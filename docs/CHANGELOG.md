@@ -4,6 +4,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Changed
+
+- Made English the default README and added a synchronized Simplified Chinese guide.
+- Consolidated engineering documentation, community policy, and examples into dedicated directories.
+- Removed the duplicate static systemd unit; `mocop service install` remains the tested service path.
+
 ## [0.8.0] - 2026-08-09
 
 ### Added
@@ -15,7 +21,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - A safe bundled default and a publication-safe example configuration.
 - A configurable hard limit for combined SSH stdout and stderr.
 - Safe `mocop init` bootstrap and explicit user-level systemd lifecycle commands.
-- Python 3.10–3.13 CI, populated browser smoke coverage and security contracts.
+- Python 3.10–3.14 CI, populated browser smoke coverage and security contracts.
 
 ### Fixed
 

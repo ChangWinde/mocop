@@ -133,7 +133,9 @@ class ConfigTests(unittest.TestCase):
                     load_config(self.write(value))
 
     def test_example_uses_an_explicit_host_whitelist(self) -> None:
-        example = Path(__file__).resolve().parents[1] / "config" / "mocop.example.json"
+        example = (
+            Path(__file__).resolve().parents[1] / "examples" / "mocop.example.json"
+        )
         config = load_config(example)
 
         self.assertFalse(config.auto_discover)

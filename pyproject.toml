@@ -24,6 +24,8 @@ classifiers = [
 mocop = "mocop.__main__:main"
 
 [project.urls]
+Changelog = "https://github.com/ChangWinde/mocop/blob/master/docs/CHANGELOG.md"
+Documentation = "https://github.com/ChangWinde/mocop#readme"
 Homepage = "https://github.com/ChangWinde/mocop"
 Issues = "https://github.com/ChangWinde/mocop/issues"
 Repository = "https://github.com/ChangWinde/mocop"

@@ -17,6 +17,6 @@ Harassment, threats, discriminatory language, deliberate intimidation, doxxing a
 
 Project maintainers may edit, remove or reject comments, code and contributions that violate these standards, and may temporarily or permanently restrict participation. Enforcement decisions should be proportionate, documented privately and protect the reporter's confidentiality.
 
-Report conduct incidents through the repository's private maintainer contact or private vulnerability-reporting channel described in [SECURITY.md](SECURITY.md). Do not include sensitive personal details in a public issue. Maintainers will acknowledge a report within seven days when the project has an active published repository.
+Report conduct incidents through the repository's private maintainer contact or private vulnerability-reporting channel described in [SECURITY.md](SECURITY.md). Do not include sensitive personal details in a public issue. Maintainers will acknowledge a report within seven days.
 
 This policy is inspired by the Contributor Covenant 2.1.

@@ -1,63 +1,66 @@
 # Performance
 
-Mocop 的采集成本主要来自 SSH 建连和网络等待。当前架构选择 Python，是因为采集器绝大部分时间都在等待 I/O；在没有测量证据前改写为 Rust 不会自动减少远端往返或连接超时。
+Mocop spends most collection time waiting for SSH connection and network I/O. Python is appropriate for the current workload because changing the implementation language would not remove a remote round trip or shorten a connection timeout.
 
-本文件只记录可复现的方法和明确的性能边界，不发布真实集群规模、主机信息或遥测。
+This document defines reproducible measurement conditions and architecture thresholds. It contains no production inventory or telemetry.
 
-## 热路径设计
+## Hot-path design
 
-- 每台服务器每个周期只建立一次逻辑 SSH 会话，同时采集系统与 GPU 指标。
-- `ThreadPoolExecutor` 并发数由 `max_workers` 限制，单台失败不会阻塞已完成结果发布。
-- 连续失败目标指数退避到最多 60 秒，避免不可达节点持续占用连接槽位。
-- stdout 与 stderr 增量读取并共享硬字节上限；超时或超限会终止独立进程组。
-- 当前快照、趋势和事件只保存在有界内存结构中，没有数据库写放大。
-- SSE 在每台主机结果完成后发布；浏览器通过 `requestAnimationFrame` 合并同帧更新。
-- GPU 分组、服务器列表、热力图与事件面板按签名复用 DOM；默认折叠避免全局视图展开全部表格。
+- One logical SSH session collects system and GPU metrics for one host per cycle.
+- `max_workers` bounds concurrent probes, while completed hosts publish independently.
+- Repeated failures back off to at most 60 seconds instead of occupying a connection slot every cycle.
+- Stdout and stderr are drained incrementally under one byte limit; timeout and overflow terminate the process group.
+- Snapshots, trends, and incidents use bounded memory structures with no database write path.
+- SSE publishes each completed host result; the browser coalesces same-frame work with `requestAnimationFrame`.
+- GPU groups, host lists, heatmap cells, and incident panels reuse DOM when their input signature is unchanged.
+- GPU groups start collapsed, which bounds initial table rendering in the cluster-wide view.
 
-## OpenSSH 连接复用
+## OpenSSH connection reuse
 
-Mocop 始终通过 `ssh -F` 使用现有 OpenSSH 配置，不在应用内实现第二套连接池。可用下面的只读命令确认某个别名是否启用了安全的连接复用：
+Mocop always delegates connection behavior to the selected OpenSSH configuration. It does not maintain a second connection pool. Inspect an alias with:
 
 ```bash
 ssh -G gpu-node-01 | grep -E '^(controlmaster|controlpath|controlpersist) '
 ```
 
-如果启用 `ControlMaster`，控制目录应只允许当前用户访问。是否启用复用由操作者的 SSH 安全策略决定，Mocop 不会自动修改。
+If `ControlMaster` is enabled, its control directory must be accessible only to the operator. Mocop does not change that policy.
 
-## 可复现验证
+## Reproducible checks
 
-功能回归使用完全虚构的 3 节点、8 GPU 浏览器夹具：
+The browser fixture uses three fictional nodes and eight GPUs:
 
 ```bash
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-该用例验证 GPU 分组默认折叠、调度热力图、核心资源卡、异常面板、响应式布局和采集周期竞态，但不把 CI 时间当作性能基准。
+This test covers collapsed GPU groups, the scheduling heatmap, resource cards, incidents, responsive layout, and the runtime-cadence race. CI duration is not a performance benchmark.
 
-在自有环境测量一次完整采集时，可运行：
+Measure one complete collection in an authorized environment with:
 
 ```bash
 /usr/bin/time -v mocop --once > /tmp/mocop-snapshot.json
 ```
 
-输出包含资产与遥测，必须保留在受控位置并在使用后安全清理。比较优化前后结果时，应固定以下变量：
+The output contains inventory and telemetry. Keep it in a controlled location and remove it according to local data-handling policy.
 
-- Mocop 提交与配置
-- SSH 配置、连接复用状态和 `known_hosts`
-- 目标集合、在线状态、并发数与超时
-- 采样次数、预热次数、CPU/RSS 与墙钟统计方法
-- 浏览器版本、视口、GPU 数量、DOM 数量和是否强制布局
+An optimization comparison must hold these inputs constant:
 
-至少报告中位数、P95、最大值与样本数，不用单次最好结果证明提速。
+- Mocop commit and configuration
+- SSH configuration, connection reuse, and `known_hosts`
+- target set, online state, worker count, and timeouts
+- warm-up count, sample count, CPU/RSS collection method, and wall-clock method
+- browser version, viewport, GPU count, DOM count, and forced-layout behavior
 
-## 架构升级门槛
+Report sample count, median, P95, and maximum. A single best result is not evidence of improvement.
 
-出现以下任一情况时，应在相同工作负载上重新剖析，再决定是否引入持久连接 Agent、分层采集或语言级改写：
+## Architecture thresholds
 
-- 需要稳定监控 200 台以上服务器
-- 需要低于 2 秒的持续采集周期
-- 采集进程稳定占满一个 CPU 核心
-- 常驻 RSS 超过 512 MiB
-- SSH 建连不再是主要瓶颈
+Profile the same workload again before considering a persistent agent, hierarchical collection, or a language rewrite when any of these conditions becomes real:
 
-任何性能优化都必须保留现有的超时、输出上限、主机密钥校验、失败隔离和逐节点实时发布语义。
+- more than 200 monitored hosts
+- sustained collection below a 2-second interval
+- one CPU core remains saturated
+- resident memory exceeds 512 MiB
+- SSH connection time is no longer the dominant cost
+
+Every optimization must preserve timeouts, output limits, host-key checking, failure isolation, and per-host publication semantics.

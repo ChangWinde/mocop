@@ -12,4 +12,4 @@ Include the affected version, attacker prerequisites, a minimal reproduction, im
 
 Do not probe systems you do not own or have explicit permission to test. Never attach a real SSH configuration, private key, inventory file or unredacted monitor response.
 
-The implementation threat model and deployment boundary are documented in [docs/SECURITY.md](docs/SECURITY.md).
+The implementation threat model and deployment boundary are documented in [docs/SECURITY.md](../docs/SECURITY.md).

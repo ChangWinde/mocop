@@ -1,11 +1,7 @@
-include ARCHITECTURE.md
-include CHANGELOG.md
-include CODE_OF_CONDUCT.md
-include CONTRIBUTING.md
 include LICENSE
 include README.md
-include SECURITY.md
-include config/mocop.example.json
-include deploy/mocop.service
+include README.zh-CN.md
+recursive-include .github *.md
 recursive-include docs *.md *.png
+include examples/mocop.example.json
 recursive-include tests *.mjs *.py

@@ -4,10 +4,10 @@
 
 <h1 align="center">Mocop</h1>
 
-<p align="center"><strong>AI-native GPU cluster monitor</strong></p>
+<p align="center">AI-native GPU cluster monitoring over OpenSSH</p>
 
 <p align="center">
-  通过 OpenSSH 实时查看整个 GPU 集群。无需远端 Agent，无数据库，无运行时 Python 依赖。
+  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
@@ -18,69 +18,76 @@
 </p>
 
 <p align="center">
-  <a href="#快速开始">快速开始</a> ·
-  <a href="#配置服务器">配置</a> ·
-  <a href="#安全边界">安全</a> ·
-  <a href="CONTRIBUTING.md">参与贡献</a>
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#security-boundary">Security</a>
 </p>
 
 ![Mocop dashboard with fictional cluster data](docs/assets/dashboard.png)
 
-Mocop 面向 AI 训练与推理集群，把 GPU 容量、显存和调度状态放在页面的第一阅读层级，同时提供 CPU、内存、Swap、磁盘和网络上下文。它复用操作者现有的 OpenSSH 配置，在一次只读 SSH 往返中完成单台服务器采集，并通过 SSE 将结果持续推送到浏览器。
+Mocop provides a live, GPU-first view of an NVIDIA compute cluster. It collects GPU, CPU, memory, swap, disk, and network metrics through the OpenSSH configuration you already use, then streams each completed host result to a local web dashboard.
 
-这里的 **AI-native** 指产品围绕 GPU 集群的容量判断、故障定位和调度工作流设计；核心采集不依赖外部 AI API，也不会把遥测发送给第三方。
+Remote machines need no agent, database, Python environment, or open monitoring port. The local runtime uses only the Python standard library and the system OpenSSH client.
 
-## 为什么选择 Mocop
+In Mocop, AI-native describes the product focus: capacity checks, failure diagnosis, and scheduling decisions for AI training and inference clusters. The collection path does not call an AI API or send telemetry to a third party.
 
-- **GPU-first**：数量、利用率、显存、温度、功耗、型号和驱动一屏可见
-- **集群视角**：调度热力图、按服务器折叠的 GPU 清单、搜索、筛选、排序和 CSV 导出
-- **完整上下文**：CPU、Load、内存、Swap、磁盘容量与 I/O、网络速率和运行时间
-- **实时且稳健**：2–60 秒运行时采集频率、SSE 推送、失败退避、重试倒计时和陈旧数据标记
-- **低侵入**：远端无需安装 Agent；本地单进程运行，不需要数据库或 CDN
-- **安全默认值**：显式主机白名单、回环监听、严格主机密钥校验、固定命令和全面资源上限
+## Why Mocop
 
-## 快速开始
+- GPU-first dashboard with utilization, VRAM, temperature, power, model, driver, and process state
+- Cluster scheduling heatmap and per-host GPU groups that stay collapsed until needed
+- CPU, load, memory, swap, filesystem capacity, disk I/O, network throughput, and uptime context
+- Search, health filters, sorting, bounded trends, incident history, and safe CSV export
+- Per-host publication, bounded concurrency, failure backoff, retry countdowns, and stale-data handling
+- Explicit host allowlist, loopback binding, strict host-key checking, fixed remote script, and resource limits
 
-### 1. 准备环境
+## Requirements
 
-- Linux 与 Python 3.10+
-- OpenSSH 客户端
-- 目标主机可通过密钥或 `ssh-agent` 非交互登录
-- 目标主机提供 Linux `/proc`；GPU 指标需要 `nvidia-smi`
+- Linux and Python 3.10 or newer on the Mocop host
+- OpenSSH client
+- Key-based or `ssh-agent` access that works without an interactive prompt
+- Linux `/proc` on monitored hosts
+- `nvidia-smi` on hosts where NVIDIA GPU metrics are required
 
-首次连接目标前，请先在终端人工核对主机指纹并建立 `known_hosts`。
+Verify every host fingerprint manually before unattended monitoring creates its first connection.
 
-### 2. 从 GitHub 安装
+## Quick start
 
-推荐使用 [`uv`](https://docs.astral.sh/uv/) 从公开仓库创建隔离的命令环境，不在当前目录留下构建文件：
+Install an isolated command with [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
 uv tool install git+https://github.com/ChangWinde/mocop.git
 ```
 
-### 3. 初始化并启动
+Create an explicit inventory and install the user-level systemd service:
 
 ```bash
 mocop init --host gpu-node-01 --host gpu-node-02
 mocop service install
 ```
 
-打开 <http://127.0.0.1:8787>。
+Open <http://127.0.0.1:8787>.
 
-`service install` 会校验配置，安装并立即启动当前用户的 systemd 服务，同时设置为该用户登录后自动启动。安装源码本身不会修改 systemd。无需后台服务时可直接运行 `mocop`；一次性采集可运行 `mocop --once`。
+`mocop service install` validates the configuration, writes a hardened user unit, enables it, and starts it immediately. Package installation itself does not modify systemd. Use `mocop` for a foreground process when a service is unnecessary.
 
 ```bash
 mocop service status
 mocop service uninstall
 ```
 
-卸载服务不会删除配置。确需用户未登录时也随系统开机运行，可由管理员在确认该账号能长期安全使用 SSH 凭据后执行 `loginctl enable-linger <user>`；Mocop 不会自动改变 linger 策略。
+The service starts with the user's systemd manager. If it must run before that user logs in, an administrator can enable lingering after reviewing how the account stores SSH credentials:
 
-## 配置服务器
+```bash
+loginctl enable-linger <user>
+```
 
-`mocop init` 默认以 `0600` 权限创建 `~/.config/mocop/config.json`，并拒绝覆盖已有配置。也可以复制完整的 [`config/mocop.example.json`](config/mocop.example.json)。
+Mocop never changes the linger policy automatically.
 
-推荐关闭自动发现，让 `hosts` 成为唯一监控白名单：
+## Common workflows
+
+### Monitor an explicit set of hosts
+
+`mocop init` creates `~/.config/mocop/config.json` with mode `0600` and refuses to overwrite an existing file. Keep automatic discovery disabled and list only the OpenSSH aliases that belong to the monitored cluster:
 
 ```json
 {
@@ -90,76 +97,88 @@ mocop service uninstall
 }
 ```
 
-示例仅展示关键字段；配置文件必须包含完整 schema。SSH 别名只允许字母、数字、点、下划线和连字符。修改配置后重启服务：
+The snippet shows only the inventory fields. Start from the complete, publication-safe [example configuration](examples/mocop.example.json).
+
+### Change the live collection cadence
+
+Use the dashboard selector to change the running process to any interval from 2 to 60 seconds. The control changes the actual SSH scheduler immediately. It does not rewrite the configuration, so a service restart restores `poll_interval_seconds`, whose default is 5 seconds.
+
+### Collect one snapshot
+
+Use one-shot mode for local inspection or a controlled automation pipeline:
+
+```bash
+mocop --once > snapshot.json
+```
+
+The output contains inventory and telemetry. Store and delete it according to the same policy used for infrastructure logs.
+
+## Dashboard data
+
+| Area | Data |
+|---|---|
+| GPU | count, utilization, VRAM, temperature, power, model, driver, processes |
+| Host | status, CPU, load, memory, swap, disk capacity and I/O, network rate, uptime |
+| Cluster | capacity totals, scheduling heatmap, attention queue, health filters, search |
+| Operations | bounded trends, state transitions, retry timing, staleness, CSV export |
+
+Failed hosts retain their last successful sample and are marked stale. Stale values remain available for diagnosis but are excluded from current cluster totals.
+
+## Configuration
+
+| Field | Purpose | Range or default |
+|---|---|---|
+| `hosts` / `exclude_hosts` | OpenSSH alias allowlist and exclusions | empty by default |
+| `auto_discover` | discover explicit `Host` aliases from OpenSSH config | `false` |
+| `poll_interval_seconds` | collection cadence at process start | 1 to 3600; default 5 |
+| `probe_timeout_seconds` | complete collection timeout for one host | 2 to 300 |
+| `connect_timeout_seconds` | SSH connection timeout | 1 to 120; less than probe timeout |
+| `max_output_bytes` | combined SSH stdout and stderr limit | 64 KiB to 16 MiB |
+| `max_workers` | concurrent host probes | 1 to 64 |
+| `listen_host` / `listen_port` | dashboard listener | `127.0.0.1:8787` |
+| `history_points` | successful samples retained per host | 12 to 8640 |
+| `incident_history_points` | state transitions retained in memory | 20 to 5000 |
+| `collection_stale_cycles` | delay threshold measured in collection cycles | 2 to 12 |
+| `thresholds` | CPU, memory, swap, disk, GPU temperature, and busy thresholds | see example |
+
+Configuration is resolved in this order:
+
+1. `--config`
+2. `MOCOP_CONFIG`
+3. `$XDG_CONFIG_HOME/mocop/config.json`, or `~/.config/mocop/config.json`
+4. `config/mocop.json` in the current directory
+5. the bundled safe default with an empty host list and loopback listener
+
+Host aliases may contain letters, numbers, dots, underscores, and hyphens. Restart the service after changing the file:
 
 ```bash
 systemctl --user restart mocop.service
 ```
 
-配置查找顺序：
-
-1. `--config`
-2. `MOCOP_CONFIG`
-3. `$XDG_CONFIG_HOME/mocop/config.json`，默认 `~/.config/mocop/config.json`
-4. 当前目录的 `config/mocop.json`
-5. 包内安全默认配置：空白名单，仅监听回环地址
-
-| 字段 | 作用 | 范围 / 默认值 |
-|---|---|---|
-| `hosts` / `exclude_hosts` | SSH 别名白名单 / 排除列表 | 默认空 |
-| `auto_discover` | 发现 OpenSSH 中明确的 `Host` 别名 | 默认 `false` |
-| `poll_interval_seconds` | 启动时采集周期 | 1–3600 秒，默认 5 |
-| `probe_timeout_seconds` | 单台完整采集超时 | 2–300 秒 |
-| `connect_timeout_seconds` | SSH 建连超时 | 1–120 秒，且小于完整超时 |
-| `max_output_bytes` | 单次 SSH 输出硬上限 | 64 KiB–16 MiB |
-| `max_workers` | 并发探测上限 | 1–64 |
-| `listen_host` / `listen_port` | Web 监听地址和端口 | `127.0.0.1:8787` |
-| `history_points` | 每台服务器的内存趋势点数 | 12–8640 |
-| `incident_history_points` | 状态变化事件环大小 | 20–5000 |
-| `collection_stale_cycles` | 采集延迟判定窗口 | 2–12 个周期 |
-| `thresholds` | CPU、内存、Swap、磁盘、GPU 温度和繁忙阈值 | 见示例配置 |
-
-网页上的采集频率会立即改变当前进程的真实 SSH 调度，但不会写回配置；服务重启后恢复 `poll_interval_seconds`。这是有意设计的临时运行控制。
-
-## 工作原理
+## Architecture
 
 ```text
-JSON 主机白名单 ──▶ 有界并发调度 ──▶ OpenSSH
-                                          │
-                            固定只读脚本：/proc、df、nvidia-smi
-                                          │
-浏览器 ◀── SSE / JSON ◀── 线程安全内存状态 ◀┘
+JSON host allowlist ──▶ bounded scheduler ──▶ OpenSSH
+                                                │
+                              fixed read-only probe
+                         /proc · df · nvidia-smi
+                                                │
+browser ◀── SSE / JSON ◀── bounded in-memory state
 ```
 
-每台主机的结果完成后立即发布，慢节点不会拖延快节点。连续失败的目标指数退避到最多 60 秒，健康节点仍按正常周期采集。失败后保留最后成功样本并标记为陈旧，但不把旧数据计入实时集群汇总。
+Each host uses one logical SSH round trip per cycle. Results are published as they complete, so a slow node does not delay a healthy node. Repeated failures back off to at most 60 seconds. Snapshots, trends, and incidents use bounded memory structures and are never persisted by Mocop.
 
-更完整的模块边界与性能依据见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [docs/PERFORMANCE.md](docs/PERFORMANCE.md)。
+See the [architecture](docs/ARCHITECTURE.md), [performance methodology](docs/PERFORMANCE.md), and [repository layout decision](docs/adr/0001-repository-layout.md) for implementation details.
 
-## 健康检查与数据接口
+## Security boundary
 
-| 接口 | 用途 |
-|---|---|
-| `GET /healthz` | HTTP 进程存活 |
-| `GET /readyz` | 已发现目标且至少获得一份成功样本 |
-| `GET /api/snapshot` | 当前集群快照 |
-| `GET /api/events` | SSE 实时快照流 |
-| `GET /api/history` | 单节点有界短期趋势 |
-| `GET /api/incidents` | 有界状态变化时间线 |
+The browser cannot add a host or provide a command. Targets come from local configuration, while the remote probe is fixed and versioned. Mocop enforces strict host-key checking, batch mode, timeouts, output limits, concurrency limits, and safe rendering for untrusted remote text.
 
-唯一写接口只允许同源页面把当前进程的采集周期调整到 2–60 秒，不能更改主机、SSH 参数或远端命令。
+Mocop has no built-in user accounts and listens on loopback by default. Any remote deployment must add TLS and authenticated authorization through a reverse proxy or VPN.
 
-## 安全边界
+Read the [threat model](docs/SECURITY.md) before changing a trust boundary. Report vulnerabilities through the process in the [security policy](.github/SECURITY.md).
 
-- 浏览器不能添加目标或提供命令；目标只能来自本地配置中的安全 SSH 别名
-- OpenSSH 使用结构化参数、`BatchMode`、严格主机密钥校验和操作者现有凭据
-- 远端执行仓库内固定、版本化的只读脚本；不读取、复制或保存 SSH 私钥
-- 建连时间、总时间、并发数、失败频率以及 stdout/stderr 内存都有硬上限
-- 原始 SSH stderr 不进入状态存储，也不会发送到浏览器
-- 默认没有账号系统且只监听回环地址；远程开放必须置于带 TLS 和认证授权的反向代理或 VPN 后
-
-完整威胁模型见 [docs/SECURITY.md](docs/SECURITY.md)。漏洞请按 [SECURITY.md](SECURITY.md) 私下报告。
-
-## 开发
+## Development
 
 ```bash
 git clone https://github.com/ChangWinde/mocop.git
@@ -172,6 +191,10 @@ node --check mocop/static/app.js
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-CI 在 Python 3.10–3.14 上运行语法、格式、静态检查和测试，并在无头 Chrome 中验证完整的 GPU 数据形态、默认折叠、响应式布局和采集频率竞态。
+CI runs syntax, format, lint, and unit checks on Python 3.10 through 3.14. A separate source-install and headless Chrome job verifies the populated GPU dashboard, collapsed groups, responsive layout, and runtime-cadence race handling.
 
-贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。Mocop 使用 [MIT License](LICENSE)。
+Read the [contribution guide](.github/CONTRIBUTING.md), [changelog](docs/CHANGELOG.md), and [code of conduct](.github/CODE_OF_CONDUCT.md) before submitting a change.
+
+## License
+
+Mocop is available under the [MIT License](LICENSE).
