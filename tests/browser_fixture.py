@@ -4,7 +4,7 @@ import sys
 import threading
 import time
 
-from mocop.models import DiskMetrics, GpuMetrics, ProbeResult, SystemMetrics
+from mocop.models import DiskMetrics, GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
 from mocop.service import StateStore
 from mocop.web import MonitorHttpServer
 
@@ -16,6 +16,22 @@ def gpu(
     memory_used: float,
     temperature: float,
 ) -> GpuMetrics:
+    processes = (
+        (
+            GpuProcess(
+                pid=10_000 + index,
+                name="/workspace/train.py",
+                used_memory_mib=max(512, memory_used - 1024),
+            ),
+            GpuProcess(
+                pid=20_000 + index,
+                name="python data_worker.py",
+                used_memory_mib=512,
+            ),
+        )
+        if utilization >= 50
+        else ()
+    )
     return GpuMetrics(
         index=index,
         uuid=f"GPU-DEMO-{host}-{index:02d}",
@@ -30,6 +46,7 @@ def gpu(
         memory_free_mib=81_920 - memory_used,
         power_draw_w=round(75 + utilization * 4.5, 1),
         power_limit_w=700,
+        processes=processes,
     )
 
 

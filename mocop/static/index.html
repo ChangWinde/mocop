@@ -38,6 +38,10 @@
             <span>最近同步</span>
             <strong id="last-sync">等待数据</strong>
           </div>
+          <button id="settings-toggle" class="settings-toggle" type="button" aria-haspopup="dialog" title="个性化设置">
+            <span class="settings-glyph" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span>设置</span>
+          </button>
           <div id="connection" class="connection connecting" role="status">
             <i></i><span id="connection-text">连接中</span>
           </div>
@@ -199,7 +203,6 @@
               <div class="heatmap-scroll">
                 <div id="heatmap-grid" class="heatmap-grid"></div>
               </div>
-              <div class="heatmap-legend"><span>低</span><i></i><span>高</span><em>点击单元格定位服务器</em></div>
             </section>
             <div id="resource-grid" class="resource-grid" aria-label="系统资源概览"></div>
             <div id="disk-list" class="disk-list" hidden></div>
@@ -230,8 +233,8 @@
                     <th>型号 / 驱动</th>
                     <th>GPU 负载</th>
                     <th>显存</th>
-                    <th>温度</th>
-                    <th>功耗</th>
+                    <th class="gpu-col-temperature">温度</th>
+                    <th class="gpu-col-power">功耗</th>
                     <th>状态</th>
                   </tr>
                 </thead>
@@ -252,6 +255,84 @@
         <span id="poll-info">等待采集</span>
       </footer>
     </div>
+    <dialog id="settings-dialog" class="side-dialog settings-dialog" aria-labelledby="settings-title">
+      <div class="dialog-heading">
+        <div>
+          <span class="section-kicker">PREFERENCES</span>
+          <h2 id="settings-title">界面设置</h2>
+        </div>
+        <button class="dialog-close" data-close-dialog="settings-dialog" type="button" aria-label="关闭设置">×</button>
+      </div>
+      <p class="dialog-intro">只保存在当前浏览器，不会修改集群配置或采集命令。</p>
+      <div class="settings-sections">
+        <section class="settings-section">
+          <h3>服务器列表</h3>
+          <label class="settings-field">
+            <span>排序方式</span>
+            <select id="server-sort">
+              <option value="custom">自定义拖动顺序</option>
+              <option value="host">服务器名称</option>
+              <option value="status">异常优先</option>
+              <option value="gpu">GPU 利用率</option>
+              <option value="cpu">CPU 利用率</option>
+            </select>
+          </label>
+          <span class="settings-help">拖动任意服务器会自动切换到自定义顺序。</span>
+        </section>
+        <section class="settings-section">
+          <h3>GPU 视图</h3>
+          <label class="settings-field">
+            <span>默认排序</span>
+            <select id="settings-gpu-sort">
+              <option value="host">服务器 / Index</option>
+              <option value="utilization">GPU 负载</option>
+              <option value="memory">显存占用率</option>
+              <option value="temperature">温度</option>
+              <option value="power">功耗</option>
+            </select>
+          </label>
+          <label class="settings-field">
+            <span>热力图指标</span>
+            <select id="settings-heat-metric">
+              <option value="utilization">计算利用率</option>
+              <option value="memory">显存占用</option>
+              <option value="temperature">温度</option>
+            </select>
+          </label>
+          <label class="settings-switch">
+            <span><strong>显示温度列</strong><small>GPU 当前温度</small></span>
+            <input id="show-temperature" type="checkbox" checked>
+          </label>
+          <label class="settings-switch">
+            <span><strong>显示功耗列</strong><small>实时功率读数</small></span>
+            <input id="show-power" type="checkbox" checked>
+          </label>
+        </section>
+      </div>
+      <button id="reset-preferences" class="secondary-action" type="button">恢复默认设置</button>
+    </dialog>
+
+    <dialog id="gpu-detail-dialog" class="side-dialog gpu-detail-dialog" aria-labelledby="gpu-detail-title">
+      <div class="dialog-heading">
+        <div>
+          <span id="gpu-detail-host" class="section-kicker">GPU DETAIL</span>
+          <h2 id="gpu-detail-title">GPU 详情</h2>
+        </div>
+        <button class="dialog-close" data-close-dialog="gpu-detail-dialog" type="button" aria-label="关闭 GPU 详情">×</button>
+      </div>
+      <div id="gpu-detail-state" class="gpu-detail-state"></div>
+      <div id="gpu-detail-metrics" class="gpu-detail-metrics"></div>
+      <section class="gpu-task-section">
+        <div class="gpu-task-heading">
+          <div>
+            <span class="section-kicker">COMPUTE PROCESSES</span>
+            <h3>GPU 任务</h3>
+          </div>
+          <span id="gpu-task-count" class="count-badge">0</span>
+        </div>
+        <div id="gpu-task-list" class="gpu-task-list"></div>
+      </section>
+    </dialog>
     <script src="/app.js" defer></script>
   </body>
 </html>

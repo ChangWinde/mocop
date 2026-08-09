@@ -1,13 +1,61 @@
 "use strict";
 
+const PREFERENCE_STORAGE_KEY = "mocop.preferences.v1";
+const DEFAULT_PREFERENCES = Object.freeze({
+  serverSort: "custom",
+  serverOrder: [],
+  gpuSort: "host",
+  heatMetric: "utilization",
+  showTemperature: true,
+  showPower: true,
+});
+const SERVER_SORT_VALUES = new Set(["custom", "host", "status", "gpu", "cpu"]);
+const GPU_SORT_VALUES = new Set(["host", "utilization", "memory", "temperature", "power"]);
+const HEAT_METRIC_VALUES = new Set(["utilization", "memory", "temperature"]);
+
+function safeStoredHosts(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter(
+    (host) => typeof host === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(host),
+  ))];
+}
+
+function loadPreferences() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(PREFERENCE_STORAGE_KEY) || "null");
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
+      return { ...DEFAULT_PREFERENCES };
+    }
+    return {
+      serverSort: SERVER_SORT_VALUES.has(stored.serverSort)
+        ? stored.serverSort : DEFAULT_PREFERENCES.serverSort,
+      serverOrder: safeStoredHosts(stored.serverOrder),
+      gpuSort: GPU_SORT_VALUES.has(stored.gpuSort)
+        ? stored.gpuSort : DEFAULT_PREFERENCES.gpuSort,
+      heatMetric: HEAT_METRIC_VALUES.has(stored.heatMetric)
+        ? stored.heatMetric : DEFAULT_PREFERENCES.heatMetric,
+      showTemperature: typeof stored.showTemperature === "boolean"
+        ? stored.showTemperature : DEFAULT_PREFERENCES.showTemperature,
+      showPower: typeof stored.showPower === "boolean"
+        ? stored.showPower : DEFAULT_PREFERENCES.showPower,
+    };
+  } catch (_error) {
+    return { ...DEFAULT_PREFERENCES };
+  }
+}
+
+const preferences = loadPreferences();
+
 const view = {
   snapshot: null,
   selectedHost: "all",
   serverFilter: "all",
   attentionFilter: "all",
   filter: "all",
-  sort: "host",
-  heatMetric: "utilization",
+  sort: preferences.gpuSort,
+  heatMetric: preferences.heatMetric,
+  serverSort: preferences.serverSort,
+  serverOrder: preferences.serverOrder,
   query: "",
   lastEventAt: 0,
   history: null,
@@ -35,6 +83,11 @@ const view = {
   transportLabel: "连接中",
   refreshFeedbackTimer: null,
   cadenceSnapshotFloor: null,
+  connectionErrorTimer: null,
+  snapshotFetchInFlight: null,
+  draggedHost: null,
+  suppressServerClick: false,
+  selectedGpu: null,
 };
 
 try {
@@ -55,6 +108,14 @@ const SERVER_FILTER_LABELS = Object.freeze({
 const elements = {
   connection: $("#connection"),
   connectionText: $("#connection-text"),
+  settingsToggle: $("#settings-toggle"),
+  settingsDialog: $("#settings-dialog"),
+  serverSort: $("#server-sort"),
+  settingsGpuSort: $("#settings-gpu-sort"),
+  settingsHeatMetric: $("#settings-heat-metric"),
+  showTemperature: $("#show-temperature"),
+  showPower: $("#show-power"),
+  resetPreferences: $("#reset-preferences"),
   refreshInterval: $("#refresh-interval"),
   refreshFeedback: $("#refresh-feedback"),
   lastSync: $("#last-sync"),
@@ -113,6 +174,13 @@ const elements = {
   gpuGroups: $("#gpu-groups"),
   emptyState: $("#empty-state"),
   pollInfo: $("#poll-info"),
+  gpuDetailDialog: $("#gpu-detail-dialog"),
+  gpuDetailHost: $("#gpu-detail-host"),
+  gpuDetailTitle: $("#gpu-detail-title"),
+  gpuDetailState: $("#gpu-detail-state"),
+  gpuDetailMetrics: $("#gpu-detail-metrics"),
+  gpuTaskCount: $("#gpu-task-count"),
+  gpuTaskList: $("#gpu-task-list"),
 };
 
 function create(tag, className, text) {
@@ -120,6 +188,48 @@ function create(tag, className, text) {
   if (className) element.className = className;
   if (text !== undefined) element.textContent = text;
   return element;
+}
+
+function savePreferences() {
+  const value = {
+    serverSort: view.serverSort,
+    serverOrder: view.serverOrder,
+    gpuSort: view.sort,
+    heatMetric: view.heatMetric,
+    showTemperature: preferences.showTemperature,
+    showPower: preferences.showPower,
+  };
+  try {
+    localStorage.setItem(PREFERENCE_STORAGE_KEY, JSON.stringify(value));
+  } catch (_error) {
+    // Rendering must remain available when browser storage is disabled or full.
+  }
+}
+
+function syncPreferenceControls() {
+  elements.serverSort.value = view.serverSort;
+  elements.gpuSort.value = view.sort;
+  elements.settingsGpuSort.value = view.sort;
+  elements.settingsHeatMetric.value = view.heatMetric;
+  elements.showTemperature.checked = preferences.showTemperature;
+  elements.showPower.checked = preferences.showPower;
+  document.body.classList.toggle("hide-gpu-temperature", !preferences.showTemperature);
+  document.body.classList.toggle("hide-gpu-power", !preferences.showPower);
+}
+
+function resetPreferences() {
+  view.serverSort = DEFAULT_PREFERENCES.serverSort;
+  view.serverOrder = [];
+  view.sort = DEFAULT_PREFERENCES.gpuSort;
+  view.heatMetric = DEFAULT_PREFERENCES.heatMetric;
+  preferences.showTemperature = DEFAULT_PREFERENCES.showTemperature;
+  preferences.showPower = DEFAULT_PREFERENCES.showPower;
+  view.serverItemCache.clear();
+  view.groupCache.clear();
+  view.heatmapCache.clear();
+  syncPreferenceControls();
+  savePreferences();
+  render();
 }
 
 function numeric(value, fallback = 0) {
@@ -390,6 +500,10 @@ function failureText(message) {
     "SSH network is unreachable": "SSH 网络不可达",
     "SSH connection failed": "SSH 连接失败",
     "SSH/resource collection timed out": "SSH / 资源采集超时",
+    "Local resource collection timed out": "本机资源采集超时",
+    "Local resource probe could not be started": "本机资源探针无法启动",
+    "Local resource output was not recognized": "本机资源数据格式异常",
+    "Local resource output exceeded the configured limit": "本机资源输出超过安全上限",
     "Remote resource output was not recognized": "远端资源数据格式异常",
     "Remote resource output exceeded the configured limit": "远端资源输出超过安全上限",
     "nvidia-smi is unavailable": "系统在线，但未安装 nvidia-smi",
@@ -793,6 +907,122 @@ function setConnection(kind, label) {
   renderConnectionStatus();
 }
 
+function serverGpuUsage(server) {
+  const values = server.gpus
+    .map((gpu) => optionalMetric(gpu, "utilization_gpu_pct"))
+    .filter((value) => Number.isFinite(value));
+  if (!values.length) return NaN;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function serverUtilizationRow(label, value, kind, warning = false) {
+  const row = create("div", `server-util-row ${kind}${warning ? " warning" : ""}`);
+  const track = create("span", "server-util-track");
+  const bar = create("i");
+  bar.style.width = `${clamp(value)}%`;
+  if (warning) bar.style.background = "var(--amber)";
+  track.append(bar);
+  row.append(
+    create("span", "", label),
+    track,
+    create("strong", "", Number.isFinite(value) ? `${format(value)}%` : "—"),
+  );
+  return row;
+}
+
+function syncServerOrder(servers) {
+  const hosts = servers.map((server) => server.host);
+  const known = new Set(hosts);
+  const order = view.serverOrder.filter((host) => known.has(host));
+  const ordered = new Set(order);
+  hosts.forEach((host) => {
+    if (!ordered.has(host)) {
+      order.push(host);
+      ordered.add(host);
+    }
+  });
+  view.serverOrder = order;
+  return order;
+}
+
+function serverStatusRank(server) {
+  if (server.status !== "online") return 0;
+  if (serverResources(server).warning) return 1;
+  return 2;
+}
+
+function orderedServers(servers) {
+  const original = syncServerOrder(view.snapshot.servers);
+  const order = new Map(original.map((host, index) => [host, index]));
+  return servers.slice().sort((a, b) => {
+    if (view.serverSort === "host") return a.host.localeCompare(b.host);
+    if (view.serverSort === "status") {
+      return serverStatusRank(a) - serverStatusRank(b)
+        || a.host.localeCompare(b.host);
+    }
+    if (view.serverSort === "gpu") {
+      return numeric(serverGpuUsage(b), -1) - numeric(serverGpuUsage(a), -1)
+        || a.host.localeCompare(b.host);
+    }
+    if (view.serverSort === "cpu") {
+      return numeric(b.system?.cpu_usage_pct, -1) - numeric(a.system?.cpu_usage_pct, -1)
+        || a.host.localeCompare(b.host);
+    }
+    return numeric(order.get(a.host), Number.MAX_SAFE_INTEGER)
+      - numeric(order.get(b.host), Number.MAX_SAFE_INTEGER);
+  });
+}
+
+function reorderServer(source, target) {
+  if (!source || !target || source === target || !view.snapshot) return;
+  const order = syncServerOrder(view.snapshot.servers).filter((host) => host !== source);
+  const targetIndex = order.indexOf(target);
+  if (targetIndex < 0) return;
+  order.splice(targetIndex, 0, source);
+  view.serverOrder = order;
+  view.serverSort = "custom";
+  elements.serverSort.value = "custom";
+  savePreferences();
+  renderServers();
+}
+
+function enableServerDrag(item, host) {
+  item.draggable = true;
+  item.dataset.host = host;
+  item.addEventListener("dragstart", (event) => {
+    view.draggedHost = host;
+    item.classList.add("dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", host);
+    }
+  });
+  item.addEventListener("dragover", (event) => {
+    if (!view.draggedHost || view.draggedHost === host) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    item.classList.add("drag-target");
+  });
+  item.addEventListener("dragleave", () => item.classList.remove("drag-target"));
+  item.addEventListener("drop", (event) => {
+    event.preventDefault();
+    item.classList.remove("drag-target");
+    view.suppressServerClick = true;
+    reorderServer(
+      view.draggedHost || event.dataTransfer?.getData("text/plain"),
+      host,
+    );
+  });
+  item.addEventListener("dragend", () => {
+    item.classList.remove("dragging");
+    elements.serverList.querySelectorAll(".drag-target").forEach(
+      (node) => node.classList.remove("drag-target"),
+    );
+    view.draggedHost = null;
+    setTimeout(() => { view.suppressServerClick = false; }, 0);
+  });
+}
+
 function renderSummary() {
   const { snapshot } = view;
   if (!snapshot) return;
@@ -896,8 +1126,10 @@ function serverItem(server, selectedHost) {
     server.polling ? "正在重新探测" : server.nextRetryAt ? retryCountdown(server.nextRetryAt) : "",
   ].filter(Boolean).join(" · ");
   item.addEventListener("click", () => {
+    if (view.suppressServerClick) return;
     selectHost(server.host);
   });
+  enableServerDrag(item, server.host);
 
   const main = create("div", "server-main");
   const identity = create("div", "server-main");
@@ -906,19 +1138,25 @@ function serverItem(server, selectedHost) {
   main.append(identity, create("span", "server-gpu-count", gpuLabel));
 
   const stats = create("div", "server-stats");
+  const utilization = create("div", "server-utilization");
+  const gpuUsage = serverGpuUsage(server);
+  utilization.append(
+    serverUtilizationRow(
+      "GPU",
+      gpuUsage,
+      "gpu",
+      Number.isFinite(gpuUsage) && gpuUsage >= 95,
+    ),
+    serverUtilizationRow(
+      "CPU",
+      optionalMetric(server.system || {}, "cpu_usage_pct"),
+      "cpu",
+      resources.cpu >= limits().cpu_warning_pct,
+    ),
+  );
   if (server.status === "online") {
-    const description = server.system?.cpu_usage_pct == null
-      ? "计算首个样本"
-      : resources.warning
-        ? `${resources.warningKind} ${format(resources.warningUsage)}% · CPU ${format(resources.cpu)}%`
-        : `CPU ${format(resources.cpu)}% · RAM ${format(resources.memory)}%`;
-    stats.append(create("span", resources.warning ? "issue-text" : "", description));
-    const load = create("span", "server-load");
-    const bar = create("i");
-    bar.style.width = `${clamp(resources.warning ? resources.warningUsage : resources.cpu)}%`;
-    if (resources.warning) bar.style.background = "var(--amber)";
-    load.append(bar);
-    stats.append(load);
+    item.append(main, utilization);
+    return item;
   } else {
     const detail = create("span", "issue-text");
     detail.append(failureText(server.message) || label);
@@ -941,7 +1179,7 @@ function serverItem(server, selectedHost) {
       stats.append(create("span", "", `${server.latencyMs} ms`));
     }
   }
-  item.append(main, stats);
+  item.append(main, utilization, stats);
   return item;
 }
 
@@ -957,6 +1195,7 @@ function serverItemSignature(server) {
     server.nextRetryAt,
     server.consecutiveFailures,
     server.gpus.length,
+    serverGpuUsage(server),
     view.selectedHost === server.host,
     resources.warning,
     resources.warningKind,
@@ -997,11 +1236,7 @@ function fleetAllItem(label, gpuCount) {
 
 function renderServers() {
   if (!view.snapshot) return;
-  const servers = focusedServers(view.snapshot.servers).sort((a, b) => {
-    if ((a.status === "online") !== (b.status === "online")) return a.status === "online" ? 1 : -1;
-    if (serverResources(a).warning !== serverResources(b).warning) return serverResources(a).warning ? -1 : 1;
-    return a.host.localeCompare(b.host);
-  });
+  const servers = orderedServers(focusedServers(view.snapshot.servers));
   elements.serverCount.textContent = view.serverFilter === "all"
     ? String(view.snapshot.stats.servers)
     : `${servers.length}/${view.snapshot.stats.servers}`;
@@ -1187,7 +1422,7 @@ function heatmapTile(server, gpu) {
     create("small", "", `#${gpu.index}`),
     create("strong", "", metric.label),
   );
-  tile.addEventListener("click", () => selectHost(server.host));
+  tile.addEventListener("click", () => openGpuDetail(server, gpu));
   return tile;
 }
 
@@ -1490,6 +1725,100 @@ function gpuState(gpu, server) {
   return ["空闲", "idle"];
 }
 
+function gpuDetailMetric(label, value, title = "") {
+  const metric = create("article", "gpu-detail-metric");
+  const content = create("strong", "", value);
+  if (title) content.title = title;
+  metric.append(create("span", "", label), content);
+  return metric;
+}
+
+function gpuProcessName(process) {
+  const fullName = String(process.name || "unknown process");
+  return fullName.replaceAll("\\", "/").split("/").at(-1) || fullName;
+}
+
+function selectedGpuRecord() {
+  if (!view.snapshot || !view.selectedGpu) return null;
+  const server = view.snapshot.servers.find(
+    (candidate) => candidate.host === view.selectedGpu.host,
+  );
+  const gpu = server?.gpus.find(
+    (candidate) => String(candidate.uuid || candidate.index) === view.selectedGpu.key,
+  );
+  return server && gpu ? { server, gpu } : null;
+}
+
+function renderGpuDetail() {
+  if (!elements.gpuDetailDialog.open) return;
+  const record = selectedGpuRecord();
+  if (!record) {
+    elements.gpuDetailDialog.close();
+    return;
+  }
+  const { server, gpu } = record;
+  const [state] = gpuState(gpu, server);
+  const memoryPct = ratio(gpu.memory_used_mib, gpu.memory_total_mib);
+  const processes = Array.isArray(gpu.processes) ? gpu.processes.slice() : [];
+  processes.sort((a, b) => numeric(b.used_memory_mib, -1) - numeric(a.used_memory_mib, -1)
+    || numeric(a.pid) - numeric(b.pid));
+
+  elements.gpuDetailHost.textContent = `${server.host} · GPU ${gpu.index}`;
+  elements.gpuDetailTitle.textContent = gpu.name || "Unknown NVIDIA GPU";
+  elements.gpuDetailState.textContent = [
+    state,
+    server.stale ? "历史样本" : "实时样本",
+    gpu.uuid || "No UUID",
+    `Driver ${gpu.driver_version || "—"}`,
+  ].join(" · ");
+  elements.gpuDetailMetrics.replaceChildren(
+    gpuDetailMetric("GPU 负载", `${format(gpu.utilization_gpu_pct)}%`),
+    gpuDetailMetric("显存", `${memory(gpu.memory_used_mib)} / ${memory(gpu.memory_total_mib)}`),
+    gpuDetailMetric("温度", gpu.temperature_c == null ? "—" : `${format(gpu.temperature_c)}°C`),
+    gpuDetailMetric("功耗", gpu.power_draw_w == null ? "—" : `${format(gpu.power_draw_w)} W`),
+    gpuDetailMetric("P-State", gpu.pstate || "—"),
+    gpuDetailMetric("显存占用率", `${format(memoryPct, 1)}%`),
+  );
+  elements.gpuTaskCount.textContent = String(processes.length);
+  if (gpu.processes_available === false) {
+    elements.gpuTaskList.replaceChildren(
+      create("div", "gpu-task-empty", "任务数据暂不可用；GPU 指标仍会继续刷新。"),
+    );
+    return;
+  }
+  if (!processes.length) {
+    elements.gpuTaskList.replaceChildren(
+      create("div", "gpu-task-empty", "当前没有活跃的 CUDA 计算进程。"),
+    );
+    return;
+  }
+  elements.gpuTaskList.replaceChildren(...processes.map((process) => {
+    const item = create("article", "gpu-task");
+    const name = create("strong", "gpu-task-name", gpuProcessName(process));
+    name.title = process.name || "unknown process";
+    const used = process.used_memory_mib == null ? "显存未知" : memory(process.used_memory_mib);
+    const usage = ratio(process.used_memory_mib, gpu.memory_total_mib);
+    const track = create("div", "mini-track");
+    const bar = create("i");
+    bar.style.width = `${clamp(usage)}%`;
+    track.append(bar);
+    const meta = create("div", "gpu-task-meta");
+    meta.append(create("span", "", `PID ${process.pid}`), track);
+    item.append(name, create("span", "gpu-task-memory", used), meta);
+    return item;
+  }));
+}
+
+function openGpuDetail(server, gpu) {
+  view.selectedGpu = {
+    host: server.host,
+    key: String(gpu.uuid || gpu.index),
+  };
+  if (elements.settingsDialog.open) elements.settingsDialog.close();
+  if (!elements.gpuDetailDialog.open) elements.gpuDetailDialog.showModal();
+  renderGpuDetail();
+}
+
 function tableRow(record, grouped = false) {
   const { server, gpu } = record;
   const row = document.createElement("tr");
@@ -1521,6 +1850,7 @@ function tableRow(record, grouped = false) {
   ));
 
   const temperatureCell = document.createElement("td");
+  temperatureCell.className = "gpu-col-temperature";
   const temperature = numeric(gpu.temperature_c, NaN);
   const warningTemperature = limits().gpu_temperature_warning_c;
   const temperatureClass = temperature >= warningTemperature + 5
@@ -1533,6 +1863,7 @@ function tableRow(record, grouped = false) {
   ));
 
   const powerCell = document.createElement("td");
+  powerCell.className = "gpu-col-power";
   powerCell.append(create("span", "power", gpu.power_draw_w == null ? "—" : `${format(gpu.power_draw_w)} W`));
 
   const statusCell = document.createElement("td");
@@ -1541,6 +1872,15 @@ function tableRow(record, grouped = false) {
   pill.append(create("i"), create("span", "", status));
   statusCell.append(pill);
   row.append(deviceCell, modelCell, utilCell, memoryCell, temperatureCell, powerCell, statusCell);
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.setAttribute("aria-label", `查看 ${server.host} GPU ${gpu.index} 的任务详情`);
+  row.addEventListener("click", () => openGpuDetail(server, gpu));
+  row.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openGpuDetail(server, gpu);
+  });
   return row;
 }
 
@@ -1725,6 +2065,7 @@ function tableSignature(server, records) {
     query: view.query.trim(),
     sort: view.sort,
     status: server.status,
+    stale: server.stale,
     system: system ? {
       cpu: system.cpu_usage_pct,
       memoryTotal: system.memory_total_mib,
@@ -1734,7 +2075,18 @@ function tableSignature(server, records) {
       diskTotal: system.disk_total_mib,
       diskUsed: system.disk_used_mib,
     } : null,
-    gpus: server.gpus,
+    gpus: server.gpus.map((gpu) => ({
+      index: gpu.index,
+      uuid: gpu.uuid,
+      name: gpu.name,
+      driver: gpu.driver_version,
+      pstate: gpu.pstate,
+      utilization: gpu.utilization_gpu_pct,
+      memoryTotal: gpu.memory_total_mib,
+      memoryUsed: gpu.memory_used_mib,
+      temperature: gpu.temperature_c,
+      power: gpu.power_draw_w,
+    })),
     visibleGpuUuids: records.map((record) => record.gpu.uuid),
   });
 }
@@ -1813,6 +2165,7 @@ function render() {
   renderHeatmap();
   renderTrends();
   renderTable();
+  renderGpuDetail();
   refreshRelativeTimes();
 }
 
@@ -1826,18 +2179,29 @@ function scheduleRender() {
 }
 
 async function fetchSnapshot() {
+  if (view.snapshotFetchInFlight) return view.snapshotFetchInFlight;
+  const request = (async () => {
+    try {
+      const response = await fetch("/api/snapshot", { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const snapshot = await response.json();
+      if (!acceptSnapshot(snapshot)) return true;
+      view.lastEventAt = Date.now();
+      normalizeSelection();
+      render();
+      syncHistory();
+      syncIncidents();
+      return true;
+    } catch (_error) {
+      if (!view.snapshot) setConnection("offline", "服务不可达");
+      return false;
+    }
+  })();
+  view.snapshotFetchInFlight = request;
   try {
-    const response = await fetch("/api/snapshot", { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const snapshot = await response.json();
-    if (!acceptSnapshot(snapshot)) return;
-    view.lastEventAt = Date.now();
-    normalizeSelection();
-    render();
-    syncHistory();
-    syncIncidents();
-  } catch (_error) {
-    if (!view.snapshot) setConnection("offline", "服务不可达");
+    return await request;
+  } finally {
+    if (view.snapshotFetchInFlight === request) view.snapshotFetchInFlight = null;
   }
 }
 
@@ -1870,11 +2234,19 @@ async function syncIncidents() {
 
 function connect() {
   const events = new EventSource("/api/events");
-  events.addEventListener("open", () => setConnection("live", "实时连接"));
+  const markLive = () => {
+    if (view.connectionErrorTimer != null) {
+      clearTimeout(view.connectionErrorTimer);
+      view.connectionErrorTimer = null;
+    }
+    setConnection("live", "实时连接");
+  };
+  events.addEventListener("open", markLive);
   events.addEventListener("snapshot", (event) => {
     try {
       if (!acceptSnapshot(JSON.parse(event.data))) return;
       view.lastEventAt = Date.now();
+      markLive();
       normalizeSelection();
       scheduleRender();
       syncIncidents();
@@ -1882,7 +2254,20 @@ function connect() {
       setConnection("offline", "数据异常");
     }
   });
-  events.addEventListener("error", () => setConnection("offline", "正在重连"));
+  events.addEventListener("error", () => {
+    if (view.connectionErrorTimer != null) return;
+    view.connectionErrorTimer = setTimeout(async () => {
+      view.connectionErrorTimer = null;
+      const reachable = await fetchSnapshot();
+      if (events.readyState === EventSource.OPEN) {
+        markLive();
+      } else if (reachable) {
+        setConnection("delayed", "轮询同步");
+      } else {
+        setConnection("offline", "服务不可达");
+      }
+    }, 1200);
+  });
 }
 
 document.querySelectorAll(".filter").forEach((button) => {
@@ -1915,6 +2300,8 @@ document.querySelectorAll(".attention-filter").forEach((button) => {
 document.querySelectorAll(".heatmap-mode").forEach((button) => {
   button.addEventListener("click", () => {
     view.heatMetric = button.dataset.heatMetric;
+    elements.settingsHeatMetric.value = view.heatMetric;
+    savePreferences();
     renderHeatmap();
   });
 });
@@ -1944,8 +2331,65 @@ document.addEventListener("keydown", (event) => {
 
 elements.gpuSort.addEventListener("change", () => {
   view.sort = elements.gpuSort.value;
+  elements.settingsGpuSort.value = view.sort;
+  savePreferences();
   render();
 });
+
+elements.settingsToggle.addEventListener("click", () => {
+  syncPreferenceControls();
+  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
+  elements.settingsDialog.showModal();
+});
+
+document.querySelectorAll("[data-close-dialog]").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.getElementById(button.dataset.closeDialog)?.close();
+  });
+});
+
+document.querySelectorAll("dialog.side-dialog").forEach((dialog) => {
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+});
+
+elements.gpuDetailDialog.addEventListener("close", () => {
+  view.selectedGpu = null;
+});
+
+elements.serverSort.addEventListener("change", () => {
+  view.serverSort = elements.serverSort.value;
+  savePreferences();
+  renderServers();
+});
+
+elements.settingsGpuSort.addEventListener("change", () => {
+  view.sort = elements.settingsGpuSort.value;
+  elements.gpuSort.value = view.sort;
+  savePreferences();
+  render();
+});
+
+elements.settingsHeatMetric.addEventListener("change", () => {
+  view.heatMetric = elements.settingsHeatMetric.value;
+  savePreferences();
+  renderHeatmap();
+});
+
+elements.showTemperature.addEventListener("change", () => {
+  preferences.showTemperature = elements.showTemperature.checked;
+  syncPreferenceControls();
+  savePreferences();
+});
+
+elements.showPower.addEventListener("change", () => {
+  preferences.showPower = elements.showPower.checked;
+  syncPreferenceControls();
+  savePreferences();
+});
+
+elements.resetPreferences.addEventListener("click", resetPreferences);
 
 elements.refreshInterval.addEventListener("change", updatePollInterval);
 
@@ -1972,8 +2416,12 @@ setInterval(() => {
   if (view.snapshot) elements.lastSync.textContent = age(view.snapshot.lastPollCompletedAt);
   refreshRelativeTimes();
   renderConnectionStatus();
-  if (Date.now() - view.lastEventAt > 15000) fetchSnapshot();
+  const elapsed = Date.now() - view.lastEventAt;
+  const fallbackAfter = Math.max(2000, numeric(view.snapshot?.pollIntervalSeconds, 5) * 1000);
+  if (view.transportKind !== "live" && elapsed > fallbackAfter) fetchSnapshot();
+  else if (elapsed > 15000) fetchSnapshot();
 }, 1000);
 
+syncPreferenceControls();
 fetchSnapshot();
 connect();

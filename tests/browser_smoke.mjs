@@ -226,7 +226,14 @@ try {
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
   await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-    source: `window.addEventListener("DOMContentLoaded", () => {
+    source: `const NativeEventSource = window.EventSource;
+    window.EventSource = class MocopObservedEventSource extends NativeEventSource {
+      constructor(...arguments_) {
+        super(...arguments_);
+        window.__mocopEventSource = this;
+      }
+    };
+    window.addEventListener("DOMContentLoaded", () => {
       const select = document.querySelector("#refresh-interval");
       select.value = "2";
       select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -283,6 +290,73 @@ try {
   assert.equal(final.attentionVisible, true);
   assert.equal(final.overflow, false);
 
+  const transientConnection = await cdp.evaluate(`(async () => {
+    window.__mocopEventSource.dispatchEvent(new Event("error"));
+    const immediate = document.querySelector("#connection-text")?.textContent;
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    return {
+      immediate,
+      settled: document.querySelector("#connection-text")?.textContent,
+      className: document.querySelector("#connection")?.className,
+    };
+  })()`, true);
+  assert.notEqual(transientConnection.immediate, "正在重连");
+  assert.match(transientConnection.className, /live/);
+
+  const personalization = await cdp.evaluate(`(() => {
+    const serverItems = [...document.querySelectorAll(".server-item[data-host]")];
+    const utilizationVisible = serverItems.every(
+      (item) => item.textContent.includes("GPU") && item.textContent.includes("CPU"),
+    );
+    const source = serverItems[1];
+    const target = serverItems[0];
+    const transfer = new DataTransfer();
+    source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: transfer }));
+    target.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    source.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer: transfer }));
+    const reordered = [...document.querySelectorAll(".server-item[data-host]")].map(
+      (item) => item.dataset.host,
+    );
+
+    document.querySelector("#settings-toggle").click();
+    const gpuSort = document.querySelector("#settings-gpu-sort");
+    gpuSort.value = "memory";
+    gpuSort.dispatchEvent(new Event("change", { bubbles: true }));
+    const power = document.querySelector("#show-power");
+    power.checked = false;
+    power.dispatchEvent(new Event("change", { bubbles: true }));
+    const settingsOpen = document.querySelector("#settings-dialog").open;
+    document.querySelector('[data-close-dialog="settings-dialog"]').click();
+
+    document.querySelector(".gpu-table-body tbody tr").click();
+    const taskDialog = document.querySelector("#gpu-detail-dialog");
+    const result = {
+      utilizationVisible,
+      reordered,
+      savedServerSort: JSON.parse(localStorage.getItem("mocop.preferences.v1")).serverSort,
+      settingsOpen,
+      gpuSort: document.querySelector("#gpu-sort").value,
+      powerHidden: document.body.classList.contains("hide-gpu-power"),
+      taskDialogOpen: taskDialog.open,
+      taskCount: document.querySelector("#gpu-task-count").textContent,
+      taskNames: document.querySelector("#gpu-task-list").textContent,
+      heatmapLegend: Boolean(document.querySelector(".heatmap-legend")),
+    };
+    taskDialog.close();
+    return result;
+  })()`);
+  assert.equal(personalization.utilizationVisible, true);
+  assert.equal(personalization.reordered[0], "atlas-02");
+  assert.equal(personalization.savedServerSort, "custom");
+  assert.equal(personalization.settingsOpen, true);
+  assert.equal(personalization.gpuSort, "memory");
+  assert.equal(personalization.powerHidden, true);
+  assert.equal(personalization.taskDialogOpen, true);
+  assert.equal(personalization.taskCount, "2");
+  assert.match(personalization.taskNames, /train\.py/);
+  assert.equal(personalization.heatmapLegend, false);
+
   if (process.env.MOCOP_SCREENSHOT_PATH) {
     await cdp.send("Emulation.setDeviceMetricsOverride", {
       width: 1440,
@@ -317,7 +391,9 @@ try {
   assert(mobile.gpuMemoryWidth > mobile.gridWidth * 0.9);
   assert.deepEqual(cdp.errors, []);
 
-  console.log(JSON.stringify({ browser: "chrome", initial, final, mobile }));
+  console.log(JSON.stringify({
+    browser: "chrome", initial, final, transientConnection, personalization, mobile,
+  }));
 } catch (error) {
   console.error(error);
   if (monitorOutput()) console.error(`monitor output:\n${monitorOutput()}`);
