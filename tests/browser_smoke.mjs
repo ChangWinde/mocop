@@ -326,5 +326,10 @@ try {
 } finally {
   cdp?.close();
   await Promise.all([terminate(chrome), terminate(monitor)]);
-  await rm(temporary, { recursive: true, force: true });
+  await rm(temporary, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
 }
