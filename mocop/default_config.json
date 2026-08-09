@@ -1,0 +1,24 @@
+{
+  "ssh_config": "~/.ssh/config",
+  "auto_discover": false,
+  "hosts": [],
+  "exclude_hosts": [],
+  "poll_interval_seconds": 5,
+  "probe_timeout_seconds": 12,
+  "connect_timeout_seconds": 5,
+  "max_output_bytes": 2097152,
+  "max_workers": 8,
+  "listen_host": "127.0.0.1",
+  "listen_port": 8787,
+  "history_points": 720,
+  "incident_history_points": 500,
+  "collection_stale_cycles": 3,
+  "thresholds": {
+    "cpu_warning_pct": 85,
+    "memory_warning_pct": 90,
+    "swap_warning_pct": 50,
+    "disk_warning_pct": 85,
+    "gpu_temperature_warning_c": 80,
+    "gpu_busy_pct": 10
+  }
+}

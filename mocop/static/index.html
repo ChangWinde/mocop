@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="description" content="Mocop：AI-native GPU cluster monitor">
+    <title>Mocop · AI-native GPU cluster monitor</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="identity">
+          <div class="logo" aria-hidden="true">
+            <i></i><i></i><i></i><i></i>
+          </div>
+          <div>
+            <div class="product-line">Mocop <span>/</span> AI-NATIVE GPU CLUSTER MONITOR</div>
+            <h1>GPU 集群控制台</h1>
+          </div>
+        </div>
+        <div class="header-status">
+          <label class="refresh-control">
+            <span>采集频率</span>
+            <select id="refresh-interval" aria-label="采集频率">
+              <option value="2">2 秒</option>
+              <option value="5" selected>5 秒</option>
+              <option value="10">10 秒</option>
+              <option value="30">30 秒</option>
+              <option value="60">60 秒</option>
+            </select>
+            <i aria-hidden="true"></i>
+            <em id="refresh-feedback" class="refresh-feedback" role="status"></em>
+          </label>
+          <div class="sync-time">
+            <span>最近同步</span>
+            <strong id="last-sync">等待数据</strong>
+          </div>
+          <div id="connection" class="connection connecting" role="status">
+            <i></i><span id="connection-text">连接中</span>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        <section class="metrics-grid" aria-label="集群概览">
+          <article id="server-card" class="metric-card primary">
+            <div class="metric-top">
+              <span class="metric-name">服务器在线</span>
+              <span id="server-health" class="health-badge">—</span>
+            </div>
+            <div class="metric-number"><strong id="server-ratio">— / —</strong></div>
+            <div id="server-detail" class="metric-foot">等待首次探测</div>
+            <div class="track"><i id="server-bar"></i></div>
+          </article>
+          <article id="gpu-card" class="metric-card gpu-card">
+            <div class="metric-top">
+              <span class="metric-name">GPU 资源</span>
+              <span class="metric-icon gpu-icon" aria-hidden="true"></span>
+            </div>
+            <div class="metric-number"><strong id="total-gpus">—</strong><small>张</small></div>
+            <div class="metric-foot"><span id="active-gpus">—</span> 张正在计算</div>
+            <div class="track"><i id="gpu-bar"></i></div>
+          </article>
+          <article id="gpu-memory-card" class="metric-card gpu-memory-card">
+            <div class="metric-top">
+              <span class="metric-name">GPU 显存</span>
+              <span id="gpu-memory-percent" class="metric-side">—</span>
+            </div>
+            <div class="metric-number compact"><strong id="gpu-memory-used">—</strong><small id="gpu-memory-total">/ —</small></div>
+            <div class="metric-foot">集群实时显存占用</div>
+            <div class="track"><i id="gpu-memory-bar"></i></div>
+          </article>
+          <article id="cpu-card" class="metric-card">
+            <div class="metric-top">
+              <span class="metric-name">平均 CPU</span>
+              <span id="cpu-health" class="metric-side">—</span>
+            </div>
+            <div class="metric-number"><strong id="average-cpu">—</strong><small>%</small></div>
+            <div class="metric-foot"><span id="cpu-cores">—</span> 个逻辑核心</div>
+            <div class="track"><i id="cpu-bar"></i></div>
+          </article>
+          <article id="memory-card" class="metric-card memory-card">
+            <div class="metric-top">
+              <span class="metric-name">系统内存</span>
+              <span id="memory-percent" class="metric-side">—</span>
+            </div>
+            <div class="metric-number compact"><strong id="memory-used">—</strong><small id="memory-total">/ —</small></div>
+            <div class="track"><i id="memory-bar"></i></div>
+          </article>
+          <article class="metric-card network-card">
+            <div class="metric-top">
+              <span class="metric-name">实时网络</span>
+              <span class="metric-side">TOTAL</span>
+            </div>
+            <div class="network-values">
+              <div><span>↓</span><strong id="network-rx">—</strong></div>
+              <div><span>↑</span><strong id="network-tx">—</strong></div>
+            </div>
+            <div class="metric-foot">接收 / 发送速率</div>
+          </article>
+        </section>
+
+        <div id="collector-error" class="alert" hidden></div>
+        <section id="attention-panel" class="attention-panel" aria-label="需要关注的服务器" hidden>
+          <div class="attention-heading">
+            <div>
+              <span class="section-kicker">ATTENTION</span>
+              <strong id="attention-summary">需要关注</strong>
+            </div>
+            <div class="attention-filters" role="group" aria-label="问题类型筛选">
+              <button class="attention-filter active" data-attention-filter="all" type="button">全部 <span>0</span></button>
+              <button class="attention-filter" data-attention-filter="connection" type="button">连接 <span>0</span></button>
+              <button class="attention-filter" data-attention-filter="storage" type="button">存储 <span>0</span></button>
+              <button class="attention-filter" data-attention-filter="compute" type="button">算力 <span>0</span></button>
+            </div>
+            <span>点击问题可定位服务器</span>
+          </div>
+          <div id="attention-list" class="attention-list"></div>
+        </section>
+
+        <section id="incident-panel" class="incident-panel" aria-label="近期状态变化" hidden>
+          <div class="incident-heading">
+            <div>
+              <span class="section-kicker">RECENT EVENTS</span>
+              <strong id="incident-summary">近期状态变化</strong>
+            </div>
+            <button id="toggle-incidents" type="button" hidden>展开全部</button>
+          </div>
+          <div id="incident-list" class="incident-list"></div>
+        </section>
+
+        <section class="workspace">
+          <aside class="fleet-panel panel">
+            <div class="panel-heading">
+              <div>
+                <span class="section-kicker">FLEET</span>
+                <h2>服务器</h2>
+              </div>
+              <span id="server-count" class="count-badge">0</span>
+            </div>
+            <div class="fleet-filters" role="group" aria-label="服务器快速筛选">
+              <button class="fleet-filter active" data-server-filter="all" type="button">全部</button>
+              <button class="fleet-filter" data-server-filter="issues" type="button">异常</button>
+              <button class="fleet-filter" data-server-filter="busy" type="button">计算中</button>
+              <button class="fleet-filter" data-server-filter="available" type="button">有空闲卡</button>
+              <button class="fleet-filter" data-server-filter="stale" type="button">陈旧</button>
+            </div>
+            <div id="server-list" class="server-list" role="listbox" aria-label="服务器列表"></div>
+          </aside>
+
+          <section class="inventory-panel panel">
+            <div class="inventory-header">
+              <div>
+                <span class="section-kicker">INVENTORY</span>
+                <div class="title-row">
+                  <h2 id="inventory-title">全局资源</h2>
+                  <span id="visible-count" class="count-badge">0</span>
+                  <span id="node-freshness" class="freshness-badge" hidden></span>
+                </div>
+              </div>
+              <div class="inventory-tools">
+                <label class="sort-control">
+                  <span>排序</span>
+                  <select id="gpu-sort" aria-label="GPU 排序方式">
+                    <option value="host">服务器 / Index</option>
+                    <option value="utilization">GPU 负载</option>
+                    <option value="memory">显存占用率</option>
+                    <option value="temperature">温度</option>
+                    <option value="power">功耗</option>
+                  </select>
+                </label>
+                <button id="export-csv" class="tool-button" type="button">导出当前结果</button>
+                <button id="toggle-groups" class="group-toggle" type="button" hidden>全部展开</button>
+                <label class="search-box">
+                  <span class="search-symbol" aria-hidden="true"></span>
+                  <span class="sr-only">搜索主机、型号或 UUID</span>
+                  <input id="search" type="search" placeholder="搜索主机、GPU 型号或 UUID" autocomplete="off">
+                  <kbd class="search-shortcut" aria-hidden="true">/</kbd>
+                </label>
+              </div>
+            </div>
+
+            <div id="node-notice" class="node-notice" role="status" hidden></div>
+            <section id="gpu-heatmap" class="gpu-heatmap" aria-label="GPU 调度热力图" hidden>
+              <div class="heatmap-heading">
+                <div>
+                  <span class="section-kicker">SCHEDULING MAP</span>
+                  <h3>GPU 调度热力图</h3>
+                </div>
+                <div class="heatmap-modes" role="group" aria-label="热力图指标">
+                  <button class="heatmap-mode active" data-heat-metric="utilization" type="button">计算</button>
+                  <button class="heatmap-mode" data-heat-metric="memory" type="button">显存</button>
+                  <button class="heatmap-mode" data-heat-metric="temperature" type="button">温度</button>
+                </div>
+              </div>
+              <div class="heatmap-scroll">
+                <div id="heatmap-grid" class="heatmap-grid"></div>
+              </div>
+              <div class="heatmap-legend"><span>低</span><i></i><span>高</span><em>点击单元格定位服务器</em></div>
+            </section>
+            <div id="resource-grid" class="resource-grid" aria-label="系统资源概览"></div>
+            <div id="disk-list" class="disk-list" hidden></div>
+            <section id="trend-panel" class="trend-panel" aria-label="服务器短期趋势" hidden>
+              <div class="trend-heading">
+                <div>
+                  <span class="section-kicker">RECENT HISTORY</span>
+                  <h3>实时趋势</h3>
+                </div>
+                <span id="trend-range">等待样本</span>
+              </div>
+              <div id="trend-grid" class="trend-grid"></div>
+            </section>
+
+            <div class="filter-row" role="group" aria-label="GPU 状态筛选">
+              <span class="filter-label">GPU 设备</span>
+              <button class="filter active" data-filter="all" type="button">全部</button>
+              <button class="filter" data-filter="busy" type="button"><i class="dot busy"></i>运行中</button>
+              <button class="filter" data-filter="idle" type="button"><i class="dot idle"></i>空闲</button>
+              <button class="filter" data-filter="hot" type="button"><i class="dot hot"></i>高温</button>
+            </div>
+
+            <div class="table-scroll">
+              <table class="gpu-table gpu-table-head" aria-label="GPU 设备列标题">
+                <thead>
+                  <tr>
+                    <th>设备</th>
+                    <th>型号 / 驱动</th>
+                    <th>GPU 负载</th>
+                    <th>显存</th>
+                    <th>温度</th>
+                    <th>功耗</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+              </table>
+              <div id="gpu-groups" class="gpu-groups"></div>
+              <div id="empty-state" class="empty-state" hidden>
+                <div class="empty-glyph" aria-hidden="true"><i></i></div>
+                <strong>没有匹配的 GPU</strong>
+                <span>调整服务器、状态筛选或搜索条件</span>
+              </div>
+            </div>
+          </section>
+        </section>
+      </main>
+
+      <footer class="app-footer">
+        <span>Mocop · AI-native · OpenSSH 采集 · SSE 实时推送</span>
+        <span id="poll-info">等待采集</span>
+      </footer>
+    </div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
