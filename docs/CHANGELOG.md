@@ -4,6 +4,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Added
+
+- Added per-GPU CUDA compute-task details with bounded process parsing and per-process VRAM.
+- Added an explicit `local_host` target that uses the fixed resource probe without an SSH connection.
+- Added draggable server ordering, GPU/CPU activity in the fleet list, and browser-local display preferences.
+
 ### Changed
 
 - Made English the default README and added a synchronized Simplified Chinese guide.
@@ -11,6 +17,11 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Consolidated engineering documentation, community policy, and examples into dedicated directories.
 - Removed the duplicate static systemd unit; `mocop service install` remains the tested service path.
 - Adopted Forge commit subjects with repository-owned hook and CI enforcement.
+- Removed the heatmap legend and reduced redundant SSE snapshot publication at poll start.
+
+### Fixed
+
+- Debounced transient EventSource failures and added snapshot fallback so a healthy dashboard no longer sticks on a reconnecting state.
 
 ## [0.8.0] - 2026-08-09
 

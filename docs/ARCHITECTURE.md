@@ -20,10 +20,10 @@ local JSON configuration
         │ bounded worker pool       │
         ▼                           │
  ResourceProbe Protocol             │
-   openssh-linux-v2                 │
+   openssh-linux-v3                 │
         │ fixed argv and script     │
         ▼                           │
- OpenSSH → /proc + /sys + df + nvidia-smi
+ local shell or OpenSSH → /proc + /sys + df + nvidia-smi
         │ immutable results         │
         ▼                           │
      StateStore ◀───────────────────┘
@@ -54,11 +54,11 @@ The dependency direction is `web → StateStore ← service → protocols/models
 
 Configuration uses JSON. Startup rejects unknown keys, invalid types, unsafe aliases, and values outside documented limits. Resolution prefers an explicit path, then the environment, the standard user configuration directory, a development-only local path, and finally the bundled empty configuration.
 
-Collection produces immutable `ProbeResult`, `SystemMetrics`, `DiskMetrics`, and `GpuMetrics` values. The remote system section uses the versioned `MONITOR_V2` tab-separated protocol. NVIDIA data uses the stable CSV mode of `nvidia-smi`. Parsers validate versions, columns, text length, numeric ranges, record counts, and GPU indexes.
+Collection produces immutable `ProbeResult`, `SystemMetrics`, `DiskMetrics`, `GpuMetrics`, and `GpuProcess` values. The system section uses the versioned `MONITOR_V3` tab-separated protocol. NVIDIA device and compute-process data use the stable CSV mode of `nvidia-smi`. Parsers validate versions, columns, text length, numeric ranges, record counts, process identifiers, and GPU indexes.
 
 The browser receives UTF-8 JSON snapshots through SSE. `/api/snapshot` supports cold start and diagnostics. History queries accept only discovered aliases and at most 300 points. Incident queries accept limits from 1 to 200. The only write route accepts one finite JSON number from 2 to 60 and changes in-memory cadence only.
 
-OpenSSH receives a structured argument vector and the repository-owned script through stdin. Stdout and stderr are drained incrementally into buffers that share one configured byte limit. A timeout or limit violation terminates the isolated SSH process group.
+The optional `local_host` alias must be present in the explicit host allowlist. It executes the same repository-owned script through a local `sh` process; every other target uses a structured OpenSSH argument vector. Stdout and stderr are drained incrementally into buffers that share one configured byte limit. A timeout or limit violation terminates the isolated process group.
 
 ## State and collection lifecycle
 
@@ -72,7 +72,9 @@ Each host result is published as soon as it completes. A collection cycle writes
 
 GPU count, busy devices, and cluster VRAM form the first summary layer. The scheduling heatmap follows, then system resources and native per-host GPU groups. Groups are collapsed by default. Search and status filters temporarily expand matching groups without losing the user's explicit expansion state.
 
-SSE updates are coalesced with `requestAnimationFrame`. GPU groups, host rows, attention items, incidents, and heatmap cells reuse DOM when their input signature is unchanged. Compute, VRAM, and temperature heatmap modes transform the in-memory snapshot without another request. CSV export is generated from visible rows in the browser.
+SSE updates are coalesced with `requestAnimationFrame`. GPU groups, host rows, attention items, incidents, and heatmap cells reuse DOM when their input signature is unchanged. A successful SSE snapshot is authoritative for connection state; transient errors are debounced, and snapshot fetches provide bounded degraded-mode synchronization during recovery. Compute, VRAM, and temperature heatmap modes transform the in-memory snapshot without another request. CSV export is generated from visible rows in the browser.
+
+Display-only preferences use a versioned, validated browser-local record. They control server order, GPU sort, heatmap metric, and optional columns without adding a server write route. Cluster configuration remains an administrator-owned JSON boundary. [ADR-0002](adr/0002-local-targets-and-dashboard-preferences.md) records the rejected server-persisted and on-demand remote-query alternatives.
 
 ## Process and service model
 

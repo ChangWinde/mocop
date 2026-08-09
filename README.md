@@ -34,10 +34,10 @@ In Mocop, AI-native describes the product focus: capacity checks, failure diagno
 
 ## Why Mocop
 
-- GPU-first dashboard with utilization, VRAM, temperature, power, model, driver, and process state
+- GPU-first dashboard with utilization, VRAM, temperature, power, model, driver, and per-device compute tasks
 - Cluster scheduling heatmap and per-host GPU groups that stay collapsed until needed
 - CPU, load, memory, swap, filesystem capacity, disk I/O, network throughput, and uptime context
-- Search, health filters, sorting, bounded trends, incident history, and safe CSV export
+- Drag-to-order servers, browser-local display preferences, search, filters, bounded trends, incidents, and safe CSV export
 - Per-host publication, bounded concurrency, failure backoff, retry countdowns, and stale-data handling
 - Explicit host allowlist, loopback binding, strict host-key checking, fixed remote script, and resource limits
 
@@ -147,6 +147,23 @@ This is an inventory excerpt, not a complete replacement configuration. Keep the
 
 Use the dashboard selector to change the running process to any interval from 2 to 60 seconds. The control changes the actual SSH scheduler immediately. It does not rewrite the configuration, so a service restart restores `poll_interval_seconds`, whose default is 5 seconds.
 
+### Monitor the machine running Mocop
+
+Give the local machine an inventory alias, add it to `hosts`, and set the same alias as `local_host`:
+
+```json
+{
+  "hosts": ["monitor-host", "gpu-node-01", "gpu-node-02"],
+  "local_host": "monitor-host"
+}
+```
+
+This is an inventory excerpt. Keep the remaining generated fields. `local_host` does not need an OpenSSH entry: Mocop runs the same fixed, bounded probe locally and bypasses SSH. Only one local alias is supported, and it must also be present in the explicit `hosts` list.
+
+### Personalize the dashboard
+
+Use **Settings** to choose server and GPU sorting, the heatmap metric, and optional GPU columns. Drag any server row to save a custom order. These display preferences stay in the current browser and never modify the cluster configuration. Select a GPU row or heatmap cell to inspect its active CUDA compute tasks and per-process VRAM.
+
 ### Collect one snapshot
 
 Use one-shot mode for local inspection or a controlled automation pipeline:
@@ -161,7 +178,7 @@ The output contains inventory and telemetry. Store and delete it according to th
 
 | Area | Data |
 |---|---|
-| GPU | count, utilization, VRAM, temperature, power, model, driver, processes |
+| GPU | count, utilization, VRAM, temperature, power, model, driver, per-device compute tasks |
 | Host | status, CPU, load, memory, swap, disk capacity and I/O, network rate, uptime |
 | Cluster | capacity totals, scheduling heatmap, attention queue, health filters, search |
 | Operations | bounded trends, state transitions, retry timing, staleness, CSV export |
@@ -174,6 +191,7 @@ Failed hosts retain their last successful sample and are marked stale. Stale val
 |---|---|---|
 | `hosts` / `exclude_hosts` | OpenSSH alias allowlist and exclusions | empty by default |
 | `auto_discover` | discover explicit `Host` aliases from OpenSSH config | `false` |
+| `local_host` | optional alias in `hosts` to probe without SSH | `null` |
 | `poll_interval_seconds` | collection cadence at process start | 1 to 3600; default 5 |
 | `probe_timeout_seconds` | complete collection timeout for one host | 2 to 300 |
 | `connect_timeout_seconds` | SSH connection timeout | 1 to 120; less than probe timeout |
@@ -202,15 +220,16 @@ systemctl --user restart mocop.service
 ## Architecture
 
 ```text
-JSON host allowlist ──▶ bounded scheduler ──▶ OpenSSH
-                                                │
-                              fixed read-only probe
-                         /proc · df · nvidia-smi
-                                                │
-browser ◀── SSE / JSON ◀── bounded in-memory state
+JSON host allowlist ──▶ bounded scheduler ──┬──▶ OpenSSH
+                                           └──▶ local shell
+                                                  │
+                                         fixed read-only probe
+                                    /proc · df · nvidia-smi
+                                                  │
+browser ◀──── SSE / JSON ◀──── bounded in-memory state
 ```
 
-Each host uses one logical SSH round trip per cycle. Results are published as they complete, so a slow node does not delay a healthy node. Repeated failures back off to at most 60 seconds. Snapshots, trends, and incidents use bounded memory structures and are never persisted by Mocop.
+Each remote host uses one logical SSH round trip per cycle; the optional local target uses one bounded shell process. GPU metrics and compute tasks are collected together. Results are published as they complete, so a slow node does not delay a healthy node. Repeated failures back off to at most 60 seconds. Snapshots, trends, and incidents use bounded memory structures and are never persisted by Mocop.
 
 See the [architecture](docs/ARCHITECTURE.md), [performance methodology](docs/PERFORMANCE.md), and [repository layout decision](docs/adr/0001-repository-layout.md) for implementation details.
 
