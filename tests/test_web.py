@@ -52,6 +52,7 @@ class WebTests(unittest.TestCase):
         self.assertIn('class="search-shortcut"', body)
         self.assertIn('id="gpu-sort"', body)
         self.assertIn('id="refresh-interval"', body)
+        self.assertIn('<option value="5" selected>5 秒</option>', body)
         self.assertIn('id="toggle-groups"', body)
         self.assertIn('id="gpu-groups"', body)
         self.assertIn("age(snapshot.lastPollCompletedAt)", script)

@@ -48,10 +48,45 @@ Mocop 的 AI-native 指产品围绕 AI 训练与推理集群的容量判断、�
 - 可以通过密钥或 `ssh-agent` 非交互访问目标主机
 - 目标主机提供 Linux `/proc`
 - 需要 NVIDIA GPU 指标的主机提供 `nvidia-smi`
+- 只有使用可选的后台服务时才需要用户级 systemd 管理器
 
 开始无人值守监控前，请人工核对每台主机的指纹。
 
 ## 快速开始
+
+### 1. 创建 OpenSSH 别名
+
+Mocop 监控的是 SSH 别名，而不是直接写入连接字符串。先在 `~/.ssh/config` 中为每个计算节点定义明确的别名：
+
+```sshconfig
+Host gpu-node-01
+    HostName 192.0.2.10
+    User cluster-monitor
+    IdentityFile ~/.ssh/id_ed25519
+    IdentitiesOnly yes
+```
+
+这里使用的是文档专用地址段 `192.0.2.0/24`，实际使用时必须替换为自己的环境。如果节点需要跳板机，继续由 OpenSSH 维护连接关系：
+
+```sshconfig
+Host gpu-bastion
+    HostName 192.0.2.5
+    User cluster-monitor
+
+Host gpu-node-*
+    ProxyJump gpu-bastion
+```
+
+首次连接时人工核对主机指纹，然后确认无人值守连接可用：
+
+```bash
+ssh gpu-node-01 true
+ssh -o BatchMode=yes gpu-node-01 true
+```
+
+跳板机和 Git 远端等无关别名只是连接基础设施，不是被监控的计算节点，不要把它们加入 Mocop 的 `hosts`。
+
+### 2. 安装 Mocop
 
 使用 [`uv`](https://docs.astral.sh/uv/) 创建隔离的命令环境：
 
@@ -59,10 +94,19 @@ Mocop 的 AI-native 指产品围绕 AI 训练与推理集群的容量判断、�
 uv tool install git+https://github.com/ChangWinde/mocop.git
 ```
 
-创建显式资产清单并安装用户级 systemd 服务：
+### 3. 创建集群配置
 
 ```bash
 mocop init --host gpu-node-01 --host gpu-node-02
+```
+
+这条命令会以 `0600` 权限创建完整的 `~/.config/mocop/config.json`。只有 `hosts` 中的别名会被监控。生成的配置默认关闭 `auto_discover`，因此不会自动加入跳板机、Git 别名或 SSH 通配项。初始采集周期为 5 秒。
+
+修改超时、并发、历史长度或告警阈值前，请先查看[完整示例配置](examples/mocop.example.json)。
+
+### 4. 启动控制台
+
+```bash
 mocop service install
 ```
 
@@ -85,19 +129,19 @@ Mocop 不会自动修改 linger 策略。
 
 ## 常用工作流
 
-### 只监控明确指定的主机
+### 修改被监控的主机
 
-`mocop init` 以 `0600` 权限创建 `~/.config/mocop/config.json`，并拒绝覆盖已有文件。建议关闭自动发现，只列出属于目标集群的 OpenSSH 别名：
+`mocop init` 不会覆盖已有配置。集群变化时直接编辑配置文件，保持自动发现关闭，并且只列出计算节点别名：
 
 ```json
 {
   "auto_discover": false,
   "hosts": ["gpu-node-01", "gpu-node-02"],
-  "exclude_hosts": []
+  "exclude_hosts": ["gpu-bastion", "git-host"]
 }
 ```
 
-上面的片段只展示资产字段。完整配置请从不含真实资产的[示例配置](examples/mocop.example.json)开始。
+上面只是资产字段片段，不能替换完整配置；请保留 `mocop init` 生成的其他字段。`exclude_hosts` 是最终拒绝列表，主动启用 `auto_discover` 时尤其适合排除跳板机等非计算节点。编辑后重启服务。
 
 ### 临时调整实时采集频率
 

@@ -141,11 +141,13 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.auto_discover)
         self.assertEqual(config.hosts, ("gpu-node-01", "gpu-node-02"))
         self.assertEqual(config.exclude_hosts, frozenset())
+        self.assertEqual(config.poll_interval_seconds, 5)
 
     def test_bundled_default_is_safe_and_loadable(self) -> None:
         config = load_config(BUNDLED_CONFIG_PATH)
         self.assertFalse(config.auto_discover)
         self.assertEqual(config.hosts, ())
+        self.assertEqual(config.poll_interval_seconds, 5)
         self.assertEqual(config.max_output_bytes, 2_097_152)
 
     def test_resolves_explicit_environment_user_project_and_bundled_paths(self) -> None:

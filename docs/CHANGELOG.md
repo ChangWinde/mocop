@@ -7,8 +7,10 @@ All notable changes are documented here. This project follows Semantic Versionin
 ### Changed
 
 - Made English the default README and added a synchronized Simplified Chinese guide.
+- Added a first-run path from OpenSSH aliases to an explicit Mocop cluster allowlist.
 - Consolidated engineering documentation, community policy, and examples into dedicated directories.
 - Removed the duplicate static systemd unit; `mocop service install` remains the tested service path.
+- Adopted Forge commit subjects with repository-owned hook and CI enforcement.
 
 ## [0.8.0] - 2026-08-09
 
