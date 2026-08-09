@@ -111,13 +111,10 @@ class StateStore:
 
     def begin_poll(self, hosts: tuple[str, ...]) -> None:
         with self._condition:
-            if not hosts:
-                return
             for host in hosts:
                 state = self._servers.get(host)
                 if state is not None:
                     state.polling = True
-            self._publish_locked()
 
     def apply(
         self,
@@ -255,10 +252,7 @@ class StateStore:
         }
 
     def _snapshot_locked(self) -> dict[str, object]:
-        servers = [
-            state.to_dict()
-            for state in sorted(self._servers.values(), key=lambda item: item.host)
-        ]
+        servers = [state.to_dict() for state in self._servers.values()]
         online = sum(server["status"] == "online" for server in servers)
         current_servers = [server for server in servers if server["status"] == "online"]
         gpus = [gpu for server in current_servers for gpu in server["gpus"]]

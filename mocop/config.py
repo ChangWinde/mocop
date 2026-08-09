@@ -43,6 +43,7 @@ class MonitorConfig:
     max_workers: int
     listen_host: str
     listen_port: int
+    local_host: str | None = None
     max_output_bytes: int = 2_097_152
     history_points: int = 720
     incident_history_points: int = 500
@@ -63,6 +64,7 @@ _REQUIRED_KEYS = {
     "listen_port",
 }
 _OPTIONAL_KEYS = {
+    "local_host",
     "history_points",
     "incident_history_points",
     "collection_stale_cycles",
@@ -177,6 +179,19 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
             "host aliases must contain only letters, numbers, dots, underscores, "
             f"and hyphens: {', '.join(invalid_aliases)}"
         )
+    local_host_value = data.get("local_host")
+    if local_host_value is None:
+        local_host = None
+    elif not isinstance(local_host_value, str) or not is_safe_alias(
+        local_host_value.strip()
+    ):
+        raise ConfigError("local_host must be null or a safe host alias")
+    else:
+        local_host = local_host_value.strip()
+        if local_host not in hosts:
+            raise ConfigError("local_host must also appear in the explicit hosts list")
+        if local_host in excludes:
+            raise ConfigError("local_host cannot be excluded")
     poll_interval = _bounded_number(data, "poll_interval_seconds", 1, 3600)
     probe_timeout = _bounded_number(data, "probe_timeout_seconds", 2, 300)
     connect_timeout = _bounded_integer(data, "connect_timeout_seconds", 1, 120)
@@ -254,6 +269,7 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         max_workers=max_workers,
         listen_host=data["listen_host"].strip(),
         listen_port=listen_port,
+        local_host=local_host,
         history_points=history_value,
         incident_history_points=incident_history_value,
         collection_stale_cycles=collection_stale_cycles,

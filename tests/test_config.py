@@ -142,6 +142,27 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.hosts, ("gpu-node-01", "gpu-node-02"))
         self.assertEqual(config.exclude_hosts, frozenset())
         self.assertEqual(config.poll_interval_seconds, 5)
+        self.assertIsNone(config.local_host)
+
+    def test_local_host_must_be_an_explicit_non_excluded_target(self) -> None:
+        value = valid_config()
+        value["auto_discover"] = False
+        value["hosts"] = ["star-0", "gpu-1"]
+        value["local_host"] = "star-0"
+        path = self.write(value)
+
+        self.assertEqual(load_config(path).local_host, "star-0")
+
+        value["hosts"] = ["gpu-1"]
+        path = self.write(value)
+        with self.assertRaisesRegex(ConfigError, "local_host must also appear"):
+            load_config(path)
+
+        value["hosts"] = ["star-0", "gpu-1"]
+        value["exclude_hosts"] = ["star-0"]
+        path = self.write(value)
+        with self.assertRaisesRegex(ConfigError, "local_host cannot be excluded"):
+            load_config(path)
 
     def test_bundled_default_is_safe_and_loadable(self) -> None:
         config = load_config(BUNDLED_CONFIG_PATH)

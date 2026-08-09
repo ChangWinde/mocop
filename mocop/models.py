@@ -22,6 +22,16 @@ def utc_after(seconds: float) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class GpuProcess:
+    pid: int
+    name: str
+    used_memory_mib: float | None
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class GpuMetrics:
     index: int
     uuid: str
@@ -36,9 +46,13 @@ class GpuMetrics:
     memory_free_mib: float | None
     power_draw_w: float | None
     power_limit_w: float | None
+    processes: tuple[GpuProcess, ...] = ()
+    processes_available: bool = True
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        value = asdict(self)
+        value["processes"] = [process.to_dict() for process in self.processes]
+        return value
 
 
 @dataclass(frozen=True, slots=True)

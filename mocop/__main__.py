@@ -88,7 +88,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
     monitor = MonitorService(
         config=config,
         host_source=create_host_source("openssh-config"),
-        probe=create_probe("openssh-linux-v2"),
+        probe=create_probe("openssh-linux-v3"),
         state=state,
     )
     if args.once:

@@ -11,11 +11,11 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from .config import MonitorConfig, is_safe_alias
-from .models import DiskMetrics, GpuMetrics, ProbeResult, SystemMetrics
+from .models import DiskMetrics, GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
 
 _QUERY_FIELDS = (
     "index",
@@ -32,16 +32,18 @@ _QUERY_FIELDS = (
     "power.draw",
     "power.limit",
 )
+_PROCESS_QUERY_FIELDS = ("gpu_uuid", "pid", "process_name", "used_gpu_memory")
 _UNAVAILABLE = {"", "n/a", "[n/a]", "not supported", "[not supported]"}
-_PROTOCOL_VERSION = "MONITOR_V2"
+_PROTOCOL_VERSION = "MONITOR_V3"
 _PROCESS_READ_CHUNK_BYTES = 65_536
 _MAX_GPUS_PER_HOST = 256
 _MAX_DISKS_PER_HOST = 1_024
+_MAX_PROCESSES_PER_HOST = 4_096
 
 _REMOTE_SCRIPT_TEMPLATE = r"""
 LC_ALL=C
 export LC_ALL
-printf 'MONITOR_V2\n'
+printf 'MONITOR_V3\n'
 host_value=$(hostname 2>/dev/null || printf 'unknown')
 host_value=$(printf '%s' "$host_value" | tr '\t\r\n' '   ' | cut -c 1-255)
 printf 'HOST\t%s\n' "$host_value"
@@ -86,10 +88,15 @@ else
   printf 'GPU_UNAVAILABLE\n'
 fi
 printf 'GPUS_END\n'
+printf 'PROCESSES_BEGIN\n'
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi --query-compute-apps=__PROCESS_QUERY__ --format=csv,noheader,nounits 2>/dev/null || printf 'PROCESS_ERROR\t%s\n' "$?"
+fi
+printf 'PROCESSES_END\n'
 """
 _REMOTE_SCRIPT = _REMOTE_SCRIPT_TEMPLATE.replace(
     "__GPU_QUERY__", ",".join(_QUERY_FIELDS)
-)
+).replace("__PROCESS_QUERY__", ",".join(_PROCESS_QUERY_FIELDS))
 
 
 class ResourceProbe(Protocol):
@@ -322,6 +329,40 @@ def parse_nvidia_smi_csv(payload: str) -> tuple[GpuMetrics, ...]:
     return tuple(gpus)
 
 
+def parse_nvidia_processes_csv(payload: str) -> dict[str, tuple[GpuProcess, ...]]:
+    rows = csv.reader(io.StringIO(payload), skipinitialspace=True)
+    processes: dict[str, list[GpuProcess]] = {}
+    count = 0
+    for row_number, row in enumerate(rows, start=1):
+        if not row or not any(cell.strip() for cell in row):
+            continue
+        if count >= _MAX_PROCESSES_PER_HOST:
+            raise ValueError("nvidia-smi returned too many GPU process records")
+        if len(row) != len(_PROCESS_QUERY_FIELDS):
+            raise ValueError(
+                f"nvidia-smi returned {len(row)} process columns on row {row_number}; "
+                f"expected {len(_PROCESS_QUERY_FIELDS)}"
+            )
+        gpu_uuid = _bounded_text(row[0], "process GPU UUID", 128)
+        pid = _number(row[1])
+        if pid is None or not pid.is_integer() or not 1 <= pid <= 2_147_483_647:
+            raise ValueError(
+                f"nvidia-smi returned an invalid process PID on row {row_number}"
+            )
+        process = GpuProcess(
+            pid=int(pid),
+            name=_bounded_text(
+                row[2], "GPU process name", 512, fallback="unknown process"
+            ),
+            used_memory_mib=_optional_number(
+                row[3], "GPU process memory", maximum=1_000_000_000
+            ),
+        )
+        processes.setdefault(gpu_uuid, []).append(process)
+        count += 1
+    return {gpu_uuid: tuple(items) for gpu_uuid, items in processes.items()}
+
+
 @dataclass(frozen=True, slots=True)
 class _RawSystemSample:
     hostname: str
@@ -353,14 +394,17 @@ def parse_linux_resource_payload(
     values: dict[str, list[str]] = {}
     disks: list[DiskMetrics] = []
     gpu_lines: list[str] = []
+    process_lines: list[str] = []
     gpu_message: str | None = None
+    processes_available = True
     in_gpus = False
     in_disks = False
+    in_processes = False
     section_markers: set[str] = set()
 
     for line in lines[1:]:
         if line == "GPUS_BEGIN":
-            if in_gpus or in_disks or line in section_markers:
+            if in_gpus or in_disks or in_processes or line in section_markers:
                 raise ValueError("resource payload has an invalid GPU section")
             section_markers.add(line)
             in_gpus = True
@@ -372,7 +416,7 @@ def parse_linux_resource_payload(
             in_gpus = False
             continue
         if line == "DISKS_BEGIN":
-            if in_gpus or in_disks or line in section_markers:
+            if in_gpus or in_disks or in_processes or line in section_markers:
                 raise ValueError("resource payload has an invalid disk section")
             section_markers.add(line)
             in_disks = True
@@ -383,6 +427,18 @@ def parse_linux_resource_payload(
             section_markers.add(line)
             in_disks = False
             continue
+        if line == "PROCESSES_BEGIN":
+            if in_gpus or in_disks or in_processes or line in section_markers:
+                raise ValueError("resource payload has an invalid process section")
+            section_markers.add(line)
+            in_processes = True
+            continue
+        if line == "PROCESSES_END":
+            if not in_processes or line in section_markers:
+                raise ValueError("resource payload has an invalid process section")
+            section_markers.add(line)
+            in_processes = False
+            continue
         if in_gpus:
             if line == "GPU_UNAVAILABLE":
                 gpu_message = "nvidia-smi is unavailable"
@@ -390,6 +446,12 @@ def parse_linux_resource_payload(
                 gpu_message = "nvidia-smi query failed"
             elif line.strip():
                 gpu_lines.append(line)
+            continue
+        if in_processes:
+            if line.startswith("PROCESS_ERROR\t"):
+                processes_available = False
+            elif line.strip():
+                process_lines.append(line)
             continue
 
         parts = line.split("\t")
@@ -418,8 +480,15 @@ def parse_linux_resource_payload(
         elif len(parts) >= 2:
             values[parts[0]] = parts[1:]
 
-    expected_markers = {"DISKS_BEGIN", "DISKS_END", "GPUS_BEGIN", "GPUS_END"}
-    if section_markers != expected_markers or in_disks or in_gpus:
+    expected_markers = {
+        "DISKS_BEGIN",
+        "DISKS_END",
+        "GPUS_BEGIN",
+        "GPUS_END",
+        "PROCESSES_BEGIN",
+        "PROCESSES_END",
+    }
+    if section_markers != expected_markers or in_disks or in_gpus or in_processes:
         raise ValueError("resource payload has incomplete metric sections")
     if gpu_message is not None and gpu_lines:
         raise ValueError("resource payload has conflicting GPU status")
@@ -459,6 +528,19 @@ def parse_linux_resource_payload(
         disks=tuple(disks),
     )
     gpus = parse_nvidia_smi_csv("\n".join(gpu_lines))
+    processes = (
+        parse_nvidia_processes_csv("\n".join(process_lines))
+        if processes_available
+        else {}
+    )
+    gpus = tuple(
+        replace(
+            gpu,
+            processes=processes.get(gpu.uuid, ()),
+            processes_available=processes_available,
+        )
+        for gpu in gpus
+    )
     return raw, gpus, gpu_message
 
 
@@ -494,9 +576,9 @@ def _safe_ssh_failure(stderr: str) -> str:
     return "SSH connection failed"
 
 
-@register_probe("openssh-linux-v2")
+@register_probe("openssh-linux-v3")
 class OpenSshLinuxResourceProbe:
-    """Collect Linux system and NVIDIA metrics through one fixed SSH script."""
+    """Collect Linux and NVIDIA metrics locally or through one fixed SSH script."""
 
     def __init__(self) -> None:
         self._baseline_lock = threading.Lock()
@@ -579,28 +661,33 @@ class OpenSshLinuxResourceProbe:
         if not is_safe_alias(host):
             raise ValueError(f"unsafe SSH alias: {host!r}")
 
-        command = [
-            "ssh",
-            "-F",
-            str(config.ssh_config),
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "NumberOfPasswordPrompts=0",
-            "-o",
-            f"ConnectTimeout={config.connect_timeout_seconds}",
-            "-o",
-            "ConnectionAttempts=1",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "LogLevel=ERROR",
-            "--",
-            host,
-            "sh",
-            "-s",
-        ]
+        local = config.local_host == host
+        command = (
+            ["sh", "-s"]
+            if local
+            else [
+                "ssh",
+                "-F",
+                str(config.ssh_config),
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "NumberOfPasswordPrompts=0",
+                "-o",
+                f"ConnectTimeout={config.connect_timeout_seconds}",
+                "-o",
+                "ConnectionAttempts=1",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                "LogLevel=ERROR",
+                "--",
+                host,
+                "sh",
+                "-s",
+            ]
+        )
         started = time.monotonic()
         environment = os.environ.copy()
         environment["LC_ALL"] = "C"
@@ -617,26 +704,38 @@ class OpenSshLinuxResourceProbe:
                 host=host,
                 status="unreachable",
                 latency_ms=round((time.monotonic() - started) * 1000),
-                message="SSH/resource collection timed out",
+                message=(
+                    "Local resource collection timed out"
+                    if local
+                    else "SSH/resource collection timed out"
+                ),
             )
         except _ProcessOutputLimitExceeded:
             return ProbeResult(
                 host=host,
                 status="error",
                 latency_ms=round((time.monotonic() - started) * 1000),
-                message="Remote resource output exceeded the configured limit",
+                message=(
+                    "Local resource output exceeded the configured limit"
+                    if local
+                    else "Remote resource output exceeded the configured limit"
+                ),
             )
         except OSError:
             return ProbeResult(
                 host=host,
                 status="error",
                 latency_ms=round((time.monotonic() - started) * 1000),
-                message="Local SSH client could not be started",
+                message=(
+                    "Local resource probe could not be started"
+                    if local
+                    else "Local SSH client could not be started"
+                ),
             )
 
         observed_monotonic = time.monotonic()
         latency_ms = round((observed_monotonic - started) * 1000)
-        if completed.returncode == 255:
+        if not local and completed.returncode == 255:
             return ProbeResult(
                 host=host,
                 status="unreachable",
@@ -648,7 +747,11 @@ class OpenSshLinuxResourceProbe:
                 host=host,
                 status="error",
                 latency_ms=latency_ms,
-                message=f"Remote resource query failed (exit {completed.returncode})",
+                message=(
+                    f"Local resource query failed (exit {completed.returncode})"
+                    if local
+                    else f"Remote resource query failed (exit {completed.returncode})"
+                ),
             )
         try:
             raw, gpus, gpu_message = parse_linux_resource_payload(completed.stdout)
@@ -658,7 +761,11 @@ class OpenSshLinuxResourceProbe:
                 host=host,
                 status="error",
                 latency_ms=latency_ms,
-                message="Remote resource output was not recognized",
+                message=(
+                    "Local resource output was not recognized"
+                    if local
+                    else "Remote resource output was not recognized"
+                ),
             )
         return ProbeResult(
             host=host,
@@ -672,5 +779,6 @@ class OpenSshLinuxResourceProbe:
 
 # The old class and registry name remain import-compatible for one release.
 OpenSshNvidiaSmiProbe = OpenSshLinuxResourceProbe
+_PROBES["openssh-linux-v2"] = OpenSshLinuxResourceProbe
 _PROBES["openssh-linux-v1"] = OpenSshLinuxResourceProbe
 _PROBES["openssh-nvidia-smi"] = OpenSshLinuxResourceProbe

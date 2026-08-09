@@ -167,6 +167,22 @@ class StateStoreTests(unittest.TestCase):
         store.set_hosts(("new-host",))
         self.assertIsNotNone(store.wait_for_update(version, 0.001))
 
+    def test_preserves_configured_host_order_without_publishing_poll_start(
+        self,
+    ) -> None:
+        store = StateStore(5)
+        store.set_hosts(("node-b", "node-a"))
+        version = store.snapshot()["version"]
+
+        store.begin_poll(("node-b", "node-a"))
+        snapshot = store.snapshot()
+
+        self.assertEqual(
+            [server["host"] for server in snapshot["servers"]], ["node-b", "node-a"]
+        )
+        self.assertEqual(snapshot["version"], version)
+        self.assertEqual(snapshot["stats"]["pollingServers"], 2)
+
     def test_exposes_configured_collection_freshness_window(self) -> None:
         store = StateStore(5, collection_stale_cycles=4)
 

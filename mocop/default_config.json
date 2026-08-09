@@ -3,6 +3,7 @@
   "auto_discover": false,
   "hosts": [],
   "exclude_hosts": [],
+  "local_host": null,
   "poll_interval_seconds": 5,
   "probe_timeout_seconds": 12,
   "connect_timeout_seconds": 5,

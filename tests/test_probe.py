@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from mocop.probe import (
     _ProcessOutputLimitExceeded,
     _run_bounded_process,
     parse_linux_resource_payload,
+    parse_nvidia_processes_csv,
     parse_nvidia_smi_csv,
 )
 
@@ -46,9 +48,10 @@ def resource_payload(
         "0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
         "81920, 40960, 40960, 287.5, 400"
     ),
+    process_payload: str = "GPU-abc, 4242, python, 2048",
 ) -> str:
     return (
-        "MONITOR_V2\n"
+        "MONITOR_V3\n"
         "HOST\tnode-a\n"
         f"CPU\t{cpu_total}\t{cpu_idle}\n"
         "CORES\t8\n"
@@ -63,6 +66,9 @@ def resource_payload(
         "GPUS_BEGIN\n"
         f"{gpu_payload}\n"
         "GPUS_END\n"
+        "PROCESSES_BEGIN\n"
+        f"{process_payload}\n"
+        "PROCESSES_END\n"
     )
 
 
@@ -91,14 +97,36 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(raw.disks[0].mountpoint, "/")
         self.assertEqual(raw.disks[0].used_pct, 50)
         self.assertEqual(len(gpus), 1)
+        self.assertEqual(gpus[0].processes[0].pid, 4242)
+        self.assertEqual(gpus[0].processes[0].used_memory_mib, 2048)
         self.assertIsNone(gpu_message)
+
+    def test_parses_and_bounds_gpu_compute_processes(self) -> None:
+        processes = parse_nvidia_processes_csv(
+            'GPU-abc, 42, "python, trainer.py", 1024\n'
+            "GPU-abc, 43, inference-server, [N/A]\n"
+        )
+
+        self.assertEqual([process.pid for process in processes["GPU-abc"]], [42, 43])
+        self.assertEqual(processes["GPU-abc"][0].name, "python, trainer.py")
+        self.assertIsNone(processes["GPU-abc"][1].used_memory_mib)
+
+        with self.assertRaisesRegex(ValueError, "process PID"):
+            parse_nvidia_processes_csv("GPU-abc, 0, python, 10")
 
     def test_rejects_unknown_resource_protocol(self) -> None:
         with self.assertRaisesRegex(ValueError, "protocol version"):
-            parse_linux_resource_payload("MONITOR_V3\n")
+            parse_linux_resource_payload("MONITOR_V999\n")
 
     def test_rejects_incomplete_metric_sections(self) -> None:
-        for marker in ("DISKS_BEGIN\n", "DISKS_END\n", "GPUS_BEGIN\n", "GPUS_END\n"):
+        for marker in (
+            "DISKS_BEGIN\n",
+            "DISKS_END\n",
+            "GPUS_BEGIN\n",
+            "GPUS_END\n",
+            "PROCESSES_BEGIN\n",
+            "PROCESSES_END\n",
+        ):
             with (
                 self.subTest(marker=marker),
                 self.assertRaisesRegex(ValueError, "section"),
@@ -133,10 +161,33 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("BatchMode=yes", arguments)
         self.assertEqual(arguments[arguments.index("--") + 1], "gpu-1")
         self.assertEqual(arguments[-2:], ["sh", "-s"])
-        self.assertIn("MONITOR_V2", run.call_args.kwargs["input_text"])
+        self.assertIn("MONITOR_V3", run.call_args.kwargs["input_text"])
+        self.assertIn("--query-compute-apps", run.call_args.kwargs["input_text"])
         self.assertIn("/proc/meminfo", run.call_args.kwargs["input_text"])
         self.assertEqual(run.call_args.kwargs["max_output_bytes"], 2_097_152)
         self.assertNotIn("shell", run.call_args.kwargs)
+
+    @patch("mocop.probe._run_bounded_process")
+    def test_local_host_uses_the_fixed_probe_without_ssh(self, run) -> None:
+        run.return_value = _BoundedProcessResult(
+            0, stdout=resource_payload(), stderr=""
+        )
+
+        result = OpenSshLinuxResourceProbe().probe(
+            "star-0", replace(config(), hosts=("star-0",), local_host="star-0")
+        )
+
+        self.assertEqual(result.status, "online")
+        self.assertEqual(run.call_args.args[0], ["sh", "-s"])
+
+    @patch("mocop.probe._run_bounded_process", side_effect=OSError)
+    def test_local_host_reports_local_probe_start_failure(self, _run) -> None:
+        result = OpenSshLinuxResourceProbe().probe(
+            "star-0", replace(config(), hosts=("star-0",), local_host="star-0")
+        )
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.message, "Local resource probe could not be started")
 
     @patch("mocop.probe.time.monotonic")
     @patch("mocop.probe._run_bounded_process")
