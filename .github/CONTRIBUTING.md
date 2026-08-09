@@ -15,6 +15,12 @@ node --check mocop/static/app.js
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
+Enable the repository-owned Git hooks once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Change requirements
 
 - Add focused regression coverage for behavior changes and negative coverage for security boundaries.
@@ -26,7 +32,21 @@ node --experimental-websocket tests/browser_smoke.mjs
 
 ## Commits
 
-Each commit must represent one independently reviewable intent and leave the repository verifiable. Use `type(scope): imperative summary`, with a subject no longer than 72 characters. Accepted types are `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`, and `chore`. Use a body when the rationale or trade-offs are not evident from the diff.
+Each commit must represent one independently reviewable intent and leave the repository verifiable. Use the Forge subject format:
+
+```text
+[scope/op]: imperative summary
+```
+
+Scopes use lowercase path-like names such as `repo`, `core`, `config`, `probe`, `service`, `web`, `docs`, `security`, `ci`, or `tests`. The final segment must be one of `add`, `cleanup`, `document`, `fix`, `harden`, `promote`, `refactor`, `remove`, `test`, or `validate`.
+
+```text
+[repo/refactor]: simplify public project layout
+[docs/readme/document]: explain cluster configuration
+[tests/fix]: stabilize browser smoke test
+```
+
+The complete subject must be at most 72 characters, and the imperative summary must not end with a period. Use a body when the rationale or trade-offs are not evident from the diff. The local `commit-msg` hook checks new commits, and CI validates the complete reachable history. Git-generated merge and revert subjects are accepted only when their commit metadata proves their origin.
 
 Do not mix generated output, unrelated formatting, or local configuration into a commit. Before committing, inspect staged paths and run the checks relevant to the change.
 
