@@ -1,11 +1,33 @@
+# Python caches and build output
 __pycache__/
 *.py[cod]
 *.egg-info/
+build/
+dist/
+
+# Test and analysis output
 .coverage
+.coverage.*
+coverage.xml
+htmlcov/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Local environments and secrets
 .venv/
-dist/
-build/
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local runtime configuration
 config/mocop.json
