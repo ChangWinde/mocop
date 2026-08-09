@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 
 from mocop.models import DiskMetrics, GpuMetrics, ProbeResult, SystemMetrics
 from mocop.service import StateStore
@@ -113,7 +115,19 @@ def demo_state() -> StateStore:
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: browser_fixture.py PORT")
-    server = MonitorHttpServer(("127.0.0.1", int(sys.argv[1])), demo_state())
+    state = demo_state()
+
+    def publish_poll_completions() -> None:
+        while True:
+            time.sleep(1)
+            state.record_poll_cycle(0.42)
+
+    threading.Thread(
+        target=publish_poll_completions,
+        name="mocop-browser-fixture",
+        daemon=True,
+    ).start()
+    server = MonitorHttpServer(("127.0.0.1", int(sys.argv[1])), state)
     try:
         server.serve_forever()
     finally:

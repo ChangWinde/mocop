@@ -54,4 +54,4 @@ jobs:
           mocop --config /tmp/mocop-ci.json --once > /tmp/snapshot.json
           python -c 'import json; data=json.load(open("/tmp/snapshot.json")); assert data["stats"]["servers"] == 0'
       - name: Browser smoke test
-        run: node --experimental-websocket tests/browser_smoke.mjs
+        run: MOCOP_BROWSER_WARMUP_MS=8000 node --experimental-websocket tests/browser_smoke.mjs

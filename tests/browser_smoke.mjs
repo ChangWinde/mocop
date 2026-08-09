@@ -189,6 +189,11 @@ try {
   });
   monitorOutput = capture(monitor);
   await waitFor(`http://127.0.0.1:${monitorPort}/healthz`);
+  const warmupMs = Number(process.env.MOCOP_BROWSER_WARMUP_MS || 0);
+  assert(Number.isInteger(warmupMs) && warmupMs >= 0 && warmupMs <= 30_000);
+  if (warmupMs) {
+    await new Promise((resolve) => setTimeout(resolve, warmupMs));
+  }
 
   const chromePath = executable([
     process.env.CHROME_PATH,
