@@ -6,13 +6,14 @@ This document defines reproducible measurement conditions and architecture thres
 
 ## Hot-path design
 
-- One subprocess collects system metrics, GPU metrics, and compute tasks for one host per cycle; remote targets use one logical SSH session and the optional local target bypasses SSH.
+- One bounded transport process collects system metrics, GPU metrics, compute tasks, and optional GPU health for one host per cycle; remote targets use one logical SSH session and the optional local target bypasses SSH.
+- The optional hardware-health section uses one additional short `nvidia-smi` query inside that transport. Its failure is isolated and does not cause a retry or invalidate base telemetry.
 - `max_workers` bounds concurrent probes, while completed hosts publish independently.
 - Repeated failures back off to at most 60 seconds instead of occupying a connection slot every cycle.
 - Stdout and stderr are drained incrementally under one byte limit; timeout and overflow terminate the process group.
 - Snapshots, trends, and incidents use bounded memory structures with no database write path.
 - SSE publishes each completed host result and one authoritative cycle completion; it does not duplicate the full snapshot when a cycle merely starts. The browser coalesces same-frame work with `requestAnimationFrame`.
-- GPU groups, host lists, heatmap cells, and incident panels reuse DOM when their input signature is unchanged.
+- GPU groups, host lists, heatmap cells, and incident panels reuse DOM when their input signature is unchanged; the browser consumes backend incident decisions instead of re-evaluating thresholds.
 - GPU groups start collapsed, which bounds initial table rendering in the cluster-wide view.
 
 ## OpenSSH connection reuse
@@ -33,7 +34,7 @@ The browser fixture uses three fictional nodes and eight GPUs:
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-This test covers collapsed GPU groups, GPU task details, drag ordering, display preferences, the scheduling heatmap, resource cards, incidents, transient SSE errors, responsive layout, and the runtime-cadence race. CI duration is not a performance benchmark.
+This test covers collapsed GPU groups, GPU task and health details, drag ordering, display preferences, the scheduling heatmap, resource cards, authoritative incidents, transient SSE errors, responsive layout, and the runtime-cadence race. CI duration is not a performance benchmark.
 
 Measure one complete collection in an authorized environment with:
 

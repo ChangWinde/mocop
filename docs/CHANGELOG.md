@@ -9,6 +9,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Added per-GPU CUDA compute-task details with bounded process parsing and per-process VRAM.
 - Added an explicit `local_host` target that uses the fixed resource probe without an SSH connection.
 - Added draggable server ordering, GPU/CPU activity in the fleet list, and browser-local display preferences.
+- Added optional GPU ECC, memory-repair, hardware-slowdown, and MIG telemetry without making base collection depend on the health query.
+- Added validated expected GPU counts, VRAM pressure, sustained idle-VRAM detection, and configurable incident stability windows.
 
 ### Changed
 
@@ -18,10 +20,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Removed the duplicate static systemd unit; `mocop service install` remains the tested service path.
 - Adopted Forge commit subjects with repository-owned hook and CI enforcement.
 - Removed the heatmap legend and reduced redundant SSE snapshot publication at poll start.
+- Made backend incident conditions authoritative for both the attention queue and transition history.
 
 ### Fixed
 
 - Debounced transient EventSource failures and added snapshot fallback so a healthy dashboard no longer sticks on a reconnecting state.
+- Stabilized incident activation and recovery so transient SSH or resource samples do not repeatedly open and resolve the same condition.
 
 ## [0.8.0] - 2026-08-09
 

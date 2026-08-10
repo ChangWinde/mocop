@@ -34,11 +34,11 @@ In Mocop, AI-native describes the product focus: capacity checks, failure diagno
 
 ## Why Mocop
 
-- GPU-first dashboard with utilization, VRAM, temperature, power, model, driver, and per-device compute tasks
+- GPU-first dashboard with utilization, VRAM, temperature, power, model, driver, per-device tasks, and hardware health
 - Cluster scheduling heatmap and per-host GPU groups that stay collapsed until needed
 - CPU, load, memory, swap, filesystem capacity, disk I/O, network throughput, and uptime context
 - Drag-to-order servers, browser-local display preferences, search, filters, bounded trends, incidents, and safe CSV export
-- Per-host publication, bounded concurrency, failure backoff, retry countdowns, and stale-data handling
+- Expected GPU inventory, authoritative incidents, anti-flap activation/recovery, failure backoff, and stale-data handling
 - Explicit host allowlist, loopback binding, strict host-key checking, fixed remote script, and resource limits
 
 ## Requirements
@@ -147,6 +147,26 @@ This is an inventory excerpt, not a complete replacement configuration. Keep the
 
 Use the dashboard selector to change the running process to any interval from 2 to 60 seconds. The control changes the actual SSH scheduler immediately. It does not rewrite the configuration, so a service restart restores `poll_interval_seconds`, whose default is 5 seconds.
 
+### Detect missing GPUs and noisy resource samples
+
+Declare the expected device count for stable compute nodes and tune incident stability in the configuration:
+
+```json
+{
+  "expected_gpu_counts": {
+    "gpu-node-01": 8,
+    "gpu-node-02": 8
+  },
+  "incidents": {
+    "resource_open_cycles": 2,
+    "recovery_cycles": 2,
+    "gpu_idle_memory_cycles": 12
+  }
+}
+```
+
+Expected-count keys must reference active aliases in the explicit `hosts` list. Connectivity and GPU-query loss surface immediately. Resource pressure requires consecutive samples, recovery requires consecutive healthy samples, and idle GPUs retaining significant VRAM use the longer window. This prevents one noisy sample from flooding the incident feed.
+
 ### Monitor the machine running Mocop
 
 Give the local machine an inventory alias, add it to `hosts`, and set the same alias as `local_host`:
@@ -178,7 +198,7 @@ The output contains inventory and telemetry. Store and delete it according to th
 
 | Area | Data |
 |---|---|
-| GPU | count, utilization, VRAM, temperature, power, model, driver, per-device compute tasks |
+| GPU | count, utilization, VRAM, temperature, power, model, driver, tasks, ECC, memory-repair and slowdown state, MIG mode |
 | Host | status, CPU, load, memory, swap, disk capacity and I/O, network rate, uptime |
 | Cluster | capacity totals, scheduling heatmap, attention queue, health filters, search |
 | Operations | bounded trends, state transitions, retry timing, staleness, CSV export |
@@ -192,6 +212,7 @@ Failed hosts retain their last successful sample and are marked stale. Stale val
 | `hosts` / `exclude_hosts` | OpenSSH alias allowlist and exclusions | empty by default |
 | `auto_discover` | discover explicit `Host` aliases from OpenSSH config | `false` |
 | `local_host` | optional alias in `hosts` to probe without SSH | `null` |
+| `expected_gpu_counts` | expected device count by explicit host alias | empty; 0 to 256 per host |
 | `poll_interval_seconds` | collection cadence at process start | 1 to 3600; default 5 |
 | `probe_timeout_seconds` | complete collection timeout for one host | 2 to 300 |
 | `connect_timeout_seconds` | SSH connection timeout | 1 to 120; less than probe timeout |
@@ -201,7 +222,8 @@ Failed hosts retain their last successful sample and are marked stale. Stale val
 | `history_points` | successful samples retained per host | 12 to 8640 |
 | `incident_history_points` | state transitions retained in memory | 20 to 5000 |
 | `collection_stale_cycles` | delay threshold measured in collection cycles | 2 to 12 |
-| `thresholds` | CPU, memory, swap, disk, GPU temperature, and busy thresholds | see example |
+| `incidents` | consecutive activation, recovery, and idle-VRAM windows | 1 to 60 cycles |
+| `thresholds` | CPU, memory, swap, disk, GPU temperature, utilization, and VRAM thresholds | see example |
 
 Configuration is resolved in this order:
 
@@ -229,7 +251,7 @@ JSON host allowlist ──▶ bounded scheduler ──┬──▶ OpenSSH
 browser ◀──── SSE / JSON ◀──── bounded in-memory state
 ```
 
-Each remote host uses one logical SSH round trip per cycle; the optional local target uses one bounded shell process. GPU metrics and compute tasks are collected together. Results are published as they complete, so a slow node does not delay a healthy node. Repeated failures back off to at most 60 seconds. Snapshots, trends, and incidents use bounded memory structures and are never persisted by Mocop.
+Each remote host uses one logical SSH round trip per cycle; the optional local target uses one bounded shell process. Base GPU metrics, compute tasks, and optional hardware-health data are isolated sections in the same fixed probe, so a health-query failure cannot hide system or base GPU telemetry. Results are published as they complete, so a slow node does not delay a healthy node. Repeated failures back off to at most 60 seconds. Snapshots, trends, and incidents use bounded memory structures and are never persisted by Mocop.
 
 See the [architecture](docs/ARCHITECTURE.md), [performance methodology](docs/PERFORMANCE.md), and [repository layout decision](docs/adr/0001-repository-layout.md) for implementation details.
 

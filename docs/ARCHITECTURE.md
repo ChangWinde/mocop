@@ -20,7 +20,7 @@ local JSON configuration
         │ bounded worker pool       │
         ▼                           │
  ResourceProbe Protocol             │
-   openssh-linux-v3                 │
+   openssh-linux-v4                 │
         │ fixed argv and script     │
         ▼                           │
  local shell or OpenSSH → /proc + /sys + df + nvidia-smi
@@ -54,7 +54,7 @@ The dependency direction is `web → StateStore ← service → protocols/models
 
 Configuration uses JSON. Startup rejects unknown keys, invalid types, unsafe aliases, and values outside documented limits. Resolution prefers an explicit path, then the environment, the standard user configuration directory, a development-only local path, and finally the bundled empty configuration.
 
-Collection produces immutable `ProbeResult`, `SystemMetrics`, `DiskMetrics`, `GpuMetrics`, and `GpuProcess` values. The system section uses the versioned `MONITOR_V3` tab-separated protocol. NVIDIA device and compute-process data use the stable CSV mode of `nvidia-smi`. Parsers validate versions, columns, text length, numeric ranges, record counts, process identifiers, and GPU indexes.
+Collection produces immutable `ProbeResult`, `SystemMetrics`, `DiskMetrics`, `GpuMetrics`, `GpuHealthMetrics`, and `GpuProcess` values. The system section uses the versioned `MONITOR_V4` tab-separated protocol. NVIDIA device, compute-process, and optional hardware-health data use the stable CSV mode of `nvidia-smi`. Parsers validate versions, columns, text length, numeric ranges, record counts, process identifiers, and GPU indexes. An optional health-query failure never invalidates base resource telemetry. [ADR-0003](adr/0003-gpu-reliability-and-authoritative-incidents.md) records the agentless decision and rejected DCGM-first alternative.
 
 The browser receives UTF-8 JSON snapshots through SSE. `/api/snapshot` supports cold start and diagnostics. History queries accept only discovered aliases and at most 300 points. Incident queries accept limits from 1 to 200. The only write route accepts one finite JSON number from 2 to 60 and changes in-memory cadence only.
 
@@ -66,7 +66,7 @@ Each host result is published as soon as it completes. A collection cycle writes
 
 `StateStore` retains the current snapshot, bounded successful history per host, and a bounded incident ring. It does not persist telemetry. Trends and incident bodies are fetched only when needed; SSE snapshots carry the current state and compact incident metadata.
 
-`IncidentPolicy` maps successful samples to stable CPU, memory, swap, filesystem, and GPU-temperature conditions. Failed probes create connection conditions while preserving previous resource conditions, so missing data is never mistaken for recovery.
+`IncidentPolicy` is the sole authority for connectivity, CPU, memory, swap, filesystem, GPU availability, pressure, temperature, and hardware-health conditions. `IncidentTracker` applies bounded activation and recovery cycles while preserving previous resource conditions across failed probes, so transient samples and missing telemetry are not mistaken for stable failure or recovery.
 
 ## Dashboard rendering
 
@@ -74,7 +74,7 @@ GPU count, busy devices, and cluster VRAM form the first summary layer. The sche
 
 SSE updates are coalesced with `requestAnimationFrame`. GPU groups, host rows, attention items, incidents, and heatmap cells reuse DOM when their input signature is unchanged. A successful SSE snapshot is authoritative for connection state; transient errors are debounced, and snapshot fetches provide bounded degraded-mode synchronization during recovery. Compute, VRAM, and temperature heatmap modes transform the in-memory snapshot without another request. CSV export is generated from visible rows in the browser.
 
-Display-only preferences use a versioned, validated browser-local record. They control server order, GPU sort, heatmap metric, and optional columns without adding a server write route. Cluster configuration remains an administrator-owned JSON boundary. [ADR-0002](adr/0002-local-targets-and-dashboard-preferences.md) records the rejected server-persisted and on-demand remote-query alternatives.
+Display-only preferences use a versioned, validated browser-local record. They control server order, GPU sort, heatmap metric, and optional columns without adding a server write route. Cluster configuration remains an administrator-owned JSON boundary. The attention view consumes backend incident conditions and only groups them for presentation; threshold decisions are never duplicated in JavaScript. [ADR-0002](adr/0002-local-targets-and-dashboard-preferences.md) records the rejected server-persisted and on-demand remote-query alternatives.
 
 ## Process and service model
 
