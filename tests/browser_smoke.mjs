@@ -214,7 +214,8 @@ try {
     "about:blank",
   ], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
   chromeOutput = capture(chrome);
-  await waitFor(`http://127.0.0.1:${debugPort}/json/version`);
+  // Shared CI runners can take longer than the monitor warmup to launch Chrome.
+  await waitFor(`http://127.0.0.1:${debugPort}/json/version`, 30_000);
 
   const targetResponse = await fetch(
     `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent(`http://127.0.0.1:${monitorPort}/`)}`,
