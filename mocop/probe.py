@@ -15,7 +15,14 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from .config import MonitorConfig, is_safe_alias
-from .models import DiskMetrics, GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
+from .models import (
+    DiskMetrics,
+    GpuHealthMetrics,
+    GpuMetrics,
+    GpuProcess,
+    ProbeResult,
+    SystemMetrics,
+)
 
 _QUERY_FIELDS = (
     "index",
@@ -33,8 +40,17 @@ _QUERY_FIELDS = (
     "power.limit",
 )
 _PROCESS_QUERY_FIELDS = ("gpu_uuid", "pid", "process_name", "used_gpu_memory")
+_HEALTH_QUERY_FIELDS = (
+    "uuid",
+    "ecc.errors.uncorrected.volatile.total",
+    "retired_pages.pending",
+    "remapped_rows.pending",
+    "clocks_event_reasons.hw_thermal_slowdown",
+    "clocks_event_reasons.hw_power_brake_slowdown",
+    "mig.mode.current",
+)
 _UNAVAILABLE = {"", "n/a", "[n/a]", "not supported", "[not supported]"}
-_PROTOCOL_VERSION = "MONITOR_V3"
+_PROTOCOL_VERSION = "MONITOR_V4"
 _PROCESS_READ_CHUNK_BYTES = 65_536
 _MAX_GPUS_PER_HOST = 256
 _MAX_DISKS_PER_HOST = 1_024
@@ -43,7 +59,7 @@ _MAX_PROCESSES_PER_HOST = 4_096
 _REMOTE_SCRIPT_TEMPLATE = r"""
 LC_ALL=C
 export LC_ALL
-printf 'MONITOR_V3\n'
+printf 'MONITOR_V4\n'
 host_value=$(hostname 2>/dev/null || printf 'unknown')
 host_value=$(printf '%s' "$host_value" | tr '\t\r\n' '   ' | cut -c 1-255)
 printf 'HOST\t%s\n' "$host_value"
@@ -93,10 +109,17 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi --query-compute-apps=__PROCESS_QUERY__ --format=csv,noheader,nounits 2>/dev/null || printf 'PROCESS_ERROR\t%s\n' "$?"
 fi
 printf 'PROCESSES_END\n'
+printf 'GPU_HEALTH_BEGIN\n'
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi --query-gpu=__HEALTH_QUERY__ --format=csv,noheader,nounits 2>/dev/null || printf 'GPU_HEALTH_ERROR\t%s\n' "$?"
+fi
+printf 'GPU_HEALTH_END\n'
 """
-_REMOTE_SCRIPT = _REMOTE_SCRIPT_TEMPLATE.replace(
-    "__GPU_QUERY__", ",".join(_QUERY_FIELDS)
-).replace("__PROCESS_QUERY__", ",".join(_PROCESS_QUERY_FIELDS))
+_REMOTE_SCRIPT = (
+    _REMOTE_SCRIPT_TEMPLATE.replace("__GPU_QUERY__", ",".join(_QUERY_FIELDS))
+    .replace("__PROCESS_QUERY__", ",".join(_PROCESS_QUERY_FIELDS))
+    .replace("__HEALTH_QUERY__", ",".join(_HEALTH_QUERY_FIELDS))
+)
 
 
 class ResourceProbe(Protocol):
@@ -363,6 +386,54 @@ def parse_nvidia_processes_csv(payload: str) -> dict[str, tuple[GpuProcess, ...]
     return {gpu_uuid: tuple(items) for gpu_uuid, items in processes.items()}
 
 
+def _optional_health_boolean(value: str) -> bool | None:
+    normalized = value.strip().lower()
+    if normalized in _UNAVAILABLE:
+        return None
+    if normalized in {"yes", "active", "enabled"}:
+        return True
+    if normalized in {"no", "not active", "disabled"}:
+        return False
+    raise ValueError("nvidia-smi returned an invalid health boolean")
+
+
+def parse_nvidia_health_csv(payload: str) -> dict[str, GpuHealthMetrics]:
+    rows = csv.reader(io.StringIO(payload), skipinitialspace=True)
+    health: dict[str, GpuHealthMetrics] = {}
+    for row_number, row in enumerate(rows, start=1):
+        if not row or not any(cell.strip() for cell in row):
+            continue
+        if len(health) >= _MAX_GPUS_PER_HOST:
+            raise ValueError("nvidia-smi returned too many GPU health records")
+        if len(row) != len(_HEALTH_QUERY_FIELDS):
+            raise ValueError(
+                f"nvidia-smi returned {len(row)} health columns on row {row_number}; "
+                f"expected {len(_HEALTH_QUERY_FIELDS)}"
+            )
+        gpu_uuid = _bounded_text(row[0], "health GPU UUID", 128)
+        if gpu_uuid in health:
+            raise ValueError("nvidia-smi returned duplicate GPU health records")
+        ecc_value = _optional_number(
+            row[1], "uncorrected ECC count", maximum=9_007_199_254_740_991
+        )
+        if ecc_value is not None and not ecc_value.is_integer():
+            raise ValueError("nvidia-smi returned an invalid uncorrected ECC count")
+        mig_value = (
+            None
+            if row[6].strip().lower() in _UNAVAILABLE
+            else _bounded_text(row[6], "MIG mode", 64)
+        )
+        health[gpu_uuid] = GpuHealthMetrics(
+            ecc_uncorrected_volatile=int(ecc_value) if ecc_value is not None else None,
+            retired_pages_pending=_optional_health_boolean(row[2]),
+            remapped_rows_pending=_optional_health_boolean(row[3]),
+            thermal_slowdown=_optional_health_boolean(row[4]),
+            power_brake_slowdown=_optional_health_boolean(row[5]),
+            mig_mode=mig_value,
+        )
+    return health
+
+
 @dataclass(frozen=True, slots=True)
 class _RawSystemSample:
     hostname: str
@@ -395,16 +466,25 @@ def parse_linux_resource_payload(
     disks: list[DiskMetrics] = []
     gpu_lines: list[str] = []
     process_lines: list[str] = []
+    health_lines: list[str] = []
     gpu_message: str | None = None
     processes_available = True
+    health_available = True
     in_gpus = False
     in_disks = False
     in_processes = False
+    in_health = False
     section_markers: set[str] = set()
 
     for line in lines[1:]:
         if line == "GPUS_BEGIN":
-            if in_gpus or in_disks or in_processes or line in section_markers:
+            if (
+                in_gpus
+                or in_disks
+                or in_processes
+                or in_health
+                or line in section_markers
+            ):
                 raise ValueError("resource payload has an invalid GPU section")
             section_markers.add(line)
             in_gpus = True
@@ -416,7 +496,13 @@ def parse_linux_resource_payload(
             in_gpus = False
             continue
         if line == "DISKS_BEGIN":
-            if in_gpus or in_disks or in_processes or line in section_markers:
+            if (
+                in_gpus
+                or in_disks
+                or in_processes
+                or in_health
+                or line in section_markers
+            ):
                 raise ValueError("resource payload has an invalid disk section")
             section_markers.add(line)
             in_disks = True
@@ -428,7 +514,13 @@ def parse_linux_resource_payload(
             in_disks = False
             continue
         if line == "PROCESSES_BEGIN":
-            if in_gpus or in_disks or in_processes or line in section_markers:
+            if (
+                in_gpus
+                or in_disks
+                or in_processes
+                or in_health
+                or line in section_markers
+            ):
                 raise ValueError("resource payload has an invalid process section")
             section_markers.add(line)
             in_processes = True
@@ -438,6 +530,24 @@ def parse_linux_resource_payload(
                 raise ValueError("resource payload has an invalid process section")
             section_markers.add(line)
             in_processes = False
+            continue
+        if line == "GPU_HEALTH_BEGIN":
+            if (
+                in_gpus
+                or in_disks
+                or in_processes
+                or in_health
+                or line in section_markers
+            ):
+                raise ValueError("resource payload has an invalid GPU health section")
+            section_markers.add(line)
+            in_health = True
+            continue
+        if line == "GPU_HEALTH_END":
+            if not in_health or line in section_markers:
+                raise ValueError("resource payload has an invalid GPU health section")
+            section_markers.add(line)
+            in_health = False
             continue
         if in_gpus:
             if line == "GPU_UNAVAILABLE":
@@ -452,6 +562,13 @@ def parse_linux_resource_payload(
                 processes_available = False
             elif line.strip():
                 process_lines.append(line)
+            continue
+        if in_health:
+            if line.startswith("GPU_HEALTH_ERROR\t"):
+                health_available = False
+                health_lines.clear()
+            elif line.strip() and health_available:
+                health_lines.append(line)
             continue
 
         parts = line.split("\t")
@@ -487,8 +604,16 @@ def parse_linux_resource_payload(
         "GPUS_END",
         "PROCESSES_BEGIN",
         "PROCESSES_END",
+        "GPU_HEALTH_BEGIN",
+        "GPU_HEALTH_END",
     }
-    if section_markers != expected_markers or in_disks or in_gpus or in_processes:
+    if (
+        section_markers != expected_markers
+        or in_disks
+        or in_gpus
+        or in_processes
+        or in_health
+    ):
         raise ValueError("resource payload has incomplete metric sections")
     if gpu_message is not None and gpu_lines:
         raise ValueError("resource payload has conflicting GPU status")
@@ -533,11 +658,19 @@ def parse_linux_resource_payload(
         if processes_available
         else {}
     )
+    health: dict[str, GpuHealthMetrics] = {}
+    if health_available:
+        try:
+            health = parse_nvidia_health_csv("\n".join(health_lines))
+        except ValueError:
+            # Health is additive; an unsupported field must not hide base metrics.
+            health = {}
     gpus = tuple(
         replace(
             gpu,
             processes=processes.get(gpu.uuid, ()),
             processes_available=processes_available,
+            health=health.get(gpu.uuid),
         )
         for gpu in gpus
     )
@@ -576,7 +709,7 @@ def _safe_ssh_failure(stderr: str) -> str:
     return "SSH connection failed"
 
 
-@register_probe("openssh-linux-v3")
+@register_probe("openssh-linux-v4")
 class OpenSshLinuxResourceProbe:
     """Collect Linux and NVIDIA metrics locally or through one fixed SSH script."""
 
@@ -782,3 +915,4 @@ OpenSshNvidiaSmiProbe = OpenSshLinuxResourceProbe
 _PROBES["openssh-linux-v2"] = OpenSshLinuxResourceProbe
 _PROBES["openssh-linux-v1"] = OpenSshLinuxResourceProbe
 _PROBES["openssh-nvidia-smi"] = OpenSshLinuxResourceProbe
+_PROBES["openssh-linux-v3"] = OpenSshLinuxResourceProbe

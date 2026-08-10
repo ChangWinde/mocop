@@ -32,6 +32,19 @@ class GpuProcess:
 
 
 @dataclass(frozen=True, slots=True)
+class GpuHealthMetrics:
+    ecc_uncorrected_volatile: int | None
+    retired_pages_pending: bool | None
+    remapped_rows_pending: bool | None
+    thermal_slowdown: bool | None
+    power_brake_slowdown: bool | None
+    mig_mode: str | None
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class GpuMetrics:
     index: int
     uuid: str
@@ -48,10 +61,12 @@ class GpuMetrics:
     power_limit_w: float | None
     processes: tuple[GpuProcess, ...] = ()
     processes_available: bool = True
+    health: GpuHealthMetrics | None = None
 
     def to_dict(self) -> dict[str, object]:
         value = asdict(self)
         value["processes"] = [process.to_dict() for process in self.processes]
+        value["health"] = self.health.to_dict() if self.health else None
         return value
 
 

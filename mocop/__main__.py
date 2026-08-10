@@ -84,11 +84,13 @@ def _run_monitor(args: argparse.Namespace) -> int:
         history_points=config.history_points,
         incident_history_points=config.incident_history_points,
         collection_stale_cycles=config.collection_stale_cycles,
+        expected_gpu_counts=config.expected_gpu_counts,
+        incidents=config.incidents,
     )
     monitor = MonitorService(
         config=config,
         host_source=create_host_source("openssh-config"),
-        probe=create_probe("openssh-linux-v3"),
+        probe=create_probe("openssh-linux-v4"),
         state=state,
     )
     if args.once:

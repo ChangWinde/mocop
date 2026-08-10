@@ -45,6 +45,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.history_points, 720)
         self.assertEqual(config.incident_history_points, 500)
         self.assertEqual(config.collection_stale_cycles, 3)
+        self.assertEqual(config.expected_gpu_counts, ())
+        self.assertEqual(config.incidents.resource_open_cycles, 2)
+        self.assertEqual(config.incidents.recovery_cycles, 2)
+        self.assertEqual(config.incidents.gpu_idle_memory_cycles, 12)
 
     def test_rejects_unknown_keys(self) -> None:
         value = valid_config()
@@ -91,15 +95,69 @@ class ConfigTests(unittest.TestCase):
 
     def test_loads_and_bounds_thresholds(self) -> None:
         value = valid_config()
-        value["thresholds"] = {"cpu_warning_pct": 77, "gpu_temperature_warning_c": 91}
+        value["thresholds"] = {
+            "cpu_warning_pct": 77,
+            "gpu_temperature_warning_c": 91,
+            "gpu_memory_warning_pct": 88,
+            "gpu_idle_memory_pct": 25,
+        }
         config = load_config(self.write(value))
         self.assertEqual(config.thresholds.cpu_warning_pct, 77)
         self.assertEqual(config.thresholds.gpu_temperature_warning_c, 91)
         self.assertEqual(config.thresholds.disk_warning_pct, 85)
+        self.assertEqual(config.thresholds.gpu_memory_warning_pct, 88)
+        self.assertEqual(config.thresholds.gpu_idle_memory_pct, 25)
 
         value["thresholds"] = {"disk_warning_pct": 101}
         with self.assertRaisesRegex(ConfigError, "must be between"):
             load_config(self.write(value))
+
+    def test_validates_expected_gpu_counts_against_explicit_hosts(self) -> None:
+        value = valid_config()
+        value["auto_discover"] = False
+        value["hosts"] = ["gpu-1", "gpu-2"]
+        value["expected_gpu_counts"] = {"gpu-1": 8, "gpu-2": 0}
+
+        config = load_config(self.write(value))
+
+        self.assertEqual(dict(config.expected_gpu_counts), {"gpu-1": 8, "gpu-2": 0})
+
+        for invalid in (
+            {"unknown": 8},
+            {"gpu-1": -1},
+            {"gpu-1": 257},
+            {"gpu-1": 1.5},
+            {"--bad": 1},
+        ):
+            with self.subTest(invalid=invalid):
+                value["expected_gpu_counts"] = invalid
+                with self.assertRaises(ConfigError):
+                    load_config(self.write(value))
+
+        value["expected_gpu_counts"] = {"gpu-1": 8}
+        value["exclude_hosts"] = ["gpu-1"]
+        with self.assertRaisesRegex(ConfigError, "cannot be excluded"):
+            load_config(self.write(value))
+
+    def test_validates_incident_stability_configuration(self) -> None:
+        value = valid_config()
+        value["incidents"] = {
+            "resource_open_cycles": 3,
+            "recovery_cycles": 4,
+            "gpu_idle_memory_cycles": 20,
+        }
+
+        config = load_config(self.write(value))
+
+        self.assertEqual(config.incidents.resource_open_cycles, 3)
+        self.assertEqual(config.incidents.recovery_cycles, 4)
+        self.assertEqual(config.incidents.gpu_idle_memory_cycles, 20)
+
+        for invalid in (0, 61, 2.5, True):
+            with self.subTest(invalid=invalid):
+                value["incidents"]["recovery_cycles"] = invalid
+                with self.assertRaisesRegex(ConfigError, "incidents.recovery_cycles"):
+                    load_config(self.write(value))
 
     def test_bounds_history_points(self) -> None:
         value = valid_config()

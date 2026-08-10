@@ -7,6 +7,10 @@
   ],
   "exclude_hosts": [],
   "local_host": null,
+  "expected_gpu_counts": {
+    "gpu-node-01": 8,
+    "gpu-node-02": 8
+  },
   "poll_interval_seconds": 5,
   "probe_timeout_seconds": 12,
   "connect_timeout_seconds": 5,
@@ -17,12 +21,19 @@
   "history_points": 720,
   "incident_history_points": 500,
   "collection_stale_cycles": 3,
+  "incidents": {
+    "resource_open_cycles": 2,
+    "recovery_cycles": 2,
+    "gpu_idle_memory_cycles": 12
+  },
   "thresholds": {
     "cpu_warning_pct": 85,
     "memory_warning_pct": 90,
     "swap_warning_pct": 50,
     "disk_warning_pct": 85,
     "gpu_temperature_warning_c": 80,
-    "gpu_busy_pct": 10
+    "gpu_busy_pct": 10,
+    "gpu_memory_warning_pct": 90,
+    "gpu_idle_memory_pct": 20
   }
 }

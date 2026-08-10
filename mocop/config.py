@@ -26,9 +26,18 @@ class ThresholdConfig:
     disk_warning_pct: float = 85
     gpu_temperature_warning_c: float = 80
     gpu_busy_pct: float = 10
+    gpu_memory_warning_pct: float = 90
+    gpu_idle_memory_pct: float = 20
 
     def to_dict(self) -> dict[str, float]:
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class IncidentConfig:
+    resource_open_cycles: int = 2
+    recovery_cycles: int = 2
+    gpu_idle_memory_cycles: int = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +58,8 @@ class MonitorConfig:
     incident_history_points: int = 500
     collection_stale_cycles: int = 3
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
+    expected_gpu_counts: tuple[tuple[str, int], ...] = ()
+    incidents: IncidentConfig = field(default_factory=IncidentConfig)
 
 
 _REQUIRED_KEYS = {
@@ -70,6 +81,8 @@ _OPTIONAL_KEYS = {
     "collection_stale_cycles",
     "max_output_bytes",
     "thresholds",
+    "expected_gpu_counts",
+    "incidents",
 }
 _THRESHOLD_KEYS = {
     "cpu_warning_pct",
@@ -78,6 +91,13 @@ _THRESHOLD_KEYS = {
     "disk_warning_pct",
     "gpu_temperature_warning_c",
     "gpu_busy_pct",
+    "gpu_memory_warning_pct",
+    "gpu_idle_memory_pct",
+}
+_INCIDENT_KEYS = {
+    "resource_open_cycles",
+    "recovery_cycles",
+    "gpu_idle_memory_cycles",
 }
 
 
@@ -251,6 +271,49 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         disk_warning_pct=threshold("disk_warning_pct"),
         gpu_temperature_warning_c=threshold("gpu_temperature_warning_c", 150),
         gpu_busy_pct=threshold("gpu_busy_pct"),
+        gpu_memory_warning_pct=threshold("gpu_memory_warning_pct"),
+        gpu_idle_memory_pct=threshold("gpu_idle_memory_pct"),
+    )
+
+    expected_data = data.get("expected_gpu_counts", {})
+    if not isinstance(expected_data, dict):
+        raise ConfigError("expected_gpu_counts must be a JSON object")
+    expected_gpu_counts: list[tuple[str, int]] = []
+    for alias, count in expected_data.items():
+        if not isinstance(alias, str) or not is_safe_alias(alias):
+            raise ConfigError("expected_gpu_counts keys must be safe host aliases")
+        if alias not in hosts:
+            raise ConfigError(
+                f"expected_gpu_counts.{alias} must reference an explicit host"
+            )
+        if alias in excludes:
+            raise ConfigError(f"expected_gpu_counts.{alias} cannot be excluded")
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise ConfigError(f"expected_gpu_counts.{alias} must be an integer")
+        if not 0 <= count <= 256:
+            raise ConfigError(f"expected_gpu_counts.{alias} must be between 0 and 256")
+        expected_gpu_counts.append((alias, count))
+
+    incident_data = data.get("incidents", {})
+    if not isinstance(incident_data, dict):
+        raise ConfigError("incidents must be a JSON object")
+    unknown_incidents = sorted(incident_data.keys() - _INCIDENT_KEYS)
+    if unknown_incidents:
+        raise ConfigError(f"unknown incident keys: {', '.join(unknown_incidents)}")
+    incident_defaults = IncidentConfig()
+
+    def incident_cycles(name: str) -> int:
+        value = incident_data.get(name, getattr(incident_defaults, name))
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(f"incidents.{name} must be an integer")
+        if not 1 <= value <= 60:
+            raise ConfigError(f"incidents.{name} must be between 1 and 60")
+        return value
+
+    incidents = IncidentConfig(
+        resource_open_cycles=incident_cycles("resource_open_cycles"),
+        recovery_cycles=incident_cycles("recovery_cycles"),
+        gpu_idle_memory_cycles=incident_cycles("gpu_idle_memory_cycles"),
     )
 
     ssh_config = Path(data["ssh_config"]).expanduser()
@@ -274,4 +337,6 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         incident_history_points=incident_history_value,
         collection_stale_cycles=collection_stale_cycles,
         thresholds=thresholds,
+        expected_gpu_counts=tuple(expected_gpu_counts),
+        incidents=incidents,
     )

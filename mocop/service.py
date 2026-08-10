@@ -9,7 +9,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import __version__
-from .config import MonitorConfig, ThresholdConfig
+from .config import IncidentConfig, MonitorConfig, ThresholdConfig
 from .discovery import HostSource
 from .incidents import IncidentPolicy, IncidentTracker, ThresholdIncidentPolicy
 from .models import ProbeResult, ServerState, utc_after, utc_now
@@ -31,6 +31,8 @@ class StateStore:
         incident_history_points: int = 500,
         collection_stale_cycles: int = 3,
         incident_policy: IncidentPolicy | None = None,
+        expected_gpu_counts: tuple[tuple[str, int], ...] = (),
+        incidents: IncidentConfig | None = None,
     ) -> None:
         self._condition = threading.Condition()
         self._servers: dict[str, ServerState] = {}
@@ -46,7 +48,12 @@ class StateStore:
         self._thresholds = thresholds or ThresholdConfig()
         self._history_points = history_points
         self._incidents = IncidentTracker(
-            incident_policy or ThresholdIncidentPolicy(self._thresholds),
+            incident_policy
+            or ThresholdIncidentPolicy(
+                self._thresholds,
+                expected_gpu_counts=expected_gpu_counts,
+                incidents=incidents,
+            ),
             incident_history_points,
         )
         self._started_at = utc_now()

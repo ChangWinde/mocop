@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mocop.config import MonitorConfig
+from mocop.models import GpuHealthMetrics
 from mocop.probe import (
     OpenSshLinuxResourceProbe,
     OpenSshNvidiaSmiProbe,
@@ -16,6 +17,7 @@ from mocop.probe import (
     _ProcessOutputLimitExceeded,
     _run_bounded_process,
     parse_linux_resource_payload,
+    parse_nvidia_health_csv,
     parse_nvidia_processes_csv,
     parse_nvidia_smi_csv,
 )
@@ -49,9 +51,10 @@ def resource_payload(
         "81920, 40960, 40960, 287.5, 400"
     ),
     process_payload: str = "GPU-abc, 4242, python, 2048",
+    health_payload: str = "GPU-abc, 0, No, No, Not Active, Not Active, Disabled",
 ) -> str:
     return (
-        "MONITOR_V3\n"
+        "MONITOR_V4\n"
         "HOST\tnode-a\n"
         f"CPU\t{cpu_total}\t{cpu_idle}\n"
         "CORES\t8\n"
@@ -69,6 +72,9 @@ def resource_payload(
         "PROCESSES_BEGIN\n"
         f"{process_payload}\n"
         "PROCESSES_END\n"
+        "GPU_HEALTH_BEGIN\n"
+        f"{health_payload}\n"
+        "GPU_HEALTH_END\n"
     )
 
 
@@ -99,7 +105,52 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(len(gpus), 1)
         self.assertEqual(gpus[0].processes[0].pid, 4242)
         self.assertEqual(gpus[0].processes[0].used_memory_mib, 2048)
+        self.assertEqual(
+            gpus[0].health,
+            GpuHealthMetrics(
+                ecc_uncorrected_volatile=0,
+                retired_pages_pending=False,
+                remapped_rows_pending=False,
+                thermal_slowdown=False,
+                power_brake_slowdown=False,
+                mig_mode="Disabled",
+            ),
+        )
         self.assertIsNone(gpu_message)
+
+    def test_parses_gpu_health_and_isolates_optional_query_failure(self) -> None:
+        health = parse_nvidia_health_csv(
+            "GPU-a, 2, Yes, No, Active, Not Active, Enabled\n"
+            "GPU-b, [N/A], [N/A], [N/A], [N/A], [N/A], [N/A]\n"
+        )
+        self.assertEqual(health["GPU-a"].ecc_uncorrected_volatile, 2)
+        self.assertTrue(health["GPU-a"].retired_pages_pending)
+        self.assertTrue(health["GPU-a"].thermal_slowdown)
+        self.assertIsNone(health["GPU-b"].mig_mode)
+
+        _, gpus, _ = parse_linux_resource_payload(
+            resource_payload(health_payload="GPU_HEALTH_ERROR\t2")
+        )
+        self.assertIsNone(gpus[0].health)
+
+        with self.assertRaisesRegex(ValueError, "health boolean"):
+            parse_nvidia_health_csv(
+                "GPU-a, 0, Maybe, No, Not Active, Not Active, Disabled"
+            )
+        with self.assertRaisesRegex(ValueError, "duplicate GPU health"):
+            parse_nvidia_health_csv(
+                "GPU-a, 0, No, No, Not Active, Not Active, Disabled\n"
+                "GPU-a, 0, No, No, Not Active, Not Active, Disabled"
+            )
+
+        _, gpus, _ = parse_linux_resource_payload(
+            resource_payload(
+                health_payload=(
+                    "GPU-abc, 0, Maybe, No, Not Active, Not Active, Disabled"
+                )
+            )
+        )
+        self.assertIsNone(gpus[0].health)
 
     def test_parses_and_bounds_gpu_compute_processes(self) -> None:
         processes = parse_nvidia_processes_csv(
@@ -126,6 +177,8 @@ class ProbeTests(unittest.TestCase):
             "GPUS_END\n",
             "PROCESSES_BEGIN\n",
             "PROCESSES_END\n",
+            "GPU_HEALTH_BEGIN\n",
+            "GPU_HEALTH_END\n",
         ):
             with (
                 self.subTest(marker=marker),
@@ -161,8 +214,12 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("BatchMode=yes", arguments)
         self.assertEqual(arguments[arguments.index("--") + 1], "gpu-1")
         self.assertEqual(arguments[-2:], ["sh", "-s"])
-        self.assertIn("MONITOR_V3", run.call_args.kwargs["input_text"])
+        self.assertIn("MONITOR_V4", run.call_args.kwargs["input_text"])
         self.assertIn("--query-compute-apps", run.call_args.kwargs["input_text"])
+        self.assertIn(
+            "ecc.errors.uncorrected.volatile.total",
+            run.call_args.kwargs["input_text"],
+        )
         self.assertIn("/proc/meminfo", run.call_args.kwargs["input_text"])
         self.assertEqual(run.call_args.kwargs["max_output_bytes"], 2_097_152)
         self.assertNotIn("shell", run.call_args.kwargs)

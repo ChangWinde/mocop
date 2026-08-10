@@ -225,6 +225,17 @@ class StateStoreTests(unittest.TestCase):
         self.assertIsNotNone(snapshot["lastPollCompletedAt"])
         self.assertEqual(store.incidents(10)["events"][0]["state"], "opened")
 
+    def test_wires_expected_gpu_inventory_into_authoritative_incidents(self) -> None:
+        store = StateStore(5, expected_gpu_counts=(("gpu-1", 2),))
+        store.set_hosts(("gpu-1",))
+
+        store.apply(ProbeResult("gpu-1", "online", 10))
+
+        incidents = store.incidents(10)
+        self.assertEqual(incidents["active"][0]["category"], "gpu_count")
+        self.assertEqual(incidents["active"][0]["value"], 0)
+        self.assertEqual(incidents["active"][0]["threshold"], 2)
+
 
 class _HostSource:
     def hosts(self, _config):
