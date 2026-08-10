@@ -4,7 +4,7 @@
 
 Mocop monitors 10 to 200 Linux servers through the operator's existing OpenSSH aliases and credentials. A target requires no resident agent, database, or inbound monitoring port. One failed or slow host must not delay completed results from other hosts.
 
-The browser receives current state after one page load. It may change only the running process's bounded collection cadence. Hosts, SSH arguments, thresholds, and remote commands remain local administrative inputs.
+The browser receives current state after one page load. It may change the running process's bounded collection cadence and promote or remove aliases through the constrained inventory controller. SSH arguments, thresholds, remote commands, and arbitrary destinations remain local administrative inputs.
 
 The installed runtime contains no inventory and has no third-party Python dependency. A blank installation starts with an empty allowlist and a loopback listener. AI-native refers to the GPU capacity, VRAM, diagnosis, and scheduling workflows; collection does not require an external AI service.
 
@@ -31,7 +31,8 @@ local JSON configuration
   snapshot  history  readiness
       │       └── IncidentPolicy → bounded transition ring
       ├── JSON / SSE → dashboard
-      └── runtime cadence ← bounded same-origin POST
+      ├── runtime cadence ← bounded same-origin POST
+      └── runtime config ← ConfigInventory ← eligible SSH aliases
 ```
 
 The dependency direction is `web → StateStore ← service → protocols/models/config`. The web layer has no knowledge of the SSH implementation. The scheduler consumes `HostSource` and `ResourceProbe` protocols through registries, which keeps environment-specific collection behind stable interfaces.
@@ -42,6 +43,7 @@ The dependency direction is `web → StateStore ← service → protocols/models
 |---|---|
 | `config.py` | configuration discovery, strict schema validation, safe defaults |
 | `discovery.py` | explicit inventory and optional OpenSSH alias discovery |
+| `inventory.py` | eligible SSH alias projection and atomic host-list mutation |
 | `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
 | `models.py` | immutable resource result types |
@@ -56,7 +58,7 @@ Configuration uses JSON. Startup rejects unknown keys, invalid types, unsafe ali
 
 Collection produces immutable `ProbeResult`, `SystemMetrics`, `DiskMetrics`, `GpuMetrics`, `GpuHealthMetrics`, and `GpuProcess` values. The system section uses the versioned `MONITOR_V4` tab-separated protocol. NVIDIA device, compute-process, and optional hardware-health data use the stable CSV mode of `nvidia-smi`. Parsers validate versions, columns, text length, numeric ranges, record counts, process identifiers, and GPU indexes. An optional health-query failure never invalidates base resource telemetry. [ADR-0003](adr/0003-gpu-reliability-and-authoritative-incidents.md) records the agentless decision and rejected DCGM-first alternative.
 
-The browser receives UTF-8 JSON snapshots through SSE. `/api/snapshot` supports cold start and diagnostics. History queries accept only discovered aliases and at most 300 points. Incident queries accept limits from 1 to 200. The only write route accepts one finite JSON number from 2 to 60 and changes in-memory cadence only.
+The browser receives UTF-8 JSON snapshots through SSE. `/api/snapshot` supports cold start and diagnostics. History queries accept only discovered aliases and at most 300 points. Incident queries accept limits from 1 to 200. One write route accepts a finite JSON number from 2 to 60 and changes in-memory cadence only. The inventory write route accepts one exact add/remove action and one validated alias. An add must match a fresh, eligible OpenSSH scan; a remove must match the current configuration. Both routes use the same bounded same-origin dashboard-request guard.
 
 The optional `local_host` alias must be present in the explicit host allowlist. It executes the same repository-owned script through a local `sh` process; every other target uses a structured OpenSSH argument vector. Stdout and stderr are drained incrementally into buffers that share one configured byte limit. A timeout or limit violation terminates the isolated process group.
 
@@ -74,13 +76,13 @@ GPU count, busy devices, and cluster VRAM form the first summary layer. The sche
 
 SSE updates are coalesced with `requestAnimationFrame`. GPU groups, host rows, attention items, incidents, and heatmap cells reuse DOM when their input signature is unchanged. A successful SSE snapshot is authoritative for connection state; transient errors are debounced, and snapshot fetches provide bounded degraded-mode synchronization during recovery. Compute, VRAM, and temperature heatmap modes transform the in-memory snapshot without another request. CSV export is generated from visible rows in the browser.
 
-Display-only preferences use a versioned, validated browser-local record. They control server order, GPU sort, heatmap metric, and optional columns without adding a server write route. Cluster configuration remains an administrator-owned JSON boundary. The attention view consumes backend incident conditions and only groups them for presentation; threshold decisions are never duplicated in JavaScript. [ADR-0002](adr/0002-local-targets-and-dashboard-preferences.md) records the rejected server-persisted and on-demand remote-query alternatives.
+Display-only preferences use a versioned, validated browser-local record. They control theme, server order, GPU sort, heatmap metric, and optional columns. Cluster inventory changes cross a separate single-purpose controller; display preferences never enter the server configuration. The attention view consumes backend incident conditions and only groups them for presentation; threshold decisions are never duplicated in JavaScript. [ADR-0002](adr/0002-local-targets-and-dashboard-preferences.md) records the rejected server-persisted presentation and on-demand remote-query alternatives. [ADR-0004](adr/0004-dashboard-managed-ssh-inventory.md) records the constrained inventory write boundary.
 
 ## Process and service model
 
 Package installation and service management are separate operations. `mocop init` creates a non-overwriting `0600` user configuration. `mocop service install` validates that configuration, generates a unit for the active Python environment, enables the user service, and starts it.
 
-The user service is intentional because OpenSSH configuration, `known_hosts`, keys, and agent sockets belong to that identity. The unit invokes `systemctl --user` without a shell and applies `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, restricted address families, and `UMask=0077`.
+The user service is intentional because OpenSSH configuration, `known_hosts`, keys, and agent sockets belong to that identity. The unit invokes `systemctl --user` without a shell and applies `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, restricted address families, and `UMask=0077`. `ReadWritePaths` grants write access only to the selected configuration directory; atomic replacement requires directory-level rename permission but does not make the rest of the home directory writable.
 
 ## Failure model
 

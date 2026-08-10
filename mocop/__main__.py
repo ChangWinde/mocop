@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import ConfigError, load_config, resolve_config_path
 from .discovery import create_host_source
+from .inventory import ConfigInventory
 from .lifecycle import (
     LifecycleError,
     UserServiceManager,
@@ -87,9 +88,10 @@ def _run_monitor(args: argparse.Namespace) -> int:
         expected_gpu_counts=config.expected_gpu_counts,
         incidents=config.incidents,
     )
+    host_source = create_host_source("openssh-config")
     monitor = MonitorService(
         config=config,
-        host_source=create_host_source("openssh-config"),
+        host_source=host_source,
         probe=create_probe("openssh-linux-v4"),
         state=state,
     )
@@ -109,7 +111,10 @@ def _run_monitor(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, stop)
 
     try:
-        server = MonitorHttpServer((config.listen_host, config.listen_port), state)
+        inventory = ConfigInventory(config_path, host_source, monitor.update_config)
+        server = MonitorHttpServer(
+            (config.listen_host, config.listen_port), state, inventory
+        )
     except OSError as exc:
         print(
             f"Cannot listen on {config.listen_host}:{config.listen_port}: {exc}",

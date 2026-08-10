@@ -12,6 +12,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Added optional GPU ECC, memory-repair, hardware-slowdown, and MIG telemetry without making base collection depend on the health query.
 - Added validated expected GPU counts, VRAM pressure, sustained idle-VRAM detection, and configurable incident stability windows.
 - Added validated per-host pacing and timeout overrides for empirically slow GPU nodes.
+- Added a dashboard SSH-alias inventory scan with Git/GitHub/GitLab filtering, constrained add/remove, private atomic persistence, and live scheduler updates.
+- Added three browser-local interface themes with refined system-font typography and clearer settings language.
 
 ### Changed
 
@@ -22,6 +24,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Adopted Forge commit subjects with repository-owned hook and CI enforcement.
 - Removed the heatmap legend and reduced redundant SSE snapshot publication at poll start.
 - Made backend incident conditions authoritative for both the attention queue and transition history.
+- Expanded the user-service write sandbox only to the selected Mocop configuration directory so atomic dashboard inventory updates work under `ProtectSystem=strict`.
 
 ### Fixed
 

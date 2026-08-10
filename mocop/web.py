@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .config import is_safe_alias
+from .inventory import InventoryController, InventoryError, InventoryRequestError
 from .service import StateStore
 
 _STATIC_ROOT = Path(__file__).with_name("static")
@@ -20,6 +21,7 @@ _STATIC_ROUTES = {
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
 _MAX_SETTINGS_BODY_BYTES = 128
+_MAX_INVENTORY_BODY_BYTES = 512
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -39,8 +41,14 @@ class MonitorHttpServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], state: StateStore) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        state: StateStore,
+        inventory: InventoryController | None = None,
+    ) -> None:
         self.state = state
+        self.inventory = inventory
         super().__init__(address, MonitorRequestHandler)
 
 
@@ -70,6 +78,9 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/incidents":
             self._send_incidents(request_url.query)
+            return
+        if path == "/api/inventory":
+            self._send_inventory(request_url.query)
             return
         if path == "/healthz":
             self._send_json(
@@ -108,7 +119,12 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         # being parsed as a second request on the same socket.
         self.close_connection = True
         request_url = urlsplit(self.path)
-        if request_url.path != "/api/settings/poll-interval":
+        write_limits = {
+            "/api/settings/poll-interval": _MAX_SETTINGS_BODY_BYTES,
+            "/api/settings/hosts": _MAX_INVENTORY_BODY_BYTES,
+        }
+        body_limit = write_limits.get(request_url.path)
+        if body_limit is None:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if request_url.query:
@@ -135,7 +151,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", ""))
         except ValueError:
             content_length = 0
-        if not 1 <= content_length <= _MAX_SETTINGS_BODY_BYTES:
+        if not 1 <= content_length <= body_limit:
             self._send_json(
                 {"error": "invalid request body size"},
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
@@ -150,6 +166,12 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             self._send_json({"error": "invalid JSON body"}, HTTPStatus.BAD_REQUEST)
             return
+        if request_url.path == "/api/settings/hosts":
+            self._change_inventory(payload)
+            return
+        self._change_poll_interval(payload)
+
+    def _change_poll_interval(self, payload: object) -> None:
         if not isinstance(payload, dict) or set(payload) != {"pollIntervalSeconds"}:
             self._send_json(
                 {"error": "invalid settings schema"}, HTTPStatus.BAD_REQUEST
@@ -174,6 +196,42 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "collectionStaleAfterSeconds": snapshot["collectionStaleAfterSeconds"],
             }
         )
+
+    def _change_inventory(self, payload: object) -> None:
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"action", "host"}
+            or payload["action"] not in {"add", "remove"}
+            or not isinstance(payload["host"], str)
+            or not is_safe_alias(payload["host"])
+        ):
+            self._send_json(
+                {"error": "invalid inventory settings schema"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        inventory = self.monitor_server.inventory
+        if inventory is None:
+            self._send_json(
+                {"error": "inventory management is unavailable"},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        try:
+            snapshot = inventory.change(payload["action"], payload["host"])
+        except InventoryRequestError:
+            self._send_json(
+                {"error": "inventory changed; scan again and retry"},
+                HTTPStatus.CONFLICT,
+            )
+            return
+        except InventoryError:
+            self._send_json(
+                {"error": "inventory could not be updated"},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        self._send_json(snapshot)
 
     def do_OPTIONS(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         # The settings write intentionally has no cross-origin API contract. A
@@ -207,6 +265,14 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             and not parsed.fragment
             and fetch_site in {"", "same-origin", "none"}
         )
+
+    def _is_dashboard_read_request(self) -> bool:
+        fetch_site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
+        return self.headers.get("X-Monitor-Request") == "dashboard" and fetch_site in {
+            "",
+            "same-origin",
+            "none",
+        }
 
     def _send_history(self, query: str) -> None:
         parameters = parse_qs(query, keep_blank_values=True)
@@ -259,6 +325,35 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(self.monitor_server.state.incidents(limit))
+
+    def _send_inventory(self, query: str) -> None:
+        if query:
+            self._send_json(
+                {"error": "query parameters are not allowed"}, HTTPStatus.BAD_REQUEST
+            )
+            return
+        if not self._is_dashboard_read_request():
+            self._send_json(
+                {"error": "same-origin dashboard request required"},
+                HTTPStatus.FORBIDDEN,
+            )
+            return
+        inventory = self.monitor_server.inventory
+        if inventory is None:
+            self._send_json(
+                {"error": "inventory management is unavailable"},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        try:
+            snapshot = inventory.snapshot()
+        except InventoryError:
+            self._send_json(
+                {"error": "inventory scan failed"},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        self._send_json(snapshot)
 
     def _send_json(self, value: object, status: HTTPStatus = HTTPStatus.OK) -> None:
         payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(
@@ -314,9 +409,12 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
 
 
 def serve_in_thread(
-    host: str, port: int, state: StateStore
+    host: str,
+    port: int,
+    state: StateStore,
+    inventory: InventoryController | None = None,
 ) -> tuple[MonitorHttpServer, threading.Thread]:
-    server = MonitorHttpServer((host, port), state)
+    server = MonitorHttpServer((host, port), state, inventory)
     thread = threading.Thread(
         target=server.serve_forever, name="mocop-http", daemon=True
     )

@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 
+from mocop.inventory import InventoryRequestError
 from mocop.models import (
     DiskMetrics,
     GpuHealthMetrics,
@@ -14,6 +15,35 @@ from mocop.models import (
 )
 from mocop.service import StateStore
 from mocop.web import MonitorHttpServer
+
+
+class DemoInventory:
+    def __init__(self) -> None:
+        self.configured = ["atlas-01", "atlas-02", "atlas-03"]
+        self.available = ["atlas-04", "atlas-05"]
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "configuredHosts": list(self.configured),
+            "activeHosts": list(self.configured),
+            "availableHosts": list(self.available),
+            "localHost": None,
+            "autoDiscover": False,
+            "ignoredCodeHostCount": 2,
+            "excludedHostCount": 1,
+            "writable": True,
+        }
+
+    def change(self, action: str, host: str) -> dict[str, object]:
+        if action == "add" and host in self.available:
+            self.available.remove(host)
+            self.configured.append(host)
+        elif action == "remove" and host in self.configured:
+            self.configured.remove(host)
+            self.available.append(host)
+        else:
+            raise InventoryRequestError("stale demo inventory")
+        return self.snapshot()
 
 
 def gpu(
@@ -159,7 +189,7 @@ def main() -> int:
         name="mocop-browser-fixture",
         daemon=True,
     ).start()
-    server = MonitorHttpServer(("127.0.0.1", int(sys.argv[1])), state)
+    server = MonitorHttpServer(("127.0.0.1", int(sys.argv[1])), state, DemoInventory())
     try:
         server.serve_forever()
     finally:

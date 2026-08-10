@@ -44,18 +44,16 @@ class StateStore:
         self._collection_stale_after_seconds = (
             poll_interval_seconds * collection_stale_cycles
         )
-        self._poll_interval_changed = threading.Event()
+        self._schedule_changed = threading.Event()
         self._thresholds = thresholds or ThresholdConfig()
         self._history_points = history_points
-        self._incidents = IncidentTracker(
-            incident_policy
-            or ThresholdIncidentPolicy(
-                self._thresholds,
-                expected_gpu_counts=expected_gpu_counts,
-                incidents=incidents,
-            ),
-            incident_history_points,
+        selected_policy = incident_policy or ThresholdIncidentPolicy(
+            self._thresholds,
+            expected_gpu_counts=expected_gpu_counts,
+            incidents=incidents,
         )
+        self._incident_policy = selected_policy
+        self._incidents = IncidentTracker(selected_policy, incident_history_points)
         self._started_at = utc_now()
         self._last_poll_completed_at: str | None = None
         self._last_poll_duration_ms: int | None = None
@@ -106,14 +104,27 @@ class StateStore:
             self._collection_stale_after_seconds = (
                 interval * self._collection_stale_cycles
             )
-            self._poll_interval_changed.set()
+            self._schedule_changed.set()
             self._publish_locked()
         return interval
 
     def wait_for_poll_interval_change(self, timeout_seconds: float) -> bool:
-        changed = self._poll_interval_changed.wait(max(0.0, timeout_seconds))
+        return self.wait_for_schedule_change(timeout_seconds)
+
+    def notify_inventory_changed(self) -> None:
+        self._schedule_changed.set()
+
+    def update_expected_gpu_counts(
+        self, expected_gpu_counts: tuple[tuple[str, int], ...]
+    ) -> None:
+        with self._condition:
+            if isinstance(self._incident_policy, ThresholdIncidentPolicy):
+                self._incident_policy.update_expected_gpu_counts(expected_gpu_counts)
+
+    def wait_for_schedule_change(self, timeout_seconds: float) -> bool:
+        changed = self._schedule_changed.wait(max(0.0, timeout_seconds))
         if changed:
-            self._poll_interval_changed.clear()
+            self._schedule_changed.clear()
         return changed
 
     def begin_poll(self, hosts: tuple[str, ...]) -> None:
@@ -350,6 +361,9 @@ class MonitorService:
         state: StateStore,
     ) -> None:
         self._config = config
+        self._config_lock = threading.Lock()
+        self._config_update_lock = threading.Lock()
+        self._config_generation = 0
         self._host_source = host_source
         self._probe = probe
         self._state = state
@@ -362,15 +376,38 @@ class MonitorService:
         multiplier = 2 ** min(failures - 1, 10)
         return min(_MAX_FAILURE_BACKOFF_SECONDS, interval_seconds * multiplier)
 
-    def _host_poll_interval(self, host: str) -> float:
-        override = self._config.host_override(host)
+    def update_config(self, config: MonitorConfig) -> None:
+        """Atomically replace configuration used by future collection cycles."""
+        with self._config_update_lock:
+            with self._config_lock:
+                self._config = config
+                self._config_generation += 1
+            self._state.update_expected_gpu_counts(config.expected_gpu_counts)
+            try:
+                hosts = self._host_source.hosts(config)
+            except (OSError, ValueError):
+                pass
+            else:
+                self._state.set_hosts(hosts)
+            self._state.notify_inventory_changed()
+
+    def _config_snapshot(self) -> tuple[MonitorConfig, int]:
+        with self._config_lock:
+            return self._config, self._config_generation
+
+    def _config_is_current(self, generation: int) -> bool:
+        with self._config_lock:
+            return generation == self._config_generation
+
+    def _host_poll_interval(self, host: str, config: MonitorConfig) -> float:
+        override = config.host_override(host)
         if override and override.poll_interval_seconds is not None:
             return override.poll_interval_seconds
         return self._state.poll_interval_seconds()
 
-    def _rebase_failure_backoff(self, now: float) -> None:
+    def _rebase_failure_backoff(self, now: float, config: MonitorConfig) -> None:
         for host, failures in self._failure_counts.items():
-            current_interval = self._host_poll_interval(host)
+            current_interval = self._host_poll_interval(host, config)
             previous_deadline = self._next_probe_at.get(host)
             if previous_deadline is None:
                 continue
@@ -385,13 +422,16 @@ class MonitorService:
             self._state.reschedule_retry(host, max(0.0, new_deadline - now))
 
     def poll_once(self) -> None:
+        config, generation = self._config_snapshot()
         try:
-            hosts = self._host_source.hosts(self._config)
+            hosts = self._host_source.hosts(config)
         except (OSError, ValueError) as exc:
             print(f"Host discovery failed: {exc}", file=sys.stderr)
             self._state.set_collector_error(
                 "SSH host discovery failed; check the monitor configuration"
             )
+            return
+        if not self._config_is_current(generation):
             return
 
         self._state.set_collector_error(None)
@@ -413,7 +453,7 @@ class MonitorService:
             if host in active_hosts
         }
         now = time.monotonic()
-        self._rebase_failure_backoff(now)
+        self._rebase_failure_backoff(now, config)
         due_hosts = tuple(
             host for host in hosts if self._next_probe_at.get(host, 0) <= now
         )
@@ -422,12 +462,11 @@ class MonitorService:
             return
 
         with ThreadPoolExecutor(
-            max_workers=min(self._config.max_workers, len(due_hosts)),
+            max_workers=min(config.max_workers, len(due_hosts)),
             thread_name_prefix="gpu-probe",
         ) as pool:
             futures = {
-                pool.submit(self._probe.probe, host, self._config): host
-                for host in due_hosts
+                pool.submit(self._probe.probe, host, config): host for host in due_hosts
             }
             for future in as_completed(futures):
                 host = futures[future]
@@ -443,7 +482,7 @@ class MonitorService:
                 if result.status == "online":
                     self._failure_counts.pop(host, None)
                     self._backoff_intervals.pop(host, None)
-                    override = self._config.host_override(host)
+                    override = config.host_override(host)
                     if override and override.poll_interval_seconds is not None:
                         self._next_probe_at[host] = now + override.poll_interval_seconds
                     else:
@@ -452,7 +491,7 @@ class MonitorService:
                 else:
                     failures = self._failure_counts.get(host, 0) + 1
                     self._failure_counts[host] = failures
-                    interval = self._host_poll_interval(host)
+                    interval = self._host_poll_interval(host, config)
                     delay = self._backoff_delay(interval, failures)
                     self._next_probe_at[host] = time.monotonic() + delay
                     self._backoff_intervals[host] = interval
@@ -479,5 +518,5 @@ class MonitorService:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                if self._state.wait_for_poll_interval_change(min(1.0, remaining)):
+                if self._state.wait_for_schedule_change(min(1.0, remaining)):
                     break

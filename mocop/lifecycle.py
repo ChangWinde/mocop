@@ -88,7 +88,9 @@ def render_user_unit(python_executable: Path, config_path: Path) -> str:
     # A virtual environment is identified by the interpreter path used to launch
     # it. Resolving that symlink would silently escape the environment.
     executable = _systemd_quote(_absolute_without_resolving_symlinks(python_executable))
-    config = _systemd_quote(config_path.expanduser().resolve())
+    resolved_config = config_path.expanduser().resolve()
+    config = _systemd_quote(resolved_config)
+    config_directory = _systemd_quote(resolved_config.parent)
     return f"""[Unit]
 Description=Mocop AI-native GPU cluster monitor
 Wants=network-online.target
@@ -103,6 +105,7 @@ Environment=PYTHONUNBUFFERED=1
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
+ReadWritePaths={config_directory}
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0077
 

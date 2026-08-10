@@ -51,6 +51,10 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn(f'--config="{self.root}/config file.json"', unit)
         self.assertIn("NoNewPrivileges=true", unit)
         self.assertIn("ProtectSystem=strict", unit)
+        self.assertIn(
+            f'ReadWritePaths="{self.root}"',
+            unit,
+        )
         self.assertIn("UMask=0077", unit)
 
         with self.assertRaisesRegex(LifecycleError, "control characters"):

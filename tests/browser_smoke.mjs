@@ -253,7 +253,7 @@ try {
     overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth
   })`);
   assert.equal(initial.title, "Mocop · AI-native GPU cluster monitor");
-  assert.equal(initial.heading, "GPU 集群控制台");
+  assert.equal(initial.heading, "GPU 集群实时监控");
   assert.equal(initial.earlyCadenceChange, true);
   assert.equal(initial.gpuMemoryCard, true);
   assert.equal(initial.overflow, false);
@@ -303,7 +303,7 @@ try {
   assert.notEqual(transientConnection.immediate, "正在重连");
   assert.match(transientConnection.className, /live/);
 
-  const personalization = await cdp.evaluate(`(() => {
+  const personalization = await cdp.evaluate(`(async () => {
     const serverItems = [...document.querySelectorAll(".server-item[data-host]")];
     const utilizationVisible = serverItems.every(
       (item) => item.textContent.includes("GPU") && item.textContent.includes("CPU"),
@@ -320,6 +320,14 @@ try {
     );
 
     document.querySelector("#settings-toggle").click();
+    for (let attempt = 0; attempt < 20 && document.querySelector("#configured-host-count").textContent !== "3"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    document.querySelector('[data-theme-choice="graphite"]').click();
+    document.querySelector("#available-host-list .inventory-host-action").click();
+    for (let attempt = 0; attempt < 20 && document.querySelector("#configured-host-count").textContent !== "4"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     const gpuSort = document.querySelector("#settings-gpu-sort");
     gpuSort.value = "memory";
     gpuSort.dispatchEvent(new Event("change", { bubbles: true }));
@@ -335,6 +343,10 @@ try {
       utilizationVisible,
       reordered,
       savedServerSort: JSON.parse(localStorage.getItem("mocop.preferences.v1")).serverSort,
+      savedTheme: JSON.parse(localStorage.getItem("mocop.preferences.v1")).theme,
+      activeTheme: document.documentElement.dataset.theme,
+      configuredHosts: document.querySelector("#configured-host-count").textContent,
+      inventoryStatus: document.querySelector("#inventory-status").textContent,
       settingsOpen,
       gpuSort: document.querySelector("#gpu-sort").value,
       powerHidden: document.body.classList.contains("hide-gpu-power"),
@@ -346,10 +358,14 @@ try {
     };
     taskDialog.close();
     return result;
-  })()`);
+  })()`, true);
   assert.equal(personalization.utilizationVisible, true);
   assert.equal(personalization.reordered[0], "atlas-02");
   assert.equal(personalization.savedServerSort, "custom");
+  assert.equal(personalization.savedTheme, "graphite");
+  assert.equal(personalization.activeTheme, "graphite");
+  assert.equal(personalization.configuredHosts, "4");
+  assert.match(personalization.inventoryStatus, /atlas-04/);
   assert.equal(personalization.settingsOpen, true);
   assert.equal(personalization.gpuSort, "memory");
   assert.equal(personalization.powerHidden, true);

@@ -6,12 +6,14 @@ const DEFAULT_PREFERENCES = Object.freeze({
   serverOrder: [],
   gpuSort: "host",
   heatMetric: "utilization",
+  theme: "midnight",
   showTemperature: true,
   showPower: true,
 });
 const SERVER_SORT_VALUES = new Set(["custom", "host", "status", "gpu", "cpu"]);
 const GPU_SORT_VALUES = new Set(["host", "utilization", "memory", "temperature", "power"]);
 const HEAT_METRIC_VALUES = new Set(["utilization", "memory", "temperature"]);
+const THEME_VALUES = new Set(["midnight", "graphite", "aurora"]);
 
 function safeStoredHosts(value) {
   if (!Array.isArray(value)) return [];
@@ -34,6 +36,8 @@ function loadPreferences() {
         ? stored.gpuSort : DEFAULT_PREFERENCES.gpuSort,
       heatMetric: HEAT_METRIC_VALUES.has(stored.heatMetric)
         ? stored.heatMetric : DEFAULT_PREFERENCES.heatMetric,
+      theme: THEME_VALUES.has(stored.theme)
+        ? stored.theme : DEFAULT_PREFERENCES.theme,
       showTemperature: typeof stored.showTemperature === "boolean"
         ? stored.showTemperature : DEFAULT_PREFERENCES.showTemperature,
       showPower: typeof stored.showPower === "boolean"
@@ -45,6 +49,7 @@ function loadPreferences() {
 }
 
 const preferences = loadPreferences();
+document.documentElement.dataset.theme = preferences.theme;
 
 const view = {
   snapshot: null,
@@ -88,6 +93,13 @@ const view = {
   draggedHost: null,
   suppressServerClick: false,
   selectedGpu: null,
+  inventory: null,
+  inventoryLoading: false,
+  inventoryMessage: "",
+  inventoryMessageKind: "",
+  inventoryPendingHost: null,
+  inventoryConfirmHost: null,
+  inventoryConfirmTimer: null,
 };
 
 try {
@@ -116,6 +128,12 @@ const elements = {
   showTemperature: $("#show-temperature"),
   showPower: $("#show-power"),
   resetPreferences: $("#reset-preferences"),
+  inventoryRefresh: $("#inventory-refresh"),
+  inventoryStatus: $("#inventory-status"),
+  configuredHostCount: $("#configured-host-count"),
+  configuredHostList: $("#configured-host-list"),
+  availableHostCount: $("#available-host-count"),
+  availableHostList: $("#available-host-list"),
   refreshInterval: $("#refresh-interval"),
   refreshFeedback: $("#refresh-feedback"),
   lastSync: $("#last-sync"),
@@ -196,6 +214,7 @@ function savePreferences() {
     serverOrder: view.serverOrder,
     gpuSort: view.sort,
     heatMetric: view.heatMetric,
+    theme: preferences.theme,
     showTemperature: preferences.showTemperature,
     showPower: preferences.showPower,
   };
@@ -213,6 +232,12 @@ function syncPreferenceControls() {
   elements.settingsHeatMetric.value = view.heatMetric;
   elements.showTemperature.checked = preferences.showTemperature;
   elements.showPower.checked = preferences.showPower;
+  document.documentElement.dataset.theme = preferences.theme;
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+    const selected = button.dataset.themeChoice === preferences.theme;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-checked", String(selected));
+  });
   document.body.classList.toggle("hide-gpu-temperature", !preferences.showTemperature);
   document.body.classList.toggle("hide-gpu-power", !preferences.showPower);
 }
@@ -222,6 +247,7 @@ function resetPreferences() {
   view.serverOrder = [];
   view.sort = DEFAULT_PREFERENCES.gpuSort;
   view.heatMetric = DEFAULT_PREFERENCES.heatMetric;
+  preferences.theme = DEFAULT_PREFERENCES.theme;
   preferences.showTemperature = DEFAULT_PREFERENCES.showTemperature;
   preferences.showPower = DEFAULT_PREFERENCES.showPower;
   view.serverItemCache.clear();
@@ -464,6 +490,194 @@ async function updatePollInterval() {
   } finally {
     elements.refreshInterval.disabled = false;
   }
+}
+
+function normalizeInventory(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TypeError("Invalid inventory response");
+  }
+  const configuredHosts = safeStoredHosts(payload.configuredHosts);
+  const activeHosts = safeStoredHosts(payload.activeHosts);
+  const availableHosts = safeStoredHosts(payload.availableHosts);
+  if (
+    configuredHosts.length !== payload.configuredHosts?.length
+    || activeHosts.length !== payload.activeHosts?.length
+    || availableHosts.length !== payload.availableHosts?.length
+    || (payload.localHost != null && !safeStoredHosts([payload.localHost]).length)
+    || typeof payload.autoDiscover !== "boolean"
+    || typeof payload.writable !== "boolean"
+    || !Number.isSafeInteger(payload.ignoredCodeHostCount)
+    || !Number.isSafeInteger(payload.excludedHostCount)
+  ) {
+    throw new TypeError("Invalid inventory response");
+  }
+  return {
+    configuredHosts,
+    activeHosts,
+    availableHosts,
+    localHost: payload.localHost,
+    autoDiscover: payload.autoDiscover,
+    writable: payload.writable,
+    ignoredCodeHostCount: Math.max(0, payload.ignoredCodeHostCount),
+    excludedHostCount: Math.max(0, payload.excludedHostCount),
+  };
+}
+
+function inventoryEmpty(message) {
+  return create("div", "inventory-empty", message);
+}
+
+function inventoryHostRow(host, action) {
+  const row = create("div", "inventory-host");
+  const identity = create("span", "inventory-host-name");
+  identity.append(create("i", "status-dot online"), create("strong", "", host));
+  if (action === "remove" && host === view.inventory.localHost) {
+    identity.append(create("small", "", "本机"));
+  }
+  const button = create("button", "inventory-host-action");
+  button.type = "button";
+  button.disabled = !view.inventory.writable || view.inventoryPendingHost != null;
+  if (action === "add") {
+    button.setAttribute("aria-label", `添加节点 ${host}`);
+    button.textContent = view.inventoryPendingHost === host ? "添加中" : "添加";
+    button.addEventListener("click", () => changeInventory("add", host));
+  } else {
+    const confirming = view.inventoryConfirmHost === host;
+    button.classList.toggle("confirm", confirming);
+    button.setAttribute("aria-label", confirming ? `确认移除节点 ${host}` : `移除节点 ${host}`);
+    button.textContent = view.inventoryPendingHost === host
+      ? "移除中"
+      : confirming ? "再次点击确认" : "移除";
+    button.addEventListener("click", () => requestInventoryRemoval(host));
+  }
+  row.append(identity, button);
+  return row;
+}
+
+function renderInventory() {
+  elements.inventoryRefresh.disabled = view.inventoryLoading || view.inventoryPendingHost != null;
+  elements.inventoryRefresh.textContent = view.inventoryLoading ? "扫描中" : "重新扫描";
+  if (!view.inventory) {
+    elements.configuredHostCount.textContent = "0";
+    elements.availableHostCount.textContent = "0";
+    elements.configuredHostList.replaceChildren(inventoryEmpty("等待扫描结果"));
+    elements.availableHostList.replaceChildren(inventoryEmpty("等待扫描结果"));
+    elements.inventoryStatus.className = `inventory-status ${view.inventoryMessageKind}`.trim();
+    elements.inventoryStatus.textContent = view.inventoryMessage
+      || (view.inventoryLoading ? "正在解析 OpenSSH 配置别名…" : "尚未扫描 SSH 配置");
+    return;
+  }
+
+  const inventory = view.inventory;
+  elements.configuredHostCount.textContent = inventory.activeHosts.length;
+  elements.availableHostCount.textContent = inventory.availableHosts.length;
+  elements.configuredHostList.replaceChildren(...(
+    inventory.activeHosts.length
+      ? inventory.activeHosts.map((host) => inventoryHostRow(host, "remove"))
+      : [inventoryEmpty("当前配置中没有监控节点")]
+  ));
+  elements.availableHostList.replaceChildren(...(
+    inventory.availableHosts.length
+      ? inventory.availableHosts.map((host) => inventoryHostRow(host, "add"))
+      : [inventoryEmpty("没有新的可添加节点")]
+  ));
+  const ignored = inventory.ignoredCodeHostCount + inventory.excludedHostCount;
+  let message = `正在监控 ${inventory.activeHosts.length} 个节点，可添加 ${inventory.availableHosts.length} 个`;
+  if (ignored) message += `，已按规则忽略 ${ignored} 个别名`;
+  if (inventory.autoDiscover) message += "；自动发现已开启";
+  if (!inventory.writable) message = "当前配置不可由网页修改，请先运行 mocop init 创建用户配置";
+  elements.inventoryStatus.className = `inventory-status ${view.inventoryMessageKind}`.trim();
+  elements.inventoryStatus.textContent = view.inventoryMessage || message;
+}
+
+async function refreshInventory() {
+  if (view.inventoryLoading || view.inventoryPendingHost != null) return;
+  view.inventoryConfirmHost = null;
+  if (view.inventoryConfirmTimer != null) clearTimeout(view.inventoryConfirmTimer);
+  view.inventoryConfirmTimer = null;
+  view.inventoryLoading = true;
+  view.inventoryMessage = "";
+  view.inventoryMessageKind = "";
+  renderInventory();
+  try {
+    const response = await fetch("/api/inventory", {
+      cache: "no-store",
+      headers: { "X-Monitor-Request": "dashboard" },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    view.inventory = normalizeInventory(await response.json());
+  } catch (_error) {
+    view.inventory = null;
+    view.inventoryMessage = "扫描失败，请检查 SSH 配置与 Mocop 服务权限";
+    view.inventoryMessageKind = "error";
+  } finally {
+    view.inventoryLoading = false;
+    renderInventory();
+  }
+}
+
+async function changeInventory(action, host) {
+  if (view.inventoryPendingHost != null) return;
+  view.inventoryPendingHost = host;
+  view.inventoryConfirmHost = null;
+  view.inventoryMessage = action === "add" ? `正在添加 ${host}…` : `正在移除 ${host}…`;
+  view.inventoryMessageKind = "";
+  renderInventory();
+  try {
+    const response = await fetch("/api/settings/hosts", {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Monitor-Request": "dashboard",
+      },
+      body: JSON.stringify({ action, host }),
+    });
+    if (response.status === 409) {
+      throw new RangeError("stale inventory");
+    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    view.inventory = normalizeInventory(await response.json());
+    view.inventoryMessage = action === "add"
+      ? `${host} 已加入监控，正在等待首轮数据`
+      : `${host} 已从监控配置移除`;
+    view.inventoryMessageKind = "success";
+    if (action === "remove" && view.selectedHost === host) selectHost("all");
+    await fetchSnapshot();
+  } catch (error) {
+    view.inventoryMessage = error instanceof RangeError
+      ? "节点清单已变化，已重新扫描，请再试一次"
+      : "节点配置更新失败，请重新扫描并检查服务权限";
+    view.inventoryMessageKind = "error";
+    if (error instanceof RangeError) {
+      view.inventoryPendingHost = null;
+      await refreshInventory();
+      view.inventoryMessage = "节点清单已变化，已重新扫描，请再试一次";
+      view.inventoryMessageKind = "error";
+      renderInventory();
+      return;
+    }
+  } finally {
+    view.inventoryPendingHost = null;
+    renderInventory();
+  }
+}
+
+function requestInventoryRemoval(host) {
+  if (view.inventoryConfirmHost === host) {
+    if (view.inventoryConfirmTimer != null) clearTimeout(view.inventoryConfirmTimer);
+    view.inventoryConfirmTimer = null;
+    changeInventory("remove", host);
+    return;
+  }
+  view.inventoryConfirmHost = host;
+  if (view.inventoryConfirmTimer != null) clearTimeout(view.inventoryConfirmTimer);
+  view.inventoryConfirmTimer = setTimeout(() => {
+    view.inventoryConfirmHost = null;
+    view.inventoryConfirmTimer = null;
+    renderInventory();
+  }, 4000);
+  renderInventory();
 }
 
 function limits() {
@@ -2357,6 +2571,7 @@ elements.settingsToggle.addEventListener("click", () => {
   syncPreferenceControls();
   if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
   elements.settingsDialog.showModal();
+  refreshInventory();
 });
 
 document.querySelectorAll("[data-close-dialog]").forEach((button) => {
@@ -2406,7 +2621,18 @@ elements.showPower.addEventListener("change", () => {
   savePreferences();
 });
 
+document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const theme = button.dataset.themeChoice;
+    if (!THEME_VALUES.has(theme)) return;
+    preferences.theme = theme;
+    syncPreferenceControls();
+    savePreferences();
+  });
+});
+
 elements.resetPreferences.addEventListener("click", resetPreferences);
+elements.inventoryRefresh.addEventListener("click", refreshInventory);
 
 elements.refreshInterval.addEventListener("change", updatePollInterval);
 
@@ -2440,5 +2666,6 @@ setInterval(() => {
 }, 1000);
 
 syncPreferenceControls();
+renderInventory();
 fetchSnapshot();
 connect();

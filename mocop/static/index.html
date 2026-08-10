@@ -18,7 +18,7 @@
           </div>
           <div>
             <div class="product-line">Mocop <span>/</span> AI-NATIVE GPU CLUSTER MONITOR</div>
-            <h1>GPU 集群控制台</h1>
+            <h1>GPU 集群实时监控</h1>
           </div>
         </div>
         <div class="header-status">
@@ -52,7 +52,7 @@
         <section class="metrics-grid" aria-label="集群概览">
           <article id="server-card" class="metric-card primary">
             <div class="metric-top">
-              <span class="metric-name">服务器在线</span>
+              <span class="metric-name">节点可用性</span>
               <span id="server-health" class="health-badge">—</span>
             </div>
             <div class="metric-number"><strong id="server-ratio">— / —</strong></div>
@@ -74,12 +74,12 @@
               <span id="gpu-memory-percent" class="metric-side">—</span>
             </div>
             <div class="metric-number compact"><strong id="gpu-memory-used">—</strong><small id="gpu-memory-total">/ —</small></div>
-            <div class="metric-foot">集群实时显存占用</div>
+            <div class="metric-foot">当前在线 GPU 显存占用</div>
             <div class="track"><i id="gpu-memory-bar"></i></div>
           </article>
           <article id="cpu-card" class="metric-card">
             <div class="metric-top">
-              <span class="metric-name">平均 CPU</span>
+              <span class="metric-name">集群平均 CPU</span>
               <span id="cpu-health" class="metric-side">—</span>
             </div>
             <div class="metric-number"><strong id="average-cpu">—</strong><small>%</small></div>
@@ -96,7 +96,7 @@
           </article>
           <article class="metric-card network-card">
             <div class="metric-top">
-              <span class="metric-name">实时网络</span>
+              <span class="metric-name">集群网络吞吐</span>
               <span class="metric-side">TOTAL</span>
             </div>
             <div class="network-values">
@@ -251,20 +251,57 @@
       </main>
 
       <footer class="app-footer">
-        <span>Mocop · AI-native · OpenSSH 采集 · SSE 实时推送</span>
+        <span>Mocop · AI-native GPU cluster monitor · OpenSSH 无代理采集</span>
         <span id="poll-info">等待采集</span>
       </footer>
     </div>
     <dialog id="settings-dialog" class="side-dialog settings-dialog" aria-labelledby="settings-title">
       <div class="dialog-heading">
         <div>
-          <span class="section-kicker">PREFERENCES</span>
-          <h2 id="settings-title">界面设置</h2>
+          <span class="section-kicker">SETTINGS</span>
+          <h2 id="settings-title">监控与外观</h2>
         </div>
         <button class="dialog-close" data-close-dialog="settings-dialog" type="button" aria-label="关闭设置">×</button>
       </div>
-      <p class="dialog-intro">只保存在当前浏览器，不会修改集群配置或采集命令。</p>
+      <p class="dialog-intro">外观与排序仅保存在当前浏览器；节点增删会安全写入 Mocop 配置，但不会接受任意主机或采集命令。</p>
       <div class="settings-sections">
+        <section class="settings-section appearance-settings">
+          <h3>界面皮肤</h3>
+          <div class="theme-grid" role="radiogroup" aria-label="界面皮肤">
+            <button class="theme-choice" data-theme-choice="midnight" type="button" role="radio" aria-checked="true">
+              <span class="theme-preview midnight" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>深空蓝</strong><small>清晰、克制的专业默认</small></span>
+            </button>
+            <button class="theme-choice" data-theme-choice="graphite" type="button" role="radio" aria-checked="false">
+              <span class="theme-preview graphite" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>石墨黑</strong><small>中性、沉稳的低干扰界面</small></span>
+            </button>
+            <button class="theme-choice" data-theme-choice="aurora" type="button" role="radio" aria-checked="false">
+              <span class="theme-preview aurora" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>极光青</strong><small>冷静、鲜明的算力氛围</small></span>
+            </button>
+          </div>
+          <span class="settings-help">使用本机系统字体，不加载第三方字体或视觉资源。</span>
+        </section>
+        <section class="settings-section inventory-settings">
+          <div class="settings-section-heading">
+            <div>
+              <h3>监控节点</h3>
+              <span>从 OpenSSH 配置中发现候选节点</span>
+            </div>
+            <button id="inventory-refresh" class="inline-action" type="button">扫描</button>
+          </div>
+          <p class="inventory-note">扫描只读取本机 SSH 别名，不会发起连接。Git、GitHub、GitLab 与 <code>exclude_hosts</code> 中的别名会被忽略。</p>
+          <div id="inventory-status" class="inventory-status" role="status">打开设置后自动扫描</div>
+          <div class="inventory-block">
+            <div class="inventory-block-heading"><strong>正在监控</strong><span id="configured-host-count">0</span></div>
+            <div id="configured-host-list" class="inventory-host-list"></div>
+          </div>
+          <div class="inventory-block">
+            <div class="inventory-block-heading"><strong>可添加</strong><span id="available-host-count">0</span></div>
+            <div id="available-host-list" class="inventory-host-list"></div>
+          </div>
+        </section>
         <section class="settings-section">
           <h3>服务器列表</h3>
           <label class="settings-field">

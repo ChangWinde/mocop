@@ -77,6 +77,11 @@ class ThresholdIncidentPolicy:
         self._expected_gpu_counts = dict(expected_gpu_counts)
         self._incidents = incidents or IncidentConfig()
 
+    def update_expected_gpu_counts(
+        self, expected_gpu_counts: tuple[tuple[str, int], ...]
+    ) -> None:
+        self._expected_gpu_counts = dict(expected_gpu_counts)
+
     @staticmethod
     def _percentage(used: float, total: float) -> float:
         return round((used / total) * 100, 2) if total > 0 else 0.0

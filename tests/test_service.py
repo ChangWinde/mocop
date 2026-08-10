@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -238,6 +239,19 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(store.snapshot()["stats"]["incidentServers"], 1)
         self.assertEqual(store.snapshot()["stats"]["issueServers"], 1)
 
+    def test_expected_gpu_inventory_can_be_replaced_after_host_removal(self) -> None:
+        store = StateStore(5, expected_gpu_counts=(("gpu-1", 2),))
+        store.set_hosts(("gpu-1",))
+        store.apply(ProbeResult("gpu-1", "online", 10))
+        self.assertEqual(store.incidents(10)["active"][0]["category"], "gpu_count")
+
+        store.set_hosts(())
+        store.update_expected_gpu_counts(())
+        store.set_hosts(("gpu-1",))
+        store.apply(ProbeResult("gpu-1", "online", 10))
+
+        self.assertEqual(store.incidents(10)["active"], [])
+
 
 class _HostSource:
     def hosts(self, _config):
@@ -262,7 +276,49 @@ class _OnlineProbe:
         return ProbeResult(host, "online", 17_000)
 
 
+class _ConfigHostSource:
+    def hosts(self, config):
+        return config.hosts
+
+
+class _RecordingProbe:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def probe(self, host, config):
+        self.calls.append((host, config.hosts))
+        return ProbeResult(host, "online", 1)
+
+
 class MonitorServiceTests(unittest.TestCase):
+    def test_replaces_inventory_config_without_restarting_the_service(self) -> None:
+        config = MonitorConfig(
+            ssh_config=Path("/tmp/config"),
+            auto_discover=False,
+            hosts=("gpu-01",),
+            exclude_hosts=frozenset(),
+            poll_interval_seconds=5,
+            probe_timeout_seconds=12,
+            connect_timeout_seconds=5,
+            max_workers=2,
+            listen_host="127.0.0.1",
+            listen_port=8787,
+        )
+        state = StateStore(5)
+        probe = _RecordingProbe()
+        service = MonitorService(config, _ConfigHostSource(), probe, state)
+
+        service.poll_once()
+        service.update_config(replace(config, hosts=("gpu-02",)))
+        self.assertTrue(state.wait_for_schedule_change(0))
+        service.poll_once()
+
+        self.assertEqual([item[0] for item in probe.calls], ["gpu-01", "gpu-02"])
+        self.assertEqual(
+            [server["host"] for server in state.snapshot()["servers"]],
+            ["gpu-02"],
+        )
+
     @patch("mocop.service.time.monotonic")
     def test_paces_a_slow_host_without_changing_the_global_cadence(
         self, monotonic

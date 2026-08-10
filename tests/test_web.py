@@ -5,15 +5,48 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from mocop.inventory import InventoryRequestError
 from mocop.models import ProbeResult, SystemMetrics
 from mocop.service import StateStore
 from mocop.web import serve_in_thread
 
 
+class _Inventory:
+    def __init__(self) -> None:
+        self.configured = ["gpu-01"]
+        self.available = ["gpu-02"]
+
+    def snapshot(self):
+        return {
+            "configuredHosts": list(self.configured),
+            "activeHosts": list(self.configured),
+            "availableHosts": list(self.available),
+            "localHost": None,
+            "autoDiscover": False,
+            "ignoredCodeHostCount": 2,
+            "excludedHostCount": 1,
+            "writable": True,
+        }
+
+    def change(self, action, host):
+        if action == "add" and host in self.available:
+            self.available.remove(host)
+            self.configured.append(host)
+        elif action == "remove" and host in self.configured:
+            self.configured.remove(host)
+            self.available.append(host)
+        else:
+            raise InventoryRequestError("inventory changed")
+        return self.snapshot()
+
+
 class WebTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state = StateStore(5)
-        self.server, self.thread = serve_in_thread("127.0.0.1", 0, self.state)
+        self.inventory = _Inventory()
+        self.server, self.thread = serve_in_thread(
+            "127.0.0.1", 0, self.state, self.inventory
+        )
         self.base = f"http://127.0.0.1:{self.server.server_port}"
 
     def tearDown(self) -> None:
@@ -40,7 +73,7 @@ class WebTests(unittest.TestCase):
             script = response.read().decode("utf-8")
         self.assertIn("Mocop", body)
         self.assertIn("AI-NATIVE GPU CLUSTER MONITOR", body)
-        self.assertIn("GPU 集群控制台", body)
+        self.assertIn("GPU 集群实时监控", body)
         self.assertIn('id="attention-panel"', body)
         self.assertIn('data-attention-filter="storage"', body)
         self.assertIn('id="incident-panel"', body)
@@ -58,6 +91,12 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="settings-toggle"', body)
         self.assertIn('id="settings-dialog"', body)
         self.assertIn('id="server-sort"', body)
+        self.assertIn('data-theme-choice="midnight"', body)
+        self.assertIn('data-theme-choice="graphite"', body)
+        self.assertIn('data-theme-choice="aurora"', body)
+        self.assertIn('id="inventory-refresh"', body)
+        self.assertIn('id="configured-host-list"', body)
+        self.assertIn('id="available-host-list"', body)
         self.assertIn('id="gpu-detail-dialog"', body)
         self.assertIn('id="gpu-task-list"', body)
         self.assertNotIn('class="heatmap-legend"', body)
@@ -126,6 +165,80 @@ class WebTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as unknown:
             urlopen(f"{self.base}/api/incidents?debug=true", timeout=2)
         self.assertEqual(unknown.exception.code, 400)
+
+    def test_scans_and_changes_the_constrained_host_inventory(self) -> None:
+        scan = Request(
+            f"{self.base}/api/inventory",
+            headers={"X-Monitor-Request": "dashboard"},
+        )
+        with urlopen(scan, timeout=2) as response:
+            inventory = json.load(response)
+        self.assertEqual(inventory["configuredHosts"], ["gpu-01"])
+        self.assertEqual(inventory["availableHosts"], ["gpu-02"])
+        self.assertEqual(inventory["ignoredCodeHostCount"], 2)
+
+        add = self.poll_interval_request(
+            b'{"action":"add","host":"gpu-02"}',
+            origin=self.base,
+            path="/api/settings/hosts",
+        )
+        with urlopen(add, timeout=2) as response:
+            changed = json.load(response)
+        self.assertEqual(changed["configuredHosts"], ["gpu-01", "gpu-02"])
+
+        remove = self.poll_interval_request(
+            b'{"action":"remove","host":"gpu-01"}',
+            origin=self.base,
+            path="/api/settings/hosts",
+        )
+        with urlopen(remove, timeout=2) as response:
+            changed = json.load(response)
+        self.assertEqual(changed["configuredHosts"], ["gpu-02"])
+
+    def test_rejects_unmarked_or_cross_site_inventory_scans(self) -> None:
+        with self.assertRaises(HTTPError) as unmarked:
+            urlopen(f"{self.base}/api/inventory", timeout=2)
+        self.assertEqual(unmarked.exception.code, 403)
+
+        cross_site = Request(
+            f"{self.base}/api/inventory",
+            headers={
+                "X-Monitor-Request": "dashboard",
+                "Sec-Fetch-Site": "cross-site",
+            },
+        )
+        with self.assertRaises(HTTPError) as rejected_cross_site:
+            urlopen(cross_site, timeout=2)
+        self.assertEqual(rejected_cross_site.exception.code, 403)
+
+    def test_rejects_invalid_or_stale_inventory_writes(self) -> None:
+        cases = (
+            (b'{"action":"add","host":"unknown"}', 409),
+            (b'{"action":"add","host":"--proxy"}', 400),
+            (b'{"action":"replace","host":"gpu-01"}', 400),
+            (b'{"action":"add","host":"gpu-02","extra":true}', 400),
+            (b'{"action":"add","action":"remove","host":"gpu-02"}', 400),
+        )
+        for payload, status in cases:
+            with self.subTest(payload=payload):
+                request = self.poll_interval_request(
+                    payload,
+                    origin=self.base,
+                    path="/api/settings/hosts",
+                )
+                with self.assertRaises(HTTPError) as rejected:
+                    urlopen(request, timeout=2)
+                self.assertEqual(rejected.exception.code, status)
+
+        cross_origin = self.poll_interval_request(
+            b'{"action":"add","host":"gpu-02"}',
+            origin="https://attacker.example",
+            path="/api/settings/hosts",
+            fetch_site="cross-site",
+        )
+        with self.assertRaises(HTTPError) as rejected_cross_origin:
+            urlopen(cross_origin, timeout=2)
+        self.assertEqual(rejected_cross_origin.exception.code, 403)
 
     def poll_interval_request(
         self,
