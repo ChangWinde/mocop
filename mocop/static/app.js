@@ -590,7 +590,9 @@ function serverConditions(server) {
       severity: condition.severity,
       priority: condition.category === "connectivity"
         ? 3 : condition.severity === "critical" ? 2 : 1,
-      message: incidentConditionMessage(condition),
+      message: condition.category === "connectivity" && server.status === "online"
+        ? "SSH 已恢复，等待稳定确认"
+        : incidentConditionMessage(condition),
       device: String(condition.resource || ""),
       usage: condition.value == null ? -1 : numeric(condition.value, -1),
       sharedKey: condition.groupKey || null,
