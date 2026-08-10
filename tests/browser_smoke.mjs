@@ -336,7 +336,97 @@ try {
     const settingsColumns = getComputedStyle(
       document.querySelector(".settings-sections")
     ).gridTemplateColumns.split(" ").length;
-    document.querySelector('[data-theme-choice="graphite"]').click();
+    document.querySelector('[data-theme-choice="terminal"]').click();
+    const terminalCardStyle = getComputedStyle(document.querySelector(".metric-card"));
+    const terminalStyle = {
+      radius: terminalCardStyle.borderRadius,
+      shadow: terminalCardStyle.boxShadow,
+      font: getComputedStyle(document.body).fontFamily,
+    };
+    const auroraTheme = document.querySelector('[data-theme-choice="aurora"]');
+    auroraTheme.focus();
+    auroraTheme.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    const themeKeyboardFocus = document.activeElement?.dataset.themeChoice;
+    const glassCardStyle = getComputedStyle(document.querySelector(".metric-card"));
+    const glassStyle = {
+      radius: glassCardStyle.borderRadius,
+      blur: glassCardStyle.backdropFilter,
+    };
+    const backgroundInput = document.querySelector("#background-image-input");
+    const rejectedTransfer = new DataTransfer();
+    rejectedTransfer.items.add(new File(
+      ['<svg xmlns="http://www.w3.org/2000/svg"></svg>'],
+      "unsafe.svg",
+      { type: "image/svg+xml" },
+    ));
+    backgroundInput.files = rejectedTransfer.files;
+    backgroundInput.dispatchEvent(new Event("change", { bubbles: true }));
+    for (let attempt = 0; attempt < 20 && !document.querySelector("#background-image-status").classList.contains("error"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const rejectedBackground = document.querySelector("#background-image-status").textContent;
+    const spoofedTransfer = new DataTransfer();
+    spoofedTransfer.items.add(new File(["not a png"], "spoofed.png", { type: "image/png" }));
+    backgroundInput.files = spoofedTransfer.files;
+    backgroundInput.dispatchEvent(new Event("change", { bubbles: true }));
+    for (let attempt = 0; attempt < 20 && !document.querySelector("#background-image-status").classList.contains("error"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const rejectedSpoofed = document.querySelector("#background-image-status").textContent;
+    const animatedTransfer = new DataTransfer();
+    animatedTransfer.items.add(new File([
+      new Uint8Array([
+        137, 80, 78, 71, 13, 10, 26, 10,
+        0, 0, 0, 0, 97, 99, 84, 76, 0, 0, 0, 0,
+      ]),
+    ], "animated.png", { type: "image/png" }));
+    backgroundInput.files = animatedTransfer.files;
+    backgroundInput.dispatchEvent(new Event("change", { bubbles: true }));
+    for (let attempt = 0; attempt < 20 && !document.querySelector("#background-image-status").classList.contains("error"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const rejectedAnimation = document.querySelector("#background-image-status").textContent;
+    const oversizedTransfer = new DataTransfer();
+    oversizedTransfer.items.add(new File(
+      [new Uint8Array(8 * 1024 * 1024 + 1)],
+      "oversized.png",
+      { type: "image/png" },
+    ));
+    backgroundInput.files = oversizedTransfer.files;
+    backgroundInput.dispatchEvent(new Event("change", { bubbles: true }));
+    for (let attempt = 0; attempt < 20 && !document.querySelector("#background-image-status").classList.contains("error"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const rejectedOversized = document.querySelector("#background-image-status").textContent;
+    const wideCanvas = document.createElement("canvas");
+    wideCanvas.width = 8193;
+    wideCanvas.height = 1;
+    const wideBlob = await new Promise((resolve) => wideCanvas.toBlob(resolve, "image/png"));
+    const wideTransfer = new DataTransfer();
+    wideTransfer.items.add(new File([wideBlob], "wide.png", { type: "image/png" }));
+    backgroundInput.files = wideTransfer.files;
+    backgroundInput.dispatchEvent(new Event("change", { bubbles: true }));
+    for (let attempt = 0; attempt < 40 && !document.querySelector("#background-image-status").classList.contains("error"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const rejectedDimensions = document.querySelector("#background-image-status").textContent;
+    const canvas = document.createElement("canvas");
+    canvas.width = 4;
+    canvas.height = 3;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#17304a";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    const backgroundBlob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    const acceptedTransfer = new DataTransfer();
+    acceptedTransfer.items.add(new File([backgroundBlob], "background.png", { type: "image/png" }));
+    backgroundInput.files = acceptedTransfer.files;
+    backgroundInput.dispatchEvent(new Event("change", { bubbles: true }));
+    for (let attempt = 0; attempt < 40 && !document.querySelector("#background-image-status").classList.contains("success"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const visibility = document.querySelector("#background-visibility");
+    visibility.value = "52";
+    visibility.dispatchEvent(new Event("input", { bubbles: true }));
     const density = document.querySelector("#interface-density");
     density.value = "compact";
     density.dispatchEvent(new Event("change", { bubbles: true }));
@@ -375,9 +465,22 @@ try {
       savedServerSort: JSON.parse(localStorage.getItem("mocop.preferences.v1")).serverSort,
       savedTheme: JSON.parse(localStorage.getItem("mocop.preferences.v1")).theme,
       savedDensity: JSON.parse(localStorage.getItem("mocop.preferences.v1")).density,
+      savedBackgroundVisibility: JSON.parse(localStorage.getItem("mocop.preferences.v1")).backgroundVisibility,
       savedServerFilter: JSON.parse(localStorage.getItem("mocop.preferences.v1")).serverFilter,
       activeTheme: document.documentElement.dataset.theme,
       activeDensity: document.documentElement.dataset.density,
+      backgroundActive: document.documentElement.dataset.background,
+      backgroundStatus: document.querySelector("#background-image-status").textContent,
+      backgroundRemoveEnabled: !document.querySelector("#remove-background-image").disabled,
+      backgroundOpacity: getComputedStyle(document.documentElement).getPropertyValue("--custom-background-opacity").trim(),
+      rejectedBackground,
+      rejectedSpoofed,
+      rejectedAnimation,
+      rejectedOversized,
+      rejectedDimensions,
+      terminalStyle,
+      glassStyle,
+      themeKeyboardFocus,
       settingsCenterDelta: Math.abs(
         (settingsRect.left + settingsRect.right) / 2
           - document.documentElement.clientWidth / 2
@@ -401,11 +504,27 @@ try {
   assert.equal(personalization.utilizationVisible, true);
   assert.equal(personalization.reordered[0], "atlas-02");
   assert.equal(personalization.savedServerSort, "custom");
-  assert.equal(personalization.savedTheme, "graphite");
+  assert.equal(personalization.savedTheme, "glass");
   assert.equal(personalization.savedDensity, "compact");
+  assert.equal(personalization.savedBackgroundVisibility, 52);
   assert.equal(personalization.savedServerFilter, "busy");
-  assert.equal(personalization.activeTheme, "graphite");
+  assert.equal(personalization.activeTheme, "glass");
   assert.equal(personalization.activeDensity, "compact");
+  assert.equal(personalization.backgroundActive, "custom");
+  assert.match(personalization.backgroundStatus, /4 × 3/);
+  assert.equal(personalization.backgroundRemoveEnabled, true);
+  assert.equal(personalization.backgroundOpacity, "0.52");
+  assert.match(personalization.rejectedBackground, /PNG/);
+  assert.match(personalization.rejectedSpoofed, /文件格式不匹配/);
+  assert.match(personalization.rejectedAnimation, /动态图片/);
+  assert.match(personalization.rejectedOversized, /8 MiB/);
+  assert.match(personalization.rejectedDimensions, /8192/);
+  assert.equal(personalization.terminalStyle.radius, "2px");
+  assert.equal(personalization.terminalStyle.shadow, "none");
+  assert.match(personalization.terminalStyle.font, /Mono/);
+  assert.equal(personalization.glassStyle.radius, "22px");
+  assert.match(personalization.glassStyle.blur, /20px/);
+  assert.equal(personalization.themeKeyboardFocus, "glass");
   assert(personalization.settingsCenterDelta < 2);
   assert.equal(personalization.settingsColumns, 2);
   assert.equal(personalization.configuredHosts, "4");
@@ -421,6 +540,30 @@ try {
   assert.match(personalization.taskNames, /train\.py/);
   assert.match(personalization.healthMetrics, /硬件健康正常/);
   assert.equal(personalization.heatmapLegend, false);
+
+  const reloaded = cdp.waitFor("Page.loadEventFired");
+  await cdp.send("Page.reload");
+  await reloaded;
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const persistedAppearance = await cdp.evaluate(`(async () => {
+    for (let attempt = 0; attempt < 40 && document.documentElement.dataset.background !== "custom"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return {
+      theme: document.documentElement.dataset.theme,
+      density: document.documentElement.dataset.density,
+      background: document.documentElement.dataset.background,
+      visibility: document.querySelector("#background-visibility").value,
+      removeEnabled: !document.querySelector("#remove-background-image").disabled,
+    };
+  })()`, true);
+  assert.deepEqual(persistedAppearance, {
+    theme: "glass",
+    density: "compact",
+    background: "custom",
+    visibility: "52",
+    removeEnabled: true,
+  });
 
   if (process.env.MOCOP_SCREENSHOT_PATH) {
     await cdp.send("Emulation.setDeviceMetricsOverride", {
@@ -462,10 +605,27 @@ try {
   assert.equal(mobile.overflow, false);
   assert(mobile.gpuMemoryWidth > mobile.gridWidth * 0.9);
   assert(mobile.settingsCenterDelta < 2);
+  const removedBackground = await cdp.evaluate(`(async () => {
+    document.querySelector("#remove-background-image").click();
+    for (let attempt = 0; attempt < 40 && document.documentElement.dataset.background === "custom"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return {
+      background: document.documentElement.dataset.background || "",
+      removeDisabled: document.querySelector("#remove-background-image").disabled,
+      status: document.querySelector("#background-image-status").textContent,
+    };
+  })()`, true);
+  assert.deepEqual(removedBackground, {
+    background: "",
+    removeDisabled: true,
+    status: "背景已从当前浏览器移除",
+  });
   assert.deepEqual(cdp.errors, []);
 
   console.log(JSON.stringify({
-    browser: "chrome", initial, final, transientConnection, personalization, mobile,
+    browser: "chrome", initial, final, transientConnection, personalization,
+    persistedAppearance, mobile, removedBackground,
   }));
 } catch (error) {
   console.error(error);

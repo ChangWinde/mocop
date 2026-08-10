@@ -280,6 +280,14 @@
               <span class="theme-preview aurora" aria-hidden="true"><i></i><i></i><i></i></span>
               <span><strong>极光青</strong><small>冷静、鲜明的算力氛围</small></span>
             </button>
+            <button class="theme-choice" data-theme-choice="glass" type="button" role="radio" aria-checked="false">
+              <span class="theme-preview glass" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>雾光玻璃</strong><small>通透、柔和的沉浸层次</small></span>
+            </button>
+            <button class="theme-choice" data-theme-choice="terminal" type="button" role="radio" aria-checked="false">
+              <span class="theme-preview terminal" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>终端矩阵</strong><small>硬朗、紧凑的工程视图</small></span>
+            </button>
           </div>
           <label class="settings-field appearance-density">
             <span>信息密度</span>
@@ -288,7 +296,23 @@
               <option value="compact">紧凑</option>
             </select>
           </label>
-          <span class="settings-help">使用本机系统字体，不加载第三方字体或视觉资源。紧凑模式适合大规模集群。</span>
+          <div class="background-settings">
+            <div class="background-heading">
+              <span><strong>本地背景</strong><small>仅保存在当前浏览器，不会上传到服务器</small></span>
+              <div class="background-actions">
+                <input id="background-image-input" class="visually-hidden-input" type="file" accept="image/png,image/jpeg,image/webp,image/avif">
+                <label class="inline-action upload-action" for="background-image-input">选择图片</label>
+                <button id="remove-background-image" class="inline-action danger-action" type="button" disabled>移除</button>
+              </div>
+            </div>
+            <label class="background-visibility" for="background-visibility">
+              <span>背景可见度</span>
+              <input id="background-visibility" type="range" min="15" max="70" step="1" value="38">
+              <output id="background-visibility-value" for="background-visibility">38%</output>
+            </label>
+            <span id="background-image-status" class="background-status" role="status">支持 PNG、JPEG、WebP、AVIF，最大 8 MiB</span>
+          </div>
+          <span class="settings-help">字体针对中英文正文、指标数字和设备标识分别优化，并只使用本机字体；紧凑模式适合大规模集群。恢复显示默认不会删除单独保存的背景图片。</span>
         </section>
         <section class="settings-section collector-settings">
           <div class="settings-section-heading">

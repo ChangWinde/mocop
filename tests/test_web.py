@@ -73,6 +73,10 @@ class WebTests(unittest.TestCase):
             self.assertIn(
                 "default-src 'self'", response.headers["Content-Security-Policy"]
             )
+            self.assertIn(
+                "img-src 'self' data: blob:",
+                response.headers["Content-Security-Policy"],
+            )
         self.assertEqual(payload["stats"]["servers"], 0)
         self.assertEqual(payload["appVersion"], "0.8.0")
 
@@ -107,6 +111,13 @@ class WebTests(unittest.TestCase):
         self.assertIn('data-theme-choice="midnight"', body)
         self.assertIn('data-theme-choice="graphite"', body)
         self.assertIn('data-theme-choice="aurora"', body)
+        self.assertIn('data-theme-choice="glass"', body)
+        self.assertIn('data-theme-choice="terminal"', body)
+        self.assertIn('id="background-image-input"', body)
+        self.assertIn('accept="image/png,image/jpeg,image/webp,image/avif"', body)
+        self.assertIn('id="background-visibility"', body)
+        self.assertIn('id="remove-background-image"', body)
+        self.assertNotIn('accept="image/svg+xml', body)
         self.assertIn('id="inventory-refresh"', body)
         self.assertIn('id="configured-host-list"', body)
         self.assertIn('id="available-host-list"', body)

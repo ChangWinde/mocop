@@ -484,7 +484,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "connect-src 'self'; img-src 'self' data:; object-src 'none'; "
+            "connect-src 'self'; img-src 'self' data: blob:; object-src 'none'; "
             "base-uri 'none'; frame-ancestors 'none'",
         )
 

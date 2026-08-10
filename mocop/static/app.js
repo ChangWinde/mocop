@@ -1,6 +1,13 @@
 "use strict";
 
 const PREFERENCE_STORAGE_KEY = "mocop.preferences.v1";
+const VISUAL_ASSET_DATABASE = "mocop.visual-assets.v1";
+const VISUAL_ASSET_STORE = "assets";
+const BACKGROUND_ASSET_KEY = "background";
+const MAX_BACKGROUND_BYTES = 8 * 1024 * 1024;
+const MAX_BACKGROUND_DIMENSION = 8192;
+const MAX_BACKGROUND_PIXELS = 32_000_000;
+const BACKGROUND_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
 const DEFAULT_PREFERENCES = Object.freeze({
   serverSort: "custom",
   serverOrder: [],
@@ -8,6 +15,7 @@ const DEFAULT_PREFERENCES = Object.freeze({
   heatMetric: "utilization",
   theme: "midnight",
   density: "comfortable",
+  backgroundVisibility: 38,
   serverFilter: "all",
   showTemperature: true,
   showPower: true,
@@ -15,9 +23,14 @@ const DEFAULT_PREFERENCES = Object.freeze({
 const SERVER_SORT_VALUES = new Set(["custom", "host", "status", "gpu", "cpu"]);
 const GPU_SORT_VALUES = new Set(["host", "utilization", "memory", "temperature", "power"]);
 const HEAT_METRIC_VALUES = new Set(["utilization", "memory", "temperature"]);
-const THEME_VALUES = new Set(["midnight", "graphite", "aurora"]);
+const THEME_VALUES = new Set(["midnight", "graphite", "aurora", "glass", "terminal"]);
 const DENSITY_VALUES = new Set(["comfortable", "compact"]);
 const SERVER_FILTER_VALUES = new Set(["all", "issues", "busy", "available", "stale"]);
+
+function safeBackgroundVisibility(value) {
+  return Number.isInteger(value) && value >= 15 && value <= 70
+    ? value : DEFAULT_PREFERENCES.backgroundVisibility;
+}
 
 function safeStoredHosts(value) {
   if (!Array.isArray(value)) return [];
@@ -44,6 +57,7 @@ function loadPreferences() {
         ? stored.theme : DEFAULT_PREFERENCES.theme,
       density: DENSITY_VALUES.has(stored.density)
         ? stored.density : DEFAULT_PREFERENCES.density,
+      backgroundVisibility: safeBackgroundVisibility(stored.backgroundVisibility),
       serverFilter: SERVER_FILTER_VALUES.has(stored.serverFilter)
         ? stored.serverFilter : DEFAULT_PREFERENCES.serverFilter,
       showTemperature: typeof stored.showTemperature === "boolean"
@@ -59,6 +73,10 @@ function loadPreferences() {
 const preferences = loadPreferences();
 document.documentElement.dataset.theme = preferences.theme;
 document.documentElement.dataset.density = preferences.density;
+document.documentElement.style.setProperty(
+  "--custom-background-opacity",
+  String(preferences.backgroundVisibility / 100),
+);
 
 const view = {
   snapshot: null,
@@ -111,6 +129,8 @@ const view = {
   inventoryConfirmTimer: null,
   collectorSettingsDirty: false,
   collectorSettingsSaving: false,
+  backgroundObjectUrl: null,
+  backgroundRequestId: 0,
 };
 
 try {
@@ -136,6 +156,11 @@ const elements = {
   serverSort: $("#server-sort"),
   defaultServerFilter: $("#default-server-filter"),
   interfaceDensity: $("#interface-density"),
+  backgroundImageInput: $("#background-image-input"),
+  backgroundImageStatus: $("#background-image-status"),
+  backgroundVisibility: $("#background-visibility"),
+  backgroundVisibilityValue: $("#background-visibility-value"),
+  removeBackgroundImage: $("#remove-background-image"),
   settingsGpuSort: $("#settings-gpu-sort"),
   settingsHeatMetric: $("#settings-heat-metric"),
   showTemperature: $("#show-temperature"),
@@ -219,12 +244,312 @@ const elements = {
   gpuTaskCount: $("#gpu-task-count"),
   gpuTaskList: $("#gpu-task-list"),
 };
+const themeChoiceButtons = [...document.querySelectorAll("[data-theme-choice]")];
 
 function create(tag, className, text) {
   const element = document.createElement(tag);
   if (className) element.className = className;
   if (text !== undefined) element.textContent = text;
   return element;
+}
+
+// Binary presentation assets stay out of both synchronous preferences and the service.
+function openVisualAssetDatabase() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) {
+      reject(new Error("IndexedDB unavailable"));
+      return;
+    }
+    const request = indexedDB.open(VISUAL_ASSET_DATABASE, 1);
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) {
+        if (value && typeof value.close === "function") value.close();
+        return;
+      }
+      settled = true;
+      callback(value);
+    };
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(VISUAL_ASSET_STORE)) {
+        request.result.createObjectStore(VISUAL_ASSET_STORE);
+      }
+    };
+    request.onsuccess = () => finish(resolve, request.result);
+    request.onerror = () => finish(
+      reject,
+      request.error || new Error("Unable to open browser storage"),
+    );
+    request.onblocked = () => finish(reject, new Error("Browser storage is blocked"));
+  });
+}
+
+async function transactVisualAsset(mode, operation) {
+  const database = await openVisualAssetDatabase();
+  return new Promise((resolve, reject) => {
+    let result;
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      database.close();
+      callback(value);
+    };
+    let transaction;
+    let request;
+    try {
+      transaction = database.transaction(VISUAL_ASSET_STORE, mode);
+      request = operation(transaction.objectStore(VISUAL_ASSET_STORE));
+    } catch (error) {
+      finish(reject, error);
+      return;
+    }
+    request.onsuccess = () => { result = request.result; };
+    transaction.oncomplete = () => finish(resolve, result);
+    transaction.onerror = () => finish(
+      reject,
+      transaction.error || request.error || new Error("Browser storage transaction failed"),
+    );
+    transaction.onabort = transaction.onerror;
+  });
+}
+
+function readStoredBackground() {
+  return transactVisualAsset("readonly", (store) => store.get(BACKGROUND_ASSET_KEY));
+}
+
+function writeStoredBackground(blob) {
+  return transactVisualAsset("readwrite", (store) => store.put(blob, BACKGROUND_ASSET_KEY));
+}
+
+function deleteStoredBackground() {
+  return transactVisualAsset("readwrite", (store) => store.delete(BACKGROUND_ASSET_KEY));
+}
+
+function decodeImageSize(blob) {
+  if (typeof createImageBitmap === "function") {
+    return createImageBitmap(blob).then((bitmap) => {
+      const dimensions = { width: bitmap.width, height: bitmap.height };
+      bitmap.close();
+      return dimensions;
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(blob);
+    const image = new Image();
+    const finish = (callback, value) => {
+      URL.revokeObjectURL(objectUrl);
+      callback(value);
+    };
+    image.onload = () => finish(resolve, {
+      width: image.naturalWidth,
+      height: image.naturalHeight,
+    });
+    image.onerror = () => finish(reject, new Error("无法解析图片内容"));
+    image.src = objectUrl;
+  });
+}
+
+function asciiAt(bytes, offset, value) {
+  if (offset < 0 || offset + value.length > bytes.length) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    if (bytes[offset + index] !== value.charCodeAt(index)) return false;
+  }
+  return true;
+}
+
+function uint32BigEndian(bytes, offset) {
+  if (offset + 4 > bytes.length) return null;
+  return (
+    bytes[offset] * 0x1000000
+    + bytes[offset + 1] * 0x10000
+    + bytes[offset + 2] * 0x100
+    + bytes[offset + 3]
+  );
+}
+
+function uint32LittleEndian(bytes, offset) {
+  if (offset + 4 > bytes.length) return null;
+  return (
+    bytes[offset]
+    + bytes[offset + 1] * 0x100
+    + bytes[offset + 2] * 0x10000
+    + bytes[offset + 3] * 0x1000000
+  );
+}
+
+async function isAnimatedImage(blob) {
+  // Container markers are checked before decode so a selected background cannot animate.
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  if (blob.type === "image/jpeg") {
+    if (bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) {
+      throw new Error("图片内容与文件格式不匹配");
+    }
+    return false;
+  }
+  if (blob.type === "image/png") {
+    if (
+      bytes[0] !== 0x89
+      || !asciiAt(bytes, 1, "PNG")
+      || bytes[4] !== 0x0d
+      || bytes[5] !== 0x0a
+      || bytes[6] !== 0x1a
+      || bytes[7] !== 0x0a
+    ) {
+      throw new Error("图片内容与文件格式不匹配");
+    }
+    for (let offset = 8; offset + 12 <= bytes.length;) {
+      const length = uint32BigEndian(bytes, offset);
+      if (length == null || length > bytes.length - offset - 12) return false;
+      if (asciiAt(bytes, offset + 4, "acTL")) return true;
+      if (asciiAt(bytes, offset + 4, "IEND")) return false;
+      offset += length + 12;
+    }
+    return false;
+  }
+  if (blob.type === "image/webp") {
+    if (!asciiAt(bytes, 0, "RIFF") || !asciiAt(bytes, 8, "WEBP")) {
+      throw new Error("图片内容与文件格式不匹配");
+    }
+    for (let offset = 12; offset + 8 <= bytes.length;) {
+      const length = uint32LittleEndian(bytes, offset + 4);
+      if (length == null || length > bytes.length - offset - 8) return false;
+      if (asciiAt(bytes, offset, "ANIM") || asciiAt(bytes, offset, "ANMF")) return true;
+      offset += 8 + length + (length % 2);
+    }
+    return false;
+  }
+  if (blob.type === "image/avif") {
+    const boxLength = uint32BigEndian(bytes, 0);
+    if (
+      boxLength == null
+      || (boxLength > 1 && boxLength > bytes.length)
+      || !asciiAt(bytes, 4, "ftyp")
+    ) {
+      throw new Error("图片内容与文件格式不匹配");
+    }
+    const headerLimit = Math.min(
+      bytes.length,
+      boxLength === 0 ? bytes.length : boxLength === 1 ? 256 : boxLength,
+    );
+    let hasAvifBrand = false;
+    let animated = false;
+    for (let offset = 8; offset + 4 <= headerLimit; offset += 1) {
+      hasAvifBrand ||= asciiAt(bytes, offset, "avif") || asciiAt(bytes, offset, "avis");
+      animated ||= asciiAt(bytes, offset, "avis");
+    }
+    if (!hasAvifBrand) throw new Error("图片内容与文件格式不匹配");
+    return animated;
+  }
+  return false;
+}
+
+async function validateBackgroundBlob(blob) {
+  if (!(blob instanceof Blob) || !BACKGROUND_TYPES.has(blob.type)) {
+    throw new Error("仅支持 PNG、JPEG、WebP 或 AVIF 图片");
+  }
+  if (blob.size <= 0 || blob.size > MAX_BACKGROUND_BYTES) {
+    throw new Error("图片大小必须在 8 MiB 以内");
+  }
+  if (await isAnimatedImage(blob)) {
+    throw new Error("不支持动态图片，请选择静态背景");
+  }
+  let dimensions;
+  try {
+    dimensions = await decodeImageSize(blob);
+  } catch (_error) {
+    throw new Error("图片已损坏或当前浏览器不支持该格式");
+  }
+  if (
+    dimensions.width <= 0
+    || dimensions.height <= 0
+    || dimensions.width > MAX_BACKGROUND_DIMENSION
+    || dimensions.height > MAX_BACKGROUND_DIMENSION
+    || dimensions.width * dimensions.height > MAX_BACKGROUND_PIXELS
+  ) {
+    throw new Error("图片尺寸不能超过 8192 像素或 32 百万像素");
+  }
+  return dimensions;
+}
+
+function setBackgroundStatus(message, kind = "") {
+  elements.backgroundImageStatus.textContent = message;
+  elements.backgroundImageStatus.className = `background-status${kind ? ` ${kind}` : ""}`;
+}
+
+function clearRenderedBackground() {
+  if (view.backgroundObjectUrl) URL.revokeObjectURL(view.backgroundObjectUrl);
+  view.backgroundObjectUrl = null;
+  document.documentElement.style.removeProperty("--custom-background-image");
+  delete document.documentElement.dataset.background;
+  elements.removeBackgroundImage.disabled = true;
+}
+
+function renderBackground(blob) {
+  clearRenderedBackground();
+  view.backgroundObjectUrl = URL.createObjectURL(blob);
+  document.documentElement.style.setProperty(
+    "--custom-background-image",
+    `url("${view.backgroundObjectUrl}")`,
+  );
+  document.documentElement.dataset.background = "custom";
+  elements.removeBackgroundImage.disabled = false;
+}
+
+async function loadStoredBackground() {
+  try {
+    const blob = await readStoredBackground();
+    if (!(blob instanceof Blob)) return;
+    await validateBackgroundBlob(blob);
+    renderBackground(blob);
+    setBackgroundStatus("已恢复当前浏览器保存的背景", "success");
+  } catch (_error) {
+    clearRenderedBackground();
+    setBackgroundStatus("浏览器背景存储不可用；内置皮肤仍可正常使用", "error");
+  }
+}
+
+async function selectBackgroundImage() {
+  const file = elements.backgroundImageInput.files?.[0];
+  elements.backgroundImageInput.value = "";
+  if (!file) return;
+  const requestId = ++view.backgroundRequestId;
+  elements.backgroundImageInput.disabled = true;
+  setBackgroundStatus("正在安全读取图片…");
+  try {
+    const dimensions = await validateBackgroundBlob(file);
+    if (requestId !== view.backgroundRequestId) return;
+    renderBackground(file);
+    try {
+      await writeStoredBackground(file);
+      setBackgroundStatus(
+        `已保存在当前浏览器 · ${dimensions.width} × ${dimensions.height}`,
+        "success",
+      );
+    } catch (_error) {
+      setBackgroundStatus("浏览器存储空间不足；背景仅在本次会话有效", "error");
+    }
+  } catch (error) {
+    if (requestId === view.backgroundRequestId) {
+      setBackgroundStatus(error instanceof Error ? error.message : "无法使用这张图片", "error");
+    }
+  } finally {
+    if (requestId === view.backgroundRequestId) elements.backgroundImageInput.disabled = false;
+  }
+}
+
+async function removeBackgroundImage() {
+  elements.removeBackgroundImage.disabled = true;
+  setBackgroundStatus("正在移除背景…");
+  try {
+    await deleteStoredBackground();
+    view.backgroundRequestId += 1;
+    clearRenderedBackground();
+    setBackgroundStatus("背景已从当前浏览器移除", "success");
+  } catch (_error) {
+    elements.removeBackgroundImage.disabled = !view.backgroundObjectUrl;
+    setBackgroundStatus("无法更新浏览器存储，背景未移除", "error");
+  }
 }
 
 function savePreferences() {
@@ -235,6 +560,7 @@ function savePreferences() {
     heatMetric: view.heatMetric,
     theme: preferences.theme,
     density: preferences.density,
+    backgroundVisibility: preferences.backgroundVisibility,
     serverFilter: view.serverFilter,
     showTemperature: preferences.showTemperature,
     showPower: preferences.showPower,
@@ -250,6 +576,8 @@ function syncPreferenceControls() {
   elements.serverSort.value = view.serverSort;
   elements.defaultServerFilter.value = view.serverFilter;
   elements.interfaceDensity.value = preferences.density;
+  elements.backgroundVisibility.value = String(preferences.backgroundVisibility);
+  elements.backgroundVisibilityValue.value = `${preferences.backgroundVisibility}%`;
   elements.gpuSort.value = view.sort;
   elements.settingsGpuSort.value = view.sort;
   elements.settingsHeatMetric.value = view.heatMetric;
@@ -257,13 +585,18 @@ function syncPreferenceControls() {
   elements.showPower.checked = preferences.showPower;
   document.documentElement.dataset.theme = preferences.theme;
   document.documentElement.dataset.density = preferences.density;
+  document.documentElement.style.setProperty(
+    "--custom-background-opacity",
+    String(preferences.backgroundVisibility / 100),
+  );
   document.querySelectorAll(".fleet-filter").forEach((button) => {
     button.classList.toggle("active", button.dataset.serverFilter === view.serverFilter);
   });
-  document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+  themeChoiceButtons.forEach((button) => {
     const selected = button.dataset.themeChoice === preferences.theme;
     button.classList.toggle("active", selected);
     button.setAttribute("aria-checked", String(selected));
+    button.tabIndex = selected ? 0 : -1;
   });
   document.body.classList.toggle("hide-gpu-temperature", !preferences.showTemperature);
   document.body.classList.toggle("hide-gpu-power", !preferences.showPower);
@@ -276,6 +609,7 @@ function resetPreferences() {
   view.heatMetric = DEFAULT_PREFERENCES.heatMetric;
   preferences.theme = DEFAULT_PREFERENCES.theme;
   preferences.density = DEFAULT_PREFERENCES.density;
+  preferences.backgroundVisibility = DEFAULT_PREFERENCES.backgroundVisibility;
   view.serverFilter = DEFAULT_PREFERENCES.serverFilter;
   preferences.showTemperature = DEFAULT_PREFERENCES.showTemperature;
   preferences.showPower = DEFAULT_PREFERENCES.showPower;
@@ -2773,6 +3107,17 @@ elements.interfaceDensity.addEventListener("change", () => {
   savePreferences();
 });
 
+elements.backgroundVisibility.addEventListener("input", () => {
+  preferences.backgroundVisibility = safeBackgroundVisibility(
+    Number(elements.backgroundVisibility.value),
+  );
+  syncPreferenceControls();
+  savePreferences();
+});
+
+elements.backgroundImageInput.addEventListener("change", selectBackgroundImage);
+elements.removeBackgroundImage.addEventListener("click", removeBackgroundImage);
+
 elements.settingsGpuSort.addEventListener("change", () => {
   view.sort = elements.settingsGpuSort.value;
   elements.gpuSort.value = view.sort;
@@ -2798,13 +3143,26 @@ elements.showPower.addEventListener("change", () => {
   savePreferences();
 });
 
-document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+themeChoiceButtons.forEach((button, index) => {
   button.addEventListener("click", () => {
     const theme = button.dataset.themeChoice;
     if (!THEME_VALUES.has(theme)) return;
     preferences.theme = theme;
     syncPreferenceControls();
     savePreferences();
+  });
+  button.addEventListener("keydown", (event) => {
+    const direction = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+    let targetIndex = direction == null ? null : index + direction;
+    if (event.key === "Home") targetIndex = 0;
+    if (event.key === "End") targetIndex = themeChoiceButtons.length - 1;
+    if (targetIndex == null) return;
+    event.preventDefault();
+    const target = themeChoiceButtons[
+      (targetIndex + themeChoiceButtons.length) % themeChoiceButtons.length
+    ];
+    target.focus();
+    target.click();
   });
 });
 
@@ -2850,5 +3208,6 @@ setInterval(() => {
 
 syncPreferenceControls();
 renderInventory();
+loadStoredBackground();
 fetchSnapshot();
 connect();

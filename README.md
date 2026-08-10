@@ -37,7 +37,7 @@ In Mocop, AI-native describes the product focus: capacity checks, failure diagno
 - GPU-first dashboard with utilization, VRAM, temperature, power, model, driver, per-device tasks, and hardware health
 - Cluster scheduling heatmap and per-host GPU groups that stay collapsed until needed
 - CPU, load, memory, swap, filesystem capacity, disk I/O, network throughput, and uptime context
-- Drag-to-order servers, three polished themes, browser-local display preferences, search, filters, bounded trends, incidents, and safe CSV export
+- Drag-to-order servers, five structurally distinct themes, validated browser-local backgrounds, search, filters, bounded trends, incidents, and safe CSV export
 - Dashboard SSH-alias inventory scan with constrained add/remove, Git/GitHub/GitLab filtering, atomic persistence, and live scheduler updates
 - Expected GPU inventory, authoritative incidents, anti-flap activation/recovery, failure backoff, and stale-data handling
 - Explicit host allowlist, loopback binding, strict host-key checking, fixed remote script, and resource limits
@@ -193,7 +193,9 @@ This is an inventory excerpt. Keep the remaining generated fields. `local_host` 
 
 ### Personalize the dashboard
 
-Use the centered **Settings** workspace to choose one of three purpose-designed themes, comfortable or compact density, the default fleet focus, server and GPU sorting, the heatmap metric, and optional GPU columns. Drag any server row to save a custom order. These display preferences stay in the current browser so different viewers do not overwrite one another; collection policy and monitored nodes are clearly marked as durable local-configuration changes. Select a GPU row or heatmap cell to inspect its active CUDA compute tasks and per-process VRAM. Mocop uses local system font stacks and never downloads a third-party font.
+Use the centered **Settings** workspace to choose one of five purpose-designed themes, comfortable or compact density, the default fleet focus, server and GPU sorting, the heatmap metric, and optional GPU columns. The glass and terminal themes change geometry, surface treatment, depth and typography rather than only changing colors. You may also choose a PNG, JPEG, WebP or AVIF background up to 8 MiB and control its visibility. Mocop validates its decoded dimensions and stores the image only in this browser; it is never uploaded to the service.
+
+Drag any server row to save a custom order. Display preferences stay in the current browser so different viewers do not overwrite one another; collection policy and monitored nodes are clearly marked as durable local-configuration changes. Select a GPU row or heatmap cell to inspect its active CUDA compute tasks and per-process VRAM. Mocop uses refined local system stacks for interface text and tabular metrics and never downloads a third-party font.
 
 ### Collect one snapshot
 
