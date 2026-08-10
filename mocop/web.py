@@ -9,8 +9,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
-from .config import is_safe_alias
-from .inventory import DashboardConfigController, InventoryError, InventoryRequestError
+from .config import is_safe_alias, is_valid_maintenance_reason
+from .inventory import (
+    DASHBOARD_MAINTENANCE_DURATIONS,
+    DashboardConfigController,
+    InventoryError,
+    InventoryRequestError,
+)
 from .service import StateStore
 
 _STATIC_ROOT = Path(__file__).with_name("static")
@@ -24,6 +29,7 @@ _STATIC_ROUTES = {
 _MAX_SETTINGS_BODY_BYTES = 128
 _MAX_COLLECTOR_BODY_BYTES = 512
 _MAX_INVENTORY_BODY_BYTES = 512
+_MAX_MAINTENANCE_BODY_BYTES = 512
 _COLLECTOR_SETTINGS_KEYS = {
     "pollIntervalSeconds",
     "probeTimeoutSeconds",
@@ -130,6 +136,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             "/api/settings/poll-interval": _MAX_SETTINGS_BODY_BYTES,
             "/api/settings/collector": _MAX_COLLECTOR_BODY_BYTES,
             "/api/settings/hosts": _MAX_INVENTORY_BODY_BYTES,
+            "/api/settings/maintenance": _MAX_MAINTENANCE_BODY_BYTES,
         }
         body_limit = write_limits.get(request_url.path)
         if body_limit is None:
@@ -180,7 +187,60 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         if request_url.path == "/api/settings/collector":
             self._change_collector_settings(payload)
             return
+        if request_url.path == "/api/settings/maintenance":
+            self._change_maintenance(payload)
+            return
         self._change_poll_interval(payload)
+
+    def _change_maintenance(self, payload: object) -> None:
+        if not isinstance(payload, dict) or set(payload) != {
+            "host",
+            "durationSeconds",
+            "reason",
+        }:
+            self._send_json(
+                {"error": "invalid maintenance settings schema"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        host = payload["host"]
+        duration = payload["durationSeconds"]
+        reason = payload["reason"]
+        if (
+            not isinstance(host, str)
+            or not is_safe_alias(host)
+            or isinstance(duration, bool)
+            or not isinstance(duration, int)
+            or duration not in DASHBOARD_MAINTENANCE_DURATIONS
+            or not is_valid_maintenance_reason(reason, required=duration != 0)
+        ):
+            self._send_json(
+                {"error": "invalid maintenance settings"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        inventory = self.monitor_server.inventory
+        if inventory is None:
+            self._send_json(
+                {"error": "maintenance management is unavailable"},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        try:
+            snapshot = inventory.update_maintenance(host, duration, reason)
+        except InventoryRequestError:
+            self._send_json(
+                {"error": "monitored inventory changed; scan again"},
+                HTTPStatus.CONFLICT,
+            )
+            return
+        except InventoryError:
+            self._send_json(
+                {"error": "maintenance settings could not be updated"},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        self._send_json(snapshot)
 
     def _change_poll_interval(self, payload: object) -> None:
         if not isinstance(payload, dict) or set(payload) != {"pollIntervalSeconds"}:

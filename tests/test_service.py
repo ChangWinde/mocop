@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from mocop.config import HostOverrideConfig, MonitorConfig
+from mocop.config import HostOverrideConfig, MaintenanceWindowConfig, MonitorConfig
 from mocop.models import DiskMetrics, GpuMetrics, ProbeResult, SystemMetrics
 from mocop.service import MonitorService, StateStore
 
@@ -226,6 +227,74 @@ class StateStoreTests(unittest.TestCase):
         self.assertIsNotNone(snapshot["lastPollCompletedAt"])
         self.assertEqual(store.incidents(10)["events"][0]["state"], "opened")
 
+    def test_maintenance_silences_actionable_incidents_without_hiding_truth(
+        self,
+    ) -> None:
+        window = MaintenanceWindowConfig(
+            until=datetime.now(timezone.utc) + timedelta(hours=4),
+            reason="Driver upgrade",
+        )
+        store = StateStore(5, maintenance_windows=(("offline", window),))
+        store.set_hosts(("offline",))
+        store.apply(
+            ProbeResult(
+                "offline",
+                "unreachable",
+                5000,
+                message="SSH connection timed out",
+            )
+        )
+
+        snapshot = store.snapshot()
+        incidents = store.incidents(10)
+
+        self.assertEqual(snapshot["stats"]["activeIncidents"], 1)
+        self.assertEqual(snapshot["stats"]["actionableIncidents"], 0)
+        self.assertEqual(snapshot["stats"]["issueServers"], 1)
+        self.assertEqual(snapshot["stats"]["actionableIssueServers"], 0)
+        self.assertEqual(snapshot["stats"]["maintenanceServers"], 1)
+        self.assertEqual(
+            snapshot["servers"][0]["maintenance"]["reason"], "Driver upgrade"
+        )
+        self.assertTrue(incidents["active"][0]["silenced"])
+        self.assertEqual(incidents["active"][0]["maintenanceReason"], "Driver upgrade")
+        self.assertNotIn("silenced", incidents["events"][0])
+
+        previous_revision = snapshot["incidentVersion"]
+        store.set_maintenance_windows(())
+        unsilenced = store.snapshot()
+
+        self.assertEqual(unsilenced["stats"]["actionableIncidents"], 1)
+        self.assertGreater(unsilenced["incidentVersion"], previous_revision)
+        self.assertFalse(store.incidents(10)["active"][0]["silenced"])
+
+    def test_maintenance_expiry_restores_actionable_incidents_automatically(
+        self,
+    ) -> None:
+        current = [datetime(2030, 6, 15, 12, 0, tzinfo=timezone.utc)]
+        window = MaintenanceWindowConfig(
+            until=current[0] + timedelta(hours=1),
+            reason="Kernel upgrade",
+        )
+        store = StateStore(
+            5,
+            maintenance_windows=(("offline", window),),
+            utc_clock=lambda: current[0],
+        )
+        store.set_hosts(("offline",))
+        store.apply(ProbeResult("offline", "unreachable", 5000))
+        silenced = store.snapshot()
+
+        current[0] = window.until
+        expired = store.snapshot()
+
+        self.assertEqual(silenced["stats"]["actionableIncidents"], 0)
+        self.assertEqual(expired["stats"]["actionableIncidents"], 1)
+        self.assertEqual(expired["stats"]["maintenanceServers"], 0)
+        self.assertIsNone(expired["servers"][0]["maintenance"])
+        self.assertGreater(expired["incidentVersion"], silenced["incidentVersion"])
+        self.assertFalse(store.incidents(10)["active"][0]["silenced"])
+
     def test_wires_expected_gpu_inventory_into_authoritative_incidents(self) -> None:
         store = StateStore(5, expected_gpu_counts=(("gpu-1", 2),))
         store.set_hosts(("gpu-1",))
@@ -315,18 +384,27 @@ class MonitorServiceTests(unittest.TestCase):
         probe = _RecordingProbe()
         service = MonitorService(config, _ConfigHostSource(), probe, state)
 
+        maintenance = MaintenanceWindowConfig(
+            until=datetime.now(timezone.utc) + timedelta(hours=1),
+            reason="Driver upgrade",
+        )
         service.update_config(
             replace(
                 config,
                 poll_interval_seconds=2,
                 probe_timeout_seconds=24,
                 max_workers=7,
+                maintenance_windows=(("gpu-01", maintenance),),
             )
         )
         service.poll_once()
 
         self.assertEqual(state.snapshot()["pollIntervalSeconds"], 2)
         self.assertEqual(state.snapshot()["collectionStaleAfterSeconds"], 6)
+        self.assertEqual(
+            state.snapshot()["servers"][0]["maintenance"]["reason"],
+            "Driver upgrade",
+        )
         self.assertEqual(probe.calls, [("gpu-01", ("gpu-01",), 24, 7)])
 
     def test_replaces_inventory_config_without_restarting_the_service(self) -> None:

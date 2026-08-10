@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ LOCAL_CONFIG_PATH = Path("config/mocop.json")
 USER_CONFIG_RELATIVE_PATH = Path("mocop/config.json")
 BUNDLED_CONFIG_PATH = Path(__file__).with_name("default_config.json")
 _SAFE_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+MAINTENANCE_REASON_MAX_LENGTH = 120
 
 
 class ConfigError(ValueError):
@@ -47,6 +50,21 @@ class HostOverrideConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MaintenanceWindowConfig:
+    until: datetime
+    reason: str
+
+    def is_active(self, at: datetime | None = None) -> bool:
+        return self.until > (at or datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "until": self.until.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class MonitorConfig:
     ssh_config: Path
     auto_discover: bool
@@ -67,10 +85,17 @@ class MonitorConfig:
     expected_gpu_counts: tuple[tuple[str, int], ...] = ()
     incidents: IncidentConfig = field(default_factory=IncidentConfig)
     host_overrides: tuple[tuple[str, HostOverrideConfig], ...] = ()
+    maintenance_windows: tuple[tuple[str, MaintenanceWindowConfig], ...] = ()
 
     def host_override(self, host: str) -> HostOverrideConfig | None:
         return next(
             (override for alias, override in self.host_overrides if alias == host),
+            None,
+        )
+
+    def maintenance_window(self, host: str) -> MaintenanceWindowConfig | None:
+        return next(
+            (window for alias, window in self.maintenance_windows if alias == host),
             None,
         )
 
@@ -97,6 +122,7 @@ _OPTIONAL_KEYS = {
     "expected_gpu_counts",
     "incidents",
     "host_overrides",
+    "maintenance_windows",
 }
 _THRESHOLD_KEYS = {
     "cpu_warning_pct",
@@ -114,6 +140,8 @@ _INCIDENT_KEYS = {
     "gpu_idle_memory_cycles",
 }
 _HOST_OVERRIDE_KEYS = {"poll_interval_seconds", "probe_timeout_seconds"}
+_MAINTENANCE_WINDOW_KEYS = {"until", "reason"}
+_UTC_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
 def _bounded_number(
@@ -165,6 +193,17 @@ def _string_list(data: dict[str, Any], key: str) -> tuple[str, ...]:
 
 def is_safe_alias(value: str) -> bool:
     return bool(_SAFE_ALIAS.fullmatch(value))
+
+
+def is_valid_maintenance_reason(value: object, *, required: bool) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip()
+    return (
+        (bool(normalized) or not required)
+        and len(normalized) <= MAINTENANCE_REASON_MAX_LENGTH
+        and not any(unicodedata.category(character) == "Cc" for character in value)
+    )
 
 
 def resolve_config_path(
@@ -375,6 +414,54 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
             )
         host_overrides.append((alias, override))
 
+    maintenance_data = data.get("maintenance_windows", {})
+    if not isinstance(maintenance_data, dict):
+        raise ConfigError("maintenance_windows must be a JSON object")
+    maintenance_windows: list[tuple[str, MaintenanceWindowConfig]] = []
+    for alias, raw_window in maintenance_data.items():
+        if not isinstance(alias, str) or not is_safe_alias(alias):
+            raise ConfigError("maintenance_windows keys must be safe host aliases")
+        if alias not in hosts:
+            raise ConfigError(
+                f"maintenance_windows.{alias} must reference an explicit host"
+            )
+        if alias in excludes:
+            raise ConfigError(f"maintenance_windows.{alias} cannot be excluded")
+        if not isinstance(raw_window, dict):
+            raise ConfigError(f"maintenance_windows.{alias} must be a JSON object")
+        unknown_window_keys = sorted(raw_window.keys() - _MAINTENANCE_WINDOW_KEYS)
+        if unknown_window_keys:
+            raise ConfigError(
+                f"unknown maintenance_windows.{alias} keys: "
+                f"{', '.join(unknown_window_keys)}"
+            )
+        until_value = raw_window.get("until")
+        if not isinstance(until_value, str) or not _UTC_TIMESTAMP.fullmatch(
+            until_value
+        ):
+            raise ConfigError(
+                f"maintenance_windows.{alias}.until must be a UTC timestamp"
+            )
+        try:
+            until = datetime.strptime(until_value, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError as exc:
+            raise ConfigError(
+                f"maintenance_windows.{alias}.until must be a valid UTC timestamp"
+            ) from exc
+        reason_value = raw_window.get("reason", "")
+        if not is_valid_maintenance_reason(reason_value, required=False):
+            raise ConfigError(
+                f"maintenance_windows.{alias}.reason must be at most "
+                f"{MAINTENANCE_REASON_MAX_LENGTH} visible characters"
+            )
+        assert isinstance(reason_value, str)
+        reason = reason_value.strip()
+        maintenance_windows.append(
+            (alias, MaintenanceWindowConfig(until=until, reason=reason))
+        )
+
     incident_data = data.get("incidents", {})
     if not isinstance(incident_data, dict):
         raise ConfigError("incidents must be a JSON object")
@@ -421,4 +508,5 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         expected_gpu_counts=tuple(expected_gpu_counts),
         incidents=incidents,
         host_overrides=tuple(host_overrides),
+        maintenance_windows=tuple(maintenance_windows),
     )

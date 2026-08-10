@@ -17,6 +17,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Added a centered, responsive settings workspace with browser-local density and fleet-focus preferences.
 - Added durable dashboard controls for collection cadence, complete-probe timeout, and worker concurrency.
 - Added a validated, browser-local custom background with visibility control.
+- Added persistent, time-bounded maintenance windows with continuous collection, automatic expiry, and separate raw/actionable incident counts.
 
 ### Changed
 

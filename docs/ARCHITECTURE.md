@@ -29,7 +29,7 @@ local JSON configuration
      StateStore ◀───────────────────┘
       │       │        │
   snapshot  history  readiness
-      │       └── IncidentPolicy → bounded transition ring
+      │       └── IncidentPolicy → bounded transition ring → maintenance overlay
       ├── JSON / SSE → dashboard
       └── runtime config ← ConfigInventory ← bounded settings + eligible aliases
 ```
@@ -46,7 +46,7 @@ The dependency direction is `web → StateStore ← service → protocols/models
 | `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
 | `models.py` | immutable resource result types |
-| `incidents.py` | condition evaluation and bounded transition history |
+| `incidents.py` | condition evaluation, bounded transition history, and raw/actionable counts |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
 | `lifecycle.py` | private config creation and user-level systemd management |
 | `static/` | dependency-free dashboard assets |
@@ -57,7 +57,7 @@ Configuration uses JSON. Startup rejects unknown keys, invalid types, unsafe ali
 
 Collection produces immutable `ProbeResult`, `SystemMetrics`, `DiskMetrics`, `GpuMetrics`, `GpuHealthMetrics`, and `GpuProcess` values. The system section uses the versioned `MONITOR_V4` tab-separated protocol. NVIDIA device, compute-process, and optional hardware-health data use the stable CSV mode of `nvidia-smi`. Parsers validate versions, columns, text length, numeric ranges, record counts, process identifiers, and GPU indexes. An optional health-query failure never invalidates base resource telemetry. [ADR-0003](adr/0003-gpu-reliability-and-authoritative-incidents.md) records the agentless decision and rejected DCGM-first alternative.
 
-The browser receives UTF-8 JSON snapshots through SSE. `/api/snapshot` supports cold start and diagnostics. History queries accept only discovered aliases and at most 300 points. Incident queries accept limits from 1 to 200. The cadence shortcut accepts one finite JSON number from 2 to 60. The collector route accepts exactly cadence, complete-probe timeout, and integer worker concurrency within documented bounds. The inventory route accepts one exact add/remove action and one validated alias. An add must match a fresh, eligible OpenSSH scan; a remove must match the current configuration. All write routes use the same bounded same-origin dashboard-request guard, serialize through `ConfigInventory`, validate the complete candidate configuration, and hot-apply the resulting immutable `MonitorConfig` after atomic persistence.
+The browser receives UTF-8 JSON snapshots through SSE. `/api/snapshot` supports cold start and diagnostics. History queries accept only discovered aliases and at most 300 points. Incident queries accept limits from 1 to 200. The cadence shortcut accepts one finite JSON number from 2 to 60. The collector route accepts exactly cadence, complete-probe timeout, and integer worker concurrency within documented bounds. The inventory route accepts one exact add/remove action and one validated alias. An add must match a fresh, eligible OpenSSH scan; a remove must match the current configuration. The maintenance route accepts one explicit host, a fixed finite duration or clear action, and a bounded reason; the service generates the UTC expiry. All write routes use the same bounded same-origin dashboard-request guard, serialize through `ConfigInventory`, validate the complete candidate configuration, and hot-apply the resulting immutable `MonitorConfig` after atomic persistence.
 
 The optional `local_host` alias must be present in the explicit host allowlist. It executes the same repository-owned script through a local `sh` process; every other target uses a structured OpenSSH argument vector. Stdout and stderr are drained incrementally into buffers that share one configured byte limit. A timeout or limit violation terminates the isolated process group.
 
@@ -68,6 +68,8 @@ Each host result is published as soon as it completes. A collection cycle writes
 `StateStore` retains the current snapshot, bounded successful history per host, and a bounded incident ring. It does not persist telemetry. Trends and incident bodies are fetched only when needed; SSE snapshots carry the current state and compact incident metadata.
 
 `IncidentPolicy` is the sole authority for connectivity, CPU, memory, swap, filesystem, GPU availability, pressure, temperature, and hardware-health conditions. `IncidentTracker` applies bounded activation and recovery cycles while preserving previous resource conditions across failed probes, so transient samples and missing telemetry are not mistaken for stable failure or recovery.
+
+Time-bounded maintenance is an overlay on that authority, never an input to collection or condition state. Snapshots retain raw active and critical counts and add actionable counts that exclude currently silenced hosts. Maintenance changes and natural expiry advance the incident-view revision, so every browser refreshes the overlay without an invented incident transition. [ADR-0007](adr/0007-time-bounded-maintenance-overlay.md) records the rejected pause-collection and drop-incident alternatives.
 
 ## Dashboard rendering
 
@@ -90,6 +92,7 @@ The user service is intentional because OpenSSH configuration, `known_hosts`, ke
 - Repeated host failures use exponential backoff capped at 60 seconds; healthy hosts retain the normal cadence.
 - A measured slow host may use a bounded longer timeout and slower cadence without changing the browser-controlled fleet cadence.
 - A persisted cadence change wakes the scheduler and rebases existing retry deadlines; timeout and worker changes apply to future probe cycles.
+- Maintenance windows never change scheduling; their UTC expiry automatically restores active conditions to the actionable view.
 - Raw SSH stderr is classified locally and never crosses the browser boundary.
 - Failed hosts keep their last successful data, marked stale and excluded from current totals.
 - SSE sends a heartbeat every 15 seconds and relies on native `EventSource` reconnection.

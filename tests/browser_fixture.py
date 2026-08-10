@@ -26,6 +26,7 @@ class DemoInventory:
             "probeTimeoutSeconds": 15,
             "maxWorkers": 8,
         }
+        self.maintenance_windows: dict[str, dict[str, str]] = {}
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -37,6 +38,7 @@ class DemoInventory:
             "ignoredCodeHostCount": 2,
             "excludedHostCount": 1,
             "collectorSettings": dict(self.collector_settings),
+            "maintenanceWindows": dict(self.maintenance_windows),
             "writable": True,
         }
 
@@ -56,6 +58,20 @@ class DemoInventory:
     ) -> dict[str, object]:
         self.collector_settings.update(settings)
         return dict(self.collector_settings)
+
+    def update_maintenance(
+        self, host: str, duration_seconds: int, reason: str
+    ) -> dict[str, object]:
+        if host not in self.configured:
+            raise InventoryRequestError("stale demo inventory")
+        if duration_seconds:
+            self.maintenance_windows[host] = {
+                "until": "2030-06-15T12:30:00Z",
+                "reason": reason.strip(),
+            }
+        else:
+            self.maintenance_windows.pop(host, None)
+        return self.snapshot()
 
 
 def gpu(

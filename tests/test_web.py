@@ -20,6 +20,7 @@ class _Inventory:
             "probeTimeoutSeconds": 15,
             "maxWorkers": 16,
         }
+        self.maintenance_windows = {}
 
     def snapshot(self):
         return {
@@ -31,6 +32,7 @@ class _Inventory:
             "ignoredCodeHostCount": 2,
             "excludedHostCount": 1,
             "collectorSettings": dict(self.collector_settings),
+            "maintenanceWindows": dict(self.maintenance_windows),
             "writable": True,
         }
 
@@ -48,6 +50,18 @@ class _Inventory:
     def update_collector_settings(self, settings):
         self.collector_settings.update(settings)
         return dict(self.collector_settings)
+
+    def update_maintenance(self, host, duration_seconds, reason):
+        if host not in self.configured:
+            raise InventoryRequestError("inventory changed")
+        if duration_seconds:
+            self.maintenance_windows[host] = {
+                "until": "2030-06-15T12:30:00Z",
+                "reason": reason.strip(),
+            }
+        else:
+            self.maintenance_windows.pop(host, None)
+        return self.snapshot()
 
 
 class WebTests(unittest.TestCase):
@@ -121,6 +135,8 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="inventory-refresh"', body)
         self.assertIn('id="configured-host-list"', body)
         self.assertIn('id="available-host-list"', body)
+        self.assertIn("维护窗口不会停止采集", body)
+        self.assertIn('fetch("/api/settings/maintenance"', script)
         self.assertIn('id="gpu-detail-dialog"', body)
         self.assertIn('id="gpu-task-list"', body)
         self.assertNotIn('class="heatmap-legend"', body)
@@ -200,6 +216,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(inventory["configuredHosts"], ["gpu-01"])
         self.assertEqual(inventory["availableHosts"], ["gpu-02"])
         self.assertEqual(inventory["ignoredCodeHostCount"], 2)
+        self.assertEqual(inventory["maintenanceWindows"], {})
 
         add = self.poll_interval_request(
             b'{"action":"add","host":"gpu-02"}',
@@ -218,6 +235,63 @@ class WebTests(unittest.TestCase):
         with urlopen(remove, timeout=2) as response:
             changed = json.load(response)
         self.assertEqual(changed["configuredHosts"], ["gpu-02"])
+
+    def test_sets_and_clears_time_bounded_maintenance(self) -> None:
+        request = self.poll_interval_request(
+            json.dumps(
+                {
+                    "host": "gpu-01",
+                    "durationSeconds": 14_400,
+                    "reason": "Driver upgrade",
+                }
+            ).encode(),
+            origin=self.base,
+            path="/api/settings/maintenance",
+        )
+        with urlopen(request, timeout=2) as response:
+            changed = json.load(response)
+
+        self.assertEqual(
+            changed["maintenanceWindows"]["gpu-01"]["reason"],
+            "Driver upgrade",
+        )
+
+        clear = self.poll_interval_request(
+            b'{"host":"gpu-01","durationSeconds":0,"reason":""}',
+            origin=self.base,
+            path="/api/settings/maintenance",
+        )
+        with urlopen(clear, timeout=2) as response:
+            cleared = json.load(response)
+        self.assertEqual(cleared["maintenanceWindows"], {})
+
+    def test_rejects_invalid_or_stale_maintenance_writes(self) -> None:
+        cases = (
+            (b'{"host":"gpu-01","durationSeconds":60,"reason":"Work"}', 400),
+            (b'{"host":"gpu-01","durationSeconds":3600,"reason":""}', 400),
+            (b'{"host":"--bad","durationSeconds":3600,"reason":"Work"}', 400),
+            (b'{"host":"gpu-01","durationSeconds":true,"reason":"Work"}', 400),
+            (b'{"host":"gpu-01","durationSeconds":3600,"reason":"Work\\u007f"}', 400),
+            (b'{"host":"unknown","durationSeconds":3600,"reason":"Work"}', 409),
+            (
+                b'{"host":"gpu-01","durationSeconds":3600,"reason":"Work","extra":1}',
+                400,
+            ),
+            (
+                b'{"host":"gpu-01","host":"gpu-01","durationSeconds":3600,"reason":"Work"}',
+                400,
+            ),
+        )
+        for payload, status in cases:
+            with self.subTest(payload=payload):
+                request = self.poll_interval_request(
+                    payload,
+                    origin=self.base,
+                    path="/api/settings/maintenance",
+                )
+                with self.assertRaises(HTTPError) as rejected:
+                    urlopen(request, timeout=2)
+                self.assertEqual(rejected.exception.code, status)
 
     def test_rejects_unmarked_or_cross_site_inventory_scans(self) -> None:
         with self.assertRaises(HTTPError) as unmarked:

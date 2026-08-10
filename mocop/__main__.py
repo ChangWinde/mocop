@@ -87,6 +87,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
         collection_stale_cycles=config.collection_stale_cycles,
         expected_gpu_counts=config.expected_gpu_counts,
         incidents=config.incidents,
+        maintenance_windows=config.maintenance_windows,
     )
     host_source = create_host_source("openssh-config")
     monitor = MonitorService(

@@ -6,10 +6,17 @@ import sys
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 from . import __version__
-from .config import IncidentConfig, MonitorConfig, ThresholdConfig
+from .config import (
+    IncidentConfig,
+    MaintenanceWindowConfig,
+    MonitorConfig,
+    ThresholdConfig,
+)
 from .discovery import HostSource
 from .incidents import IncidentPolicy, IncidentTracker, ThresholdIncidentPolicy
 from .models import ProbeResult, ServerState, utc_after, utc_now
@@ -33,6 +40,8 @@ class StateStore:
         incident_policy: IncidentPolicy | None = None,
         expected_gpu_counts: tuple[tuple[str, int], ...] = (),
         incidents: IncidentConfig | None = None,
+        maintenance_windows: tuple[tuple[str, MaintenanceWindowConfig], ...] = (),
+        utc_clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._condition = threading.Condition()
         self._servers: dict[str, ServerState] = {}
@@ -54,6 +63,11 @@ class StateStore:
         )
         self._incident_policy = selected_policy
         self._incidents = IncidentTracker(selected_policy, incident_history_points)
+        self._utc_clock = utc_clock or (lambda: datetime.now(timezone.utc))
+        self._maintenance_windows = dict(maintenance_windows)
+        self._active_maintenance_signature = self._maintenance_signature_locked()
+        self._incident_revision = 0
+        self._tracker_version = self._incidents.version
         self._started_at = utc_now()
         self._last_poll_completed_at: str | None = None
         self._last_poll_duration_ms: int | None = None
@@ -73,6 +87,7 @@ class StateStore:
                     self._history[host] = deque(maxlen=self._history_points)
                     changed = True
             self._incidents.remove_hosts(desired)
+            self._sync_tracker_revision_locked()
             if changed:
                 self._publish_locked()
 
@@ -121,6 +136,19 @@ class StateStore:
             if isinstance(self._incident_policy, ThresholdIncidentPolicy):
                 self._incident_policy.update_expected_gpu_counts(expected_gpu_counts)
 
+    def set_maintenance_windows(
+        self,
+        maintenance_windows: tuple[tuple[str, MaintenanceWindowConfig], ...],
+    ) -> None:
+        with self._condition:
+            updated = dict(maintenance_windows)
+            if updated == self._maintenance_windows:
+                return
+            self._maintenance_windows = updated
+            self._active_maintenance_signature = self._maintenance_signature_locked()
+            self._incident_revision += 1
+            self._publish_locked()
+
     def wait_for_schedule_change(self, timeout_seconds: float) -> bool:
         changed = self._schedule_changed.wait(max(0.0, timeout_seconds))
         if changed:
@@ -144,6 +172,7 @@ class StateStore:
             if state is None:
                 return
             self._incidents.update(result)
+            self._sync_tracker_revision_locked()
             next_retry_at = (
                 utc_after(retry_after_seconds)
                 if retry_after_seconds is not None
@@ -184,7 +213,17 @@ class StateStore:
 
     def incidents(self, limit: int) -> dict[str, object]:
         with self._condition:
-            return copy.deepcopy(self._incidents.snapshot(limit))
+            self._refresh_maintenance_expiry_locked()
+            snapshot = self._incidents.snapshot(limit)
+            active_windows = self._active_maintenance_locked()
+            for item in snapshot["active"]:
+                window = active_windows.get(str(item["host"]))
+                item["silenced"] = window is not None
+                if window is not None:
+                    item["maintenanceUntil"] = window.to_dict()["until"]
+                    item["maintenanceReason"] = window.reason
+            snapshot["version"] = self._incident_revision
+            return copy.deepcopy(snapshot)
 
     def health(self) -> dict[str, object]:
         with self._condition:
@@ -213,6 +252,7 @@ class StateStore:
 
     def snapshot(self) -> dict[str, object]:
         with self._condition:
+            self._refresh_maintenance_expiry_locked()
             return self._snapshot_locked()
 
     def wait_for_update(
@@ -228,8 +268,39 @@ class StateStore:
             return self._snapshot_locked()
 
     def _publish_locked(self) -> None:
+        self._refresh_maintenance_expiry_locked()
         self._version += 1
         self._condition.notify_all()
+
+    def _sync_tracker_revision_locked(self) -> None:
+        tracker_version = self._incidents.version
+        if tracker_version == self._tracker_version:
+            return
+        self._tracker_version = tracker_version
+        self._incident_revision += 1
+
+    def _active_maintenance_locked(
+        self, at: datetime | None = None
+    ) -> dict[str, MaintenanceWindowConfig]:
+        now = at or self._utc_clock()
+        return {
+            host: window
+            for host, window in self._maintenance_windows.items()
+            if window.is_active(now)
+        }
+
+    def _maintenance_signature_locked(self) -> tuple[tuple[str, str, str], ...]:
+        return tuple(
+            (host, window.to_dict()["until"], window.reason)
+            for host, window in sorted(self._active_maintenance_locked().items())
+        )
+
+    def _refresh_maintenance_expiry_locked(self) -> None:
+        signature = self._maintenance_signature_locked()
+        if signature == self._active_maintenance_signature:
+            return
+        self._active_maintenance_signature = signature
+        self._incident_revision += 1
 
     @staticmethod
     def _history_point(result: ProbeResult) -> dict[str, object]:
@@ -271,6 +342,10 @@ class StateStore:
 
     def _snapshot_locked(self) -> dict[str, object]:
         servers = [state.to_dict() for state in self._servers.values()]
+        active_maintenance = self._active_maintenance_locked()
+        for server in servers:
+            window = active_maintenance.get(str(server["host"]))
+            server["maintenance"] = window.to_dict() if window else None
         online = sum(server["status"] == "online" for server in servers)
         current_servers = [server for server in servers if server["status"] == "online"]
         gpus = [gpu for server in current_servers for gpu in server["gpus"]]
@@ -301,6 +376,10 @@ class StateStore:
         active_incidents, critical_incidents, active_incident_hosts = (
             self._incidents.counts()
         )
+        maintenance_hosts = frozenset(active_maintenance)
+        actionable_incidents, actionable_critical, actionable_incident_hosts = (
+            self._incidents.counts(maintenance_hosts)
+        )
         non_online_hosts = {
             str(server["host"]) for server in servers if server["status"] != "online"
         }
@@ -308,7 +387,7 @@ class StateStore:
             {
                 "version": self._version,
                 "appVersion": __version__,
-                "incidentVersion": self._incidents.version,
+                "incidentVersion": self._incident_revision,
                 "generatedAt": utc_now(),
                 "startedAt": self._started_at,
                 "pollIntervalSeconds": self._poll_interval_seconds,
@@ -322,12 +401,19 @@ class StateStore:
                     "onlineServers": online,
                     "issueServers": len(non_online_hosts | active_incident_hosts),
                     "incidentServers": len(active_incident_hosts),
+                    "actionableIssueServers": len(
+                        (non_online_hosts | active_incident_hosts) - maintenance_hosts
+                    ),
+                    "actionableIncidentServers": len(actionable_incident_hosts),
+                    "maintenanceServers": len(maintenance_hosts),
                     "staleServers": sum(bool(server["stale"]) for server in servers),
                     "pollingServers": sum(
                         bool(server["polling"]) for server in servers
                     ),
                     "activeIncidents": active_incidents,
                     "criticalIncidents": critical_incidents,
+                    "actionableIncidents": actionable_incidents,
+                    "actionableCriticalIncidents": actionable_critical,
                     "gpus": len(gpus),
                     "busyGpus": busy,
                     "memoryTotalMiB": round(memory_total, 1),
@@ -384,6 +470,7 @@ class MonitorService:
                 self._config_generation += 1
             self._state.set_poll_interval_seconds(config.poll_interval_seconds)
             self._state.update_expected_gpu_counts(config.expected_gpu_counts)
+            self._state.set_maintenance_windows(config.maintenance_windows)
             try:
                 hosts = self._host_source.hosts(config)
             except (OSError, ValueError):

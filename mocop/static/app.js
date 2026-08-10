@@ -127,6 +127,8 @@ const view = {
   inventoryPendingHost: null,
   inventoryConfirmHost: null,
   inventoryConfirmTimer: null,
+  maintenanceEditingHost: null,
+  maintenancePendingHost: null,
   collectorSettingsDirty: false,
   collectorSettingsSaving: false,
   backgroundObjectUrl: null,
@@ -684,6 +686,18 @@ function age(timestamp) {
   return `${Math.floor(seconds / 60)} 分钟前`;
 }
 
+function shortTime(timestamp) {
+  const value = new Date(timestamp);
+  if (!Number.isFinite(value.getTime())) return "未知时间";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(value);
+}
+
 function retryCountdown(timestamp) {
   if (!timestamp) return "";
   const milliseconds = Date.parse(timestamp) - Date.now();
@@ -892,6 +906,10 @@ function normalizeInventory(payload) {
   const activeHosts = safeStoredHosts(payload.activeHosts);
   const availableHosts = safeStoredHosts(payload.availableHosts);
   const collectorSettings = normalizeCollectorSettings(payload.collectorSettings);
+  const maintenanceWindows = normalizeMaintenanceWindows(
+    payload.maintenanceWindows,
+    configuredHosts,
+  );
   if (
     configuredHosts.length !== payload.configuredHosts?.length
     || activeHosts.length !== payload.activeHosts?.length
@@ -914,7 +932,34 @@ function normalizeInventory(payload) {
     ignoredCodeHostCount: Math.max(0, payload.ignoredCodeHostCount),
     excludedHostCount: Math.max(0, payload.excludedHostCount),
     collectorSettings,
+    maintenanceWindows,
   };
+}
+
+function normalizeMaintenanceWindows(payload, configuredHosts) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TypeError("Invalid maintenance windows response");
+  }
+  const configured = new Set(configuredHosts);
+  const windows = {};
+  Object.entries(payload).forEach(([host, window]) => {
+    if (
+      !configured.has(host)
+      || !window
+      || typeof window !== "object"
+      || Array.isArray(window)
+      || Object.keys(window).sort().join(",") !== "reason,until"
+      || typeof window.until !== "string"
+      || !Number.isFinite(Date.parse(window.until))
+      || typeof window.reason !== "string"
+      || window.reason.length > 120
+      || /[\u0000-\u001f\u007f-\u009f]/.test(window.reason)
+    ) {
+      throw new TypeError("Invalid maintenance windows response");
+    }
+    windows[host] = { until: window.until, reason: window.reason };
+  });
+  return windows;
 }
 
 function setCollectorSettingsStatus(kind, message) {
@@ -1028,14 +1073,36 @@ function inventoryHostRow(host, action) {
   if (action === "remove" && host === view.inventory.localHost) {
     identity.append(create("small", "", "本机"));
   }
+  const maintenance = view.inventory.maintenanceWindows[host];
+  if (maintenance) {
+    const badge = create("small", "maintenance-badge", `维护至 ${shortTime(maintenance.until)}`);
+    badge.title = maintenance.reason;
+    identity.append(badge);
+  }
+  const actions = create("span", "inventory-host-actions");
   const button = create("button", "inventory-host-action");
   button.type = "button";
-  button.disabled = !view.inventory.writable || view.inventoryPendingHost != null;
+  button.disabled = !view.inventory.writable
+    || view.inventoryPendingHost != null
+    || view.maintenancePendingHost != null;
   if (action === "add") {
     button.setAttribute("aria-label", `添加节点 ${host}`);
     button.textContent = view.inventoryPendingHost === host ? "添加中" : "添加";
     button.addEventListener("click", () => changeInventory("add", host));
+    actions.append(button);
   } else {
+    if (view.inventory.configuredHosts.includes(host)) {
+      const maintenanceButton = create("button", "inventory-host-action maintenance-action");
+      maintenanceButton.type = "button";
+      maintenanceButton.disabled = button.disabled;
+      maintenanceButton.setAttribute("aria-expanded", String(view.maintenanceEditingHost === host));
+      maintenanceButton.textContent = maintenance ? "调整维护" : "设为维护";
+      maintenanceButton.addEventListener("click", () => {
+        view.maintenanceEditingHost = view.maintenanceEditingHost === host ? null : host;
+        renderInventory();
+      });
+      actions.append(maintenanceButton);
+    }
     const confirming = view.inventoryConfirmHost === host;
     button.classList.toggle("confirm", confirming);
     button.setAttribute("aria-label", confirming ? `确认移除节点 ${host}` : `移除节点 ${host}`);
@@ -1043,14 +1110,56 @@ function inventoryHostRow(host, action) {
       ? "移除中"
       : confirming ? "再次点击确认" : "移除";
     button.addEventListener("click", () => requestInventoryRemoval(host));
+    actions.append(button);
   }
-  row.append(identity, button);
+  row.append(identity, actions);
+  if (action === "remove" && view.maintenanceEditingHost === host) {
+    row.append(maintenanceEditor(host, maintenance));
+  }
   return row;
+}
+
+function maintenanceEditor(host, maintenance) {
+  const form = create("form", "maintenance-editor");
+  const reason = document.createElement("input");
+  reason.type = "text";
+  reason.required = true;
+  reason.maxLength = 120;
+  reason.placeholder = "维护原因，例如：驱动升级";
+  reason.value = maintenance?.reason || "";
+  reason.setAttribute("aria-label", `${host} 维护原因`);
+  const duration = document.createElement("select");
+  duration.setAttribute("aria-label", `${host} 维护时长`);
+  [[3600, "1 小时"], [14400, "4 小时"], [86400, "24 小时"], [604800, "7 天"]]
+    .forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = label;
+      if (value === 14400) option.selected = true;
+      duration.append(option);
+    });
+  const save = create("button", "primary-action", maintenance ? "延长维护" : "开始维护");
+  save.type = "submit";
+  form.append(reason, duration, save);
+  if (maintenance) {
+    const clear = create("button", "inline-action danger-action", "立即结束");
+    clear.type = "button";
+    clear.addEventListener("click", () => changeMaintenance(host, 0, ""));
+    form.append(clear);
+  }
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!form.reportValidity()) return;
+    changeMaintenance(host, Number(duration.value), reason.value);
+  });
+  return form;
 }
 
 function renderInventory() {
   syncCollectorSettings();
-  elements.inventoryRefresh.disabled = view.inventoryLoading || view.inventoryPendingHost != null;
+  elements.inventoryRefresh.disabled = view.inventoryLoading
+    || view.inventoryPendingHost != null
+    || view.maintenancePendingHost != null;
   elements.inventoryRefresh.textContent = view.inventoryLoading ? "扫描中" : "重新扫描";
   if (!view.inventory) {
     elements.configuredHostCount.textContent = "0";
@@ -1086,7 +1195,11 @@ function renderInventory() {
 }
 
 async function refreshInventory() {
-  if (view.inventoryLoading || view.inventoryPendingHost != null) return;
+  if (
+    view.inventoryLoading
+    || view.inventoryPendingHost != null
+    || view.maintenancePendingHost != null
+  ) return;
   view.inventoryConfirmHost = null;
   if (view.inventoryConfirmTimer != null) clearTimeout(view.inventoryConfirmTimer);
   view.inventoryConfirmTimer = null;
@@ -1107,6 +1220,45 @@ async function refreshInventory() {
     view.inventoryMessageKind = "error";
   } finally {
     view.inventoryLoading = false;
+    renderInventory();
+  }
+}
+
+async function changeMaintenance(host, durationSeconds, reason) {
+  if (view.maintenancePendingHost != null) return;
+  view.maintenancePendingHost = host;
+  view.inventoryMessage = durationSeconds
+    ? `正在为 ${host} 保存维护窗口…`
+    : `正在结束 ${host} 的维护窗口…`;
+  view.inventoryMessageKind = "";
+  renderInventory();
+  try {
+    const response = await fetch("/api/settings/maintenance", {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Monitor-Request": "dashboard",
+      },
+      body: JSON.stringify({ host, durationSeconds, reason }),
+    });
+    if (response.status === 409) throw new RangeError("stale inventory");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    view.inventory = normalizeInventory(await response.json());
+    view.maintenanceEditingHost = null;
+    view.inventoryMessage = durationSeconds
+      ? `${host} 已进入维护；采集继续，活动问题暂不计入待处理`
+      : `${host} 已结束维护，活动问题重新进入待处理`;
+    view.inventoryMessageKind = "success";
+    await fetchSnapshot();
+    syncIncidents();
+  } catch (error) {
+    view.inventoryMessage = error instanceof RangeError
+      ? "节点清单已变化，请重新扫描后再试"
+      : "维护设置保存失败，请检查本地配置权限";
+    view.inventoryMessageKind = "error";
+  } finally {
+    view.maintenancePendingHost = null;
     renderInventory();
   }
 }
@@ -1187,7 +1339,6 @@ function limits() {
 }
 
 function serverStatus(server) {
-  if (server.stale) return ["数据陈旧", "stale"];
   const states = {
     online: ["在线", "online"],
     unreachable: ["SSH 不可达", "issue"],
@@ -1195,7 +1346,10 @@ function serverStatus(server) {
     error: ["采集错误", "issue"],
     pending: ["等待探测", "pending"],
   };
-  return states[server.status] || ["未知", "issue"];
+  const current = server.stale
+    ? ["数据陈旧", "stale"]
+    : states[server.status] || ["未知", "issue"];
+  return server.maintenance ? [`维护中 · ${current[0]}`, "maintenance"] : current;
 }
 
 function failureText(message) {
@@ -1292,7 +1446,7 @@ function incidentConditionMessage(condition) {
 function serverConditions(server) {
   if (!Array.isArray(view.incidents?.active)) return [];
   return view.incidents.active
-    .filter((condition) => condition.host === server.host)
+    .filter((condition) => condition.host === server.host && !condition.silenced)
     .map((condition) => ({
       id: condition.conditionKey,
       kind: condition.category,
@@ -1524,7 +1678,10 @@ function renderIncidents() {
     const stateClass = event.state === "resolved" || event.state === "deescalated"
       ? "resolved"
       : event.severity;
-    const item = create("button", `incident-item ${stateClass}`);
+    const item = create(
+      "button",
+      `incident-item ${stateClass}${event.silenced ? " silenced" : ""}`,
+    );
     item.type = "button";
     item.title = `${event.host}：${incidentDescription(event)}`;
     const body = create("span", "incident-body");
@@ -1533,6 +1690,11 @@ function renderIncidents() {
       create("strong", "", event.host),
       create("em", "", incidentStateLabel(event.state)),
     );
+    if (event.silenced) {
+      const badge = create("em", "incident-silenced", "维护静默");
+      badge.title = event.maintenanceReason || "维护窗口内暂不处理";
+      title.append(badge);
+    }
     body.append(title, create("span", "incident-message", incidentDescription(event)));
     const observedAge = create("span", "incident-time age-relative", age(event.observedAt));
     observedAge.dataset.ageAt = event.observedAt;
@@ -1725,8 +1887,19 @@ function renderSummary() {
     -Infinity,
     ...currentGpus.map((gpu) => numeric(gpu.temperature_c, -Infinity)),
   );
-  const serverCritical = numeric(snapshot.stats.criticalIncidents) > 0
-    || (snapshot.stats.servers > 0 && snapshot.stats.onlineServers === 0);
+  const actionableIssues = numeric(
+    snapshot.stats.actionableIssueServers,
+    snapshot.stats.issueServers,
+  );
+  const actionableCritical = numeric(
+    snapshot.stats.actionableCriticalIncidents,
+    snapshot.stats.criticalIncidents,
+  );
+  const maintenanceServers = numeric(snapshot.stats.maintenanceServers);
+  const serverCritical = actionableCritical > 0
+    || (actionableIssues > 0
+      && snapshot.stats.servers > 0
+      && snapshot.stats.onlineServers === 0);
   const cpuCritical = cpu != null && cpu >= 95;
   const memoryCritical = memoryPct >= 95;
   const gpuCritical = hottestGpu >= threshold.gpu_temperature_warning_c + 5;
@@ -1741,19 +1914,23 @@ function renderSummary() {
     ? `已使用 ${memory(snapshot.stats.memoryUsedMiB)}，总计 ${memory(snapshot.stats.memoryTotalMiB)}`
     : "等待 GPU 显存样本";
   elements.serverRatio.textContent = `${snapshot.stats.onlineServers} / ${snapshot.stats.servers}`;
-  elements.serverHealth.textContent = snapshot.stats.criticalIncidents
-    ? "严重" : snapshot.stats.issueServers ? "需关注" : "健康";
+  elements.serverHealth.textContent = actionableCritical
+    ? "严重" : actionableIssues ? "需关注" : maintenanceServers ? "维护中" : "健康";
   elements.serverHealth.classList.toggle(
     "warning",
-    snapshot.stats.issueServers > 0 && !serverCritical,
+    actionableIssues > 0 && !serverCritical,
   );
   elements.serverHealth.classList.toggle("critical", serverCritical);
-  elements.serverCard.classList.toggle("is-warning", snapshot.stats.issueServers > 0 && !serverCritical);
+  elements.serverCard.classList.toggle("is-warning", actionableIssues > 0 && !serverCritical);
   elements.serverCard.classList.toggle("is-critical", serverCritical);
   elements.serverBar.style.width = `${clamp(onlineRatio)}%`;
-  elements.serverDetail.textContent = snapshot.stats.issueServers
-    ? `${snapshot.stats.issueServers} 台需关注 · ${snapshot.stats.activeIncidents} 个问题`
-    : "所有服务器运行正常";
+  elements.serverDetail.textContent = actionableIssues
+    ? `${actionableIssues} 台需关注 · ${numeric(snapshot.stats.actionableIncidents, snapshot.stats.activeIncidents)} 个待处理问题`
+    : maintenanceServers && snapshot.stats.activeIncidents
+      ? `${maintenanceServers} 台维护中 · ${snapshot.stats.activeIncidents} 个活动问题已静默`
+      : maintenanceServers
+        ? `${maintenanceServers} 台处于计划维护窗口`
+        : "所有服务器运行正常";
   elements.averageCpu.textContent = cpu == null ? "—" : format(cpu, 1);
   elements.cpuHealth.textContent = cpu == null
     ? "采样中"
@@ -1888,6 +2065,8 @@ function serverItemSignature(server) {
     resources.warningUsage,
     resources.cpu,
     resources.memory,
+    server.maintenance?.until,
+    server.maintenance?.reason,
   ]);
 }
 

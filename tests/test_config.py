@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mocop.config import (
@@ -47,6 +48,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.collection_stale_cycles, 3)
         self.assertEqual(config.expected_gpu_counts, ())
         self.assertEqual(config.host_overrides, ())
+        self.assertEqual(config.maintenance_windows, ())
         self.assertEqual(config.incidents.resource_open_cycles, 2)
         self.assertEqual(config.incidents.recovery_cycles, 2)
         self.assertEqual(config.incidents.gpu_idle_memory_cycles, 12)
@@ -190,6 +192,47 @@ class ConfigTests(unittest.TestCase):
         for invalid in invalid_overrides:
             with self.subTest(invalid=invalid):
                 value["host_overrides"] = invalid
+                with self.assertRaises(ConfigError):
+                    load_config(self.write(value))
+
+    def test_validates_time_bounded_maintenance_windows(self) -> None:
+        value = valid_config()
+        value["auto_discover"] = False
+        value["hosts"] = ["gpu-1", "gpu-2"]
+        value["maintenance_windows"] = {
+            "gpu-1": {
+                "until": "2030-06-15T12:30:00Z",
+                "reason": "Driver upgrade",
+            }
+        }
+
+        config = load_config(self.write(value))
+
+        window = config.maintenance_window("gpu-1")
+        self.assertIsNotNone(window)
+        self.assertEqual(window.reason, "Driver upgrade")
+        self.assertEqual(window.to_dict()["until"], "2030-06-15T12:30:00Z")
+        self.assertTrue(
+            window.is_active(datetime(2030, 6, 15, 12, 29, tzinfo=timezone.utc))
+        )
+        self.assertFalse(
+            window.is_active(datetime(2030, 6, 15, 12, 30, tzinfo=timezone.utc))
+        )
+        self.assertIsNone(config.maintenance_window("gpu-2"))
+
+        invalid_windows = (
+            {"unknown": {"until": "2030-06-15T12:30:00Z"}},
+            {"gpu-1": {"until": "2030-06-15T12:30:00+00:00"}},
+            {"gpu-1": {"until": "not-a-time"}},
+            {"gpu-1": {"until": "2030-06-15T12:30:00Z", "reason": 1}},
+            {"gpu-1": {"until": "2030-06-15T12:30:00Z", "reason": "x\n"}},
+            {"gpu-1": {"until": "2030-06-15T12:30:00Z", "reason": "x\u007f"}},
+            {"gpu-1": {"until": "2030-06-15T12:30:00Z", "extra": True}},
+            {"gpu-1": {}},
+        )
+        for invalid in invalid_windows:
+            with self.subTest(invalid=invalid):
+                value["maintenance_windows"] = invalid
                 with self.assertRaises(ConfigError):
                     load_config(self.write(value))
 

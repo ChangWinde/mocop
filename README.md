@@ -40,6 +40,7 @@ In Mocop, AI-native describes the product focus: capacity checks, failure diagno
 - Drag-to-order servers, five structurally distinct themes, validated browser-local backgrounds, search, filters, bounded trends, incidents, and safe CSV export
 - Dashboard SSH-alias inventory scan with constrained add/remove, Git/GitHub/GitLab filtering, atomic persistence, and live scheduler updates
 - Expected GPU inventory, authoritative incidents, anti-flap activation/recovery, failure backoff, and stale-data handling
+- Time-bounded maintenance windows that keep telemetry live while separating silenced incidents from actionable work
 - Explicit host allowlist, loopback binding, strict host-key checking, fixed remote script, and resource limits
 
 ## Requirements
@@ -152,6 +153,12 @@ Use the dashboard selector to change the collection cadence to any interval from
 
 Shorter cadence, longer timeouts, and higher concurrency all increase collection pressure. Mocop therefore keeps strict bounds and does not expose SSH paths, commands, listeners, thresholds, or arbitrary configuration keys to the browser.
 
+### Silence planned maintenance without stopping collection
+
+Open **Settings → Monitored nodes**, choose **Set maintenance**, enter a short reason, and select 1 hour, 4 hours, 24 hours, or 7 days. The window is stored in `config.json`, takes effect without a restart, and expires automatically. You can end it immediately from the same control.
+
+Maintenance never pauses SSH collection, removes an incident, or fabricates a recovery. Mocop continues to show the node's true status and transition history, while reporting raw active incidents separately from the smaller actionable set. This keeps planned work out of the attention queue without creating a monitoring blind spot.
+
 ### Detect missing GPUs and noisy resource samples
 
 Declare the expected device count for stable compute nodes and tune incident stability in the configuration:
@@ -227,6 +234,7 @@ Failed hosts retain their last successful sample and are marked stale. Stale val
 | `local_host` | optional alias in `hosts` to probe without SSH | `null` |
 | `expected_gpu_counts` | expected device count by explicit host alias | empty; 0 to 256 per host |
 | `host_overrides` | optional per-host collection cadence and complete-probe timeout | empty; same bounds as global values |
+| `maintenance_windows` | UTC expiry and reason by explicit host alias | empty; dashboard offers 1 hour to 7 days |
 | `poll_interval_seconds` | global collection cadence | 1 to 3600; default 5, dashboard 2 to 60 |
 | `probe_timeout_seconds` | complete collection timeout for one host | 2 to 300; dashboard-managed |
 | `connect_timeout_seconds` | SSH connection timeout | 1 to 120; less than probe timeout |

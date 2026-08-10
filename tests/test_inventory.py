@@ -131,6 +131,9 @@ class InventoryTests(unittest.TestCase):
         data["local_host"] = "gpu-01"
         data["expected_gpu_counts"] = {"gpu-01": 8}
         data["host_overrides"] = {"gpu-01": {"poll_interval_seconds": 30}}
+        data["maintenance_windows"] = {
+            "gpu-01": {"until": "2030-06-15T12:30:00Z", "reason": "Repair"}
+        }
         self.config_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -143,7 +146,51 @@ class InventoryTests(unittest.TestCase):
         self.assertIsNone(raw["local_host"])
         self.assertEqual(raw["expected_gpu_counts"], {})
         self.assertEqual(raw["host_overrides"], {})
+        self.assertEqual(raw["maintenance_windows"], {})
         self.assertEqual(self.updates[-1].hosts, ())
+
+    def test_sets_and_clears_bounded_maintenance_windows_atomically(self) -> None:
+        changed = self.inventory.update_maintenance("gpu-01", 14_400, "Driver upgrade")
+
+        window = changed["maintenanceWindows"]["gpu-01"]
+        self.assertEqual(window["reason"], "Driver upgrade")
+        reloaded = load_config(self.config_path)
+        self.assertTrue(reloaded.maintenance_window("gpu-01").is_active())
+        self.assertEqual(self.config_path.stat().st_mode & 0o777, 0o600)
+
+        cleared = self.inventory.update_maintenance("gpu-01", 0, "")
+
+        self.assertEqual(cleared["maintenanceWindows"], {})
+        self.assertIsNone(load_config(self.config_path).maintenance_window("gpu-01"))
+
+    def test_clearing_absent_maintenance_is_a_noop(self) -> None:
+        before = self.config_path.stat().st_mtime_ns
+
+        snapshot = self.inventory.update_maintenance("gpu-01", 0, "")
+
+        self.assertEqual(snapshot["maintenanceWindows"], {})
+        self.assertEqual(self.config_path.stat().st_mtime_ns, before)
+        self.assertEqual(self.updates, [])
+
+    def test_rejects_unsafe_maintenance_changes_without_rewriting_config(self) -> None:
+        before = self.config_path.read_bytes()
+        cases = (
+            ("unknown", 3600, "Work"),
+            ("--bad", 3600, "Work"),
+            ("gpu-01", 60, "Work"),
+            ("gpu-01", 3600, ""),
+            ("gpu-01", 3600, "x\n"),
+            ("gpu-01", 3600, "x\u007f"),
+            ("gpu-01", 3600, "x" * 121),
+        )
+
+        for host, duration, reason in cases:
+            with (
+                self.subTest(host=host, duration=duration),
+                self.assertRaises(InventoryError),
+            ):
+                self.inventory.update_maintenance(host, duration, reason)
+            self.assertEqual(self.config_path.read_bytes(), before)
 
     def test_remove_stays_removed_when_automatic_discovery_is_enabled(self) -> None:
         data = json.loads(self.config_path.read_text(encoding="utf-8"))

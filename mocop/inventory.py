@@ -15,11 +15,14 @@ from .config import (
     ConfigError,
     MonitorConfig,
     is_safe_alias,
+    is_valid_maintenance_reason,
     load_config,
 )
 from .discovery import HostSource, is_code_host_alias
+from .models import utc_after
 
 _MAX_CONFIG_BYTES = 1_048_576
+DASHBOARD_MAINTENANCE_DURATIONS = frozenset({0, 3_600, 14_400, 86_400, 604_800})
 
 
 class InventoryError(RuntimeError):
@@ -37,6 +40,10 @@ class DashboardConfigController(Protocol):
 
     def update_collector_settings(
         self, settings: dict[str, object]
+    ) -> dict[str, object]: ...
+
+    def update_maintenance(
+        self, host: str, duration_seconds: int, reason: str
     ) -> dict[str, object]: ...
 
 
@@ -97,12 +104,58 @@ class ConfigInventory:
                     )
                 if data.get("local_host") == host:
                     data["local_host"] = None
-                for field in ("expected_gpu_counts", "host_overrides"):
+                for field in (
+                    "expected_gpu_counts",
+                    "host_overrides",
+                    "maintenance_windows",
+                ):
                     metadata = data.get(field)
                     if isinstance(metadata, dict):
                         metadata.pop(host, None)
 
             data["hosts"] = configured
+            updated = self._commit(data)
+            return self._snapshot(updated)
+
+    def update_maintenance(
+        self, host: str, duration_seconds: int, reason: str
+    ) -> dict[str, object]:
+        """Persist or clear one explicitly configured maintenance window."""
+        if not isinstance(host, str) or not is_safe_alias(host):
+            raise InventoryRequestError("host must be a safe OpenSSH alias")
+        if (
+            isinstance(duration_seconds, bool)
+            or not isinstance(duration_seconds, int)
+            or duration_seconds not in DASHBOARD_MAINTENANCE_DURATIONS
+        ):
+            raise InventoryRequestError("maintenance duration is not allowed")
+        if not is_valid_maintenance_reason(reason, required=duration_seconds != 0):
+            raise InventoryRequestError("maintenance reason is invalid")
+        assert isinstance(reason, str)
+        normalized_reason = reason.strip()
+
+        with self._lock:
+            self._require_writable()
+            config = self._load()
+            if host not in config.hosts or host in config.exclude_hosts:
+                raise InventoryRequestError(
+                    "maintenance host is not explicitly configured"
+                )
+            data = self._read_object()
+            raw_windows = data.get("maintenance_windows", {})
+            if not isinstance(raw_windows, dict):
+                raise InventoryError("maintenance configuration is invalid")
+            windows = dict(raw_windows)
+            if duration_seconds == 0:
+                if host not in windows:
+                    return self._snapshot(config)
+                windows.pop(host, None)
+            else:
+                windows[host] = {
+                    "until": utc_after(duration_seconds),
+                    "reason": normalized_reason,
+                }
+            data["maintenance_windows"] = windows
             updated = self._commit(data)
             return self._snapshot(updated)
 
@@ -207,6 +260,11 @@ class ConfigInventory:
                 for alias in scanned
             ),
             "collectorSettings": self._collector_settings(config),
+            "maintenanceWindows": {
+                alias: window.to_dict()
+                for alias, window in config.maintenance_windows
+                if window.is_active()
+            },
             "writable": self._is_writable_target(),
         }
 

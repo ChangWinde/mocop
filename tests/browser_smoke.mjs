@@ -441,6 +441,14 @@ try {
     for (let attempt = 0; attempt < 20 && !document.querySelector("#collector-settings-status").classList.contains("success"); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    document.querySelector("#configured-host-list .maintenance-action").click();
+    const maintenanceEditor = document.querySelector("#configured-host-list .maintenance-editor");
+    maintenanceEditor.querySelector('input[type="text"]').value = "Driver upgrade";
+    maintenanceEditor.requestSubmit();
+    for (let attempt = 0; attempt < 20 && !document.querySelector("#configured-host-list .maintenance-badge"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const maintenanceBadge = document.querySelector("#configured-host-list .maintenance-badge")?.textContent;
     document.querySelector("#available-host-list .inventory-host-action").click();
     for (let attempt = 0; attempt < 20 && document.querySelector("#configured-host-count").textContent !== "4"; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -490,6 +498,8 @@ try {
       inventoryStatus: document.querySelector("#inventory-status").textContent,
       settingsOpen,
       collectorSettings: persistedCollector.collectorSettings,
+      maintenanceWindows: persistedCollector.maintenanceWindows,
+      maintenanceBadge,
       gpuSort: document.querySelector("#gpu-sort").value,
       powerHidden: document.body.classList.contains("hide-gpu-power"),
       taskDialogOpen: taskDialog.open,
@@ -533,6 +543,8 @@ try {
   assert.equal(personalization.collectorSettings.pollIntervalSeconds, 2);
   assert.equal(personalization.collectorSettings.probeTimeoutSeconds, 24);
   assert.equal(personalization.collectorSettings.maxWorkers, 6);
+  assert.equal(personalization.maintenanceWindows["atlas-01"].reason, "Driver upgrade");
+  assert.match(personalization.maintenanceBadge, /维护至/);
   assert.equal(personalization.gpuSort, "memory");
   assert.equal(personalization.powerHidden, true);
   assert.equal(personalization.taskDialogOpen, true);

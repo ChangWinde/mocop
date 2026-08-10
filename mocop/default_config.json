@@ -6,6 +6,7 @@
   "local_host": null,
   "expected_gpu_counts": {},
   "host_overrides": {},
+  "maintenance_windows": {},
   "poll_interval_seconds": 5,
   "probe_timeout_seconds": 12,
   "connect_timeout_seconds": 5,

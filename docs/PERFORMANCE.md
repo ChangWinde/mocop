@@ -16,6 +16,7 @@ This document defines reproducible measurement conditions and architecture thres
 - SSE publishes each completed host result and one authoritative cycle completion; it does not duplicate the full snapshot when a cycle merely starts. The browser coalesces same-frame work with `requestAnimationFrame`.
 - GPU groups, host lists, heatmap cells, and incident panels reuse DOM when their input signature is unchanged; the browser consumes backend incident decisions instead of re-evaluating thresholds.
 - GPU groups start collapsed, which bounds initial table rendering in the cluster-wide view.
+- Maintenance evaluation is an in-memory pass over the configured host-window map during snapshot publication; it starts no timer, process, probe, or database write.
 
 ## OpenSSH connection reuse
 

@@ -403,7 +403,7 @@
             </div>
             <button id="inventory-refresh" class="inline-action" type="button">扫描</button>
           </div>
-          <p class="inventory-note">扫描只读取本机 SSH 别名，不会发起连接。Git、GitHub、GitLab 与 <code>exclude_hosts</code> 中的别名会被忽略。</p>
+          <p class="inventory-note">扫描只读取本机 SSH 别名，不会发起连接。Git、GitHub、GitLab 与 <code>exclude_hosts</code> 中的别名会被忽略。维护窗口不会停止采集，只会暂时静默该节点的待处理问题，并在到期后自动恢复。</p>
           <div id="inventory-status" class="inventory-status" role="status">打开设置后自动扫描</div>
           <div class="inventory-columns">
             <div class="inventory-block">
