@@ -199,7 +199,7 @@ class StateStoreTests(unittest.TestCase):
         self.assertTrue(store.wait_for_poll_interval_change(0))
         self.assertFalse(store.wait_for_poll_interval_change(0))
 
-        for invalid in (1, 61, True, "5"):
+        for invalid in (0, 3601, True, "5"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 store.set_poll_interval_seconds(invalid)
 
@@ -286,11 +286,49 @@ class _RecordingProbe:
         self.calls = []
 
     def probe(self, host, config):
-        self.calls.append((host, config.hosts))
+        self.calls.append(
+            (
+                host,
+                config.hosts,
+                config.probe_timeout_seconds,
+                config.max_workers,
+            )
+        )
         return ProbeResult(host, "online", 1)
 
 
 class MonitorServiceTests(unittest.TestCase):
+    def test_replaces_persisted_collector_policy_without_restart(self) -> None:
+        config = MonitorConfig(
+            ssh_config=Path("/tmp/config"),
+            auto_discover=False,
+            hosts=("gpu-01",),
+            exclude_hosts=frozenset(),
+            poll_interval_seconds=5,
+            probe_timeout_seconds=12,
+            connect_timeout_seconds=5,
+            max_workers=2,
+            listen_host="127.0.0.1",
+            listen_port=8787,
+        )
+        state = StateStore(5)
+        probe = _RecordingProbe()
+        service = MonitorService(config, _ConfigHostSource(), probe, state)
+
+        service.update_config(
+            replace(
+                config,
+                poll_interval_seconds=2,
+                probe_timeout_seconds=24,
+                max_workers=7,
+            )
+        )
+        service.poll_once()
+
+        self.assertEqual(state.snapshot()["pollIntervalSeconds"], 2)
+        self.assertEqual(state.snapshot()["collectionStaleAfterSeconds"], 6)
+        self.assertEqual(probe.calls, [("gpu-01", ("gpu-01",), 24, 7)])
+
     def test_replaces_inventory_config_without_restarting_the_service(self) -> None:
         config = MonitorConfig(
             ssh_config=Path("/tmp/config"),

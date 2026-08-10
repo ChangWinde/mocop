@@ -4,7 +4,7 @@
 
 Mocop monitors 10 to 200 Linux servers through the operator's existing OpenSSH aliases and credentials. A target requires no resident agent, database, or inbound monitoring port. One failed or slow host must not delay completed results from other hosts.
 
-The browser receives current state after one page load. It may change the running process's bounded collection cadence and promote or remove aliases through the constrained inventory controller. SSH arguments, thresholds, remote commands, and arbitrary destinations remain local administrative inputs.
+The browser receives current state after one page load. It may persist a bounded projection of fleet collection policy and promote or remove aliases through the constrained configuration controller. SSH arguments, thresholds, remote commands, listeners, paths, and arbitrary destinations remain local administrative inputs.
 
 The installed runtime contains no inventory and has no third-party Python dependency. A blank installation starts with an empty allowlist and a loopback listener. AI-native refers to the GPU capacity, VRAM, diagnosis, and scheduling workflows; collection does not require an external AI service.
 
@@ -31,8 +31,7 @@ local JSON configuration
   snapshot  history  readiness
       │       └── IncidentPolicy → bounded transition ring
       ├── JSON / SSE → dashboard
-      ├── runtime cadence ← bounded same-origin POST
-      └── runtime config ← ConfigInventory ← eligible SSH aliases
+      └── runtime config ← ConfigInventory ← bounded settings + eligible aliases
 ```
 
 The dependency direction is `web → StateStore ← service → protocols/models/config`. The web layer has no knowledge of the SSH implementation. The scheduler consumes `HostSource` and `ResourceProbe` protocols through registries, which keeps environment-specific collection behind stable interfaces.
@@ -43,12 +42,12 @@ The dependency direction is `web → StateStore ← service → protocols/models
 |---|---|
 | `config.py` | configuration discovery, strict schema validation, safe defaults |
 | `discovery.py` | explicit inventory and optional OpenSSH alias discovery |
-| `inventory.py` | eligible SSH alias projection and atomic host-list mutation |
+| `inventory.py` | typed dashboard configuration projection and private atomic mutation |
 | `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
 | `models.py` | immutable resource result types |
 | `incidents.py` | condition evaluation and bounded transition history |
-| `web.py` | fixed HTTP routes, JSON/SSE delivery, runtime cadence control |
+| `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
 | `lifecycle.py` | private config creation and user-level systemd management |
 | `static/` | dependency-free dashboard assets |
 
@@ -58,7 +57,7 @@ Configuration uses JSON. Startup rejects unknown keys, invalid types, unsafe ali
 
 Collection produces immutable `ProbeResult`, `SystemMetrics`, `DiskMetrics`, `GpuMetrics`, `GpuHealthMetrics`, and `GpuProcess` values. The system section uses the versioned `MONITOR_V4` tab-separated protocol. NVIDIA device, compute-process, and optional hardware-health data use the stable CSV mode of `nvidia-smi`. Parsers validate versions, columns, text length, numeric ranges, record counts, process identifiers, and GPU indexes. An optional health-query failure never invalidates base resource telemetry. [ADR-0003](adr/0003-gpu-reliability-and-authoritative-incidents.md) records the agentless decision and rejected DCGM-first alternative.
 
-The browser receives UTF-8 JSON snapshots through SSE. `/api/snapshot` supports cold start and diagnostics. History queries accept only discovered aliases and at most 300 points. Incident queries accept limits from 1 to 200. One write route accepts a finite JSON number from 2 to 60 and changes in-memory cadence only. The inventory write route accepts one exact add/remove action and one validated alias. An add must match a fresh, eligible OpenSSH scan; a remove must match the current configuration. Both routes use the same bounded same-origin dashboard-request guard.
+The browser receives UTF-8 JSON snapshots through SSE. `/api/snapshot` supports cold start and diagnostics. History queries accept only discovered aliases and at most 300 points. Incident queries accept limits from 1 to 200. The cadence shortcut accepts one finite JSON number from 2 to 60. The collector route accepts exactly cadence, complete-probe timeout, and integer worker concurrency within documented bounds. The inventory route accepts one exact add/remove action and one validated alias. An add must match a fresh, eligible OpenSSH scan; a remove must match the current configuration. All write routes use the same bounded same-origin dashboard-request guard, serialize through `ConfigInventory`, validate the complete candidate configuration, and hot-apply the resulting immutable `MonitorConfig` after atomic persistence.
 
 The optional `local_host` alias must be present in the explicit host allowlist. It executes the same repository-owned script through a local `sh` process; every other target uses a structured OpenSSH argument vector. Stdout and stderr are drained incrementally into buffers that share one configured byte limit. A timeout or limit violation terminates the isolated process group.
 
@@ -76,7 +75,7 @@ GPU count, busy devices, and cluster VRAM form the first summary layer. The sche
 
 SSE updates are coalesced with `requestAnimationFrame`. GPU groups, host rows, attention items, incidents, and heatmap cells reuse DOM when their input signature is unchanged. A successful SSE snapshot is authoritative for connection state; transient errors are debounced, and snapshot fetches provide bounded degraded-mode synchronization during recovery. Compute, VRAM, and temperature heatmap modes transform the in-memory snapshot without another request. CSV export is generated from visible rows in the browser.
 
-Display-only preferences use a versioned, validated browser-local record. They control theme, server order, GPU sort, heatmap metric, and optional columns. Cluster inventory changes cross a separate single-purpose controller; display preferences never enter the server configuration. The attention view consumes backend incident conditions and only groups them for presentation; threshold decisions are never duplicated in JavaScript. [ADR-0002](adr/0002-local-targets-and-dashboard-preferences.md) records the rejected server-persisted presentation and on-demand remote-query alternatives. [ADR-0004](adr/0004-dashboard-managed-ssh-inventory.md) records the constrained inventory write boundary.
+Display-only preferences use a versioned, validated browser-local record. They control theme, information density, fleet focus, server order, GPU sort, heatmap metric, and optional columns. They never enter the server configuration or overwrite another viewer's choices. Cluster inventory and the narrow collector-policy projection cross the serialized configuration controller. The attention view consumes backend incident conditions and only groups them for presentation; threshold decisions are never duplicated in JavaScript. [ADR-0002](adr/0002-local-targets-and-dashboard-preferences.md) records the rejected server-persisted presentation and on-demand remote-query alternatives. [ADR-0004](adr/0004-dashboard-managed-ssh-inventory.md) records the constrained inventory boundary; [ADR-0005](adr/0005-dashboard-persisted-collector-settings.md) records the collector-settings allowlist and rejected general editor.
 
 ## Process and service model
 
@@ -90,7 +89,7 @@ The user service is intentional because OpenSSH configuration, `known_hosts`, ke
 - Connection and complete-probe timeouts are independent and bounded.
 - Repeated host failures use exponential backoff capped at 60 seconds; healthy hosts retain the normal cadence.
 - A measured slow host may use a bounded longer timeout and slower cadence without changing the browser-controlled fleet cadence.
-- A runtime cadence change wakes the scheduler and rebases existing retry deadlines.
+- A persisted cadence change wakes the scheduler and rebases existing retry deadlines; timeout and worker changes apply to future probe cycles.
 - Raw SSH stderr is classified locally and never crosses the browser boundary.
 - Failed hosts keep their last successful data, marked stale and excluded from current totals.
 - SSE sends a heartbeat every 15 seconds and relies on native `EventSource` reconnection.

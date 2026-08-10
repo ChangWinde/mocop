@@ -14,6 +14,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Added validated per-host pacing and timeout overrides for empirically slow GPU nodes.
 - Added a dashboard SSH-alias inventory scan with Git/GitHub/GitLab filtering, constrained add/remove, private atomic persistence, and live scheduler updates.
 - Added three browser-local interface themes with refined system-font typography and clearer settings language.
+- Added a centered, responsive settings workspace with browser-local density and fleet-focus preferences.
+- Added durable dashboard controls for collection cadence, complete-probe timeout, and worker concurrency.
 
 ### Changed
 
@@ -25,6 +27,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Removed the heatmap legend and reduced redundant SSE snapshot publication at poll start.
 - Made backend incident conditions authoritative for both the attention queue and transition history.
 - Expanded the user-service write sandbox only to the selected Mocop configuration directory so atomic dashboard inventory updates work under `ProtectSystem=strict`.
+- Routed the header cadence control through validated atomic configuration persistence while preserving immediate scheduler updates.
 
 ### Fixed
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .config import is_safe_alias
-from .inventory import InventoryController, InventoryError, InventoryRequestError
+from .inventory import DashboardConfigController, InventoryError, InventoryRequestError
 from .service import StateStore
 
 _STATIC_ROOT = Path(__file__).with_name("static")
@@ -21,7 +22,13 @@ _STATIC_ROUTES = {
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
 _MAX_SETTINGS_BODY_BYTES = 128
+_MAX_COLLECTOR_BODY_BYTES = 512
 _MAX_INVENTORY_BODY_BYTES = 512
+_COLLECTOR_SETTINGS_KEYS = {
+    "pollIntervalSeconds",
+    "probeTimeoutSeconds",
+    "maxWorkers",
+}
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -45,7 +52,7 @@ class MonitorHttpServer(ThreadingHTTPServer):
         self,
         address: tuple[str, int],
         state: StateStore,
-        inventory: InventoryController | None = None,
+        inventory: DashboardConfigController | None = None,
     ) -> None:
         self.state = state
         self.inventory = inventory
@@ -121,6 +128,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         request_url = urlsplit(self.path)
         write_limits = {
             "/api/settings/poll-interval": _MAX_SETTINGS_BODY_BYTES,
+            "/api/settings/collector": _MAX_COLLECTOR_BODY_BYTES,
             "/api/settings/hosts": _MAX_INVENTORY_BODY_BYTES,
         }
         body_limit = write_limits.get(request_url.path)
@@ -169,6 +177,9 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         if request_url.path == "/api/settings/hosts":
             self._change_inventory(payload)
             return
+        if request_url.path == "/api/settings/collector":
+            self._change_collector_settings(payload)
+            return
         self._change_poll_interval(payload)
 
     def _change_poll_interval(self, payload: object) -> None:
@@ -177,16 +188,19 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 {"error": "invalid settings schema"}, HTTPStatus.BAD_REQUEST
             )
             return
-        try:
-            interval = self.monitor_server.state.set_poll_interval_seconds(
-                payload["pollIntervalSeconds"]
-            )
-        except ValueError:
+        value = payload["pollIntervalSeconds"]
+        if not self._valid_number(value, 2, 60):
             self._send_json(
                 {"error": "pollIntervalSeconds must be between 2 and 60"},
                 HTTPStatus.BAD_REQUEST,
             )
             return
+        settings = self._persist_collector_settings({"pollIntervalSeconds": value})
+        if settings is None:
+            return
+        interval = self.monitor_server.state.set_poll_interval_seconds(
+            settings["pollIntervalSeconds"]
+        )
         snapshot = self.monitor_server.state.snapshot()
         self._send_json(
             {
@@ -196,6 +210,77 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "collectionStaleAfterSeconds": snapshot["collectionStaleAfterSeconds"],
             }
         )
+
+    def _change_collector_settings(self, payload: object) -> None:
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != _COLLECTOR_SETTINGS_KEYS
+            or not self._valid_number(payload["pollIntervalSeconds"], 2, 60)
+            or not self._valid_number(payload["probeTimeoutSeconds"], 2, 300)
+            or isinstance(payload["maxWorkers"], bool)
+            or not isinstance(payload["maxWorkers"], int)
+            or not 1 <= payload["maxWorkers"] <= 64
+        ):
+            self._send_json(
+                {"error": "invalid collector settings schema"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        settings = self._persist_collector_settings(payload)
+        if settings is None:
+            return
+        try:
+            self.monitor_server.state.set_poll_interval_seconds(
+                settings["pollIntervalSeconds"]
+            )
+        except (KeyError, ValueError):
+            self._send_json(
+                {"error": "collector settings synchronization failed"},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        snapshot = self.monitor_server.state.snapshot()
+        self._send_json(
+            {
+                "version": snapshot["version"],
+                "startedAt": snapshot["startedAt"],
+                "collectionStaleAfterSeconds": snapshot["collectionStaleAfterSeconds"],
+                "collectorSettings": settings,
+            }
+        )
+
+    @staticmethod
+    def _valid_number(value: object, minimum: float, maximum: float) -> bool:
+        return (
+            not isinstance(value, bool)
+            and isinstance(value, int | float)
+            and math.isfinite(float(value))
+            and minimum <= value <= maximum
+        )
+
+    def _persist_collector_settings(
+        self, settings: dict[str, object]
+    ) -> dict[str, object] | None:
+        inventory = self.monitor_server.inventory
+        if inventory is None:
+            self._send_json(
+                {"error": "configuration management is unavailable"},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return None
+        try:
+            return inventory.update_collector_settings(settings)
+        except InventoryRequestError:
+            self._send_json(
+                {"error": "invalid collector settings"},
+                HTTPStatus.BAD_REQUEST,
+            )
+        except InventoryError:
+            self._send_json(
+                {"error": "collector settings could not be updated"},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        return None
 
     def _change_inventory(self, payload: object) -> None:
         if (
@@ -412,7 +497,7 @@ def serve_in_thread(
     host: str,
     port: int,
     state: StateStore,
-    inventory: InventoryController | None = None,
+    inventory: DashboardConfigController | None = None,
 ) -> tuple[MonitorHttpServer, threading.Thread]:
     server = MonitorHttpServer((host, port), state, inventory)
     thread = threading.Thread(

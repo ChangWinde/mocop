@@ -16,8 +16,8 @@ from .models import ProbeResult, ServerState, utc_after, utc_now
 from .probe import ResourceProbe
 
 _MAX_FAILURE_BACKOFF_SECONDS = 60.0
-_MIN_RUNTIME_POLL_INTERVAL_SECONDS = 2.0
-_MAX_RUNTIME_POLL_INTERVAL_SECONDS = 60.0
+_MIN_RUNTIME_POLL_INTERVAL_SECONDS = 1.0
+_MAX_RUNTIME_POLL_INTERVAL_SECONDS = 3600.0
 
 
 class StateStore:
@@ -96,7 +96,7 @@ class StateStore:
             <= interval
             <= _MAX_RUNTIME_POLL_INTERVAL_SECONDS
         ):
-            raise ValueError("poll interval must be between 2 and 60 seconds")
+            raise ValueError("poll interval must be between 1 and 3600 seconds")
         with self._condition:
             if interval == self._poll_interval_seconds:
                 return interval
@@ -382,6 +382,7 @@ class MonitorService:
             with self._config_lock:
                 self._config = config
                 self._config_generation += 1
+            self._state.set_poll_interval_seconds(config.poll_interval_seconds)
             self._state.update_expected_gpu_counts(config.expected_gpu_counts)
             try:
                 hosts = self._host_source.hosts(config)

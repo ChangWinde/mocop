@@ -7,6 +7,8 @@ const DEFAULT_PREFERENCES = Object.freeze({
   gpuSort: "host",
   heatMetric: "utilization",
   theme: "midnight",
+  density: "comfortable",
+  serverFilter: "all",
   showTemperature: true,
   showPower: true,
 });
@@ -14,6 +16,8 @@ const SERVER_SORT_VALUES = new Set(["custom", "host", "status", "gpu", "cpu"]);
 const GPU_SORT_VALUES = new Set(["host", "utilization", "memory", "temperature", "power"]);
 const HEAT_METRIC_VALUES = new Set(["utilization", "memory", "temperature"]);
 const THEME_VALUES = new Set(["midnight", "graphite", "aurora"]);
+const DENSITY_VALUES = new Set(["comfortable", "compact"]);
+const SERVER_FILTER_VALUES = new Set(["all", "issues", "busy", "available", "stale"]);
 
 function safeStoredHosts(value) {
   if (!Array.isArray(value)) return [];
@@ -38,6 +42,10 @@ function loadPreferences() {
         ? stored.heatMetric : DEFAULT_PREFERENCES.heatMetric,
       theme: THEME_VALUES.has(stored.theme)
         ? stored.theme : DEFAULT_PREFERENCES.theme,
+      density: DENSITY_VALUES.has(stored.density)
+        ? stored.density : DEFAULT_PREFERENCES.density,
+      serverFilter: SERVER_FILTER_VALUES.has(stored.serverFilter)
+        ? stored.serverFilter : DEFAULT_PREFERENCES.serverFilter,
       showTemperature: typeof stored.showTemperature === "boolean"
         ? stored.showTemperature : DEFAULT_PREFERENCES.showTemperature,
       showPower: typeof stored.showPower === "boolean"
@@ -50,11 +58,12 @@ function loadPreferences() {
 
 const preferences = loadPreferences();
 document.documentElement.dataset.theme = preferences.theme;
+document.documentElement.dataset.density = preferences.density;
 
 const view = {
   snapshot: null,
   selectedHost: "all",
-  serverFilter: "all",
+  serverFilter: preferences.serverFilter,
   attentionFilter: "all",
   filter: "all",
   sort: preferences.gpuSort,
@@ -100,6 +109,8 @@ const view = {
   inventoryPendingHost: null,
   inventoryConfirmHost: null,
   inventoryConfirmTimer: null,
+  collectorSettingsDirty: false,
+  collectorSettingsSaving: false,
 };
 
 try {
@@ -123,11 +134,19 @@ const elements = {
   settingsToggle: $("#settings-toggle"),
   settingsDialog: $("#settings-dialog"),
   serverSort: $("#server-sort"),
+  defaultServerFilter: $("#default-server-filter"),
+  interfaceDensity: $("#interface-density"),
   settingsGpuSort: $("#settings-gpu-sort"),
   settingsHeatMetric: $("#settings-heat-metric"),
   showTemperature: $("#show-temperature"),
   showPower: $("#show-power"),
   resetPreferences: $("#reset-preferences"),
+  collectorSettingsForm: $("#collector-settings-form"),
+  settingsPollInterval: $("#settings-poll-interval"),
+  settingsProbeTimeout: $("#settings-probe-timeout"),
+  settingsMaxWorkers: $("#settings-max-workers"),
+  saveCollectorSettings: $("#save-collector-settings"),
+  collectorSettingsStatus: $("#collector-settings-status"),
   inventoryRefresh: $("#inventory-refresh"),
   inventoryStatus: $("#inventory-status"),
   configuredHostCount: $("#configured-host-count"),
@@ -215,6 +234,8 @@ function savePreferences() {
     gpuSort: view.sort,
     heatMetric: view.heatMetric,
     theme: preferences.theme,
+    density: preferences.density,
+    serverFilter: view.serverFilter,
     showTemperature: preferences.showTemperature,
     showPower: preferences.showPower,
   };
@@ -227,12 +248,18 @@ function savePreferences() {
 
 function syncPreferenceControls() {
   elements.serverSort.value = view.serverSort;
+  elements.defaultServerFilter.value = view.serverFilter;
+  elements.interfaceDensity.value = preferences.density;
   elements.gpuSort.value = view.sort;
   elements.settingsGpuSort.value = view.sort;
   elements.settingsHeatMetric.value = view.heatMetric;
   elements.showTemperature.checked = preferences.showTemperature;
   elements.showPower.checked = preferences.showPower;
   document.documentElement.dataset.theme = preferences.theme;
+  document.documentElement.dataset.density = preferences.density;
+  document.querySelectorAll(".fleet-filter").forEach((button) => {
+    button.classList.toggle("active", button.dataset.serverFilter === view.serverFilter);
+  });
   document.querySelectorAll("[data-theme-choice]").forEach((button) => {
     const selected = button.dataset.themeChoice === preferences.theme;
     button.classList.toggle("active", selected);
@@ -248,6 +275,8 @@ function resetPreferences() {
   view.sort = DEFAULT_PREFERENCES.gpuSort;
   view.heatMetric = DEFAULT_PREFERENCES.heatMetric;
   preferences.theme = DEFAULT_PREFERENCES.theme;
+  preferences.density = DEFAULT_PREFERENCES.density;
+  view.serverFilter = DEFAULT_PREFERENCES.serverFilter;
   preferences.showTemperature = DEFAULT_PREFERENCES.showTemperature;
   preferences.showPower = DEFAULT_PREFERENCES.showPower;
   view.serverItemCache.clear();
@@ -481,8 +510,12 @@ async function updatePollInterval() {
       view.snapshot.pollIntervalSeconds = settings.pollIntervalSeconds;
       view.snapshot.collectionStaleAfterSeconds = settings.collectionStaleAfterSeconds;
     }
+    if (view.inventory?.collectorSettings) {
+      view.inventory.collectorSettings.pollIntervalSeconds = settings.pollIntervalSeconds;
+      syncCollectorSettings();
+    }
     elements.refreshInterval.value = String(settings.pollIntervalSeconds);
-    showRefreshFeedback("saved", `采集频率已调整为 ${format(settings.pollIntervalSeconds)} 秒`);
+    showRefreshFeedback("saved", `已保存为 ${format(settings.pollIntervalSeconds)} 秒`);
     renderSummary();
   } catch (_error) {
     syncRefreshControl();
@@ -492,6 +525,31 @@ async function updatePollInterval() {
   }
 }
 
+function normalizeCollectorSettings(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TypeError("Invalid collector settings response");
+  }
+  const pollIntervalSeconds = payload.pollIntervalSeconds;
+  const probeTimeoutSeconds = payload.probeTimeoutSeconds;
+  const maxWorkers = payload.maxWorkers;
+  if (
+    typeof pollIntervalSeconds !== "number"
+    || !Number.isFinite(pollIntervalSeconds)
+    || pollIntervalSeconds < 1
+    || pollIntervalSeconds > 3600
+    || typeof probeTimeoutSeconds !== "number"
+    || !Number.isFinite(probeTimeoutSeconds)
+    || probeTimeoutSeconds < 2
+    || probeTimeoutSeconds > 300
+    || !Number.isSafeInteger(maxWorkers)
+    || maxWorkers < 1
+    || maxWorkers > 64
+  ) {
+    throw new TypeError("Invalid collector settings response");
+  }
+  return { pollIntervalSeconds, probeTimeoutSeconds, maxWorkers };
+}
+
 function normalizeInventory(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new TypeError("Invalid inventory response");
@@ -499,6 +557,7 @@ function normalizeInventory(payload) {
   const configuredHosts = safeStoredHosts(payload.configuredHosts);
   const activeHosts = safeStoredHosts(payload.activeHosts);
   const availableHosts = safeStoredHosts(payload.availableHosts);
+  const collectorSettings = normalizeCollectorSettings(payload.collectorSettings);
   if (
     configuredHosts.length !== payload.configuredHosts?.length
     || activeHosts.length !== payload.activeHosts?.length
@@ -520,7 +579,108 @@ function normalizeInventory(payload) {
     writable: payload.writable,
     ignoredCodeHostCount: Math.max(0, payload.ignoredCodeHostCount),
     excludedHostCount: Math.max(0, payload.excludedHostCount),
+    collectorSettings,
   };
+}
+
+function setCollectorSettingsStatus(kind, message) {
+  elements.collectorSettingsStatus.className = kind;
+  elements.collectorSettingsStatus.textContent = message;
+}
+
+function syncCollectorSettings() {
+  const settings = view.inventory?.collectorSettings;
+  const writable = Boolean(settings && view.inventory.writable);
+  const fields = [
+    elements.settingsPollInterval,
+    elements.settingsProbeTimeout,
+    elements.settingsMaxWorkers,
+  ];
+  fields.forEach((field) => {
+    field.disabled = !writable || view.collectorSettingsSaving;
+  });
+  elements.saveCollectorSettings.disabled = (
+    !writable || view.collectorSettingsSaving || !view.collectorSettingsDirty
+  );
+  if (settings && !view.collectorSettingsDirty) {
+    elements.settingsPollInterval.value = String(settings.pollIntervalSeconds);
+    elements.settingsProbeTimeout.value = String(settings.probeTimeoutSeconds);
+    elements.settingsMaxWorkers.value = String(settings.maxWorkers);
+  }
+  if (!settings) {
+    setCollectorSettingsStatus("", "等待读取本地配置");
+  } else if (!view.inventory.writable) {
+    setCollectorSettingsStatus("error", "当前配置不可由网页修改");
+  } else if (view.collectorSettingsSaving) {
+    setCollectorSettingsStatus("", "正在验证并写入配置…");
+  } else if (!view.collectorSettingsDirty) {
+    setCollectorSettingsStatus("success", "已与本地配置同步");
+  }
+}
+
+function markCollectorSettingsDirty() {
+  view.collectorSettingsDirty = true;
+  setCollectorSettingsStatus("", "有尚未保存的采集策略");
+  syncCollectorSettings();
+}
+
+async function saveCollectorSettings(event) {
+  event.preventDefault();
+  if (
+    view.collectorSettingsSaving
+    || !view.inventory?.writable
+    || !elements.collectorSettingsForm.reportValidity()
+  ) return;
+  const settings = {
+    pollIntervalSeconds: Number(elements.settingsPollInterval.value),
+    probeTimeoutSeconds: Number(elements.settingsProbeTimeout.value),
+    maxWorkers: Number(elements.settingsMaxWorkers.value),
+  };
+  if (!Number.isSafeInteger(settings.maxWorkers)) {
+    setCollectorSettingsStatus("error", "并发探测数必须是整数");
+    return;
+  }
+  view.collectorSettingsSaving = true;
+  syncCollectorSettings();
+  try {
+    const response = await fetch("/api/settings/collector", {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Monitor-Request": "dashboard",
+      },
+      body: JSON.stringify(settings),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const persisted = normalizeCollectorSettings(payload.collectorSettings);
+    if (!Number.isSafeInteger(payload.version) || typeof payload.startedAt !== "string") {
+      throw new TypeError("Invalid collector settings response");
+    }
+    view.inventory.collectorSettings = persisted;
+    view.collectorSettingsDirty = false;
+    view.cadenceSnapshotFloor = {
+      version: payload.version,
+      startedAt: payload.startedAt,
+    };
+    if (view.snapshot?.startedAt === payload.startedAt) {
+      view.snapshot.pollIntervalSeconds = persisted.pollIntervalSeconds;
+      view.snapshot.collectionStaleAfterSeconds = payload.collectionStaleAfterSeconds;
+    }
+    elements.refreshInterval.value = String(persisted.pollIntervalSeconds);
+    syncRefreshControl();
+    renderSummary();
+    setCollectorSettingsStatus("success", "已写入本地配置并立即生效");
+  } catch (_error) {
+    setCollectorSettingsStatus(
+      "error",
+      "保存失败，请检查数值范围、SSH 连接超时与配置权限",
+    );
+  } finally {
+    view.collectorSettingsSaving = false;
+    syncCollectorSettings();
+  }
 }
 
 function inventoryEmpty(message) {
@@ -555,6 +715,7 @@ function inventoryHostRow(host, action) {
 }
 
 function renderInventory() {
+  syncCollectorSettings();
   elements.inventoryRefresh.disabled = view.inventoryLoading || view.inventoryPendingHost != null;
   elements.inventoryRefresh.textContent = view.inventoryLoading ? "扫描中" : "重新扫描";
   if (!view.inventory) {
@@ -2512,9 +2673,9 @@ document.querySelectorAll(".filter").forEach((button) => {
 
 document.querySelectorAll(".fleet-filter").forEach((button) => {
   button.addEventListener("click", () => {
-    document.querySelectorAll(".fleet-filter").forEach((item) => item.classList.remove("active"));
-    button.classList.add("active");
     view.serverFilter = button.dataset.serverFilter;
+    syncPreferenceControls();
+    savePreferences();
     if (view.selectedHost !== "all") selectHost("all");
     else render();
   });
@@ -2596,6 +2757,22 @@ elements.serverSort.addEventListener("change", () => {
   renderServers();
 });
 
+elements.defaultServerFilter.addEventListener("change", () => {
+  if (!SERVER_FILTER_VALUES.has(elements.defaultServerFilter.value)) return;
+  view.serverFilter = elements.defaultServerFilter.value;
+  syncPreferenceControls();
+  savePreferences();
+  if (view.selectedHost !== "all") selectHost("all");
+  else render();
+});
+
+elements.interfaceDensity.addEventListener("change", () => {
+  if (!DENSITY_VALUES.has(elements.interfaceDensity.value)) return;
+  preferences.density = elements.interfaceDensity.value;
+  syncPreferenceControls();
+  savePreferences();
+});
+
 elements.settingsGpuSort.addEventListener("change", () => {
   view.sort = elements.settingsGpuSort.value;
   elements.gpuSort.value = view.sort;
@@ -2633,6 +2810,12 @@ document.querySelectorAll("[data-theme-choice]").forEach((button) => {
 
 elements.resetPreferences.addEventListener("click", resetPreferences);
 elements.inventoryRefresh.addEventListener("click", refreshInventory);
+elements.collectorSettingsForm.addEventListener("submit", saveCollectorSettings);
+[
+  elements.settingsPollInterval,
+  elements.settingsProbeTimeout,
+  elements.settingsMaxWorkers,
+].forEach((field) => field.addEventListener("input", markCollectorSettingsDirty));
 
 elements.refreshInterval.addEventListener("change", updatePollInterval);
 

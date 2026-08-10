@@ -263,9 +263,9 @@
         </div>
         <button class="dialog-close" data-close-dialog="settings-dialog" type="button" aria-label="关闭设置">×</button>
       </div>
-      <p class="dialog-intro">外观与排序仅保存在当前浏览器；节点增删会安全写入 Mocop 配置，但不会接受任意主机或采集命令。</p>
+      <p class="dialog-intro">采集策略与监控节点会安全写入本地配置、立即生效并在重启后恢复；外观、密度和视图偏好仅保存在当前浏览器。</p>
       <div class="settings-sections">
-        <section class="settings-section appearance-settings">
+        <section class="settings-section appearance-settings settings-wide">
           <h3>界面皮肤</h3>
           <div class="theme-grid" role="radiogroup" aria-label="界面皮肤">
             <button class="theme-choice" data-theme-choice="midnight" type="button" role="radio" aria-checked="true">
@@ -281,26 +281,42 @@
               <span><strong>极光青</strong><small>冷静、鲜明的算力氛围</small></span>
             </button>
           </div>
-          <span class="settings-help">使用本机系统字体，不加载第三方字体或视觉资源。</span>
+          <label class="settings-field appearance-density">
+            <span>信息密度</span>
+            <select id="interface-density">
+              <option value="comfortable">舒适</option>
+              <option value="compact">紧凑</option>
+            </select>
+          </label>
+          <span class="settings-help">使用本机系统字体，不加载第三方字体或视觉资源。紧凑模式适合大规模集群。</span>
         </section>
-        <section class="settings-section inventory-settings">
+        <section class="settings-section collector-settings">
           <div class="settings-section-heading">
             <div>
-              <h3>监控节点</h3>
-              <span>从 OpenSSH 配置中发现候选节点</span>
+              <h3>采集策略</h3>
+              <span>写入 config.json，并立即热更新</span>
             </div>
-            <button id="inventory-refresh" class="inline-action" type="button">扫描</button>
+            <span class="persistence-badge">持久化</span>
           </div>
-          <p class="inventory-note">扫描只读取本机 SSH 别名，不会发起连接。Git、GitHub、GitLab 与 <code>exclude_hosts</code> 中的别名会被忽略。</p>
-          <div id="inventory-status" class="inventory-status" role="status">打开设置后自动扫描</div>
-          <div class="inventory-block">
-            <div class="inventory-block-heading"><strong>正在监控</strong><span id="configured-host-count">0</span></div>
-            <div id="configured-host-list" class="inventory-host-list"></div>
-          </div>
-          <div class="inventory-block">
-            <div class="inventory-block-heading"><strong>可添加</strong><span id="available-host-count">0</span></div>
-            <div id="available-host-list" class="inventory-host-list"></div>
-          </div>
+          <form id="collector-settings-form">
+            <label class="settings-field">
+              <span>采集周期</span>
+              <span class="number-field"><input id="settings-poll-interval" type="number" min="2" max="60" step="1" required><small>秒</small></span>
+            </label>
+            <label class="settings-field">
+              <span>单轮探测超时</span>
+              <span class="number-field"><input id="settings-probe-timeout" type="number" min="2" max="300" step="1" required><small>秒</small></span>
+            </label>
+            <label class="settings-field">
+              <span>并发探测数</span>
+              <span class="number-field"><input id="settings-max-workers" type="number" min="1" max="64" step="1" required><small>节点</small></span>
+            </label>
+            <div class="collector-actions">
+              <span id="collector-settings-status" role="status">修改后需要保存</span>
+              <button id="save-collector-settings" class="primary-action" type="submit">保存采集策略</button>
+            </div>
+          </form>
+          <span class="settings-help">较短周期会增加 SSH 与远端查询压力；探测超时必须高于 SSH 连接超时。</span>
         </section>
         <section class="settings-section">
           <h3>服务器列表</h3>
@@ -314,7 +330,17 @@
               <option value="cpu">CPU 利用率</option>
             </select>
           </label>
-          <span class="settings-help">拖动任意服务器会自动切换到自定义顺序。</span>
+          <label class="settings-field">
+            <span>关注视图</span>
+            <select id="default-server-filter">
+              <option value="all">全部服务器</option>
+              <option value="issues">异常节点</option>
+              <option value="busy">计算中节点</option>
+              <option value="available">有空闲 GPU</option>
+              <option value="stale">陈旧节点</option>
+            </select>
+          </label>
+          <span class="settings-help">拖动服务器会自动切换到自定义顺序；关注视图会在下次打开时恢复。</span>
         </section>
         <section class="settings-section">
           <h3>GPU 视图</h3>
@@ -345,8 +371,29 @@
             <input id="show-power" type="checkbox" checked>
           </label>
         </section>
+        <section class="settings-section inventory-settings settings-wide">
+          <div class="settings-section-heading">
+            <div>
+              <h3>监控节点</h3>
+              <span>从 OpenSSH 配置中发现候选节点</span>
+            </div>
+            <button id="inventory-refresh" class="inline-action" type="button">扫描</button>
+          </div>
+          <p class="inventory-note">扫描只读取本机 SSH 别名，不会发起连接。Git、GitHub、GitLab 与 <code>exclude_hosts</code> 中的别名会被忽略。</p>
+          <div id="inventory-status" class="inventory-status" role="status">打开设置后自动扫描</div>
+          <div class="inventory-columns">
+            <div class="inventory-block">
+              <div class="inventory-block-heading"><strong>正在监控</strong><span id="configured-host-count">0</span></div>
+              <div id="configured-host-list" class="inventory-host-list"></div>
+            </div>
+            <div class="inventory-block">
+              <div class="inventory-block-heading"><strong>可添加</strong><span id="available-host-count">0</span></div>
+              <div id="available-host-list" class="inventory-host-list"></div>
+            </div>
+          </div>
+        </section>
       </div>
-      <button id="reset-preferences" class="secondary-action" type="button">恢复默认设置</button>
+      <button id="reset-preferences" class="secondary-action" type="button">恢复浏览器显示默认</button>
     </dialog>
 
     <dialog id="gpu-detail-dialog" class="side-dialog gpu-detail-dialog" aria-labelledby="gpu-detail-title">

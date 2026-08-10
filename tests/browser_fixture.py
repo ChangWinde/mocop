@@ -21,6 +21,11 @@ class DemoInventory:
     def __init__(self) -> None:
         self.configured = ["atlas-01", "atlas-02", "atlas-03"]
         self.available = ["atlas-04", "atlas-05"]
+        self.collector_settings = {
+            "pollIntervalSeconds": 5,
+            "probeTimeoutSeconds": 15,
+            "maxWorkers": 8,
+        }
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -31,6 +36,7 @@ class DemoInventory:
             "autoDiscover": False,
             "ignoredCodeHostCount": 2,
             "excludedHostCount": 1,
+            "collectorSettings": dict(self.collector_settings),
             "writable": True,
         }
 
@@ -44,6 +50,12 @@ class DemoInventory:
         else:
             raise InventoryRequestError("stale demo inventory")
         return self.snapshot()
+
+    def update_collector_settings(
+        self, settings: dict[str, object]
+    ) -> dict[str, object]:
+        self.collector_settings.update(settings)
+        return dict(self.collector_settings)
 
 
 def gpu(

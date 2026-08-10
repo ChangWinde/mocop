@@ -303,6 +303,14 @@ try {
   assert.notEqual(transientConnection.immediate, "正在重连");
   assert.match(transientConnection.className, /live/);
 
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 1440,
+    height: 1000,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
   const personalization = await cdp.evaluate(`(async () => {
     const serverItems = [...document.querySelectorAll(".server-item[data-host]")];
     const utilizationVisible = serverItems.every(
@@ -323,7 +331,26 @@ try {
     for (let attempt = 0; attempt < 20 && document.querySelector("#configured-host-count").textContent !== "3"; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    const settingsDialog = document.querySelector("#settings-dialog");
+    const settingsRect = settingsDialog.getBoundingClientRect();
+    const settingsColumns = getComputedStyle(
+      document.querySelector(".settings-sections")
+    ).gridTemplateColumns.split(" ").length;
     document.querySelector('[data-theme-choice="graphite"]').click();
+    const density = document.querySelector("#interface-density");
+    density.value = "compact";
+    density.dispatchEvent(new Event("change", { bubbles: true }));
+    const serverFilter = document.querySelector("#default-server-filter");
+    serverFilter.value = "busy";
+    serverFilter.dispatchEvent(new Event("change", { bubbles: true }));
+    document.querySelector("#settings-probe-timeout").value = "24";
+    document.querySelector("#settings-probe-timeout").dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("#settings-max-workers").value = "6";
+    document.querySelector("#settings-max-workers").dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("#collector-settings-form").requestSubmit();
+    for (let attempt = 0; attempt < 20 && !document.querySelector("#collector-settings-status").classList.contains("success"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     document.querySelector("#available-host-list .inventory-host-action").click();
     for (let attempt = 0; attempt < 20 && document.querySelector("#configured-host-count").textContent !== "4"; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -335,6 +362,9 @@ try {
     power.checked = false;
     power.dispatchEvent(new Event("change", { bubbles: true }));
     const settingsOpen = document.querySelector("#settings-dialog").open;
+    const persistedCollector = await fetch("/api/inventory", {
+      headers: { "X-Monitor-Request": "dashboard" },
+    }).then((response) => response.json());
     document.querySelector('[data-close-dialog="settings-dialog"]').click();
 
     document.querySelector(".gpu-table-body tbody tr").click();
@@ -344,10 +374,19 @@ try {
       reordered,
       savedServerSort: JSON.parse(localStorage.getItem("mocop.preferences.v1")).serverSort,
       savedTheme: JSON.parse(localStorage.getItem("mocop.preferences.v1")).theme,
+      savedDensity: JSON.parse(localStorage.getItem("mocop.preferences.v1")).density,
+      savedServerFilter: JSON.parse(localStorage.getItem("mocop.preferences.v1")).serverFilter,
       activeTheme: document.documentElement.dataset.theme,
+      activeDensity: document.documentElement.dataset.density,
+      settingsCenterDelta: Math.abs(
+        (settingsRect.left + settingsRect.right) / 2
+          - document.documentElement.clientWidth / 2
+      ),
+      settingsColumns,
       configuredHosts: document.querySelector("#configured-host-count").textContent,
       inventoryStatus: document.querySelector("#inventory-status").textContent,
       settingsOpen,
+      collectorSettings: persistedCollector.collectorSettings,
       gpuSort: document.querySelector("#gpu-sort").value,
       powerHidden: document.body.classList.contains("hide-gpu-power"),
       taskDialogOpen: taskDialog.open,
@@ -363,10 +402,18 @@ try {
   assert.equal(personalization.reordered[0], "atlas-02");
   assert.equal(personalization.savedServerSort, "custom");
   assert.equal(personalization.savedTheme, "graphite");
+  assert.equal(personalization.savedDensity, "compact");
+  assert.equal(personalization.savedServerFilter, "busy");
   assert.equal(personalization.activeTheme, "graphite");
+  assert.equal(personalization.activeDensity, "compact");
+  assert(personalization.settingsCenterDelta < 2);
+  assert.equal(personalization.settingsColumns, 2);
   assert.equal(personalization.configuredHosts, "4");
   assert.match(personalization.inventoryStatus, /atlas-04/);
   assert.equal(personalization.settingsOpen, true);
+  assert.equal(personalization.collectorSettings.pollIntervalSeconds, 2);
+  assert.equal(personalization.collectorSettings.probeTimeoutSeconds, 24);
+  assert.equal(personalization.collectorSettings.maxWorkers, 6);
   assert.equal(personalization.gpuSort, "memory");
   assert.equal(personalization.powerHidden, true);
   assert.equal(personalization.taskDialogOpen, true);
@@ -400,13 +447,21 @@ try {
     mobile: true,
   });
   await new Promise((resolve) => setTimeout(resolve, 200));
-  const mobile = await cdp.evaluate(`({
-    overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
-    gpuMemoryWidth: document.querySelector("#gpu-memory-card")?.getBoundingClientRect().width,
-    gridWidth: document.querySelector(".metrics-grid")?.getBoundingClientRect().width
-  })`);
+  const mobile = await cdp.evaluate(`(() => {
+    document.querySelector("#settings-toggle").click();
+    const rect = document.querySelector("#settings-dialog").getBoundingClientRect();
+    return {
+      overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      gpuMemoryWidth: document.querySelector("#gpu-memory-card")?.getBoundingClientRect().width,
+      gridWidth: document.querySelector(".metrics-grid")?.getBoundingClientRect().width,
+      settingsCenterDelta: Math.abs(
+        (rect.left + rect.right) / 2 - document.documentElement.clientWidth / 2
+      ),
+    };
+  })()`);
   assert.equal(mobile.overflow, false);
   assert(mobile.gpuMemoryWidth > mobile.gridWidth * 0.9);
+  assert(mobile.settingsCenterDelta < 2);
   assert.deepEqual(cdp.errors, []);
 
   console.log(JSON.stringify({

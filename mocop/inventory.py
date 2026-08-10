@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
 import tempfile
@@ -29,14 +30,18 @@ class InventoryRequestError(InventoryError):
     """Raised when a requested inventory transition is not currently valid."""
 
 
-class InventoryController(Protocol):
+class DashboardConfigController(Protocol):
     def snapshot(self) -> dict[str, object]: ...
 
     def change(self, action: str, host: str) -> dict[str, object]: ...
 
+    def update_collector_settings(
+        self, settings: dict[str, object]
+    ) -> dict[str, object]: ...
+
 
 class ConfigInventory:
-    """Project eligible OpenSSH aliases onto the explicit JSON host allowlist."""
+    """Manage the dashboard's bounded projection of the operator JSON config."""
 
     def __init__(
         self,
@@ -98,14 +103,64 @@ class ConfigInventory:
                         metadata.pop(host, None)
 
             data["hosts"] = configured
-            updated = self._atomic_replace(data)
-            try:
-                self._on_config_changed(updated)
-            except Exception as exc:
-                raise InventoryError(
-                    "configuration was saved but runtime synchronization failed"
-                ) from exc
+            updated = self._commit(data)
             return self._snapshot(updated)
+
+    def update_collector_settings(
+        self, settings: dict[str, object]
+    ) -> dict[str, object]:
+        """Persist the dashboard's narrow collection-policy projection."""
+        fields = {
+            "pollIntervalSeconds": "poll_interval_seconds",
+            "probeTimeoutSeconds": "probe_timeout_seconds",
+            "maxWorkers": "max_workers",
+        }
+        if not settings or set(settings) - fields.keys():
+            raise InventoryRequestError("invalid collector settings schema")
+
+        with self._lock:
+            self._require_writable()
+            config = self._load()
+            normalized: dict[str, float | int] = {}
+            for key, value in settings.items():
+                if key == "maxWorkers":
+                    if isinstance(value, bool) or not isinstance(value, int):
+                        raise InventoryRequestError("maxWorkers must be an integer")
+                    if not 1 <= value <= 64:
+                        raise InventoryRequestError("maxWorkers is outside safe bounds")
+                    normalized[key] = value
+                    continue
+                if isinstance(value, bool) or not isinstance(value, int | float):
+                    raise InventoryRequestError(f"{key} must be a finite number")
+                number = float(value)
+                if not math.isfinite(number):
+                    raise InventoryRequestError(f"{key} must be a finite number")
+                if key == "pollIntervalSeconds" and not 2 <= number <= 60:
+                    raise InventoryRequestError(
+                        "pollIntervalSeconds is outside dashboard bounds"
+                    )
+                if key == "probeTimeoutSeconds" and not 2 <= number <= 300:
+                    raise InventoryRequestError(
+                        "probeTimeoutSeconds is outside safe bounds"
+                    )
+                if (
+                    key == "probeTimeoutSeconds"
+                    and number <= config.connect_timeout_seconds
+                ):
+                    raise InventoryRequestError(
+                        "probeTimeoutSeconds must exceed the SSH connect timeout"
+                    )
+                normalized[key] = number
+
+            current = self._collector_settings(config)
+            if all(current[key] == value for key, value in normalized.items()):
+                return current
+
+            data = self._read_object()
+            for key, value in normalized.items():
+                data[fields[key]] = value
+            updated = self._commit(data)
+            return self._collector_settings(updated)
 
     def _load(self) -> MonitorConfig:
         try:
@@ -151,7 +206,16 @@ class ConfigInventory:
                 alias in config.exclude_hosts and not is_code_host_alias(alias)
                 for alias in scanned
             ),
+            "collectorSettings": self._collector_settings(config),
             "writable": self._is_writable_target(),
+        }
+
+    @staticmethod
+    def _collector_settings(config: MonitorConfig) -> dict[str, object]:
+        return {
+            "pollIntervalSeconds": config.poll_interval_seconds,
+            "probeTimeoutSeconds": config.probe_timeout_seconds,
+            "maxWorkers": config.max_workers,
         }
 
     def _read_object(self) -> dict[str, object]:
@@ -184,6 +248,16 @@ class ConfigInventory:
     def _require_writable(self) -> None:
         if not self._is_writable_target():
             raise InventoryError("cluster configuration is not dashboard-writable")
+
+    def _commit(self, data: dict[str, object]) -> MonitorConfig:
+        updated = self._atomic_replace(data)
+        try:
+            self._on_config_changed(updated)
+        except Exception as exc:
+            raise InventoryError(
+                "configuration was saved but runtime synchronization failed"
+            ) from exc
+        return updated
 
     def _atomic_replace(self, data: dict[str, object]) -> MonitorConfig:
         payload = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode(

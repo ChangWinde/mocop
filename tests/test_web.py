@@ -15,6 +15,11 @@ class _Inventory:
     def __init__(self) -> None:
         self.configured = ["gpu-01"]
         self.available = ["gpu-02"]
+        self.collector_settings = {
+            "pollIntervalSeconds": 5,
+            "probeTimeoutSeconds": 15,
+            "maxWorkers": 16,
+        }
 
     def snapshot(self):
         return {
@@ -25,6 +30,7 @@ class _Inventory:
             "autoDiscover": False,
             "ignoredCodeHostCount": 2,
             "excludedHostCount": 1,
+            "collectorSettings": dict(self.collector_settings),
             "writable": True,
         }
 
@@ -38,6 +44,10 @@ class _Inventory:
         else:
             raise InventoryRequestError("inventory changed")
         return self.snapshot()
+
+    def update_collector_settings(self, settings):
+        self.collector_settings.update(settings)
+        return dict(self.collector_settings)
 
 
 class WebTests(unittest.TestCase):
@@ -90,6 +100,9 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="gpu-groups"', body)
         self.assertIn('id="settings-toggle"', body)
         self.assertIn('id="settings-dialog"', body)
+        self.assertIn('id="collector-settings-form"', body)
+        self.assertIn('id="interface-density"', body)
+        self.assertIn('id="default-server-filter"', body)
         self.assertIn('id="server-sort"', body)
         self.assertIn('data-theme-choice="midnight"', body)
         self.assertIn('data-theme-choice="graphite"', body)
@@ -278,7 +291,80 @@ class WebTests(unittest.TestCase):
         self.assertIsInstance(payload["version"], int)
         self.assertIsInstance(payload["startedAt"], str)
         self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 10)
+        self.assertEqual(self.inventory.collector_settings["pollIntervalSeconds"], 10)
         self.assertEqual(response.headers["Connection"], "close")
+
+    def test_updates_all_persisted_collector_settings(self) -> None:
+        request = self.poll_interval_request(
+            json.dumps(
+                {
+                    "pollIntervalSeconds": 2,
+                    "probeTimeoutSeconds": 24,
+                    "maxWorkers": 8,
+                }
+            ).encode(),
+            origin=self.base,
+            path="/api/settings/collector",
+        )
+
+        with urlopen(request, timeout=2) as response:
+            payload = json.load(response)
+
+        self.assertEqual(
+            payload["collectorSettings"],
+            {
+                "pollIntervalSeconds": 2,
+                "probeTimeoutSeconds": 24,
+                "maxWorkers": 8,
+            },
+        )
+        self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 2)
+
+    def test_rejects_invalid_collector_settings(self) -> None:
+        cases = (
+            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24}',
+            b'{"pollIntervalSeconds":1,"probeTimeoutSeconds":24,"maxWorkers":8}',
+            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":true,"maxWorkers":8}',
+            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":2.5}',
+            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":65}',
+            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8,"extra":1}',
+            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8,"maxWorkers":9}',
+        )
+        before = dict(self.inventory.collector_settings)
+
+        for payload in cases:
+            with self.subTest(payload=payload):
+                request = self.poll_interval_request(
+                    payload,
+                    origin=self.base,
+                    path="/api/settings/collector",
+                )
+                with self.assertRaises(HTTPError) as rejected:
+                    urlopen(request, timeout=2)
+                self.assertEqual(rejected.exception.code, 400)
+
+        cross_origin = self.poll_interval_request(
+            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8}',
+            origin="https://attacker.example",
+            path="/api/settings/collector",
+            fetch_site="cross-site",
+        )
+        with self.assertRaises(HTTPError) as rejected_cross_origin:
+            urlopen(cross_origin, timeout=2)
+        self.assertEqual(rejected_cross_origin.exception.code, 403)
+
+        oversized = self.poll_interval_request(
+            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8,"padding":"'
+            + b"x" * 512
+            + b'"}',
+            origin=self.base,
+            path="/api/settings/collector",
+        )
+        with self.assertRaises(HTTPError) as rejected_oversized:
+            urlopen(oversized, timeout=2)
+        self.assertEqual(rejected_oversized.exception.code, 413)
+
+        self.assertEqual(self.inventory.collector_settings, before)
 
     def test_accepts_same_origin_browser_write_through_host_rewriting_proxy(
         self,

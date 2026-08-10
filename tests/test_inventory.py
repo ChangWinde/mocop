@@ -51,8 +51,67 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(snapshot["localHost"], None)
         self.assertEqual(snapshot["ignoredCodeHostCount"], 3)
         self.assertEqual(snapshot["excludedHostCount"], 1)
+        self.assertEqual(
+            snapshot["collectorSettings"],
+            {
+                "pollIntervalSeconds": 5,
+                "probeTimeoutSeconds": 12,
+                "maxWorkers": 8,
+            },
+        )
         self.assertFalse(snapshot["autoDiscover"])
         self.assertTrue(snapshot["writable"])
+
+    def test_updates_collector_settings_atomically_and_persists_them(self) -> None:
+        settings = self.inventory.update_collector_settings(
+            {
+                "pollIntervalSeconds": 2,
+                "probeTimeoutSeconds": 30,
+                "maxWorkers": 7,
+            }
+        )
+
+        reloaded = load_config(self.config_path)
+        self.assertEqual(
+            settings,
+            {
+                "pollIntervalSeconds": 2,
+                "probeTimeoutSeconds": 30,
+                "maxWorkers": 7,
+            },
+        )
+        self.assertEqual(reloaded.poll_interval_seconds, 2)
+        self.assertEqual(reloaded.probe_timeout_seconds, 30)
+        self.assertEqual(reloaded.max_workers, 7)
+        self.assertEqual(self.config_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.updates[-1], reloaded)
+
+    def test_rejects_invalid_collector_settings_without_modifying_config(self) -> None:
+        before = self.config_path.read_bytes()
+        cases = (
+            {},
+            {"pollIntervalSeconds": 1},
+            {"pollIntervalSeconds": True},
+            {"probeTimeoutSeconds": 5},
+            {"probeTimeoutSeconds": float("inf")},
+            {"maxWorkers": 2.5},
+            {"maxWorkers": 65},
+            {"unknown": 1},
+        )
+
+        for settings in cases:
+            with self.subTest(settings=settings), self.assertRaises(InventoryError):
+                self.inventory.update_collector_settings(settings)
+            self.assertEqual(self.config_path.read_bytes(), before)
+
+    def test_noop_collector_update_does_not_rewrite_or_notify(self) -> None:
+        before = self.config_path.stat().st_mtime_ns
+
+        settings = self.inventory.update_collector_settings({"pollIntervalSeconds": 5})
+
+        self.assertEqual(settings["pollIntervalSeconds"], 5)
+        self.assertEqual(self.config_path.stat().st_mtime_ns, before)
+        self.assertEqual(self.updates, [])
 
     def test_add_requires_a_fresh_eligible_scan_and_persists_privately(self) -> None:
         changed = self.inventory.change("add", "gpu-02")
