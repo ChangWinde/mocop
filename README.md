@@ -35,7 +35,7 @@ In Mocop, AI-native describes the product focus: capacity checks, failure diagno
 ## Why Mocop
 
 - GPU-first dashboard with utilization, VRAM, temperature, power, model, driver, per-device tasks, and hardware health
-- Cluster scheduling heatmap and per-host GPU groups that stay collapsed until needed
+- Live GPU capacity matcher, scheduling heatmap, and per-host groups that stay collapsed until needed
 - CPU, load, memory, swap, filesystem capacity, disk I/O, network throughput, and uptime context
 - Drag-to-order servers, five structurally distinct themes, validated browser-local backgrounds, search, filters, bounded trends, incidents, and safe CSV export
 - Dashboard SSH-alias inventory scan with constrained add/remove, Git/GitHub/GitLab filtering, atomic persistence, and live scheduler updates
@@ -204,6 +204,8 @@ Use the centered **Settings** workspace to choose one of five purpose-designed t
 
 Drag any server row to save a custom order. Display preferences stay in the current browser so different viewers do not overwrite one another; collection policy and monitored nodes are clearly marked as durable local-configuration changes. Select a GPU row or heatmap cell to inspect its active CUDA compute tasks and per-process VRAM. Mocop uses refined local system stacks for interface text and tabular metrics and never downloads a third-party font.
 
+Select **Match capacity** to enter a GPU count, minimum free VRAM per device, and optional model. Mocop ranks same-node, same-model candidates from the current snapshot, excludes maintained or unhealthy devices, and clearly separates exact from near matches. This computation runs only in the browser and never starts another SSH query. It is a placement aid, not a reservation; confirm the scheduler state before launching a job.
+
 ### Collect one snapshot
 
 Use one-shot mode for local inspection or a controlled automation pipeline:
@@ -220,7 +222,7 @@ The output contains inventory and telemetry. Store and delete it according to th
 |---|---|
 | GPU | count, utilization, VRAM, temperature, power, model, driver, tasks, ECC, memory-repair and slowdown state, MIG mode |
 | Host | status, CPU, load, memory, swap, disk capacity and I/O, network rate, uptime |
-| Cluster | capacity totals, scheduling heatmap, attention queue, health filters, search |
+| Cluster | capacity matching and totals, scheduling heatmap, attention queue, health filters, search |
 | Operations | bounded trends, state transitions, retry timing, staleness, CSV export |
 
 Failed hosts retain their last successful sample and are marked stale. Stale values remain available for diagnosis but are excluded from current cluster totals.

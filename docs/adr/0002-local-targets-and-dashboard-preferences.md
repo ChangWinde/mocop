@@ -42,6 +42,8 @@ Choose Option B. Add an optional `local_host` alias that must also appear in `ho
 
 Store display-only preferences in a versioned, validated `localStorage` record. Server ordering, GPU sorting, heatmap metric, and optional columns are browser concerns. Dragging a server switches the rail to custom order. Cluster targets, thresholds, cadence defaults, SSH arguments, and commands remain outside browser control.
 
+Capacity matching also remains a browser concern. It transforms the already published snapshot only while its dialog is open, groups devices by host and model, and never becomes an on-demand probe or reservation endpoint.
+
 ## Impact
 
 - A Mocop host can be monitored without running SSH by setting `local_host` to one alias in the explicit allowlist.
@@ -49,3 +51,4 @@ Store display-only preferences in a versioned, validated `localStorage` record. 
 - GPU task freshness matches the normal host cadence at the cost of one additional `nvidia-smi` process query per successful probe.
 - Invalid or stale browser preferences fall back to safe defaults and never prevent telemetry rendering.
 - No new runtime dependency, server-side preference store, or browser-triggered probe route is introduced.
+- Capacity requests add no network or target load and must be presented as placement guidance rather than resource reservation.

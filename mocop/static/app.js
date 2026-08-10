@@ -26,6 +26,13 @@ const HEAT_METRIC_VALUES = new Set(["utilization", "memory", "temperature"]);
 const THEME_VALUES = new Set(["midnight", "graphite", "aurora", "glass", "terminal"]);
 const DENSITY_VALUES = new Set(["comfortable", "compact"]);
 const SERVER_FILTER_VALUES = new Set(["all", "issues", "busy", "available", "stale"]);
+const CAPACITY_HOST_BLOCKERS = new Set(["connectivity", "gpu_availability", "gpu_count"]);
+const CAPACITY_GPU_BLOCKERS = new Set([
+  "gpu_ecc",
+  "gpu_memory_repair",
+  "gpu_slowdown",
+  "gpu_temperature",
+]);
 
 function safeBackgroundVisibility(value) {
   return Number.isInteger(value) && value >= 15 && value <= 70
@@ -120,6 +127,8 @@ const view = {
   draggedHost: null,
   suppressServerClick: false,
   selectedGpu: null,
+  capacityRequest: { gpuCount: 1, minVramGiB: 24, model: "any" },
+  capacityModelSignature: "",
   inventory: null,
   inventoryLoading: false,
   inventoryMessage: "",
@@ -155,6 +164,16 @@ const elements = {
   connectionText: $("#connection-text"),
   settingsToggle: $("#settings-toggle"),
   settingsDialog: $("#settings-dialog"),
+  capacityToggle: $("#capacity-toggle"),
+  capacityDialog: $("#capacity-dialog"),
+  capacityForm: $("#capacity-form"),
+  capacityGpuCount: $("#capacity-gpu-count"),
+  capacityVram: $("#capacity-vram"),
+  capacityModel: $("#capacity-model"),
+  capacityRule: $("#capacity-rule"),
+  capacitySummary: $("#capacity-summary"),
+  capacityUpdated: $("#capacity-updated"),
+  capacityResults: $("#capacity-results"),
   serverSort: $("#server-sort"),
   defaultServerFilter: $("#default-server-filter"),
   interfaceDensity: $("#interface-density"),
@@ -1462,6 +1481,203 @@ function serverConditions(server) {
     }));
 }
 
+function capacityConditions(host) {
+  if (!Array.isArray(view.incidents?.active)) return [];
+  return view.incidents.active.filter(
+    (condition) => condition.host === host && !condition.silenced,
+  );
+}
+
+function gpuHasCapacityBlocker(gpu, conditions) {
+  const identity = String(gpu.uuid || gpu.index);
+  const resourcePrefix = `GPU ${gpu.index}`;
+  return conditions.some((condition) => {
+    if (!CAPACITY_GPU_BLOCKERS.has(condition.category)) return false;
+    const key = String(condition.conditionKey || "");
+    const resource = String(condition.resource || "");
+    return key.endsWith(`:${identity}`)
+      || resource === resourcePrefix
+      || resource.startsWith(`${resourcePrefix} `);
+  });
+}
+
+function capacityMatches() {
+  const request = view.capacityRequest;
+  const minimumFreeMiB = request.minVramGiB * 1024;
+  const busyThreshold = limits().gpu_busy_pct;
+  const temperatureThreshold = limits().gpu_temperature_warning_c;
+  const candidates = [];
+  let excludedMaintenance = 0;
+  let excludedHealth = 0;
+
+  view.snapshot.servers.forEach((server) => {
+    if (server.status !== "online" || server.stale) return;
+    if (server.maintenance) {
+      excludedMaintenance += 1;
+      return;
+    }
+    const conditions = capacityConditions(server.host);
+    if (conditions.some((condition) => CAPACITY_HOST_BLOCKERS.has(condition.category))) {
+      excludedHealth += 1;
+      return;
+    }
+    const groups = new Map();
+    server.gpus.forEach((gpu) => {
+      const model = gpu.name || "Unknown NVIDIA GPU";
+      if (request.model !== "any" && model !== request.model) return;
+      const group = groups.get(model) || [];
+      group.push(gpu);
+      groups.set(model, group);
+    });
+    groups.forEach((gpus, model) => {
+      const available = gpus.filter((gpu) => {
+        const utilization = optionalMetric(gpu, "utilization_gpu_pct");
+        const freeMemory = optionalMetric(gpu, "memory_free_mib");
+        const temperature = optionalMetric(gpu, "temperature_c");
+        return Number.isFinite(utilization)
+          && utilization < busyThreshold
+          && Number.isFinite(freeMemory)
+          && freeMemory >= minimumFreeMiB
+          && (!Number.isFinite(temperature) || temperature < temperatureThreshold)
+          && !gpuHasCapacityBlocker(gpu, conditions);
+      });
+      const freeValues = available.map((gpu) => numeric(gpu.memory_free_mib));
+      const utilizationValues = available.map((gpu) => numeric(gpu.utilization_gpu_pct));
+      candidates.push({
+        host: server.host,
+        model,
+        total: gpus.length,
+        available,
+        satisfies: available.length >= request.gpuCount,
+        deficit: Math.max(0, request.gpuCount - available.length),
+        minimumFreeMiB: freeValues.length ? Math.min(...freeValues) : 0,
+        averageUtilization: utilizationValues.length
+          ? utilizationValues.reduce((sum, value) => sum + value, 0) / utilizationValues.length
+          : 101,
+        cpuUsage: optionalMetric(server.system || {}, "cpu_usage_pct"),
+      });
+    });
+  });
+  candidates.sort((first, second) => (
+    Number(second.satisfies) - Number(first.satisfies)
+    || first.deficit - second.deficit
+    || second.available.length - first.available.length
+    || second.minimumFreeMiB - first.minimumFreeMiB
+    || first.averageUtilization - second.averageUtilization
+    || first.host.localeCompare(second.host)
+  ));
+  return { candidates, excludedMaintenance, excludedHealth };
+}
+
+function syncCapacityModels() {
+  const models = [...new Set(
+    view.snapshot.servers.flatMap((server) =>
+      server.gpus.map((gpu) => gpu.name || "Unknown NVIDIA GPU")),
+  )].sort((first, second) => first.localeCompare(second));
+  const signature = JSON.stringify(models);
+  if (signature === view.capacityModelSignature) return;
+  view.capacityModelSignature = signature;
+  const selected = models.includes(view.capacityRequest.model)
+    ? view.capacityRequest.model : "any";
+  const options = [create("option", "", "不限型号")];
+  options[0].value = "any";
+  models.forEach((model) => {
+    const option = create("option", "", model);
+    option.value = model;
+    options.push(option);
+  });
+  elements.capacityModel.replaceChildren(...options);
+  elements.capacityModel.value = selected;
+  view.capacityRequest.model = selected;
+}
+
+function capacityCandidateCard(candidate) {
+  const card = create(
+    "article",
+    `capacity-candidate ${candidate.satisfies ? "match" : "near"}`,
+  );
+  const heading = create("div", "capacity-candidate-heading");
+  const identity = create("span", "capacity-candidate-identity");
+  identity.append(
+    create("strong", "", candidate.host),
+    create("small", "", candidate.model),
+  );
+  heading.append(
+    identity,
+    create(
+      "em",
+      "",
+      candidate.satisfies ? "满足需求" : `还差 ${candidate.deficit} 张`,
+    ),
+  );
+  const metrics = create("div", "capacity-candidate-metrics");
+  metrics.append(
+    create("span", "", `可用 ${candidate.available.length} / ${candidate.total}`),
+    create(
+      "span",
+      "",
+      candidate.available.length
+        ? `最低空闲 ${memory(candidate.minimumFreeMiB)}` : "没有符合条件的 GPU",
+    ),
+    create(
+      "span",
+      "",
+      candidate.averageUtilization <= 100
+        ? `平均负载 ${format(candidate.averageUtilization, 1)}%` : "负载未知",
+    ),
+    create(
+      "span",
+      "",
+      Number.isFinite(candidate.cpuUsage)
+        ? `CPU ${format(candidate.cpuUsage, 1)}%` : "CPU 采样中",
+    ),
+  );
+  const devices = create("div", "capacity-devices");
+  candidate.available.slice(0, 12).forEach((gpu) => {
+    devices.append(
+      create("span", "", `GPU ${gpu.index} · ${memory(gpu.memory_free_mib)} 空闲`),
+    );
+  });
+  if (candidate.available.length > 12) {
+    devices.append(create("span", "", `+${candidate.available.length - 12}`));
+  }
+  const locate = create("button", "inline-action", "查看节点");
+  locate.type = "button";
+  locate.addEventListener("click", () => {
+    elements.capacityDialog.close();
+    selectHost(candidate.host);
+  });
+  card.append(heading, metrics, devices, locate);
+  return card;
+}
+
+function renderCapacityMatcher() {
+  if (!elements.capacityDialog.open || !view.snapshot) return;
+  syncCapacityModels();
+  const request = view.capacityRequest;
+  const result = capacityMatches();
+  const exact = result.candidates.filter((candidate) => candidate.satisfies).length;
+  elements.capacityRule.textContent = `空闲 = GPU 负载低于 ${format(limits().gpu_busy_pct)}% · 单卡可用显存至少 ${format(request.minVramGiB)} GiB · 无 GPU 硬件告警`;
+  elements.capacityUpdated.textContent = age(view.snapshot.lastPollCompletedAt);
+  elements.capacitySummary.textContent = exact
+    ? `${exact} 个节点 / 型号组合满足 ${request.gpuCount} 张 GPU`
+    : `暂无组合满足 ${request.gpuCount} 张 GPU，显示最接近结果`;
+  const visible = exact
+    ? result.candidates.filter((candidate) => candidate.satisfies).slice(0, 12)
+    : result.candidates.slice(0, 8);
+  if (!visible.length) {
+    const detail = [
+      result.excludedMaintenance ? `${result.excludedMaintenance} 台维护中` : "",
+      result.excludedHealth ? `${result.excludedHealth} 台存在资产或连接告警` : "",
+    ].filter(Boolean).join("，");
+    elements.capacityResults.replaceChildren(
+      create("div", "capacity-empty", detail || "当前没有可用于匹配的在线 GPU 节点"),
+    );
+    return;
+  }
+  elements.capacityResults.replaceChildren(...visible.map(capacityCandidateCard));
+}
+
 function conditionCategory(condition) {
   if (condition.kind === "connectivity") return "connection";
   if (condition.kind === "disk") return "storage";
@@ -2712,6 +2928,7 @@ function openGpuDetail(server, gpu) {
     key: String(gpu.uuid || gpu.index),
   };
   if (elements.settingsDialog.open) elements.settingsDialog.close();
+  if (elements.capacityDialog.open) elements.capacityDialog.close();
   if (!elements.gpuDetailDialog.open) elements.gpuDetailDialog.showModal();
   renderGpuDetail();
 }
@@ -3067,6 +3284,7 @@ function render() {
   renderTrends();
   renderTable();
   renderGpuDetail();
+  renderCapacityMatcher();
   refreshRelativeTimes();
 }
 
@@ -3125,6 +3343,7 @@ async function syncIncidents() {
     renderServers();
     renderTable();
     renderGpuDetail();
+    renderCapacityMatcher();
   } catch (_error) {
     // Current telemetry remains usable if the optional transition feed is unavailable.
   } finally {
@@ -3244,8 +3463,42 @@ elements.gpuSort.addEventListener("change", () => {
 elements.settingsToggle.addEventListener("click", () => {
   syncPreferenceControls();
   if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
+  if (elements.capacityDialog.open) elements.capacityDialog.close();
   elements.settingsDialog.showModal();
   refreshInventory();
+});
+
+elements.capacityToggle.addEventListener("click", () => {
+  if (!view.snapshot) return;
+  if (elements.settingsDialog.open) elements.settingsDialog.close();
+  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
+  elements.capacityGpuCount.value = String(view.capacityRequest.gpuCount);
+  elements.capacityVram.value = String(view.capacityRequest.minVramGiB);
+  syncCapacityModels();
+  elements.capacityModel.value = view.capacityRequest.model;
+  elements.capacityDialog.showModal();
+  renderCapacityMatcher();
+});
+
+elements.capacityForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!elements.capacityForm.reportValidity()) return;
+  const gpuCount = Number(elements.capacityGpuCount.value);
+  const minVramGiB = Number(elements.capacityVram.value);
+  if (
+    !Number.isSafeInteger(gpuCount)
+    || gpuCount < 1
+    || gpuCount > 256
+    || !Number.isInteger(minVramGiB)
+    || minVramGiB < 0
+    || minVramGiB > 512
+  ) return;
+  view.capacityRequest = {
+    gpuCount,
+    minVramGiB,
+    model: elements.capacityModel.value,
+  };
+  renderCapacityMatcher();
 });
 
 document.querySelectorAll("[data-close-dialog]").forEach((button) => {

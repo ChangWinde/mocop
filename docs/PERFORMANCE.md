@@ -17,6 +17,7 @@ This document defines reproducible measurement conditions and architecture thres
 - GPU groups, host lists, heatmap cells, and incident panels reuse DOM when their input signature is unchanged; the browser consumes backend incident decisions instead of re-evaluating thresholds.
 - GPU groups start collapsed, which bounds initial table rendering in the cluster-wide view.
 - Maintenance evaluation is an in-memory pass over the configured host-window map during snapshot publication; it starts no timer, process, probe, or database write.
+- Capacity matching scans the existing browser snapshot only while its dialog is open; it starts no request and groups devices by host and model in linear time before sorting the bounded candidate set.
 
 ## OpenSSH connection reuse
 
@@ -36,7 +37,7 @@ The browser fixture uses three fictional nodes and eight GPUs:
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-This test covers collapsed GPU groups, GPU task and health details, drag ordering, display preferences, the scheduling heatmap, resource cards, authoritative incidents, transient SSE errors, responsive layout, and the runtime-cadence race. CI duration is not a performance benchmark.
+This test covers collapsed GPU groups, GPU task and health details, capacity matching, drag ordering, display preferences, the scheduling heatmap, resource cards, authoritative incidents, transient SSE errors, responsive layout, and the runtime-cadence race. CI duration is not a performance benchmark.
 
 Measure one complete collection in an authorized environment with:
 

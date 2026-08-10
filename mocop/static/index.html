@@ -176,6 +176,7 @@
                     <option value="power">功耗</option>
                   </select>
                 </label>
+                <button id="capacity-toggle" class="tool-button capacity-trigger" type="button" aria-haspopup="dialog">匹配算力</button>
                 <button id="export-csv" class="tool-button" type="button">导出当前结果</button>
                 <button id="toggle-groups" class="group-toggle" type="button" hidden>全部展开</button>
                 <label class="search-box">
@@ -418,6 +419,39 @@
         </section>
       </div>
       <button id="reset-preferences" class="secondary-action" type="button">恢复浏览器显示默认</button>
+    </dialog>
+
+    <dialog id="capacity-dialog" class="side-dialog capacity-dialog" aria-labelledby="capacity-title">
+      <div class="dialog-heading">
+        <div>
+          <span class="section-kicker">CAPACITY MATCHER</span>
+          <h2 id="capacity-title">匹配可用 GPU</h2>
+        </div>
+        <button class="dialog-close" data-close-dialog="capacity-dialog" type="button" aria-label="关闭算力匹配">×</button>
+      </div>
+      <p class="dialog-intro">按同一节点、同一型号匹配当前空闲 GPU。计算完全基于浏览器中的最新快照，不会触发额外 SSH 请求。</p>
+      <form id="capacity-form" class="capacity-form">
+        <label>
+          <span>GPU 数量</span>
+          <input id="capacity-gpu-count" type="number" min="1" max="256" step="1" value="1" required>
+        </label>
+        <label>
+          <span>每卡最少可用显存</span>
+          <span class="capacity-vram-field"><input id="capacity-vram" type="number" min="0" max="512" step="1" value="24" required><small>GiB</small></span>
+        </label>
+        <label>
+          <span>GPU 型号</span>
+          <select id="capacity-model"><option value="any">不限型号</option></select>
+        </label>
+        <button class="primary-action" type="submit">开始匹配</button>
+      </form>
+      <div class="capacity-rule"><i></i><span id="capacity-rule">空闲判定将在获得数据后显示</span></div>
+      <div class="capacity-heading">
+        <div><span class="section-kicker">LIVE CANDIDATES</span><h3 id="capacity-summary">等待 GPU 快照</h3></div>
+        <span id="capacity-updated">实时更新</span>
+      </div>
+      <div id="capacity-results" class="capacity-results"></div>
+      <p class="capacity-footnote">匹配结果不是资源预留；启动任务前请重新确认节点状态和调度系统中的实际占用。</p>
     </dialog>
 
     <dialog id="gpu-detail-dialog" class="side-dialog gpu-detail-dialog" aria-labelledby="gpu-detail-title">

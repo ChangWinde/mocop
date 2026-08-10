@@ -303,6 +303,34 @@ try {
   assert.notEqual(transientConnection.immediate, "正在重连");
   assert.match(transientConnection.className, /live/);
 
+  const capacity = await cdp.evaluate(`(() => {
+    document.querySelector("#capacity-toggle").click();
+    const initialMatches = document.querySelectorAll("#capacity-results .capacity-candidate.match").length;
+    document.querySelector("#capacity-gpu-count").value = "2";
+    document.querySelector("#capacity-vram").value = "60";
+    document.querySelector("#capacity-form").requestSubmit();
+    const dialog = document.querySelector("#capacity-dialog");
+    const rect = dialog.getBoundingClientRect();
+    const result = {
+      open: dialog.open,
+      initialMatches,
+      matches: document.querySelectorAll("#capacity-results .capacity-candidate.match").length,
+      firstHost: document.querySelector("#capacity-results .capacity-candidate.match strong")?.textContent,
+      summary: document.querySelector("#capacity-summary")?.textContent,
+      rule: document.querySelector("#capacity-rule")?.textContent,
+      centerDelta: Math.abs((rect.left + rect.right) / 2 - document.documentElement.clientWidth / 2),
+    };
+    dialog.close();
+    return result;
+  })()`);
+  assert.equal(capacity.open, true);
+  assert.equal(capacity.initialMatches, 2);
+  assert.equal(capacity.matches, 1);
+  assert.equal(capacity.firstHost, "atlas-02");
+  assert.match(capacity.summary, /1 个节点/);
+  assert.match(capacity.rule, /60 GiB/);
+  assert(capacity.centerDelta < 2);
+
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 1440,
     height: 1000,
@@ -636,7 +664,7 @@ try {
   assert.deepEqual(cdp.errors, []);
 
   console.log(JSON.stringify({
-    browser: "chrome", initial, final, transientConnection, personalization,
+    browser: "chrome", initial, final, transientConnection, capacity, personalization,
     persistedAppearance, mobile, removedBackground,
   }));
 } catch (error) {
