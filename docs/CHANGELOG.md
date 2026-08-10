@@ -21,6 +21,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Added a snapshot-only GPU capacity matcher with same-node/model constraints, free-VRAM requests, health exclusions, and ranked near matches.
 - Added config-backed host groups with bounded dashboard editing, live state updates, grouped fleet navigation, and cached rendering.
 - Added a dependency-free OpenMetrics 1.0 endpoint for current collection, cluster, host, GPU, and hardware-health gauges.
+- Added low-cardinality per-host raw and maintenance-aware actionable incident gauges.
 
 ### Changed
 

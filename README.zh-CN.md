@@ -233,7 +233,7 @@ scrape_configs:
       - targets: ["127.0.0.1:8787"]
 ```
 
-端点包含采集健康、集群容量与告警计数、逐节点可用性与系统资源，以及当前 GPU 利用率、显存、温度、功耗、任务数量和硬件健康指标。它只序列化已有快照，绝不会额外发起探测。陈旧节点资源不会伪装成当前时序，`mocop_host_up` 与 `mocop_host_stale` 仍会保留真实可用性；进程名和 PID 刻意不进入标签，以避免敏感信息与高基数。抓取兼容性见 [Prometheus 官方格式说明](https://prometheus.io/docs/instrumenting/exposition_formats/)。
+端点包含采集健康、集群容量、集群与逐节点的原始/可操作告警计数、逐节点可用性与系统资源，以及当前 GPU 利用率、显存、温度、功耗、任务数量和硬件健康指标。它只序列化已有快照，绝不会额外发起探测。陈旧节点资源不会伪装成当前时序，`mocop_host_up` 与 `mocop_host_stale` 仍会保留真实可用性；进程名和 PID 刻意不进入标签，以避免敏感信息与高基数。抓取兼容性见 [Prometheus 官方格式说明](https://prometheus.io/docs/instrumenting/exposition_formats/)。
 
 ## 控制台数据
 

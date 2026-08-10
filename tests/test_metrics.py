@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 
+from mocop.config import MaintenanceWindowConfig
 from mocop.metrics import render_openmetrics
 from mocop.models import GpuHealthMetrics, GpuMetrics, ProbeResult, SystemMetrics
 from mocop.service import StateStore
@@ -94,6 +96,8 @@ class OpenMetricsTests(unittest.TestCase):
         )
         self.assertIn('mocop_host_up{host="gpu-01"} 1\n', body)
         self.assertIn('mocop_host_up{host="gpu-02"} 0\n', body)
+        self.assertIn('mocop_host_incidents_active{host="gpu-02"} 1\n', body)
+        self.assertIn('mocop_host_incidents_actionable{host="gpu-02"} 1\n', body)
         self.assertIn(
             'mocop_gpu_utilization_ratio{host="gpu-01",index="0",uuid=',
             body,
@@ -102,6 +106,21 @@ class OpenMetricsTests(unittest.TestCase):
         self.assertIn("mocop_gpu_memory_total_bytes", body)
         self.assertIn(" 85899345920\n", body)
         self.assertIn("mocop_collection_duration_seconds 0.5\n", body)
+
+        self.store.set_maintenance_windows(
+            (
+                (
+                    "gpu-02",
+                    MaintenanceWindowConfig(
+                        until=datetime.now(timezone.utc) + timedelta(hours=1),
+                        reason="Network work",
+                    ),
+                ),
+            )
+        )
+        silenced = render_openmetrics(self.store.snapshot()).decode()
+        self.assertIn('mocop_host_incidents_active{host="gpu-02"} 1\n', silenced)
+        self.assertIn('mocop_host_incidents_actionable{host="gpu-02"} 0\n', silenced)
 
     def test_escapes_untrusted_labels_and_omits_stale_gpu_samples(self) -> None:
         body = render_openmetrics(self.store.snapshot()).decode()

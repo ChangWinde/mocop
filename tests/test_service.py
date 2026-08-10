@@ -256,6 +256,15 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(
             snapshot["servers"][0]["maintenance"]["reason"], "Driver upgrade"
         )
+        self.assertEqual(
+            snapshot["servers"][0]["incidents"],
+            {
+                "active": 1,
+                "critical": 1,
+                "actionable": 0,
+                "actionableCritical": 0,
+            },
+        )
         self.assertTrue(incidents["active"][0]["silenced"])
         self.assertEqual(incidents["active"][0]["maintenanceReason"], "Driver upgrade")
         self.assertNotIn("silenced", incidents["events"][0])
@@ -265,6 +274,7 @@ class StateStoreTests(unittest.TestCase):
         unsilenced = store.snapshot()
 
         self.assertEqual(unsilenced["stats"]["actionableIncidents"], 1)
+        self.assertEqual(unsilenced["servers"][0]["incidents"]["actionable"], 1)
         self.assertGreater(unsilenced["incidentVersion"], previous_revision)
         self.assertFalse(store.incidents(10)["active"][0]["silenced"])
 

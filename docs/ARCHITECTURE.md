@@ -66,7 +66,7 @@ The optional `local_host` alias must be present in the explicit host allowlist. 
 
 Each host result is published as soon as it completes. A collection cycle writes authoritative completion time and duration when all scheduled work finishes. The state version increases on observable changes, which lets SSE clients reject older snapshots that arrive after a cadence update.
 
-`StateStore` retains the current snapshot, bounded successful history per host, and a bounded incident ring. It does not persist telemetry. Trends and incident bodies are fetched only when needed; SSE snapshots carry the current state and compact incident metadata. OpenMetrics requests copy the current snapshot under the normal state lock, then format it after releasing that lock.
+`StateStore` retains the current snapshot, bounded successful history per host, and a bounded incident ring. It does not persist telemetry. Trends and incident bodies are fetched only when needed; SSE snapshots carry the current state plus raw/actionable incident counts per cluster and host. OpenMetrics requests copy the current snapshot under the normal state lock, then format it after releasing that lock.
 
 `IncidentPolicy` is the sole authority for connectivity, CPU, memory, swap, filesystem, GPU availability, pressure, temperature, and hardware-health conditions. `IncidentTracker` applies bounded activation and recovery cycles while preserving previous resource conditions across failed probes, so transient samples and missing telemetry are not mistaken for stable failure or recovery.
 

@@ -353,11 +353,19 @@ class StateStore:
     def _snapshot_locked(self) -> dict[str, object]:
         servers = [state.to_dict() for state in self._servers.values()]
         active_maintenance = self._active_maintenance_locked()
+        host_incidents = self._incidents.counts_by_host()
         for server in servers:
             host = str(server["host"])
             window = active_maintenance.get(host)
             server["maintenance"] = window.to_dict() if window else None
             server["group"] = self._host_groups.get(host)
+            incident_count, critical_count = host_incidents.get(host, (0, 0))
+            server["incidents"] = {
+                "active": incident_count,
+                "critical": critical_count,
+                "actionable": 0 if window else incident_count,
+                "actionableCritical": 0 if window else critical_count,
+            }
         online = sum(server["status"] == "online" for server in servers)
         current_servers = [server for server in servers if server["status"] == "online"]
         gpus = [gpu for server in current_servers for gpu in server["gpus"]]

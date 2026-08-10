@@ -491,6 +491,16 @@ class IncidentTracker:
             ),
         )
 
+    def counts_by_host(self) -> dict[str, tuple[int, int]]:
+        return {
+            host: (
+                len(active),
+                sum(condition.severity == "critical" for condition in active.values()),
+            )
+            for host, active in self._active.items()
+            if active
+        }
+
     def _append(
         self,
         host: str,

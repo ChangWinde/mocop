@@ -233,7 +233,7 @@ scrape_configs:
       - targets: ["127.0.0.1:8787"]
 ```
 
-The endpoint includes collection health, cluster capacity and incident counts, per-host availability and system resources, and current GPU utilization, VRAM, temperature, power, process count, and hardware-health gauges. It serializes the existing snapshot and never triggers another probe. Stale host resources are excluded from current resource series, while `mocop_host_up` and `mocop_host_stale` preserve availability truth. Process names and PIDs are intentionally omitted to avoid sensitive, high-cardinality labels. See the [official exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/) for scraper compatibility.
+The endpoint includes collection health, cluster capacity, raw/actionable incident counts per cluster and host, per-host availability and system resources, and current GPU utilization, VRAM, temperature, power, process count, and hardware-health gauges. It serializes the existing snapshot and never triggers another probe. Stale host resources are excluded from current resource series, while `mocop_host_up` and `mocop_host_stale` preserve availability truth. Process names and PIDs are intentionally omitted to avoid sensitive, high-cardinality labels. See the [official exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/) for scraper compatibility.
 
 ## Dashboard data
 

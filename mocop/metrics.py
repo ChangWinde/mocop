@@ -185,6 +185,26 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         ),
         ("mocop_cluster_gpus", "GPUs on currently online servers.", "gpus"),
         ("mocop_cluster_gpus_busy", "Currently busy GPUs.", "busyGpus"),
+        (
+            "mocop_cluster_servers_issue",
+            "Servers with any current issue.",
+            "issueServers",
+        ),
+        (
+            "mocop_cluster_servers_actionable_issue",
+            "Servers with a current issue excluding maintained hosts.",
+            "actionableIssueServers",
+        ),
+        (
+            "mocop_cluster_servers_incident",
+            "Servers with an active incident.",
+            "incidentServers",
+        ),
+        (
+            "mocop_cluster_servers_actionable_incident",
+            "Servers with an active incident excluding maintained hosts.",
+            "actionableIncidentServers",
+        ),
         ("mocop_cluster_incidents_active", "Raw active incidents.", "activeIncidents"),
         (
             "mocop_cluster_incidents_critical",
@@ -238,6 +258,10 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         "maintenance": [],
         "polling": [],
         "failures": [],
+        "incidents": [],
+        "critical_incidents": [],
+        "actionable_incidents": [],
+        "actionable_critical_incidents": [],
         "latency": [],
         "cpu": [],
         "load": [],
@@ -301,6 +325,17 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         _append_optional(
             host_samples["failures"], host_labels, raw_server.get("consecutiveFailures")
         )
+        incidents = raw_server.get("incidents")
+        incidents = incidents if isinstance(incidents, Mapping) else {}
+        for sample_key, field in (
+            ("incidents", "active"),
+            ("critical_incidents", "critical"),
+            ("actionable_incidents", "actionable"),
+            ("actionable_critical_incidents", "actionableCritical"),
+        ):
+            _append_optional(
+                host_samples[sample_key], host_labels, incidents.get(field)
+            )
         latency = _seconds_from_milliseconds(raw_server.get("latencyMs"))
         if latency is not None:
             host_samples["latency"].append((host_labels, latency))
@@ -417,6 +452,30 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
             "failures",
             "mocop_host_consecutive_failures",
             "Consecutive failed probes for the host.",
+            None,
+        ),
+        (
+            "incidents",
+            "mocop_host_incidents_active",
+            "Raw active incidents for the host.",
+            None,
+        ),
+        (
+            "critical_incidents",
+            "mocop_host_incidents_critical",
+            "Raw active critical incidents for the host.",
+            None,
+        ),
+        (
+            "actionable_incidents",
+            "mocop_host_incidents_actionable",
+            "Active incidents for the host excluding maintenance silence.",
+            None,
+        ),
+        (
+            "actionable_critical_incidents",
+            "mocop_host_incidents_actionable_critical",
+            "Active critical incidents for the host excluding maintenance silence.",
             None,
         ),
         (
