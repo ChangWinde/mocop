@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 
 from mocop.inventory import InventoryRequestError
 from mocop.models import (
@@ -175,6 +176,7 @@ def system(hostname: str, cpu: float, memory_used: float) -> SystemMetrics:
 
 
 def demo_state() -> StateStore:
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     state = StateStore(
         5,
         host_groups=(
@@ -195,7 +197,7 @@ def demo_state() -> StateStore:
                 gpu("atlas-01", 2, 14, 38_400, 57),
                 gpu("atlas-01", 3, 2, 2_048, 35),
             ),
-            observed_at="2026-08-09T09:30:00Z",
+            observed_at=observed_at,
             system=system("atlas-01", 68, 712_704),
         )
     )
@@ -210,7 +212,7 @@ def demo_state() -> StateStore:
                 gpu("atlas-02", 2, 8, 12_288, 42),
                 gpu("atlas-02", 3, 0, 1_024, 32),
             ),
-            observed_at="2026-08-09T09:30:00Z",
+            observed_at=observed_at,
             system=system("atlas-02", 53, 601_088),
         )
     )
@@ -220,7 +222,7 @@ def demo_state() -> StateStore:
             status="unreachable",
             latency_ms=5_000,
             message="SSH connection timed out",
-            observed_at="2026-08-09T09:30:00Z",
+            observed_at=observed_at,
         )
     )
     state.record_poll_cycle(0.42)
