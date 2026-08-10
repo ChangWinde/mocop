@@ -30,6 +30,20 @@ git config core.hooksPath .githooks
 - Never commit a real `config/mocop.json`, SSH address, username, key, inventory name or telemetry export. Use `examples/mocop.example.json` with fictional aliases.
 - Preserve the dependency-free runtime unless measurements and an ADR justify a new dependency.
 
+## Writing standard
+
+Documentation and interface text must tell the reader what the feature does, what action to take, and what happens next.
+
+- Put the conclusion or required action first. Use one main claim per sentence.
+- Name the concrete component, state change, storage location, limit, and failure behavior when they matter.
+- Separate current behavior from recommendations and known limitations.
+- Define a necessary technical term at first use; remove terminology that does not help the reader act.
+- Remove promotional adjectives and abstract claims such as “smart,” “seamless,” or “more robust” unless a measured behavior immediately explains them.
+- Keep essential instructions in the README and link implementation detail to the focused architecture, security, or performance document.
+- Write Chinese copy naturally rather than translating English sentence structure word for word.
+
+Prefer “Mocop retries a failed host with a delay of up to 60 seconds” over “Mocop provides an intelligent and robust retry experience.” A reader should not need to infer the subject, action, result, or boundary.
+
 ## Commits
 
 Each commit must represent one independently reviewable intent and leave the repository verifiable. Use the Forge subject format:

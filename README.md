@@ -20,46 +20,35 @@
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
   <a href="#configuration">Configuration</a> ·
-  <a href="#architecture">Architecture</a> ·
-  <a href="#security-boundary">Security</a>
+  <a href="#failure-behavior">Troubleshooting</a> ·
+  <a href="#security">Security</a>
 </p>
 
 ![Mocop dashboard with fictional cluster data](docs/assets/dashboard.png)
 
-Mocop provides a live, GPU-first view of an NVIDIA compute cluster. It collects GPU, CPU, memory, swap, disk, and network metrics through the OpenSSH configuration you already use, then streams each completed host result to a local web dashboard.
+Mocop is a local web dashboard for NVIDIA GPU clusters. It uses existing OpenSSH aliases to collect GPU, CPU, memory, swap, disk, and network data, then streams each host result to the browser as soon as it completes.
 
-Remote machines need no agent, database, Python environment, or open monitoring port. The local runtime uses only the Python standard library and the system OpenSSH client.
+Remote hosts need no agent, database, Python installation, or monitoring port. They need Linux `/proc` and `nvidia-smi` for NVIDIA GPU data. Mocop itself uses the Python standard library and the system OpenSSH client.
 
-In Mocop, AI-native describes the product focus: capacity checks, failure diagnosis, and scheduling decisions for AI training and inference clusters. The collection path does not call an AI API or send telemetry to a third party.
+Here, **AI-native** means that the interface is built around GPU capacity, task placement, and failure diagnosis. Mocop does not call an AI service or upload telemetry.
 
-## Why Mocop
+## Features
 
-- GPU-first dashboard with utilization, VRAM, temperature, power, model, driver, per-device tasks, and hardware health
-- Live GPU capacity matcher, scheduling heatmap, and per-host groups that stay collapsed until needed
-- CPU, load, memory, swap, filesystem capacity, disk I/O, network throughput, and uptime context
-- Drag-to-order servers, five structurally distinct themes, validated browser-local backgrounds, search, filters, bounded trends, incidents, and safe CSV export
-- Dashboard SSH-alias inventory scan with constrained add/remove, Git/GitHub/GitLab filtering, atomic persistence, and live scheduler updates
-- Dependency-free OpenMetrics 1.0 endpoint for Prometheus/Grafana integration
-- Expected GPU inventory, authoritative incidents, anti-flap activation/recovery, failure backoff, and stale-data handling
-- Time-bounded maintenance windows that keep telemetry live while separating silenced incidents from actionable work
-- Explicit host allowlist, loopback binding, strict host-key checking, fixed remote script, and resource limits
-
-## Requirements
-
-- Linux and Python 3.10 or newer on the Mocop host
-- OpenSSH client
-- Key-based or `ssh-agent` access that works without an interactive prompt
-- Linux `/proc` on monitored hosts
-- `nvidia-smi` on hosts where NVIDIA GPU metrics are required
-- A user-level systemd manager only when using the optional managed service
-
-Verify every host fingerprint manually before unattended monitoring creates its first connection.
+- GPU utilization, VRAM, temperature, power, model, driver, hardware health, and per-GPU processes
+- GPU capacity matching, scheduling heatmap, host groups, search, filters, and CSV export
+- CPU, load, memory, swap, disk capacity and I/O, network rate, and uptime
+- Incidents with anti-flap thresholds, stale-data handling, failure backoff, and timed maintenance windows
+- Config-backed host inventory, expected GPU counts, local-host collection, and host groups
+- Five browser-local themes, compact mode, saved ordering, and validated local backgrounds
+- OpenMetrics 1.0 endpoint for Prometheus and Grafana
 
 ## Quick start
 
-### 1. Create OpenSSH aliases
+Mocop requires Linux, Python 3.10 or newer, OpenSSH, and non-interactive SSH access to each remote node. Verify host fingerprints manually before enabling unattended collection.
 
-Mocop monitors aliases, not raw connection strings. Define one explicit alias for each compute node in `~/.ssh/config`:
+### 1. Configure SSH
+
+Add one explicit alias per compute node to `~/.ssh/config`:
 
 ```sshconfig
 Host gpu-node-01
@@ -69,80 +58,53 @@ Host gpu-node-01
     IdentitiesOnly yes
 ```
 
-The address belongs to the documentation-only `192.0.2.0/24` range. Replace every example value with your own environment. If a node requires a jump host, keep that connection detail in OpenSSH:
-
-```sshconfig
-Host gpu-bastion
-    HostName 192.0.2.5
-    User cluster-monitor
-
-Host gpu-node-*
-    ProxyJump gpu-bastion
-```
-
-Connect once interactively to verify the host fingerprint, then confirm that unattended access works:
+The address above is reserved for documentation. Replace it with your own host, then verify the connection:
 
 ```bash
 ssh gpu-node-01 true
 ssh -o BatchMode=yes gpu-node-01 true
 ```
 
-The jump host and unrelated aliases such as Git remotes are connection infrastructure, not monitored compute nodes. Do not add them to Mocop's `hosts` list.
+Keep `ProxyJump`, ports, users, and identities in OpenSSH. Do not add jump hosts or Git remotes to Mocop's monitored `hosts` list.
 
-### 2. Install Mocop
-
-Install an isolated command with [`uv`](https://docs.astral.sh/uv/):
+### 2. Install and initialize
 
 ```bash
 uv tool install git+https://github.com/ChangWinde/mocop.git
-```
-
-### 3. Create the cluster configuration
-
-```bash
 mocop init --host gpu-node-01 --host gpu-node-02
 ```
 
-This creates the complete `~/.config/mocop/config.json` with mode `0600`. Only aliases in `hosts` are monitored. The generated configuration keeps `auto_discover` disabled, so jump hosts, Git aliases, and wildcard SSH entries are not added implicitly. The initial collection cadence is 5 seconds.
+`mocop init` creates `~/.config/mocop/config.json` with mode `0600`. It monitors only the aliases passed with `--host`, disables automatic discovery, and uses a 5-second collection interval.
 
-Review the [complete example configuration](examples/mocop.example.json) before changing timeouts, concurrency, history limits, or thresholds.
-
-### 4. Start the dashboard
+### 3. Start the dashboard
 
 ```bash
 mocop service install
 ```
 
-Open <http://127.0.0.1:8787>.
+Open <http://127.0.0.1:8787>. The command installs, enables, and starts a user-level systemd service. It does not change the system linger policy.
 
-`mocop service install` validates the configuration, writes a hardened user unit, enables it, and starts it immediately. Package installation itself does not modify systemd. Use `mocop` for a foreground process when a service is unnecessary.
+Run `mocop` for a foreground process, or manage the service with:
 
 ```bash
 mocop service status
 mocop service uninstall
 ```
 
-The service starts with the user's systemd manager. If it must run before that user logs in, an administrator can enable lingering after reviewing how the account stores SSH credentials:
+## Configuration
 
-```bash
-loginctl enable-linger <user>
-```
-
-Mocop never changes the linger policy automatically.
-
-## Common workflows
-
-### Change the monitored host set
-
-Open **Settings → Monitored nodes** to scan literal aliases from the configured OpenSSH files. Scanning reads configuration only; it does not connect to a candidate. Recognizable Git, GitHub, and GitLab aliases plus entries in `exclude_hosts` are omitted. An add is accepted only for a fresh scanned alias, and a removal requires a second confirmation. Mocop persists the host list atomically with mode `0600` and updates the running scheduler without a restart. Use **Set group** on an explicit host to share one concise placement or ownership group across every browser; choose **Node group** sorting to render stable sections in the fleet rail.
-
-Use the JSON directly when you also need to maintain expected GPU counts, per-host overrides, or explicit infrastructure exclusions. `mocop init` refuses to overwrite an existing configuration. Keep automatic discovery disabled and list only compute-node aliases:
+The generated file is complete. Edit it directly only when you need fields not exposed in the dashboard. This excerpt shows the main inventory fields:
 
 ```json
 {
   "auto_discover": false,
-  "hosts": ["gpu-node-01", "gpu-node-02"],
+  "hosts": ["monitor-host", "gpu-node-01", "gpu-node-02"],
   "exclude_hosts": ["gpu-bastion", "git-host"],
+  "local_host": "monitor-host",
+  "expected_gpu_counts": {
+    "gpu-node-01": 8,
+    "gpu-node-02": 8
+  },
   "host_groups": {
     "gpu-node-01": "training",
     "gpu-node-02": "inference"
@@ -150,180 +112,83 @@ Use the JSON directly when you also need to maintain expected GPU counts, per-ho
 }
 ```
 
-This is an inventory excerpt, not a complete replacement configuration. Keep the other fields generated by `mocop init`. `host_groups` keys must reference explicit, active `hosts`; one host has at most one shared group. `exclude_hosts` is a final deny-list and is especially useful for jump hosts or custom code-host aliases that do not visibly contain a `git`, `github`, or `gitlab` token. Restart the service after a manual file edit; dashboard inventory and group changes hot-update the current process.
+- `hosts` is the explicit allowlist. `exclude_hosts` always wins.
+- `local_host` names one entry in `hosts` that should be probed without SSH.
+- `expected_gpu_counts` reports missing devices.
+- `host_groups` provides shared navigation groups.
+- `host_overrides` changes cadence or timeout for a measured slow node.
 
-### Change and persist collection policy
+See the [complete example](examples/mocop.example.json) for all fields and safe bounds. Restart the service after editing JSON manually. Changes made in the dashboard are validated, written atomically, and applied without a restart.
 
-Use the dashboard selector to change the collection cadence to any interval from 2 to 60 seconds. The centered **Settings → Collection policy** workspace also exposes the complete-probe timeout and worker concurrency. These controls validate and atomically update the selected local `config.json`, hot-update the actual scheduler, and are restored on the next service start. The initial default remains 5 seconds.
+### What is persisted
 
-Shorter cadence, longer timeouts, and higher concurrency all increase collection pressure. Mocop therefore keeps strict bounds and does not expose SSH paths, commands, listeners, thresholds, or arbitrary configuration keys to the browser.
+| Setting | Storage | Survives service restart | Shared across browsers |
+|---|---|---:|---:|
+| Collection interval, probe timeout, worker count | `config.json` | Yes | Yes |
+| Monitored hosts, groups, maintenance windows | `config.json` | Yes | Yes |
+| Theme, density, sorting, filters, visible GPU columns | browser `localStorage` | Yes | No |
+| Custom background | browser `IndexedDB` | Yes | No |
 
-### Silence planned maintenance without stopping collection
+Browser settings are lost only when that browser's site data is cleared or its display preferences are reset. Removing a custom background is a separate action.
 
-Open **Settings → Monitored nodes**, choose **Set maintenance**, enter a short reason, and select 1 hour, 4 hours, 24 hours, or 7 days. The window is stored in `config.json`, takes effect without a restart, and expires automatically. You can end it immediately from the same control.
+The dashboard allows a 2–60 second interval, a 2–300 second probe timeout, and 1–64 workers. Short intervals and high concurrency increase SSH and remote-host load.
 
-Maintenance never pauses SSH collection, removes an incident, or fabricates a recovery. Mocop continues to show the node's true status and transition history, while reporting raw active incidents separately from the smaller actionable set. This keeps planned work out of the attention queue without creating a monitoring blind spot.
+## Daily use
 
-### Detect missing GPUs and noisy resource samples
+- Select a GPU row or heatmap cell to inspect its processes and per-process VRAM.
+- Use **Match capacity** to find same-host, same-model GPUs with enough free VRAM. The result is not a reservation.
+- Set a maintenance window to silence actionable alerts while collection continues.
+- Scan SSH aliases in **Settings → Monitored nodes** to add or remove eligible compute nodes.
+- Upload a PNG, JPEG, WebP, or AVIF background up to 32 MiB. Sources above 8 MiB are compressed locally; no image is uploaded.
+- Export one current snapshot with `mocop --once > snapshot.json`.
 
-Declare the expected device count for stable compute nodes and tune incident stability in the configuration:
+## Prometheus
 
-```json
-{
-  "expected_gpu_counts": {
-    "gpu-node-01": 8,
-    "gpu-node-02": 8
-  },
-  "host_overrides": {
-    "gpu-node-02": {
-      "poll_interval_seconds": 30,
-      "probe_timeout_seconds": 20
-    }
-  },
-  "incidents": {
-    "resource_open_cycles": 2,
-    "recovery_cycles": 2,
-    "gpu_idle_memory_cycles": 12
-  }
-}
-```
-
-Expected-count and override keys must reference active aliases in the explicit `hosts` list. Use a host override only after measuring a node whose own resource query exceeds the fleet timeout: its longer timeout restores complete data, while its slower cadence prevents that expensive probe from running every global cycle. Connectivity and GPU-query loss surface immediately. Resource pressure requires consecutive samples, recovery requires consecutive healthy samples, and idle GPUs retaining significant VRAM use the longer window. This prevents one noisy sample from flooding the incident feed.
-
-### Monitor the machine running Mocop
-
-Give the local machine an inventory alias, add it to `hosts`, and set the same alias as `local_host`:
-
-```json
-{
-  "hosts": ["monitor-host", "gpu-node-01", "gpu-node-02"],
-  "local_host": "monitor-host"
-}
-```
-
-This is an inventory excerpt. Keep the remaining generated fields. `local_host` does not need an OpenSSH entry: Mocop runs the same fixed, bounded probe locally and bypasses SSH. Only one local alias is supported, and it must also be present in the explicit `hosts` list.
-
-### Personalize the dashboard
-
-Use the centered **Settings** workspace to choose one of five purpose-designed themes, comfortable or compact density, the default fleet focus, server and GPU sorting, the heatmap metric, and optional GPU columns. The glass and terminal themes change geometry, surface treatment, depth and typography rather than only changing colors. You may also choose a PNG, JPEG, WebP or AVIF background up to 32 MiB and control its visibility. Sources above 8 MiB are resized and compressed to a bounded WebP in the browser. Mocop validates the container and decoded dimensions, stores at most 8 MiB only in this browser, and never uploads the image to the service.
-
-Drag any server row to save a custom order. Display preferences stay in the current browser so different viewers do not overwrite one another; collection policy and monitored nodes are clearly marked as durable local-configuration changes. Select a GPU row or heatmap cell to inspect its active CUDA compute tasks and per-process VRAM. Mocop uses refined local system stacks for interface text and tabular metrics and never downloads a third-party font.
-
-Select **Match capacity** to enter a GPU count, minimum free VRAM per device, and optional model. Mocop ranks same-node, same-model candidates from the current snapshot, excludes maintained or unhealthy devices, and clearly separates exact from near matches. This computation runs only in the browser and never starts another SSH query. It is a placement aid, not a reservation; confirm the scheduler state before launching a job.
-
-### Collect one snapshot
-
-Use one-shot mode for local inspection or a controlled automation pipeline:
-
-```bash
-mocop --once > snapshot.json
-```
-
-The output contains inventory and telemetry. Store and delete it according to the same policy used for infrastructure logs.
-
-### Scrape current metrics with Prometheus
-
-Mocop exposes the current in-memory snapshot at `GET /metrics` using OpenMetrics 1.0. A Prometheus instance on the same machine can use:
+`GET /metrics` exports the current in-memory snapshot in OpenMetrics 1.0 format and does not start another probe:
 
 ```yaml
 scrape_configs:
   - job_name: mocop
-    metrics_path: /metrics
     static_configs:
       - targets: ["127.0.0.1:8787"]
 ```
 
-The endpoint includes collection health, cluster capacity, raw/actionable incident counts per cluster and host, per-host availability and system resources, and current GPU utilization, VRAM, temperature, power, process count, and hardware-health gauges. It serializes the existing snapshot and never triggers another probe. Stale host resources are excluded from current resource series, while `mocop_host_up` and `mocop_host_stale` preserve availability truth. Process names and PIDs are intentionally omitted to avoid sensitive, high-cardinality labels. See the [official exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/) for scraper compatibility.
+The endpoint includes collection health, host availability, incidents, system resources, and current GPU metrics. Stale resource values, process names, and PIDs are not exported.
 
-## Dashboard data
+## Failure behavior
 
-| Area | Data |
-|---|---|
-| GPU | count, utilization, VRAM, temperature, power, model, driver, tasks, ECC, memory-repair and slowdown state, MIG mode |
-| Host | status, CPU, load, memory, swap, disk capacity and I/O, network rate, uptime |
-| Cluster | capacity matching and totals, scheduling heatmap, attention queue, health filters, search |
-| Operations | bounded trends, state transitions, retry timing, staleness, CSV and OpenMetrics export |
+Mocop publishes healthy hosts without waiting for slow hosts. Failed hosts keep their last successful sample but are marked stale and excluded from current cluster totals. Repeated failures back off for up to 60 seconds.
 
-Failed hosts retain their last successful sample and are marked stale. Stale values remain available for diagnosis but are excluded from current cluster totals.
+The collection interval is the target cadence, not a guarantee that every full-cluster cycle finishes within that time. A connection timeout can make the cycle duration longer while completed hosts continue to update through SSE.
 
-## Configuration
-
-| Field | Purpose | Range or default |
-|---|---|---|
-| `hosts` / `exclude_hosts` | OpenSSH alias allowlist and exclusions | empty by default |
-| `auto_discover` | discover explicit `Host` aliases from OpenSSH config | `false` |
-| `local_host` | optional alias in `hosts` to probe without SSH | `null` |
-| `expected_gpu_counts` | expected device count by explicit host alias | empty; 0 to 256 per host |
-| `host_overrides` | optional per-host collection cadence and complete-probe timeout | empty; same bounds as global values |
-| `maintenance_windows` | UTC expiry and reason by explicit host alias | empty; dashboard offers 1 hour to 7 days |
-| `host_groups` | shared navigation group by explicit host alias | empty; visible text up to 48 characters |
-| `poll_interval_seconds` | global collection cadence | 1 to 3600; default 5, dashboard 2 to 60 |
-| `probe_timeout_seconds` | complete collection timeout for one host | 2 to 300; dashboard-managed |
-| `connect_timeout_seconds` | SSH connection timeout | 1 to 120; less than probe timeout |
-| `max_output_bytes` | combined SSH stdout and stderr limit | 64 KiB to 16 MiB |
-| `max_workers` | concurrent host probes | 1 to 64; dashboard-managed |
-| `listen_host` / `listen_port` | dashboard listener | `127.0.0.1:8787` |
-| `history_points` | successful samples retained per host | 12 to 8640 |
-| `incident_history_points` | state transitions retained in memory | 20 to 5000 |
-| `collection_stale_cycles` | delay threshold measured in collection cycles | 2 to 12 |
-| `incidents` | consecutive activation, recovery, and idle-VRAM windows | 1 to 60 cycles |
-| `thresholds` | CPU, memory, swap, disk, GPU temperature, utilization, and VRAM thresholds | see example |
-
-Configuration is resolved in this order:
-
-1. `--config`
-2. `MOCOP_CONFIG`
-3. `$XDG_CONFIG_HOME/mocop/config.json`, or `~/.config/mocop/config.json`
-4. `config/mocop.json` in the current directory
-5. the bundled safe default with an empty host list and loopback listener
-
-Host aliases may contain letters, numbers, dots, underscores, and hyphens. Restart the service after changing the file:
+Test the same SSH path outside Mocop before changing timeouts:
 
 ```bash
-systemctl --user restart mocop.service
+ssh -o BatchMode=yes gpu-node-01 true
+ssh -G gpu-node-01 | grep -E '^(hostname|port|user|proxyjump|controlmaster) '
 ```
 
-## Architecture
+If several nodes that share one `ProxyJump`, VPN, or FRP route fail together, inspect that shared route first. Restarting Mocop does not repair an unavailable tunnel or remote SSH service.
 
-```text
-JSON host allowlist ──▶ bounded scheduler ──┬──▶ OpenSSH
-                                           └──▶ local shell
-                                                  │
-                                         fixed read-only probe
-                                    /proc · df · nvidia-smi
-                                                  │
-browser ◀──── SSE / JSON ◀──── bounded in-memory state
-```
+## Security
 
-Each remote host uses one logical SSH round trip per cycle; the optional local target uses one bounded shell process. Base GPU metrics, compute tasks, and optional hardware-health data are isolated sections in the same fixed probe, so a health-query failure cannot hide system or base GPU telemetry. Results are published as they complete, so a slow node does not delay a healthy node. Repeated failures back off to at most 60 seconds. Snapshots, trends, incidents, and OpenMetrics exposition use bounded memory structures and are never persisted by Mocop.
+Mocop accepts only explicit SSH aliases and runs one fixed, read-only probe. It enforces host-key checking, batch mode, timeouts, output limits, bounded concurrency, private atomic configuration writes, and safe rendering of remote text.
 
-See the [architecture](docs/ARCHITECTURE.md), [performance methodology](docs/PERFORMANCE.md), and [repository layout decision](docs/adr/0001-repository-layout.md) for implementation details.
+The service has no built-in user accounts and listens on `127.0.0.1` by default. If you expose the dashboard or `/metrics` remotely, place it behind authenticated TLS or a private VPN.
 
-## Security boundary
-
-The browser cannot provide an arbitrary host, command, path, or raw configuration. It may add only a literal alias from a fresh, server-side OpenSSH scan; recognizable Git/GitHub/GitLab aliases and configured exclusions are denied. It may assign only a bounded visible group name to an already explicit host. Its only collection-policy fields are bounded cadence, complete-probe timeout, and worker concurrency. Targets still enter the explicit local JSON allowlist, while the remote probe remains fixed and versioned. Mocop enforces strict host-key checking, batch mode, timeouts, output limits, concurrency limits, atomic private config writes, and safe rendering for untrusted remote text.
-
-Mocop has no built-in user accounts and listens on loopback by default. `/metrics` contains the same operational inventory class as the dashboard. Any remote deployment must add TLS and authenticated authorization through a reverse proxy or VPN.
-
-Read the [threat model](docs/SECURITY.md) before changing a trust boundary. Report vulnerabilities through the process in the [security policy](.github/SECURITY.md).
+Read the [threat model](docs/SECURITY.md) and [security policy](.github/SECURITY.md) before changing a trust boundary.
 
 ## Development
 
 ```bash
-git clone https://github.com/ChangWinde/mocop.git
-cd mocop
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q mocop tests
+python3 -m unittest discover -s tests -p 'test_*.py'
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
-node --check mocop/static/app.js
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-CI runs syntax, format, lint, and unit checks on Python 3.10 through 3.14. A separate source-install and headless Chrome job verifies the populated GPU dashboard, collapsed GPU groups, shared node grouping, centered responsive settings, browser preference persistence, durable collector controls, SSH inventory controls, and cadence/SSE race handling.
-
-Read the [contribution guide](.github/CONTRIBUTING.md), [changelog](docs/CHANGELOG.md), and [code of conduct](.github/CODE_OF_CONDUCT.md) before submitting a change.
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md), [architecture](docs/ARCHITECTURE.md), [performance](docs/PERFORMANCE.md), and the [changelog](docs/CHANGELOG.md).
 
 ## License
 
-Mocop is available under the [MIT License](LICENSE).
+[MIT](LICENSE)
