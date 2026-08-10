@@ -467,7 +467,7 @@ class IncidentTracker:
             "events": [event.to_dict() for event in reversed(events[-limit:])],
         }
 
-    def counts(self) -> tuple[int, int]:
+    def counts(self) -> tuple[int, int, frozenset[str]]:
         conditions = [
             condition
             for active in self._active.values()
@@ -476,6 +476,7 @@ class IncidentTracker:
         return (
             len(conditions),
             sum(condition.severity == "critical" for condition in conditions),
+            frozenset(host for host, active in self._active.items() if active),
         )
 
     def _append(

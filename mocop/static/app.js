@@ -1016,7 +1016,8 @@ function renderSummary() {
     -Infinity,
     ...currentGpus.map((gpu) => numeric(gpu.temperature_c, -Infinity)),
   );
-  const serverCritical = snapshot.stats.servers > 0 && snapshot.stats.onlineServers === 0;
+  const serverCritical = numeric(snapshot.stats.criticalIncidents) > 0
+    || (snapshot.stats.servers > 0 && snapshot.stats.onlineServers === 0);
   const cpuCritical = cpu != null && cpu >= 95;
   const memoryCritical = memoryPct >= 95;
   const gpuCritical = hottestGpu >= threshold.gpu_temperature_warning_c + 5;
@@ -1031,13 +1032,18 @@ function renderSummary() {
     ? `已使用 ${memory(snapshot.stats.memoryUsedMiB)}，总计 ${memory(snapshot.stats.memoryTotalMiB)}`
     : "等待 GPU 显存样本";
   elements.serverRatio.textContent = `${snapshot.stats.onlineServers} / ${snapshot.stats.servers}`;
-  elements.serverHealth.textContent = snapshot.stats.issueServers ? "需关注" : "健康";
-  elements.serverHealth.classList.toggle("warning", snapshot.stats.issueServers > 0);
+  elements.serverHealth.textContent = snapshot.stats.criticalIncidents
+    ? "严重" : snapshot.stats.issueServers ? "需关注" : "健康";
+  elements.serverHealth.classList.toggle(
+    "warning",
+    snapshot.stats.issueServers > 0 && !serverCritical,
+  );
+  elements.serverHealth.classList.toggle("critical", serverCritical);
   elements.serverCard.classList.toggle("is-warning", snapshot.stats.issueServers > 0 && !serverCritical);
   elements.serverCard.classList.toggle("is-critical", serverCritical);
   elements.serverBar.style.width = `${clamp(onlineRatio)}%`;
   elements.serverDetail.textContent = snapshot.stats.issueServers
-    ? `${snapshot.stats.issueServers} 台服务器异常`
+    ? `${snapshot.stats.issueServers} 台需关注 · ${snapshot.stats.activeIncidents} 个问题`
     : "所有服务器运行正常";
   elements.averageCpu.textContent = cpu == null ? "—" : format(cpu, 1);
   elements.cpuHealth.textContent = cpu == null

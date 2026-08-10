@@ -235,6 +235,8 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(incidents["active"][0]["category"], "gpu_count")
         self.assertEqual(incidents["active"][0]["value"], 0)
         self.assertEqual(incidents["active"][0]["threshold"], 2)
+        self.assertEqual(store.snapshot()["stats"]["incidentServers"], 1)
+        self.assertEqual(store.snapshot()["stats"]["issueServers"], 1)
 
 
 class _HostSource:

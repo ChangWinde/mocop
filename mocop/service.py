@@ -287,7 +287,12 @@ class StateStore:
         network_tx = sum(float(system["network_tx_bps"] or 0) for system in systems)
         disk_read = sum(float(system["disk_read_bps"] or 0) for system in systems)
         disk_write = sum(float(system["disk_write_bps"] or 0) for system in systems)
-        active_incidents, critical_incidents = self._incidents.counts()
+        active_incidents, critical_incidents, active_incident_hosts = (
+            self._incidents.counts()
+        )
+        non_online_hosts = {
+            str(server["host"]) for server in servers if server["status"] != "online"
+        }
         return copy.deepcopy(
             {
                 "version": self._version,
@@ -304,7 +309,8 @@ class StateStore:
                 "stats": {
                     "servers": len(servers),
                     "onlineServers": online,
-                    "issueServers": len(servers) - online,
+                    "issueServers": len(non_online_hosts | active_incident_hosts),
+                    "incidentServers": len(active_incident_hosts),
                     "staleServers": sum(bool(server["stale"]) for server in servers),
                     "pollingServers": sum(
                         bool(server["polling"]) for server in servers
