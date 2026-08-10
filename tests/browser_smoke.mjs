@@ -435,9 +435,40 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     const rejectedAnimation = document.querySelector("#background-image-status").textContent;
+    const compressionCanvas = document.createElement("canvas");
+    compressionCanvas.width = 4096;
+    compressionCanvas.height = 4096;
+    const compressionContext = compressionCanvas.getContext("2d");
+    compressionContext.fillStyle = "#17304a";
+    compressionContext.fillRect(0, 0, compressionCanvas.width, compressionCanvas.height);
+    const compressionPng = await new Promise(
+      (resolve) => compressionCanvas.toBlob(resolve, "image/png"),
+    );
+    compressionCanvas.width = 1;
+    compressionCanvas.height = 1;
+    const compressibleBlob = new Blob([
+      compressionPng,
+      new Uint8Array(8 * 1024 * 1024 + 1 - compressionPng.size),
+    ], { type: "image/png" });
+    const compressibleTransfer = new DataTransfer();
+    compressibleTransfer.items.add(new File(
+      [compressibleBlob],
+      "compressible.png",
+      { type: "image/png" },
+    ));
+    backgroundInput.files = compressibleTransfer.files;
+    backgroundInput.dispatchEvent(new Event("change", { bubbles: true }));
+    for (let attempt = 0; attempt < 120 && !document.querySelector("#background-image-status").classList.contains("success"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const compressedBackgroundStatus = document.querySelector("#background-image-status").textContent;
+    const compressedBackground = await readStoredBackground().catch(() => null);
+    const compressedBackgroundDimensions = compressedBackground
+      ? await decodeImageSize(compressedBackground)
+      : { width: 0, height: 0 };
     const oversizedTransfer = new DataTransfer();
     oversizedTransfer.items.add(new File(
-      [new Uint8Array(8 * 1024 * 1024 + 1)],
+      [new Uint8Array(32 * 1024 * 1024 + 1)],
       "oversized.png",
       { type: "image/png" },
     ));
@@ -540,6 +571,11 @@ try {
       rejectedBackground,
       rejectedSpoofed,
       rejectedAnimation,
+      compressedBackgroundStatus,
+      compressedBackgroundSourceSize: compressibleBlob.size,
+      compressedBackgroundSize: compressedBackground?.size || 0,
+      compressedBackgroundType: compressedBackground?.type || "",
+      compressedBackgroundDimensions,
       rejectedOversized,
       rejectedDimensions,
       terminalStyle,
@@ -584,7 +620,19 @@ try {
   assert.match(personalization.rejectedBackground, /PNG/);
   assert.match(personalization.rejectedSpoofed, /文件格式不匹配/);
   assert.match(personalization.rejectedAnimation, /动态图片/);
-  assert.match(personalization.rejectedOversized, /8 MiB/);
+  assert.match(personalization.compressedBackgroundStatus, /已压缩/);
+  assert(personalization.compressedBackgroundSourceSize > 8 * 1024 * 1024);
+  assert(personalization.compressedBackgroundSize > 0);
+  assert(personalization.compressedBackgroundSize <= 8 * 1024 * 1024);
+  assert.equal(personalization.compressedBackgroundType, "image/webp");
+  assert(personalization.compressedBackgroundDimensions.width <= 4096);
+  assert(personalization.compressedBackgroundDimensions.height <= 4096);
+  assert(
+    personalization.compressedBackgroundDimensions.width
+      * personalization.compressedBackgroundDimensions.height
+      <= 12_000_000,
+  );
+  assert.match(personalization.rejectedOversized, /32 MiB/);
   assert.match(personalization.rejectedDimensions, /8192/);
   assert.equal(personalization.terminalStyle.radius, "2px");
   assert.equal(personalization.terminalStyle.shadow, "none");

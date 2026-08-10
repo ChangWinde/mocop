@@ -38,7 +38,7 @@ Cons: IndexedDB can be unavailable or quota-constrained, so the UI needs an expl
 
 ## Decision
 
-Choose Option C. Accept only PNG, JPEG, WebP and AVIF files up to 8 MiB. Verify the declared type against its container signature, decode the selected file before persistence, and reject images wider or taller than 8,192 pixels or larger than 32 megapixels. SVG and animated formats are intentionally excluded. Store the validated `Blob` under one fixed key in a dedicated IndexedDB object store; create only a browser-owned object URL for rendering, and revoke replaced URLs.
+Choose Option C. Accept only PNG, JPEG, WebP and AVIF source files up to 32 MiB. Verify the declared type against its container signature, reject animation, decode the selected file, and reject images wider or taller than 8,192 pixels or larger than 32 megapixels. Sources above 8 MiB are resized to at most 4,096 pixels per side and 12 megapixels, encoded as a static WebP no larger than 8 MiB, and validated again before persistence. Store the resulting `Blob` under one fixed key in a dedicated IndexedDB object store; create only a browser-owned object URL for rendering, and revoke replaced URLs. SVG and animated formats remain intentionally excluded.
 
 Theme and background-visibility values stay in the versioned, allowlisted `localStorage` record. The image never crosses an HTTP boundary. The CSP permits `blob:` only for images. If IndexedDB persistence fails, Mocop may render the validated image for the current session while clearly reporting that it was not saved.
 
@@ -47,7 +47,7 @@ Built-in themes may change geometry, surface opacity, blur, shadow, typography a
 ## Impact
 
 - Personal images do not enter Mocop configuration, logs, telemetry, backups or server storage.
-- Decode work and retained browser storage have explicit byte, dimension and pixel bounds.
+- Source decode work, compression output and retained browser storage have separate byte, dimension and pixel bounds; conversion also discards source metadata.
 - Resetting structured display preferences does not silently delete the separately managed image; removal remains an explicit action.
 - A browser without IndexedDB still renders telemetry and can use built-in themes.
 - `img-src` adds `blob:` while scripts, connections, objects, frames and base URLs retain their existing restrictions.

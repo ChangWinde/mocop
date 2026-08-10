@@ -5,8 +5,11 @@ const VISUAL_ASSET_DATABASE = "mocop.visual-assets.v1";
 const VISUAL_ASSET_STORE = "assets";
 const BACKGROUND_ASSET_KEY = "background";
 const MAX_BACKGROUND_BYTES = 8 * 1024 * 1024;
+const MAX_BACKGROUND_SOURCE_BYTES = 32 * 1024 * 1024;
 const MAX_BACKGROUND_DIMENSION = 8192;
 const MAX_BACKGROUND_PIXELS = 32_000_000;
+const MAX_COMPRESSED_BACKGROUND_DIMENSION = 4096;
+const MAX_COMPRESSED_BACKGROUND_PIXELS = 12_000_000;
 const BACKGROUND_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
 const DEFAULT_PREFERENCES = Object.freeze({
   serverSort: "custom",
@@ -350,28 +353,47 @@ function deleteStoredBackground() {
   return transactVisualAsset("readwrite", (store) => store.delete(BACKGROUND_ASSET_KEY));
 }
 
-function decodeImageSize(blob) {
+function decodeImage(blob) {
   if (typeof createImageBitmap === "function") {
     return createImageBitmap(blob).then((bitmap) => {
-      const dimensions = { width: bitmap.width, height: bitmap.height };
-      bitmap.close();
-      return dimensions;
+      return {
+        source: bitmap,
+        width: bitmap.width,
+        height: bitmap.height,
+        release: () => bitmap.close(),
+      };
     });
   }
   return new Promise((resolve, reject) => {
     const objectUrl = URL.createObjectURL(blob);
     const image = new Image();
+    let settled = false;
     const finish = (callback, value) => {
-      URL.revokeObjectURL(objectUrl);
+      if (settled) return;
+      settled = true;
       callback(value);
     };
     image.onload = () => finish(resolve, {
+      source: image,
       width: image.naturalWidth,
       height: image.naturalHeight,
+      release: () => URL.revokeObjectURL(objectUrl),
     });
-    image.onerror = () => finish(reject, new Error("无法解析图片内容"));
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      finish(reject, new Error("无法解析图片内容"));
+    };
     image.src = objectUrl;
   });
+}
+
+async function decodeImageSize(blob) {
+  const decoded = await decodeImage(blob);
+  try {
+    return { width: decoded.width, height: decoded.height };
+  } finally {
+    decoded.release();
+  }
 }
 
 function asciiAt(bytes, offset, value) {
@@ -468,12 +490,16 @@ async function isAnimatedImage(blob) {
   return false;
 }
 
-async function validateBackgroundBlob(blob) {
+async function validateBackgroundBlob(blob, maxBytes = MAX_BACKGROUND_BYTES) {
   if (!(blob instanceof Blob) || !BACKGROUND_TYPES.has(blob.type)) {
     throw new Error("仅支持 PNG、JPEG、WebP 或 AVIF 图片");
   }
-  if (blob.size <= 0 || blob.size > MAX_BACKGROUND_BYTES) {
-    throw new Error("图片大小必须在 8 MiB 以内");
+  if (blob.size <= 0) {
+    throw new Error("图片内容不能为空");
+  }
+  if (blob.size > maxBytes) {
+    const limit = maxBytes === MAX_BACKGROUND_BYTES ? 8 : 32;
+    throw new Error(`图片大小不能超过 ${limit} MiB`);
   }
   if (await isAnimatedImage(blob)) {
     throw new Error("不支持动态图片，请选择静态背景");
@@ -494,6 +520,111 @@ async function validateBackgroundBlob(blob) {
     throw new Error("图片尺寸不能超过 8192 像素或 32 百万像素");
   }
   return dimensions;
+}
+
+function canvasToWebp(canvas, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!(blob instanceof Blob) || blob.size <= 0 || blob.type !== "image/webp") {
+        reject(new Error("当前浏览器不支持 WebP 图片压缩"));
+        return;
+      }
+      resolve(blob);
+    }, "image/webp", quality);
+  });
+}
+
+async function encodeCanvasWithinLimit(canvas) {
+  const highQuality = await canvasToWebp(canvas, 0.9);
+  if (highQuality.size <= MAX_BACKGROUND_BYTES) {
+    return { blob: highQuality, smallestSize: highQuality.size };
+  }
+
+  const lowQuality = await canvasToWebp(canvas, 0.5);
+  if (lowQuality.size > MAX_BACKGROUND_BYTES) {
+    return { blob: null, smallestSize: lowQuality.size };
+  }
+
+  let best = lowQuality;
+  let lowerQuality = 0.5;
+  let upperQuality = 0.9;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const quality = (lowerQuality + upperQuality) / 2;
+    const candidate = await canvasToWebp(canvas, quality);
+    if (candidate.size <= MAX_BACKGROUND_BYTES) {
+      best = candidate;
+      lowerQuality = quality;
+    } else {
+      upperQuality = quality;
+    }
+  }
+  return { blob: best, smallestSize: best.size };
+}
+
+async function compressBackgroundBlob(blob, dimensions) {
+  const decoded = await decodeImage(blob);
+  const canvas = document.createElement("canvas");
+  const initialScale = Math.min(
+    1,
+    MAX_COMPRESSED_BACKGROUND_DIMENSION / dimensions.width,
+    MAX_COMPRESSED_BACKGROUND_DIMENSION / dimensions.height,
+    Math.sqrt(MAX_COMPRESSED_BACKGROUND_PIXELS / (dimensions.width * dimensions.height)),
+  );
+  let width = Math.max(1, Math.floor(dimensions.width * initialScale));
+  let height = Math.max(1, Math.floor(dimensions.height * initialScale));
+
+  try {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("当前浏览器无法处理这张图片");
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "high";
+      context.drawImage(decoded.source, 0, 0, width, height);
+
+      const encoded = await encodeCanvasWithinLimit(canvas);
+      if (encoded.blob) {
+        return encoded.blob;
+      }
+
+      const shrink = Math.min(
+        0.82,
+        Math.sqrt(MAX_BACKGROUND_BYTES / encoded.smallestSize) * 0.92,
+      );
+      const nextWidth = Math.max(1, Math.floor(width * shrink));
+      const nextHeight = Math.max(1, Math.floor(height * shrink));
+      if (nextWidth === width && nextHeight === height) break;
+      width = nextWidth;
+      height = nextHeight;
+    }
+  } finally {
+    decoded.release();
+    canvas.width = 1;
+    canvas.height = 1;
+  }
+  throw new Error("无法在安全限制内压缩这张图片");
+}
+
+async function prepareBackgroundBlob(blob) {
+  const dimensions = await validateBackgroundBlob(blob, MAX_BACKGROUND_SOURCE_BYTES);
+  if (blob.size <= MAX_BACKGROUND_BYTES) {
+    return { blob, dimensions, compressed: false };
+  }
+  const compressed = await compressBackgroundBlob(blob, dimensions);
+  const validatedDimensions = await validateBackgroundBlob(compressed);
+  return {
+    blob: compressed,
+    dimensions: validatedDimensions,
+    compressed: true,
+  };
+}
+
+function backgroundSize(blob) {
+  if (blob.size < 0.1 * 1024 * 1024) {
+    return `${Math.max(1, Math.ceil(blob.size / 1024))} KiB`;
+  }
+  return `${(blob.size / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function setBackgroundStatus(message, kind = "") {
@@ -539,19 +670,27 @@ async function selectBackgroundImage() {
   if (!file) return;
   const requestId = ++view.backgroundRequestId;
   elements.backgroundImageInput.disabled = true;
-  setBackgroundStatus("正在安全读取图片…");
+  setBackgroundStatus(
+    file.size > MAX_BACKGROUND_BYTES ? "正在浏览器本地优化图片…" : "正在安全读取图片…",
+  );
   try {
-    const dimensions = await validateBackgroundBlob(file);
+    const prepared = await prepareBackgroundBlob(file);
     if (requestId !== view.backgroundRequestId) return;
-    renderBackground(file);
+    renderBackground(prepared.blob);
     try {
-      await writeStoredBackground(file);
+      await writeStoredBackground(prepared.blob);
+      const prefix = prepared.compressed
+        ? `已压缩至 ${backgroundSize(prepared.blob)} 并保存在当前浏览器`
+        : "已保存在当前浏览器";
       setBackgroundStatus(
-        `已保存在当前浏览器 · ${dimensions.width} × ${dimensions.height}`,
+        `${prefix} · ${prepared.dimensions.width} × ${prepared.dimensions.height}`,
         "success",
       );
     } catch (_error) {
-      setBackgroundStatus("浏览器存储空间不足；背景仅在本次会话有效", "error");
+      const prefix = prepared.compressed
+        ? `已压缩至 ${backgroundSize(prepared.blob)}；`
+        : "";
+      setBackgroundStatus(`${prefix}浏览器存储空间不足；背景仅在本次会话有效`, "error");
     }
   } catch (error) {
     if (requestId === view.backgroundRequestId) {

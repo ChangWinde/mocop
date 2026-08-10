@@ -264,7 +264,7 @@
         </div>
         <button class="dialog-close" data-close-dialog="settings-dialog" type="button" aria-label="关闭设置">×</button>
       </div>
-      <p class="dialog-intro">采集策略与监控节点会安全写入本地配置、立即生效并在重启后恢复；外观、密度和视图偏好仅保存在当前浏览器。</p>
+      <p class="dialog-intro">设置不会因服务重启自动重置：采集策略与监控节点写入本地配置；外观、密度和视图偏好保存在当前浏览器，换浏览器或清理站点数据后不保留。</p>
       <div class="settings-sections">
         <section class="settings-section appearance-settings settings-wide">
           <h3>界面皮肤</h3>
@@ -311,7 +311,7 @@
               <input id="background-visibility" type="range" min="15" max="70" step="1" value="38">
               <output id="background-visibility-value" for="background-visibility">38%</output>
             </label>
-            <span id="background-image-status" class="background-status" role="status">支持 PNG、JPEG、WebP、AVIF，最大 8 MiB</span>
+            <span id="background-image-status" class="background-status" role="status">支持 PNG、JPEG、WebP、AVIF；超过 8 MiB 自动压缩，原图最大 32 MiB</span>
           </div>
           <span class="settings-help">字体针对中英文正文、指标数字和设备标识分别优化，并只使用本机字体；紧凑模式适合大规模集群。恢复显示默认不会删除单独保存的背景图片。</span>
         </section>
