@@ -478,6 +478,7 @@ body.hide-gpu-power .gpu-col-power { display: none !important; }
 .gpu-group-metric strong { display: block; margin-top: 5px; color: #cdd3db; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; font-weight: 620; }
 .gpu-group-state { justify-self: end; padding: 4px 7px; border-radius: 6px; color: var(--green); background: var(--green-soft); font-size: 8px; white-space: nowrap; }
 .gpu-group-state.warning { color: var(--amber); background: rgba(245, 185, 95, 0.08); }
+.gpu-group-state.critical { color: var(--red); background: rgba(255, 107, 124, 0.08); }
 .group-chevron { width: 6px; height: 6px; transform: rotate(45deg); border-right: 1px solid #697381; border-bottom: 1px solid #697381; transition: transform 150ms ease; }
 .gpu-server-group[open] .group-chevron { transform: rotate(225deg); }
 .gpu-server-group .gpu-table { border-top: 1px solid var(--line-soft); background: #101319; }
@@ -498,6 +499,7 @@ body.hide-gpu-power .gpu-col-power { display: none !important; }
 .state-pill { width: fit-content; gap: 6px; padding: 5px 8px; border-radius: 7px; color: var(--green); background: var(--green-soft); font-size: 9px; white-space: nowrap; }
 .state-pill.busy { color: #9eb0ff; background: rgba(109, 140, 255, 0.1); }
 .state-pill.hot { color: var(--amber); background: rgba(245, 185, 95, 0.08); }
+.state-pill.critical { color: var(--red); background: rgba(255, 107, 124, 0.08); }
 .state-pill.stale { color: #b3a170; background: rgba(245, 185, 95, 0.07); }
 .state-pill i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 

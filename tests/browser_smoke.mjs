@@ -341,6 +341,7 @@ try {
       taskDialogOpen: taskDialog.open,
       taskCount: document.querySelector("#gpu-task-count").textContent,
       taskNames: document.querySelector("#gpu-task-list").textContent,
+      healthMetrics: document.querySelector("#gpu-detail-metrics").textContent,
       heatmapLegend: Boolean(document.querySelector(".heatmap-legend")),
     };
     taskDialog.close();
@@ -355,6 +356,7 @@ try {
   assert.equal(personalization.taskDialogOpen, true);
   assert.equal(personalization.taskCount, "2");
   assert.match(personalization.taskNames, /train\.py/);
+  assert.match(personalization.healthMetrics, /硬件健康正常/);
   assert.equal(personalization.heatmapLegend, false);
 
   if (process.env.MOCOP_SCREENSHOT_PATH) {

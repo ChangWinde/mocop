@@ -559,65 +559,42 @@ function selectHost(host) {
   syncHistory();
 }
 
-function isNetworkFilesystem(disk) {
-  const type = String(disk.filesystem_type || "").toLowerCase();
-  const device = String(disk.device || "");
-  return ["nfs", "nfs4", "cifs", "smb3", "sshfs", "ceph", "glusterfs"].includes(type)
-    || type.startsWith("fuse.sshfs")
-    || type.startsWith("fuse.glusterfs")
-    || device.startsWith("//")
-    || /^[^/\s]+:/.test(device);
+function incidentConditionMessage(condition) {
+  const value = condition.value == null ? null : numeric(condition.value);
+  const expected = condition.threshold == null ? null : numeric(condition.threshold);
+  const resource = condition.resource || "资源";
+  if (condition.category === "connectivity") return failureText(condition.detail);
+  if (condition.category === "gpu_availability") return failureText(condition.detail);
+  if (condition.category === "gpu_count") {
+    return `GPU 数量 ${format(value)} / 预期 ${format(expected)}`;
+  }
+  if (condition.category === "gpu_processes") return `${resource} 数据不可用`;
+  if (condition.category === "gpu_ecc") return `${resource} · ${format(value)} 个未纠正错误`;
+  if (condition.category === "gpu_memory_repair") return `${resource} · 存在待处理显存修复`;
+  if (condition.category === "gpu_slowdown") return `${resource} · 硬件降频已触发`;
+  if (condition.category === "gpu_idle_memory") {
+    return `${resource} ${format(value, 1)}% · 持续低负载`;
+  }
+  if (condition.category === "gpu_temperature") return `${resource} ${format(value, 1)}°C`;
+  if (value != null) return `${resource} ${format(value, 1)}%`;
+  return condition.detail || resource;
 }
 
 function serverConditions(server) {
-  if (server.status !== "online") {
-    return [{
-      id: "connectivity",
-      kind: "connectivity",
-      severity: "critical",
-      priority: 3,
-      message: failureText(server.message),
-    }];
-  }
-  const threshold = limits();
-  const resources = serverResources(server);
-  const conditions = (server.system?.disks || [])
-    .filter((disk) => numeric(disk.used_pct) >= threshold.disk_warning_pct)
-    .map((disk) => ({
-      id: `disk:${disk.device}:${disk.mountpoint}`,
-      kind: "disk",
-      severity: numeric(disk.used_pct) >= 95 ? "critical" : "warning",
-      priority: numeric(disk.used_pct) >= 95 ? 2 : 1,
-      message: `磁盘 ${disk.mountpoint} ${format(disk.used_pct)}%`,
-      device: String(disk.device || disk.mountpoint),
-      mountpoint: String(disk.mountpoint || ""),
-      usage: numeric(disk.used_pct),
-      sharedKey: isNetworkFilesystem(disk)
-        ? `${String(disk.filesystem_type || "").toLowerCase()}|${String(disk.device || "")}`
-        : null,
+  if (!Array.isArray(view.incidents?.active)) return [];
+  return view.incidents.active
+    .filter((condition) => condition.host === server.host)
+    .map((condition) => ({
+      id: condition.conditionKey,
+      kind: condition.category,
+      severity: condition.severity,
+      priority: condition.category === "connectivity"
+        ? 3 : condition.severity === "critical" ? 2 : 1,
+      message: incidentConditionMessage(condition),
+      device: String(condition.resource || ""),
+      usage: condition.value == null ? -1 : numeric(condition.value, -1),
+      sharedKey: condition.groupKey || null,
     }));
-  if (server.system?.swap_total_mib > 0 && resources.swap >= threshold.swap_warning_pct) {
-    conditions.push({ id: "swap", kind: "swap", severity: "warning", priority: 1, message: `Swap ${format(resources.swap)}%` });
-  }
-  if (resources.memory >= threshold.memory_warning_pct) {
-    conditions.push({ id: "memory", kind: "memory", severity: "warning", priority: 1, message: `内存 ${format(resources.memory)}%` });
-  }
-  if (resources.cpu >= threshold.cpu_warning_pct) {
-    conditions.push({ id: "cpu", kind: "cpu", severity: "warning", priority: 1, message: `CPU ${format(resources.cpu)}%` });
-  }
-  const hotGpus = server.gpus.filter(
-    (gpu) => numeric(gpu.temperature_c) >= threshold.gpu_temperature_warning_c,
-  );
-  if (hotGpus.length) {
-    conditions.push({
-      id: "gpu-temperature",
-      kind: "gpu_temperature",
-      severity: "warning",
-      priority: 1,
-      message: `${hotGpus.length} 张 GPU 高温`,
-    });
-  }
-  return conditions;
 }
 
 function conditionCategory(condition) {
@@ -801,17 +778,9 @@ function incidentStateLabel(state) {
 }
 
 function incidentDescription(event) {
-  if (event.category === "connectivity") {
-    return event.state === "resolved" ? "SSH 连接恢复" : failureText(event.detail);
-  }
-  const value = event.value == null
-    ? ""
-    : event.category === "gpu_temperature"
-      ? ` ${format(event.value, 1)}°C`
-      : ` ${format(event.value, 1)}%`;
   return event.state === "resolved"
     ? `${event.resource} 恢复正常`
-    : `${event.resource}${value}`;
+    : incidentConditionMessage(event);
 }
 
 function renderIncidents() {
@@ -1717,6 +1686,22 @@ function miniMetric(value, suffix, usage, className = "") {
 
 function gpuState(gpu, server) {
   if (server.stale) return ["历史数据", "stale"];
+  const identity = String(gpu.uuid || gpu.index);
+  const activeConditions = Array.isArray(view.incidents?.active)
+    ? view.incidents.active : [];
+  const gpuConditions = activeConditions.filter(
+    (condition) => condition.host === server.host
+      && String(condition.conditionKey || "").endsWith(`:${identity}`),
+  );
+  if (gpuConditions.some((condition) => [
+    "gpu_ecc", "gpu_memory_repair", "gpu_slowdown",
+  ].includes(condition.category))) return ["硬件异常", "critical"];
+  if (gpuConditions.some((condition) => condition.category === "gpu_memory")) {
+    return ["显存压力", "hot"];
+  }
+  if (gpuConditions.some((condition) => condition.category === "gpu_idle_memory")) {
+    return ["显存待释放", "hot"];
+  }
   const utilization = numeric(gpu.utilization_gpu_pct);
   const temperature = numeric(gpu.temperature_c);
   const threshold = limits();
@@ -1736,6 +1721,19 @@ function gpuDetailMetric(label, value, title = "") {
 function gpuProcessName(process) {
   const fullName = String(process.name || "unknown process");
   return fullName.replaceAll("\\", "/").split("/").at(-1) || fullName;
+}
+
+function gpuHealthSummary(health) {
+  if (!health) return ["数据不可用", "本轮附加健康查询未返回数据"];
+  const issues = [];
+  if (numeric(health.ecc_uncorrected_volatile) > 0) {
+    issues.push(`${format(health.ecc_uncorrected_volatile)} 个未纠正 ECC 错误`);
+  }
+  if (health.retired_pages_pending) issues.push("待退休显存页");
+  if (health.remapped_rows_pending) issues.push("待重映射显存行");
+  if (health.thermal_slowdown) issues.push("热降频");
+  if (health.power_brake_slowdown) issues.push("功率制动降频");
+  return issues.length ? ["需要关注", issues.join(" · ")] : ["正常", "未检测到硬件健康异常"];
 }
 
 function selectedGpuRecord() {
@@ -1759,6 +1757,7 @@ function renderGpuDetail() {
   const { server, gpu } = record;
   const [state] = gpuState(gpu, server);
   const memoryPct = ratio(gpu.memory_used_mib, gpu.memory_total_mib);
+  const [healthState, healthDetail] = gpuHealthSummary(gpu.health);
   const processes = Array.isArray(gpu.processes) ? gpu.processes.slice() : [];
   processes.sort((a, b) => numeric(b.used_memory_mib, -1) - numeric(a.used_memory_mib, -1)
     || numeric(a.pid) - numeric(b.pid));
@@ -1778,6 +1777,8 @@ function renderGpuDetail() {
     gpuDetailMetric("功耗", gpu.power_draw_w == null ? "—" : `${format(gpu.power_draw_w)} W`),
     gpuDetailMetric("P-State", gpu.pstate || "—"),
     gpuDetailMetric("显存占用率", `${format(memoryPct, 1)}%`),
+    gpuDetailMetric("硬件健康", healthState, healthDetail),
+    gpuDetailMetric("MIG 模式", gpu.health?.mig_mode || "—"),
   );
   elements.gpuTaskCount.textContent = String(processes.length);
   if (gpu.processes_available === false) {
@@ -2030,10 +2031,13 @@ function gpuGroup(group) {
   const gpuMemoryUsed = server.gpus.reduce((sum, gpu) => sum + numeric(gpu.memory_used_mib), 0);
   const gpuMemoryTotal = server.gpus.reduce((sum, gpu) => sum + numeric(gpu.memory_total_mib), 0);
   const resources = serverResources(server);
-  const warning = resources.warning || server.gpus.some(
-    (gpu) => numeric(gpu.temperature_c) >= limits().gpu_temperature_warning_c,
+  const issue = serverIssue(server);
+  const stateClass = issue ? ` ${issue.severity}` : "";
+  const state = create(
+    "span",
+    `gpu-group-state${stateClass}`,
+    issue?.severity === "critical" ? "严重" : issue ? "需关注" : "正常",
   );
-  const state = create("span", `gpu-group-state${warning ? " warning" : ""}`, warning ? "需关注" : "正常");
   const chevron = create("i", "group-chevron");
   summary.append(
     identity,
@@ -2061,6 +2065,7 @@ function tableSignature(server, records) {
   const system = server.system;
   return JSON.stringify({
     host: server.host,
+    incidentVersion: view.incidentVersion,
     filter: view.filter,
     query: view.query.trim(),
     sort: view.sort,
@@ -2220,6 +2225,10 @@ async function syncIncidents() {
     view.incidents = incidents;
     view.incidentVersion = numeric(incidents.version, 0);
     renderIncidents();
+    renderAttention();
+    renderServers();
+    renderTable();
+    renderGpuDetail();
   } catch (_error) {
     // Current telemetry remains usable if the optional transition feed is unavailable.
   } finally {

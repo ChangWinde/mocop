@@ -4,7 +4,14 @@ import sys
 import threading
 import time
 
-from mocop.models import DiskMetrics, GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
+from mocop.models import (
+    DiskMetrics,
+    GpuHealthMetrics,
+    GpuMetrics,
+    GpuProcess,
+    ProbeResult,
+    SystemMetrics,
+)
 from mocop.service import StateStore
 from mocop.web import MonitorHttpServer
 
@@ -47,6 +54,14 @@ def gpu(
         power_draw_w=round(75 + utilization * 4.5, 1),
         power_limit_w=700,
         processes=processes,
+        health=GpuHealthMetrics(
+            ecc_uncorrected_volatile=0,
+            retired_pages_pending=False,
+            remapped_rows_pending=False,
+            thermal_slowdown=False,
+            power_brake_slowdown=False,
+            mig_mode="Disabled",
+        ),
     )
 
 
