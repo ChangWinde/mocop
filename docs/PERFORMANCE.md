@@ -19,6 +19,7 @@ This document defines reproducible measurement conditions and architecture thres
 - Maintenance evaluation is an in-memory pass over the configured host-window map during snapshot publication; it starts no timer, process, probe, or database write.
 - Capacity matching scans the existing browser snapshot only while its dialog is open; it starts no request and groups devices by host and model in linear time before sorting the bounded candidate set.
 - Host-group metadata adds one constant-time lookup per server snapshot; grouped fleet headers and host rows reuse cached DOM signatures across SSE updates.
+- `/metrics` performs one bounded snapshot copy and a linear serialization pass in the HTTP request thread; it starts no probe, worker, timer, database query, or write.
 
 ## OpenSSH connection reuse
 

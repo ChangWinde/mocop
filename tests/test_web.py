@@ -106,6 +106,24 @@ class WebTests(unittest.TestCase):
         self.assertEqual(payload["stats"]["servers"], 0)
         self.assertEqual(payload["appVersion"], "0.8.0")
 
+    def test_exposes_current_snapshot_as_openmetrics(self) -> None:
+        with urlopen(f"{self.base}/metrics", timeout=2) as response:
+            body = response.read().decode()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            response.headers["Content-Type"],
+            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertIn("# TYPE mocop_build_info gauge\n", body)
+        self.assertIn("mocop_cluster_servers 0\n", body)
+        self.assertTrue(body.endswith("# EOF\n"))
+
+        with self.assertRaises(HTTPError) as rejected:
+            urlopen(f"{self.base}/metrics?host=gpu-01", timeout=2)
+        self.assertEqual(rejected.exception.code, 400)
+
     def test_index_is_served(self) -> None:
         with urlopen(f"{self.base}/", timeout=2) as response:
             body = response.read().decode("utf-8")

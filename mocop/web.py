@@ -16,6 +16,7 @@ from .inventory import (
     InventoryError,
     InventoryRequestError,
 )
+from .metrics import OPENMETRICS_CONTENT_TYPE, render_openmetrics
 from .service import StateStore
 
 _STATIC_ROOT = Path(__file__).with_name("static")
@@ -95,6 +96,12 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/inventory":
             self._send_inventory(request_url.query)
+            return
+        if path == "/metrics":
+            if request_url.query:
+                self.send_error(HTTPStatus.BAD_REQUEST)
+                return
+            self._send_openmetrics()
             return
         if path == "/healthz":
             self._send_json(
@@ -196,6 +203,14 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             self._change_host_group(payload)
             return
         self._change_poll_interval(payload)
+
+    def _send_openmetrics(self) -> None:
+        payload = render_openmetrics(self.monitor_server.state.snapshot())
+        self.send_response(HTTPStatus.OK)
+        self._common_headers(OPENMETRICS_CONTENT_TYPE, cache="no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _change_host_group(self, payload: object) -> None:
         if not isinstance(payload, dict) or set(payload) != {"host", "group"}:

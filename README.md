@@ -39,6 +39,7 @@ In Mocop, AI-native describes the product focus: capacity checks, failure diagno
 - CPU, load, memory, swap, filesystem capacity, disk I/O, network throughput, and uptime context
 - Drag-to-order servers, five structurally distinct themes, validated browser-local backgrounds, search, filters, bounded trends, incidents, and safe CSV export
 - Dashboard SSH-alias inventory scan with constrained add/remove, Git/GitHub/GitLab filtering, atomic persistence, and live scheduler updates
+- Dependency-free OpenMetrics 1.0 endpoint for Prometheus/Grafana integration
 - Expected GPU inventory, authoritative incidents, anti-flap activation/recovery, failure backoff, and stale-data handling
 - Time-bounded maintenance windows that keep telemetry live while separating silenced incidents from actionable work
 - Explicit host allowlist, loopback binding, strict host-key checking, fixed remote script, and resource limits
@@ -220,6 +221,20 @@ mocop --once > snapshot.json
 
 The output contains inventory and telemetry. Store and delete it according to the same policy used for infrastructure logs.
 
+### Scrape current metrics with Prometheus
+
+Mocop exposes the current in-memory snapshot at `GET /metrics` using OpenMetrics 1.0. A Prometheus instance on the same machine can use:
+
+```yaml
+scrape_configs:
+  - job_name: mocop
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8787"]
+```
+
+The endpoint includes collection health, cluster capacity and incident counts, per-host availability and system resources, and current GPU utilization, VRAM, temperature, power, process count, and hardware-health gauges. It serializes the existing snapshot and never triggers another probe. Stale host resources are excluded from current resource series, while `mocop_host_up` and `mocop_host_stale` preserve availability truth. Process names and PIDs are intentionally omitted to avoid sensitive, high-cardinality labels. See the [official exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/) for scraper compatibility.
+
 ## Dashboard data
 
 | Area | Data |
@@ -227,7 +242,7 @@ The output contains inventory and telemetry. Store and delete it according to th
 | GPU | count, utilization, VRAM, temperature, power, model, driver, tasks, ECC, memory-repair and slowdown state, MIG mode |
 | Host | status, CPU, load, memory, swap, disk capacity and I/O, network rate, uptime |
 | Cluster | capacity matching and totals, scheduling heatmap, attention queue, health filters, search |
-| Operations | bounded trends, state transitions, retry timing, staleness, CSV export |
+| Operations | bounded trends, state transitions, retry timing, staleness, CSV and OpenMetrics export |
 
 Failed hosts retain their last successful sample and are marked stale. Stale values remain available for diagnosis but are excluded from current cluster totals.
 
@@ -280,7 +295,7 @@ JSON host allowlist ──▶ bounded scheduler ──┬──▶ OpenSSH
 browser ◀──── SSE / JSON ◀──── bounded in-memory state
 ```
 
-Each remote host uses one logical SSH round trip per cycle; the optional local target uses one bounded shell process. Base GPU metrics, compute tasks, and optional hardware-health data are isolated sections in the same fixed probe, so a health-query failure cannot hide system or base GPU telemetry. Results are published as they complete, so a slow node does not delay a healthy node. Repeated failures back off to at most 60 seconds. Snapshots, trends, and incidents use bounded memory structures and are never persisted by Mocop.
+Each remote host uses one logical SSH round trip per cycle; the optional local target uses one bounded shell process. Base GPU metrics, compute tasks, and optional hardware-health data are isolated sections in the same fixed probe, so a health-query failure cannot hide system or base GPU telemetry. Results are published as they complete, so a slow node does not delay a healthy node. Repeated failures back off to at most 60 seconds. Snapshots, trends, incidents, and OpenMetrics exposition use bounded memory structures and are never persisted by Mocop.
 
 See the [architecture](docs/ARCHITECTURE.md), [performance methodology](docs/PERFORMANCE.md), and [repository layout decision](docs/adr/0001-repository-layout.md) for implementation details.
 
@@ -288,7 +303,7 @@ See the [architecture](docs/ARCHITECTURE.md), [performance methodology](docs/PER
 
 The browser cannot provide an arbitrary host, command, path, or raw configuration. It may add only a literal alias from a fresh, server-side OpenSSH scan; recognizable Git/GitHub/GitLab aliases and configured exclusions are denied. It may assign only a bounded visible group name to an already explicit host. Its only collection-policy fields are bounded cadence, complete-probe timeout, and worker concurrency. Targets still enter the explicit local JSON allowlist, while the remote probe remains fixed and versioned. Mocop enforces strict host-key checking, batch mode, timeouts, output limits, concurrency limits, atomic private config writes, and safe rendering for untrusted remote text.
 
-Mocop has no built-in user accounts and listens on loopback by default. Any remote deployment must add TLS and authenticated authorization through a reverse proxy or VPN.
+Mocop has no built-in user accounts and listens on loopback by default. `/metrics` contains the same operational inventory class as the dashboard. Any remote deployment must add TLS and authenticated authorization through a reverse proxy or VPN.
 
 Read the [threat model](docs/SECURITY.md) before changing a trust boundary. Report vulnerabilities through the process in the [security policy](.github/SECURITY.md).
 
