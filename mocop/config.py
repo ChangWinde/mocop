@@ -41,6 +41,12 @@ class IncidentConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class HostOverrideConfig:
+    poll_interval_seconds: float | None = None
+    probe_timeout_seconds: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MonitorConfig:
     ssh_config: Path
     auto_discover: bool
@@ -60,6 +66,13 @@ class MonitorConfig:
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
     expected_gpu_counts: tuple[tuple[str, int], ...] = ()
     incidents: IncidentConfig = field(default_factory=IncidentConfig)
+    host_overrides: tuple[tuple[str, HostOverrideConfig], ...] = ()
+
+    def host_override(self, host: str) -> HostOverrideConfig | None:
+        return next(
+            (override for alias, override in self.host_overrides if alias == host),
+            None,
+        )
 
 
 _REQUIRED_KEYS = {
@@ -83,6 +96,7 @@ _OPTIONAL_KEYS = {
     "thresholds",
     "expected_gpu_counts",
     "incidents",
+    "host_overrides",
 }
 _THRESHOLD_KEYS = {
     "cpu_warning_pct",
@@ -99,6 +113,7 @@ _INCIDENT_KEYS = {
     "recovery_cycles",
     "gpu_idle_memory_cycles",
 }
+_HOST_OVERRIDE_KEYS = {"poll_interval_seconds", "probe_timeout_seconds"}
 
 
 def _bounded_number(
@@ -119,6 +134,24 @@ def _bounded_integer(data: dict[str, Any], key: str, minimum: int, maximum: int)
     if not minimum <= value <= maximum:
         raise ConfigError(f"{key} must be between {minimum} and {maximum}")
     return value
+
+
+def _optional_bounded_number(
+    data: dict[str, Any],
+    key: str,
+    label: str,
+    minimum: float,
+    maximum: float,
+) -> float | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ConfigError(f"{label} must be a number")
+    number = float(value)
+    if not minimum <= number <= maximum:
+        raise ConfigError(f"{label} must be between {minimum} and {maximum}")
+    return number
 
 
 def _string_list(data: dict[str, Any], key: str) -> tuple[str, ...]:
@@ -294,6 +327,54 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
             raise ConfigError(f"expected_gpu_counts.{alias} must be between 0 and 256")
         expected_gpu_counts.append((alias, count))
 
+    host_override_data = data.get("host_overrides", {})
+    if not isinstance(host_override_data, dict):
+        raise ConfigError("host_overrides must be a JSON object")
+    host_overrides: list[tuple[str, HostOverrideConfig]] = []
+    for alias, raw_override in host_override_data.items():
+        if not isinstance(alias, str) or not is_safe_alias(alias):
+            raise ConfigError("host_overrides keys must be safe host aliases")
+        if alias not in hosts:
+            raise ConfigError(f"host_overrides.{alias} must reference an explicit host")
+        if alias in excludes:
+            raise ConfigError(f"host_overrides.{alias} cannot be excluded")
+        if not isinstance(raw_override, dict):
+            raise ConfigError(f"host_overrides.{alias} must be a JSON object")
+        unknown_override_keys = sorted(raw_override.keys() - _HOST_OVERRIDE_KEYS)
+        if unknown_override_keys:
+            raise ConfigError(
+                f"unknown host_overrides.{alias} keys: "
+                f"{', '.join(unknown_override_keys)}"
+            )
+        if not raw_override:
+            raise ConfigError(f"host_overrides.{alias} must not be empty")
+
+        override = HostOverrideConfig(
+            poll_interval_seconds=_optional_bounded_number(
+                raw_override,
+                "poll_interval_seconds",
+                f"host_overrides.{alias}.poll_interval_seconds",
+                1,
+                3600,
+            ),
+            probe_timeout_seconds=_optional_bounded_number(
+                raw_override,
+                "probe_timeout_seconds",
+                f"host_overrides.{alias}.probe_timeout_seconds",
+                2,
+                300,
+            ),
+        )
+        if (
+            override.probe_timeout_seconds is not None
+            and override.probe_timeout_seconds <= connect_timeout
+        ):
+            raise ConfigError(
+                f"host_overrides.{alias}.probe_timeout_seconds must be greater "
+                "than connect_timeout_seconds"
+            )
+        host_overrides.append((alias, override))
+
     incident_data = data.get("incidents", {})
     if not isinstance(incident_data, dict):
         raise ConfigError("incidents must be a JSON object")
@@ -339,4 +420,5 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         thresholds=thresholds,
         expected_gpu_counts=tuple(expected_gpu_counts),
         incidents=incidents,
+        host_overrides=tuple(host_overrides),
     )

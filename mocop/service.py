@@ -362,9 +362,15 @@ class MonitorService:
         multiplier = 2 ** min(failures - 1, 10)
         return min(_MAX_FAILURE_BACKOFF_SECONDS, interval_seconds * multiplier)
 
+    def _host_poll_interval(self, host: str) -> float:
+        override = self._config.host_override(host)
+        if override and override.poll_interval_seconds is not None:
+            return override.poll_interval_seconds
+        return self._state.poll_interval_seconds()
+
     def _rebase_failure_backoff(self, now: float) -> None:
-        current_interval = self._state.poll_interval_seconds()
         for host, failures in self._failure_counts.items():
+            current_interval = self._host_poll_interval(host)
             previous_deadline = self._next_probe_at.get(host)
             if previous_deadline is None:
                 continue
@@ -436,13 +442,17 @@ class MonitorService:
                     )
                 if result.status == "online":
                     self._failure_counts.pop(host, None)
-                    self._next_probe_at.pop(host, None)
                     self._backoff_intervals.pop(host, None)
+                    override = self._config.host_override(host)
+                    if override and override.poll_interval_seconds is not None:
+                        self._next_probe_at[host] = now + override.poll_interval_seconds
+                    else:
+                        self._next_probe_at.pop(host, None)
                     retry_after_seconds = None
                 else:
                     failures = self._failure_counts.get(host, 0) + 1
                     self._failure_counts[host] = failures
-                    interval = self._state.poll_interval_seconds()
+                    interval = self._host_poll_interval(host)
                     delay = self._backoff_delay(interval, failures)
                     self._next_probe_at[host] = time.monotonic() + delay
                     self._backoff_intervals[host] = interval

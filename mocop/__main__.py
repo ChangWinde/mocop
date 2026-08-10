@@ -133,7 +133,14 @@ def _run_monitor(args: argparse.Namespace) -> int:
     finally:
         stop_event.set()
         server.server_close()
-        collector.join(timeout=config.probe_timeout_seconds + 1)
+        configured_timeouts = [
+            override.probe_timeout_seconds
+            for _, override in config.host_overrides
+            if override.probe_timeout_seconds is not None
+        ]
+        collector.join(
+            timeout=max([config.probe_timeout_seconds, *configured_timeouts]) + 1
+        )
     return 0
 
 

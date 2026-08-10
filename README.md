@@ -157,6 +157,12 @@ Declare the expected device count for stable compute nodes and tune incident sta
     "gpu-node-01": 8,
     "gpu-node-02": 8
   },
+  "host_overrides": {
+    "gpu-node-02": {
+      "poll_interval_seconds": 30,
+      "probe_timeout_seconds": 20
+    }
+  },
   "incidents": {
     "resource_open_cycles": 2,
     "recovery_cycles": 2,
@@ -165,7 +171,7 @@ Declare the expected device count for stable compute nodes and tune incident sta
 }
 ```
 
-Expected-count keys must reference active aliases in the explicit `hosts` list. Connectivity and GPU-query loss surface immediately. Resource pressure requires consecutive samples, recovery requires consecutive healthy samples, and idle GPUs retaining significant VRAM use the longer window. This prevents one noisy sample from flooding the incident feed.
+Expected-count and override keys must reference active aliases in the explicit `hosts` list. Use a host override only after measuring a node whose own resource query exceeds the fleet timeout: its longer timeout restores complete data, while its slower cadence prevents that expensive probe from running every global cycle. Connectivity and GPU-query loss surface immediately. Resource pressure requires consecutive samples, recovery requires consecutive healthy samples, and idle GPUs retaining significant VRAM use the longer window. This prevents one noisy sample from flooding the incident feed.
 
 ### Monitor the machine running Mocop
 
@@ -213,6 +219,7 @@ Failed hosts retain their last successful sample and are marked stale. Stale val
 | `auto_discover` | discover explicit `Host` aliases from OpenSSH config | `false` |
 | `local_host` | optional alias in `hosts` to probe without SSH | `null` |
 | `expected_gpu_counts` | expected device count by explicit host alias | empty; 0 to 256 per host |
+| `host_overrides` | optional per-host collection cadence and complete-probe timeout | empty; same bounds as global values |
 | `poll_interval_seconds` | collection cadence at process start | 1 to 3600; default 5 |
 | `probe_timeout_seconds` | complete collection timeout for one host | 2 to 300 |
 | `connect_timeout_seconds` | SSH connection timeout | 1 to 120; less than probe timeout |

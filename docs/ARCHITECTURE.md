@@ -52,7 +52,7 @@ The dependency direction is `web → StateStore ← service → protocols/models
 
 ## Boundaries and canonical formats
 
-Configuration uses JSON. Startup rejects unknown keys, invalid types, unsafe aliases, and values outside documented limits. Resolution prefers an explicit path, then the environment, the standard user configuration directory, a development-only local path, and finally the bundled empty configuration.
+Configuration uses JSON. Startup rejects unknown keys, invalid types, unsafe aliases, and values outside documented limits. Optional host overrides can pace a measured slow target and give only that target a longer complete-probe timeout; aliases still have to belong to the explicit active inventory. Resolution prefers an explicit path, then the environment, the standard user configuration directory, a development-only local path, and finally the bundled empty configuration.
 
 Collection produces immutable `ProbeResult`, `SystemMetrics`, `DiskMetrics`, `GpuMetrics`, `GpuHealthMetrics`, and `GpuProcess` values. The system section uses the versioned `MONITOR_V4` tab-separated protocol. NVIDIA device, compute-process, and optional hardware-health data use the stable CSV mode of `nvidia-smi`. Parsers validate versions, columns, text length, numeric ranges, record counts, process identifiers, and GPU indexes. An optional health-query failure never invalidates base resource telemetry. [ADR-0003](adr/0003-gpu-reliability-and-authoritative-incidents.md) records the agentless decision and rejected DCGM-first alternative.
 
@@ -87,6 +87,7 @@ The user service is intentional because OpenSSH configuration, `known_hosts`, ke
 - Host sets are recalculated each cycle so configuration changes take effect without rebuilding state.
 - Connection and complete-probe timeouts are independent and bounded.
 - Repeated host failures use exponential backoff capped at 60 seconds; healthy hosts retain the normal cadence.
+- A measured slow host may use a bounded longer timeout and slower cadence without changing the browser-controlled fleet cadence.
 - A runtime cadence change wakes the scheduler and rebases existing retry deadlines.
 - Raw SSH stderr is classified locally and never crosses the browser boundary.
 - Failed hosts keep their last successful data, marked stale and excluded from current totals.

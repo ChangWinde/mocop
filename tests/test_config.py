@@ -46,6 +46,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.incident_history_points, 500)
         self.assertEqual(config.collection_stale_cycles, 3)
         self.assertEqual(config.expected_gpu_counts, ())
+        self.assertEqual(config.host_overrides, ())
         self.assertEqual(config.incidents.resource_open_cycles, 2)
         self.assertEqual(config.incidents.recovery_cycles, 2)
         self.assertEqual(config.incidents.gpu_idle_memory_cycles, 12)
@@ -157,6 +158,39 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 value["incidents"]["recovery_cycles"] = invalid
                 with self.assertRaisesRegex(ConfigError, "incidents.recovery_cycles"):
+                    load_config(self.write(value))
+
+    def test_validates_per_host_collection_overrides(self) -> None:
+        value = valid_config()
+        value["auto_discover"] = False
+        value["hosts"] = ["gpu-1"]
+        value["host_overrides"] = {
+            "gpu-1": {
+                "poll_interval_seconds": 30,
+                "probe_timeout_seconds": 20,
+            }
+        }
+
+        config = load_config(self.write(value))
+
+        override = config.host_override("gpu-1")
+        self.assertIsNotNone(override)
+        self.assertEqual(override.poll_interval_seconds, 30)
+        self.assertEqual(override.probe_timeout_seconds, 20)
+        self.assertIsNone(config.host_override("unknown"))
+
+        invalid_overrides = (
+            {"unknown": {"poll_interval_seconds": 30}},
+            {"gpu-1": {}},
+            {"gpu-1": {"poll_interval_seconds": 0}},
+            {"gpu-1": {"probe_timeout_seconds": 5}},
+            {"gpu-1": {"surprise": 20}},
+            {"gpu-1": "slow"},
+        )
+        for invalid in invalid_overrides:
+            with self.subTest(invalid=invalid):
+                value["host_overrides"] = invalid
+                with self.assertRaises(ConfigError):
                     load_config(self.write(value))
 
     def test_bounds_history_points(self) -> None:

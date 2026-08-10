@@ -9,6 +9,7 @@ This document defines reproducible measurement conditions and architecture thres
 - One bounded transport process collects system metrics, GPU metrics, compute tasks, and optional GPU health for one host per cycle; remote targets use one logical SSH session and the optional local target bypasses SSH.
 - The optional hardware-health section uses one additional short `nvidia-smi` query inside that transport. Its failure is isolated and does not cause a retry or invalidate base telemetry.
 - `max_workers` bounds concurrent probes, while completed hosts publish independently.
+- A validated per-host override can pace a measured slow target and extend only its complete-probe timeout; it should not be used without repeated timing evidence.
 - Repeated failures back off to at most 60 seconds instead of occupying a connection slot every cycle.
 - Stdout and stderr are drained incrementally under one byte limit; timeout and overflow terminate the process group.
 - Snapshots, trends, and incidents use bounded memory structures with no database write path.
@@ -49,6 +50,7 @@ An optimization comparison must hold these inputs constant:
 - Mocop commit and configuration
 - SSH configuration, connection reuse, and `known_hosts`
 - target set, online state, worker count, and timeouts
+- global cadence and every per-host cadence/timeout override
 - warm-up count, sample count, CPU/RSS collection method, and wall-clock method
 - browser version, viewport, GPU count, DOM count, and forced-layout behavior
 

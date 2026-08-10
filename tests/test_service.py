@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mocop.config import MonitorConfig
+from mocop.config import HostOverrideConfig, MonitorConfig
 from mocop.models import DiskMetrics, GpuMetrics, ProbeResult, SystemMetrics
 from mocop.service import MonitorService, StateStore
 
@@ -253,7 +253,51 @@ class _FailingProbe:
         return ProbeResult(host, "unreachable", 5000)
 
 
+class _OnlineProbe:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def probe(self, host, _config):
+        self.calls += 1
+        return ProbeResult(host, "online", 17_000)
+
+
 class MonitorServiceTests(unittest.TestCase):
+    @patch("mocop.service.time.monotonic")
+    def test_paces_a_slow_host_without_changing_the_global_cadence(
+        self, monotonic
+    ) -> None:
+        config = MonitorConfig(
+            ssh_config=Path("/tmp/config"),
+            auto_discover=False,
+            hosts=("offline",),
+            exclude_hosts=frozenset(),
+            poll_interval_seconds=5,
+            probe_timeout_seconds=12,
+            connect_timeout_seconds=5,
+            max_workers=1,
+            listen_host="127.0.0.1",
+            listen_port=8787,
+            host_overrides=(
+                (
+                    "offline",
+                    HostOverrideConfig(
+                        poll_interval_seconds=30,
+                        probe_timeout_seconds=20,
+                    ),
+                ),
+            ),
+        )
+        probe = _OnlineProbe()
+        service = MonitorService(config, _HostSource(), probe, StateStore(5))
+        monotonic.side_effect = [0, 5, 30]
+
+        service.poll_once()
+        service.poll_once()
+        service.poll_once()
+
+        self.assertEqual(probe.calls, 2)
+
     @patch("mocop.service.time.monotonic")
     def test_backs_off_repeated_failures_without_delaying_healthy_cycles(
         self, monotonic

@@ -824,11 +824,17 @@ class OpenSshLinuxResourceProbe:
         started = time.monotonic()
         environment = os.environ.copy()
         environment["LC_ALL"] = "C"
+        override = config.host_override(host)
+        timeout_seconds = (
+            override.probe_timeout_seconds
+            if override and override.probe_timeout_seconds is not None
+            else config.probe_timeout_seconds
+        )
         try:
             completed = _run_bounded_process(
                 command,
                 input_text=_REMOTE_SCRIPT,
-                timeout_seconds=config.probe_timeout_seconds,
+                timeout_seconds=timeout_seconds,
                 max_output_bytes=config.max_output_bytes,
                 environment=environment,
             )

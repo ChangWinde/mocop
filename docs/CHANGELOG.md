@@ -11,6 +11,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Added draggable server ordering, GPU/CPU activity in the fleet list, and browser-local display preferences.
 - Added optional GPU ECC, memory-repair, hardware-slowdown, and MIG telemetry without making base collection depend on the health query.
 - Added validated expected GPU counts, VRAM pressure, sustained idle-VRAM detection, and configurable incident stability windows.
+- Added validated per-host pacing and timeout overrides for empirically slow GPU nodes.
 
 ### Changed
 

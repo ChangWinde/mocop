@@ -157,6 +157,12 @@ Mocop 不会自动修改 linger 策略。
     "gpu-node-01": 8,
     "gpu-node-02": 8
   },
+  "host_overrides": {
+    "gpu-node-02": {
+      "poll_interval_seconds": 30,
+      "probe_timeout_seconds": 20
+    }
+  },
   "incidents": {
     "resource_open_cycles": 2,
     "recovery_cycles": 2,
@@ -165,7 +171,7 @@ Mocop 不会自动修改 linger 策略。
 }
 ```
 
-预期数量的键必须引用显式 `hosts` 列表中实际启用的别名。连接失败和 GPU 查询失效会立即显示；资源压力需要连续样本，恢复也需要连续健康样本，而低负载但持续占用显存使用更长的窗口。这样可以避免单个噪声样本刷屏。
+预期数量和覆盖项的键必须引用显式 `hosts` 列表中实际启用的别名。只有在实测某台节点自身的资源查询超过集群默认超时后，才应使用主机覆盖项：更长的超时可以恢复完整数据，更慢的独立周期则避免每个全局周期都运行这次昂贵探测。连接失败和 GPU 查询失效会立即显示；资源压力需要连续样本，恢复也需要连续健康样本，而低负载但持续占用显存使用更长的窗口。这样可以避免单个噪声样本刷屏。
 
 ### 监控运行 Mocop 的本机
 
@@ -213,6 +219,7 @@ mocop --once > snapshot.json
 | `auto_discover` | 从 OpenSSH 配置发现明确的 `Host` 别名 | `false` |
 | `local_host` | `hosts` 中可绕过 SSH 采集的本机别名 | `null` |
 | `expected_gpu_counts` | 按显式主机别名声明预期设备数 | 默认空，每台 0 至 256 |
+| `host_overrides` | 可选的逐主机采集周期与完整探测超时 | 默认空，与全局字段范围相同 |
 | `poll_interval_seconds` | 进程启动时的采集周期 | 1 至 3600，默认 5 |
 | `probe_timeout_seconds` | 单台主机完整采集超时 | 2 至 300 |
 | `connect_timeout_seconds` | SSH 建连超时 | 1 至 120，且小于完整超时 |

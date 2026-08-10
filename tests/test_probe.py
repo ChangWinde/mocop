@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from mocop.config import MonitorConfig
+from mocop.config import HostOverrideConfig, MonitorConfig
 from mocop.models import GpuHealthMetrics
 from mocop.probe import (
     OpenSshLinuxResourceProbe,
@@ -223,6 +223,20 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("/proc/meminfo", run.call_args.kwargs["input_text"])
         self.assertEqual(run.call_args.kwargs["max_output_bytes"], 2_097_152)
         self.assertNotIn("shell", run.call_args.kwargs)
+
+    @patch("mocop.probe._run_bounded_process")
+    def test_uses_per_host_probe_timeout(self, run) -> None:
+        run.return_value = _BoundedProcessResult(
+            0, stdout=resource_payload(), stderr=""
+        )
+        overridden = replace(
+            config(),
+            host_overrides=(("gpu-1", HostOverrideConfig(probe_timeout_seconds=20)),),
+        )
+
+        OpenSshLinuxResourceProbe().probe("gpu-1", overridden)
+
+        self.assertEqual(run.call_args.kwargs["timeout_seconds"], 20)
 
     @patch("mocop.probe._run_bounded_process")
     def test_local_host_uses_the_fixed_probe_without_ssh(self, run) -> None:

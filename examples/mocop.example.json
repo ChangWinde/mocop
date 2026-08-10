@@ -11,6 +11,7 @@
     "gpu-node-01": 8,
     "gpu-node-02": 8
   },
+  "host_overrides": {},
   "poll_interval_seconds": 5,
   "probe_timeout_seconds": 12,
   "connect_timeout_seconds": 5,
