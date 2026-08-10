@@ -20,7 +20,7 @@ const DEFAULT_PREFERENCES = Object.freeze({
   showTemperature: true,
   showPower: true,
 });
-const SERVER_SORT_VALUES = new Set(["custom", "host", "status", "gpu", "cpu"]);
+const SERVER_SORT_VALUES = new Set(["custom", "group", "host", "status", "gpu", "cpu"]);
 const GPU_SORT_VALUES = new Set(["host", "utilization", "memory", "temperature", "power"]);
 const HEAT_METRIC_VALUES = new Set(["utilization", "memory", "temperature"]);
 const THEME_VALUES = new Set(["midnight", "graphite", "aurora", "glass", "terminal"]);
@@ -107,6 +107,7 @@ const view = {
   groupCache: new Map(),
   serverItemCache: new Map(),
   fleetAllCache: null,
+  fleetGroupCache: new Map(),
   fleetEmptyNode: null,
   heatmapCache: new Map(),
   heatmapAxisCache: null,
@@ -138,6 +139,8 @@ const view = {
   inventoryConfirmTimer: null,
   maintenanceEditingHost: null,
   maintenancePendingHost: null,
+  groupEditingHost: null,
+  groupPendingHost: null,
   collectorSettingsDirty: false,
   collectorSettingsSaving: false,
   backgroundObjectUrl: null,
@@ -929,6 +932,7 @@ function normalizeInventory(payload) {
     payload.maintenanceWindows,
     configuredHosts,
   );
+  const hostGroups = normalizeHostGroups(payload.hostGroups, configuredHosts);
   if (
     configuredHosts.length !== payload.configuredHosts?.length
     || activeHosts.length !== payload.activeHosts?.length
@@ -952,7 +956,30 @@ function normalizeInventory(payload) {
     excludedHostCount: Math.max(0, payload.excludedHostCount),
     collectorSettings,
     maintenanceWindows,
+    hostGroups,
   };
+}
+
+function normalizeHostGroups(payload, configuredHosts) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TypeError("Invalid host groups response");
+  }
+  const configured = new Set(configuredHosts);
+  const groups = {};
+  Object.entries(payload).forEach(([host, group]) => {
+    if (
+      !configured.has(host)
+      || typeof group !== "string"
+      || !group
+      || group !== group.trim()
+      || [...group].length > 48
+      || /\p{C}/u.test(group)
+    ) {
+      throw new TypeError("Invalid host groups response");
+    }
+    groups[host] = group;
+  });
+  return groups;
 }
 
 function normalizeMaintenanceWindows(payload, configuredHosts) {
@@ -971,8 +998,8 @@ function normalizeMaintenanceWindows(payload, configuredHosts) {
       || typeof window.until !== "string"
       || !Number.isFinite(Date.parse(window.until))
       || typeof window.reason !== "string"
-      || window.reason.length > 120
-      || /[\u0000-\u001f\u007f-\u009f]/.test(window.reason)
+      || [...window.reason].length > 120
+      || /\p{C}/u.test(window.reason)
     ) {
       throw new TypeError("Invalid maintenance windows response");
     }
@@ -1092,6 +1119,8 @@ function inventoryHostRow(host, action) {
   if (action === "remove" && host === view.inventory.localHost) {
     identity.append(create("small", "", "本机"));
   }
+  const group = view.inventory.hostGroups[host];
+  if (group) identity.append(create("small", "host-group-badge", group));
   const maintenance = view.inventory.maintenanceWindows[host];
   if (maintenance) {
     const badge = create("small", "maintenance-badge", `维护至 ${shortTime(maintenance.until)}`);
@@ -1103,7 +1132,8 @@ function inventoryHostRow(host, action) {
   button.type = "button";
   button.disabled = !view.inventory.writable
     || view.inventoryPendingHost != null
-    || view.maintenancePendingHost != null;
+    || view.maintenancePendingHost != null
+    || view.groupPendingHost != null;
   if (action === "add") {
     button.setAttribute("aria-label", `添加节点 ${host}`);
     button.textContent = view.inventoryPendingHost === host ? "添加中" : "添加";
@@ -1111,6 +1141,17 @@ function inventoryHostRow(host, action) {
     actions.append(button);
   } else {
     if (view.inventory.configuredHosts.includes(host)) {
+      const groupButton = create("button", "inventory-host-action group-action");
+      groupButton.type = "button";
+      groupButton.disabled = button.disabled;
+      groupButton.setAttribute("aria-expanded", String(view.groupEditingHost === host));
+      groupButton.textContent = group ? "调整分组" : "设置分组";
+      groupButton.addEventListener("click", () => {
+        view.groupEditingHost = view.groupEditingHost === host ? null : host;
+        if (view.groupEditingHost) view.maintenanceEditingHost = null;
+        renderInventory();
+      });
+      actions.append(groupButton);
       const maintenanceButton = create("button", "inventory-host-action maintenance-action");
       maintenanceButton.type = "button";
       maintenanceButton.disabled = button.disabled;
@@ -1118,6 +1159,7 @@ function inventoryHostRow(host, action) {
       maintenanceButton.textContent = maintenance ? "调整维护" : "设为维护";
       maintenanceButton.addEventListener("click", () => {
         view.maintenanceEditingHost = view.maintenanceEditingHost === host ? null : host;
+        if (view.maintenanceEditingHost) view.groupEditingHost = null;
         renderInventory();
       });
       actions.append(maintenanceButton);
@@ -1135,7 +1177,50 @@ function inventoryHostRow(host, action) {
   if (action === "remove" && view.maintenanceEditingHost === host) {
     row.append(maintenanceEditor(host, maintenance));
   }
+  if (action === "remove" && view.groupEditingHost === host) {
+    row.append(hostGroupEditor(host, group));
+  }
   return row;
+}
+
+function hostGroupEditor(host, currentGroup) {
+  const form = create("form", "host-group-editor");
+  const group = document.createElement("input");
+  group.type = "text";
+  group.maxLength = 48;
+  group.placeholder = "例如：训练集群 / 推理集群";
+  group.value = currentGroup || "";
+  group.setAttribute("aria-label", `${host} 所属分组`);
+  const knownGroups = [...new Set(Object.values(view.inventory.hostGroups))]
+    .sort((first, second) => first.localeCompare(second));
+  if (knownGroups.length) {
+    const suggestions = document.createElement("datalist");
+    suggestions.id = `host-groups-${host}`;
+    knownGroups.forEach((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      suggestions.append(option);
+    });
+    group.setAttribute("list", suggestions.id);
+    form.append(group, suggestions);
+  } else {
+    form.append(group);
+  }
+  const save = create("button", "primary-action", currentGroup ? "保存分组" : "加入分组");
+  save.type = "submit";
+  form.append(save);
+  if (currentGroup) {
+    const clear = create("button", "inline-action danger-action", "移出分组");
+    clear.type = "button";
+    clear.addEventListener("click", () => changeHostGroup(host, ""));
+    form.append(clear);
+  }
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!form.reportValidity() || !group.value.trim()) return;
+    changeHostGroup(host, group.value);
+  });
+  return form;
 }
 
 function maintenanceEditor(host, maintenance) {
@@ -1178,7 +1263,8 @@ function renderInventory() {
   syncCollectorSettings();
   elements.inventoryRefresh.disabled = view.inventoryLoading
     || view.inventoryPendingHost != null
-    || view.maintenancePendingHost != null;
+    || view.maintenancePendingHost != null
+    || view.groupPendingHost != null;
   elements.inventoryRefresh.textContent = view.inventoryLoading ? "扫描中" : "重新扫描";
   if (!view.inventory) {
     elements.configuredHostCount.textContent = "0";
@@ -1218,6 +1304,7 @@ async function refreshInventory() {
     view.inventoryLoading
     || view.inventoryPendingHost != null
     || view.maintenancePendingHost != null
+    || view.groupPendingHost != null
   ) return;
   view.inventoryConfirmHost = null;
   if (view.inventoryConfirmTimer != null) clearTimeout(view.inventoryConfirmTimer);
@@ -1239,6 +1326,42 @@ async function refreshInventory() {
     view.inventoryMessageKind = "error";
   } finally {
     view.inventoryLoading = false;
+    renderInventory();
+  }
+}
+
+async function changeHostGroup(host, group) {
+  if (view.groupPendingHost != null) return;
+  view.groupPendingHost = host;
+  view.inventoryMessage = group.trim()
+    ? `正在更新 ${host} 的分组…` : `正在将 ${host} 移出分组…`;
+  view.inventoryMessageKind = "";
+  renderInventory();
+  try {
+    const response = await fetch("/api/settings/host-group", {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Monitor-Request": "dashboard",
+      },
+      body: JSON.stringify({ host, group }),
+    });
+    if (response.status === 409) throw new RangeError("stale inventory");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    view.inventory = normalizeInventory(await response.json());
+    view.groupEditingHost = null;
+    view.inventoryMessage = group.trim()
+      ? `${host} 已加入 ${group.trim()}` : `${host} 已移出分组`;
+    view.inventoryMessageKind = "success";
+    await fetchSnapshot();
+  } catch (error) {
+    view.inventoryMessage = error instanceof RangeError
+      ? "节点清单已变化，请重新扫描后再试"
+      : "分组保存失败，请检查配置权限与分组名称";
+    view.inventoryMessageKind = "error";
+  } finally {
+    view.groupPendingHost = null;
     renderInventory();
   }
 }
@@ -2013,6 +2136,15 @@ function orderedServers(servers) {
   const original = syncServerOrder(view.snapshot.servers);
   const order = new Map(original.map((host, index) => [host, index]));
   return servers.slice().sort((a, b) => {
+    if (view.serverSort === "group") {
+      const firstGroup = hostGroupName(a);
+      const secondGroup = hostGroupName(b);
+      if (!firstGroup && secondGroup) return 1;
+      if (firstGroup && !secondGroup) return -1;
+      return firstGroup.localeCompare(secondGroup)
+        || numeric(order.get(a.host), Number.MAX_SAFE_INTEGER)
+        - numeric(order.get(b.host), Number.MAX_SAFE_INTEGER);
+    }
     if (view.serverSort === "host") return a.host.localeCompare(b.host);
     if (view.serverSort === "status") {
       return serverStatusRank(a) - serverStatusRank(b)
@@ -2029,6 +2161,11 @@ function orderedServers(servers) {
     return numeric(order.get(a.host), Number.MAX_SAFE_INTEGER)
       - numeric(order.get(b.host), Number.MAX_SAFE_INTEGER);
   });
+}
+
+function hostGroupName(server) {
+  return typeof server.group === "string" && server.group.trim()
+    ? server.group.trim() : "";
 }
 
 function reorderServer(source, target) {
@@ -2213,6 +2350,8 @@ function serverItem(server, selectedHost) {
   const main = create("div", "server-main");
   const identity = create("div", "server-main");
   identity.append(create("i", `status-dot ${stateClass}`), create("span", "server-name", server.host));
+  const group = hostGroupName(server);
+  if (group) identity.append(create("span", "server-group-badge", group));
   const gpuLabel = `${server.gpus.length} GPU${server.stale ? " · 历史" : ""}`;
   main.append(identity, create("span", "server-gpu-count", gpuLabel));
 
@@ -2283,6 +2422,7 @@ function serverItemSignature(server) {
     resources.memory,
     server.maintenance?.until,
     server.maintenance?.reason,
+    hostGroupName(server),
   ]);
 }
 
@@ -2315,6 +2455,23 @@ function fleetAllItem(label, gpuCount) {
   return item;
 }
 
+function fleetGroupHeader(group, servers) {
+  const label = group || "未分组";
+  const gpuCount = servers.reduce((sum, server) => sum + server.gpus.length, 0);
+  const signature = `${label}:${servers.length}:${gpuCount}`;
+  const cacheKey = group || "\u0000";
+  const cached = view.fleetGroupCache.get(cacheKey);
+  if (cached?.signature === signature) return cached.node;
+  const node = create("div", "fleet-group-heading");
+  node.setAttribute("role", "presentation");
+  node.append(
+    create("strong", "", label),
+    create("span", "", `${servers.length} 节点 · ${gpuCount} GPU`),
+  );
+  view.fleetGroupCache.set(cacheKey, { signature, node });
+  return node;
+}
+
 function renderServers() {
   if (!view.snapshot) return;
   const servers = orderedServers(focusedServers(view.snapshot.servers));
@@ -2322,10 +2479,23 @@ function renderServers() {
     ? String(view.snapshot.stats.servers)
     : `${servers.length}/${view.snapshot.stats.servers}`;
   const gpuCount = servers.reduce((sum, server) => sum + server.gpus.length, 0);
-  const desired = [
-    fleetAllItem(SERVER_FILTER_LABELS[view.serverFilter], gpuCount),
-    ...servers.map(cachedServerItem),
-  ];
+  const desired = [fleetAllItem(SERVER_FILTER_LABELS[view.serverFilter], gpuCount)];
+  const grouped = view.serverSort === "group" && servers.some(hostGroupName);
+  const visibleGroupKeys = new Set();
+  if (grouped) {
+    let start = 0;
+    while (start < servers.length) {
+      const group = hostGroupName(servers[start]);
+      let end = start + 1;
+      while (end < servers.length && hostGroupName(servers[end]) === group) end += 1;
+      const members = servers.slice(start, end);
+      desired.push(fleetGroupHeader(group, members), ...members.map(cachedServerItem));
+      visibleGroupKeys.add(group || "\u0000");
+      start = end;
+    }
+  } else {
+    desired.push(...servers.map(cachedServerItem));
+  }
   if (!servers.length) {
     view.fleetEmptyNode ||= create("div", "fleet-empty", "当前筛选没有匹配节点");
     desired.push(view.fleetEmptyNode);
@@ -2333,6 +2503,9 @@ function renderServers() {
   const knownHosts = new Set(view.snapshot.servers.map((server) => server.host));
   [...view.serverItemCache.keys()].forEach((host) => {
     if (!knownHosts.has(host)) view.serverItemCache.delete(host);
+  });
+  [...view.fleetGroupCache.keys()].forEach((group) => {
+    if (!visibleGroupKeys.has(group)) view.fleetGroupCache.delete(group);
   });
   reconcileChildren(elements.serverList, desired);
 }

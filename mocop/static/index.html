@@ -349,6 +349,7 @@
             <span>排序方式</span>
             <select id="server-sort">
               <option value="custom">自定义拖动顺序</option>
+              <option value="group">节点分组</option>
               <option value="host">服务器名称</option>
               <option value="status">异常优先</option>
               <option value="gpu">GPU 利用率</option>
@@ -365,7 +366,7 @@
               <option value="stale">陈旧节点</option>
             </select>
           </label>
-          <span class="settings-help">拖动服务器会自动切换到自定义顺序；关注视图会在下次打开时恢复。</span>
+          <span class="settings-help">节点分组来自本地配置；拖动服务器会自动切换到自定义顺序，关注视图会在下次打开时恢复。</span>
         </section>
         <section class="settings-section">
           <h3>GPU 视图</h3>
@@ -404,7 +405,7 @@
             </div>
             <button id="inventory-refresh" class="inline-action" type="button">扫描</button>
           </div>
-          <p class="inventory-note">扫描只读取本机 SSH 别名，不会发起连接。Git、GitHub、GitLab 与 <code>exclude_hosts</code> 中的别名会被忽略。维护窗口不会停止采集，只会暂时静默该节点的待处理问题，并在到期后自动恢复。</p>
+          <p class="inventory-note">扫描只读取本机 SSH 别名，不会发起连接。Git、GitHub、GitLab 与 <code>exclude_hosts</code> 中的别名会被忽略。节点分组会写入本地配置并热更新导航；维护窗口不会停止采集，只会暂时静默该节点的待处理问题。</p>
           <div id="inventory-status" class="inventory-status" role="status">打开设置后自动扫描</div>
           <div class="inventory-columns">
             <div class="inventory-block">

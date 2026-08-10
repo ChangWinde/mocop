@@ -41,6 +41,7 @@ class StateStore:
         expected_gpu_counts: tuple[tuple[str, int], ...] = (),
         incidents: IncidentConfig | None = None,
         maintenance_windows: tuple[tuple[str, MaintenanceWindowConfig], ...] = (),
+        host_groups: tuple[tuple[str, str], ...] = (),
         utc_clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._condition = threading.Condition()
@@ -65,6 +66,7 @@ class StateStore:
         self._incidents = IncidentTracker(selected_policy, incident_history_points)
         self._utc_clock = utc_clock or (lambda: datetime.now(timezone.utc))
         self._maintenance_windows = dict(maintenance_windows)
+        self._host_groups = dict(host_groups)
         self._active_maintenance_signature = self._maintenance_signature_locked()
         self._incident_revision = 0
         self._tracker_version = self._incidents.version
@@ -147,6 +149,14 @@ class StateStore:
             self._maintenance_windows = updated
             self._active_maintenance_signature = self._maintenance_signature_locked()
             self._incident_revision += 1
+            self._publish_locked()
+
+    def set_host_groups(self, host_groups: tuple[tuple[str, str], ...]) -> None:
+        with self._condition:
+            updated = dict(host_groups)
+            if updated == self._host_groups:
+                return
+            self._host_groups = updated
             self._publish_locked()
 
     def wait_for_schedule_change(self, timeout_seconds: float) -> bool:
@@ -344,8 +354,10 @@ class StateStore:
         servers = [state.to_dict() for state in self._servers.values()]
         active_maintenance = self._active_maintenance_locked()
         for server in servers:
-            window = active_maintenance.get(str(server["host"]))
+            host = str(server["host"])
+            window = active_maintenance.get(host)
             server["maintenance"] = window.to_dict() if window else None
+            server["group"] = self._host_groups.get(host)
         online = sum(server["status"] == "online" for server in servers)
         current_servers = [server for server in servers if server["status"] == "online"]
         gpus = [gpu for server in current_servers for gpu in server["gpus"]]
@@ -471,6 +483,7 @@ class MonitorService:
             self._state.set_poll_interval_seconds(config.poll_interval_seconds)
             self._state.update_expected_gpu_counts(config.expected_gpu_counts)
             self._state.set_maintenance_windows(config.maintenance_windows)
+            self._state.set_host_groups(config.host_groups)
             try:
                 hosts = self._host_source.hosts(config)
             except (OSError, ValueError):

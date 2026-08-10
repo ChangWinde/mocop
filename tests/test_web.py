@@ -21,6 +21,7 @@ class _Inventory:
             "maxWorkers": 16,
         }
         self.maintenance_windows = {}
+        self.host_groups = {}
 
     def snapshot(self):
         return {
@@ -33,6 +34,7 @@ class _Inventory:
             "excludedHostCount": 1,
             "collectorSettings": dict(self.collector_settings),
             "maintenanceWindows": dict(self.maintenance_windows),
+            "hostGroups": dict(self.host_groups),
             "writable": True,
         }
 
@@ -61,6 +63,16 @@ class _Inventory:
             }
         else:
             self.maintenance_windows.pop(host, None)
+        return self.snapshot()
+
+    def update_host_group(self, host, group):
+        if host not in self.configured:
+            raise InventoryRequestError("inventory changed")
+        normalized = group.strip()
+        if normalized:
+            self.host_groups[host] = normalized
+        else:
+            self.host_groups.pop(host, None)
         return self.snapshot()
 
 
@@ -137,6 +149,8 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="available-host-list"', body)
         self.assertIn("维护窗口不会停止采集", body)
         self.assertIn('fetch("/api/settings/maintenance"', script)
+        self.assertIn('fetch("/api/settings/host-group"', script)
+        self.assertIn('<option value="group">节点分组</option>', body)
         self.assertIn('id="gpu-detail-dialog"', body)
         self.assertIn('id="gpu-task-list"', body)
         self.assertIn('id="capacity-toggle"', body)
@@ -221,6 +235,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(inventory["availableHosts"], ["gpu-02"])
         self.assertEqual(inventory["ignoredCodeHostCount"], 2)
         self.assertEqual(inventory["maintenanceWindows"], {})
+        self.assertEqual(inventory["hostGroups"], {})
 
         add = self.poll_interval_request(
             b'{"action":"add","host":"gpu-02"}',
@@ -269,6 +284,46 @@ class WebTests(unittest.TestCase):
             cleared = json.load(response)
         self.assertEqual(cleared["maintenanceWindows"], {})
 
+    def test_sets_and_clears_shared_host_groups(self) -> None:
+        request = self.poll_interval_request(
+            b'{"host":"gpu-01","group":"Training"}',
+            origin=self.base,
+            path="/api/settings/host-group",
+        )
+        with urlopen(request, timeout=2) as response:
+            changed = json.load(response)
+        self.assertEqual(changed["hostGroups"], {"gpu-01": "Training"})
+
+        clear = self.poll_interval_request(
+            b'{"host":"gpu-01","group":""}',
+            origin=self.base,
+            path="/api/settings/host-group",
+        )
+        with urlopen(clear, timeout=2) as response:
+            cleared = json.load(response)
+        self.assertEqual(cleared["hostGroups"], {})
+
+    def test_rejects_invalid_or_stale_host_group_writes(self) -> None:
+        cases = (
+            (b'{"host":"--bad","group":"Training"}', 400),
+            (b'{"host":"gpu-01","group":"x\\u007f"}', 400),
+            (b'{"host":"gpu-01","group":"x\\u202e"}', 400),
+            (json.dumps({"host": "gpu-01", "group": "x" * 49}).encode(), 400),
+            (b'{"host":"unknown","group":"Training"}', 409),
+            (b'{"host":"gpu-01","group":"Training","extra":1}', 400),
+            (b'{"host":"gpu-01","host":"gpu-01","group":"Training"}', 400),
+        )
+        for payload, status in cases:
+            with self.subTest(payload=payload):
+                request = self.poll_interval_request(
+                    payload,
+                    origin=self.base,
+                    path="/api/settings/host-group",
+                )
+                with self.assertRaises(HTTPError) as rejected:
+                    urlopen(request, timeout=2)
+                self.assertEqual(rejected.exception.code, status)
+
     def test_rejects_invalid_or_stale_maintenance_writes(self) -> None:
         cases = (
             (b'{"host":"gpu-01","durationSeconds":60,"reason":"Work"}', 400),
@@ -276,6 +331,7 @@ class WebTests(unittest.TestCase):
             (b'{"host":"--bad","durationSeconds":3600,"reason":"Work"}', 400),
             (b'{"host":"gpu-01","durationSeconds":true,"reason":"Work"}', 400),
             (b'{"host":"gpu-01","durationSeconds":3600,"reason":"Work\\u007f"}', 400),
+            (b'{"host":"gpu-01","durationSeconds":3600,"reason":"Work\\u202e"}', 400),
             (b'{"host":"unknown","durationSeconds":3600,"reason":"Work"}', 409),
             (
                 b'{"host":"gpu-01","durationSeconds":3600,"reason":"Work","extra":1}',

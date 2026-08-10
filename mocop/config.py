@@ -15,6 +15,7 @@ USER_CONFIG_RELATIVE_PATH = Path("mocop/config.json")
 BUNDLED_CONFIG_PATH = Path(__file__).with_name("default_config.json")
 _SAFE_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 MAINTENANCE_REASON_MAX_LENGTH = 120
+HOST_GROUP_MAX_LENGTH = 48
 
 
 class ConfigError(ValueError):
@@ -86,6 +87,7 @@ class MonitorConfig:
     incidents: IncidentConfig = field(default_factory=IncidentConfig)
     host_overrides: tuple[tuple[str, HostOverrideConfig], ...] = ()
     maintenance_windows: tuple[tuple[str, MaintenanceWindowConfig], ...] = ()
+    host_groups: tuple[tuple[str, str], ...] = ()
 
     def host_override(self, host: str) -> HostOverrideConfig | None:
         return next(
@@ -96,6 +98,12 @@ class MonitorConfig:
     def maintenance_window(self, host: str) -> MaintenanceWindowConfig | None:
         return next(
             (window for alias, window in self.maintenance_windows if alias == host),
+            None,
+        )
+
+    def host_group(self, host: str) -> str | None:
+        return next(
+            (group for alias, group in self.host_groups if alias == host),
             None,
         )
 
@@ -123,6 +131,7 @@ _OPTIONAL_KEYS = {
     "incidents",
     "host_overrides",
     "maintenance_windows",
+    "host_groups",
 }
 _THRESHOLD_KEYS = {
     "cpu_warning_pct",
@@ -202,7 +211,22 @@ def is_valid_maintenance_reason(value: object, *, required: bool) -> bool:
     return (
         (bool(normalized) or not required)
         and len(normalized) <= MAINTENANCE_REASON_MAX_LENGTH
-        and not any(unicodedata.category(character) == "Cc" for character in value)
+        and not any(
+            unicodedata.category(character).startswith("C") for character in value
+        )
+    )
+
+
+def is_valid_host_group(value: object, *, required: bool) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip()
+    return (
+        (bool(normalized) or not required)
+        and len(normalized) <= HOST_GROUP_MAX_LENGTH
+        and not any(
+            unicodedata.category(character).startswith("C") for character in value
+        )
     )
 
 
@@ -462,6 +486,25 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
             (alias, MaintenanceWindowConfig(until=until, reason=reason))
         )
 
+    host_group_data = data.get("host_groups", {})
+    if not isinstance(host_group_data, dict):
+        raise ConfigError("host_groups must be a JSON object")
+    host_groups: list[tuple[str, str]] = []
+    for alias, group_value in host_group_data.items():
+        if not isinstance(alias, str) or not is_safe_alias(alias):
+            raise ConfigError("host_groups keys must be safe host aliases")
+        if alias not in hosts:
+            raise ConfigError(f"host_groups.{alias} must reference an explicit host")
+        if alias in excludes:
+            raise ConfigError(f"host_groups.{alias} cannot be excluded")
+        if not is_valid_host_group(group_value, required=True):
+            raise ConfigError(
+                f"host_groups.{alias} must be at most "
+                f"{HOST_GROUP_MAX_LENGTH} visible characters"
+            )
+        assert isinstance(group_value, str)
+        host_groups.append((alias, group_value.strip()))
+
     incident_data = data.get("incidents", {})
     if not isinstance(incident_data, dict):
         raise ConfigError("incidents must be a JSON object")
@@ -509,4 +552,5 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         incidents=incidents,
         host_overrides=tuple(host_overrides),
         maintenance_windows=tuple(maintenance_windows),
+        host_groups=tuple(host_groups),
     )

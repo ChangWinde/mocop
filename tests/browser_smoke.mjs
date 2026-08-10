@@ -331,6 +331,26 @@ try {
   assert.match(capacity.rule, /60 GiB/);
   assert(capacity.centerDelta < 2);
 
+  const grouping = await cdp.evaluate(`(() => {
+    const sort = document.querySelector("#server-sort");
+    sort.value = "group";
+    sort.dispatchEvent(new Event("change", { bubbles: true }));
+    return {
+      headings: [...document.querySelectorAll(".fleet-group-heading strong")].map(
+        (item) => item.textContent,
+      ),
+      groups: [...document.querySelectorAll(".server-group-badge")].map(
+        (item) => item.textContent,
+      ),
+      order: [...document.querySelectorAll(".server-item[data-host]")].map(
+        (item) => item.dataset.host,
+      ),
+    };
+  })()`);
+  assert.deepEqual(grouping.headings, ["Lab", "Training"]);
+  assert.deepEqual(grouping.groups, ["Lab", "Training", "Training"]);
+  assert.deepEqual(grouping.order, ["atlas-03", "atlas-01", "atlas-02"]);
+
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 1440,
     height: 1000,
@@ -344,8 +364,8 @@ try {
     const utilizationVisible = serverItems.every(
       (item) => item.textContent.includes("GPU") && item.textContent.includes("CPU"),
     );
-    const source = serverItems[1];
-    const target = serverItems[0];
+    const source = serverItems.find((item) => item.dataset.host === "atlas-02");
+    const target = serverItems.find((item) => item.dataset.host === "atlas-01");
     const transfer = new DataTransfer();
     source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: transfer }));
     target.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
@@ -469,6 +489,13 @@ try {
     for (let attempt = 0; attempt < 20 && !document.querySelector("#collector-settings-status").classList.contains("success"); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    document.querySelector("#configured-host-list .group-action").click();
+    const groupEditor = document.querySelector("#configured-host-list .host-group-editor");
+    groupEditor.querySelector('input[type="text"]').value = "Priority";
+    groupEditor.requestSubmit();
+    for (let attempt = 0; attempt < 20 && ![...document.querySelectorAll("#configured-host-list .host-group-badge")].some((badge) => badge.textContent === "Priority"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     document.querySelector("#configured-host-list .maintenance-action").click();
     const maintenanceEditor = document.querySelector("#configured-host-list .maintenance-editor");
     maintenanceEditor.querySelector('input[type="text"]').value = "Driver upgrade";
@@ -527,6 +554,7 @@ try {
       settingsOpen,
       collectorSettings: persistedCollector.collectorSettings,
       maintenanceWindows: persistedCollector.maintenanceWindows,
+      hostGroups: persistedCollector.hostGroups,
       maintenanceBadge,
       gpuSort: document.querySelector("#gpu-sort").value,
       powerHidden: document.body.classList.contains("hide-gpu-power"),
@@ -572,6 +600,7 @@ try {
   assert.equal(personalization.collectorSettings.probeTimeoutSeconds, 24);
   assert.equal(personalization.collectorSettings.maxWorkers, 6);
   assert.equal(personalization.maintenanceWindows["atlas-01"].reason, "Driver upgrade");
+  assert.equal(personalization.hostGroups["atlas-01"], "Priority");
   assert.match(personalization.maintenanceBadge, /维护至/);
   assert.equal(personalization.gpuSort, "memory");
   assert.equal(personalization.powerHidden, true);
@@ -664,7 +693,7 @@ try {
   assert.deepEqual(cdp.errors, []);
 
   console.log(JSON.stringify({
-    browser: "chrome", initial, final, transientConnection, capacity, personalization,
+    browser: "chrome", initial, final, transientConnection, capacity, grouping, personalization,
     persistedAppearance, mobile, removedBackground,
   }));
 } catch (error) {

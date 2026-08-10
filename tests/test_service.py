@@ -295,6 +295,25 @@ class StateStoreTests(unittest.TestCase):
         self.assertGreater(expired["incidentVersion"], silenced["incidentVersion"])
         self.assertFalse(store.incidents(10)["active"][0]["silenced"])
 
+    def test_publishes_and_hot_replaces_shared_host_groups(self) -> None:
+        store = StateStore(5, host_groups=(("gpu-1", "Training"),))
+        store.set_hosts(("gpu-1", "gpu-2"))
+
+        initial = store.snapshot()
+        groups = {server["host"]: server["group"] for server in initial["servers"]}
+        self.assertEqual(groups, {"gpu-1": "Training", "gpu-2": None})
+
+        version = initial["version"]
+        store.set_host_groups((("gpu-2", "Inference"),))
+        updated = store.snapshot()
+        groups = {server["host"]: server["group"] for server in updated["servers"]}
+        self.assertGreater(updated["version"], version)
+        self.assertEqual(groups, {"gpu-1": None, "gpu-2": "Inference"})
+
+        unchanged_version = updated["version"]
+        store.set_host_groups((("gpu-2", "Inference"),))
+        self.assertEqual(store.snapshot()["version"], unchanged_version)
+
     def test_wires_expected_gpu_inventory_into_authoritative_incidents(self) -> None:
         store = StateStore(5, expected_gpu_counts=(("gpu-1", 2),))
         store.set_hosts(("gpu-1",))

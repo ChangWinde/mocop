@@ -18,7 +18,8 @@ from mocop.web import MonitorHttpServer
 
 
 class DemoInventory:
-    def __init__(self) -> None:
+    def __init__(self, state: StateStore) -> None:
+        self.state = state
         self.configured = ["atlas-01", "atlas-02", "atlas-03"]
         self.available = ["atlas-04", "atlas-05"]
         self.collector_settings = {
@@ -27,6 +28,11 @@ class DemoInventory:
             "maxWorkers": 8,
         }
         self.maintenance_windows: dict[str, dict[str, str]] = {}
+        self.host_groups = {
+            "atlas-01": "Training",
+            "atlas-02": "Training",
+            "atlas-03": "Lab",
+        }
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -39,6 +45,7 @@ class DemoInventory:
             "excludedHostCount": 1,
             "collectorSettings": dict(self.collector_settings),
             "maintenanceWindows": dict(self.maintenance_windows),
+            "hostGroups": dict(self.host_groups),
             "writable": True,
         }
 
@@ -71,6 +78,17 @@ class DemoInventory:
             }
         else:
             self.maintenance_windows.pop(host, None)
+        return self.snapshot()
+
+    def update_host_group(self, host: str, group: str) -> dict[str, object]:
+        if host not in self.configured:
+            raise InventoryRequestError("stale demo inventory")
+        normalized = group.strip()
+        if normalized:
+            self.host_groups[host] = normalized
+        else:
+            self.host_groups.pop(host, None)
+        self.state.set_host_groups(tuple(self.host_groups.items()))
         return self.snapshot()
 
 
@@ -157,7 +175,14 @@ def system(hostname: str, cpu: float, memory_used: float) -> SystemMetrics:
 
 
 def demo_state() -> StateStore:
-    state = StateStore(5)
+    state = StateStore(
+        5,
+        host_groups=(
+            ("atlas-01", "Training"),
+            ("atlas-02", "Training"),
+            ("atlas-03", "Lab"),
+        ),
+    )
     state.set_hosts(("atlas-01", "atlas-02", "atlas-03"))
     state.apply(
         ProbeResult(
@@ -217,7 +242,9 @@ def main() -> int:
         name="mocop-browser-fixture",
         daemon=True,
     ).start()
-    server = MonitorHttpServer(("127.0.0.1", int(sys.argv[1])), state, DemoInventory())
+    server = MonitorHttpServer(
+        ("127.0.0.1", int(sys.argv[1])), state, DemoInventory(state)
+    )
     try:
         server.serve_forever()
     finally:

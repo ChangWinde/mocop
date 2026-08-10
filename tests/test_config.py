@@ -49,6 +49,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.expected_gpu_counts, ())
         self.assertEqual(config.host_overrides, ())
         self.assertEqual(config.maintenance_windows, ())
+        self.assertEqual(config.host_groups, ())
         self.assertEqual(config.incidents.resource_open_cycles, 2)
         self.assertEqual(config.incidents.recovery_cycles, 2)
         self.assertEqual(config.incidents.gpu_idle_memory_cycles, 12)
@@ -142,6 +143,40 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "cannot be excluded"):
             load_config(self.write(value))
 
+    def test_validates_shared_host_groups_against_explicit_hosts(self) -> None:
+        value = valid_config()
+        value["auto_discover"] = False
+        value["hosts"] = ["gpu-1", "gpu-2"]
+        value["host_groups"] = {"gpu-1": " Training ", "gpu-2": "Inference"}
+
+        config = load_config(self.write(value))
+
+        self.assertEqual(
+            dict(config.host_groups),
+            {"gpu-1": "Training", "gpu-2": "Inference"},
+        )
+        self.assertEqual(config.host_group("gpu-1"), "Training")
+        self.assertIsNone(config.host_group("unknown"))
+
+        for invalid in (
+            {"unknown": "Training"},
+            {"gpu-1": ""},
+            {"gpu-1": "x\n"},
+            {"gpu-1": "x\u007f"},
+            {"gpu-1": "x\u202e"},
+            {"gpu-1": "x" * 49},
+            {"--bad": "Training"},
+        ):
+            with self.subTest(invalid=invalid):
+                value["host_groups"] = invalid
+                with self.assertRaises(ConfigError):
+                    load_config(self.write(value))
+
+        value["host_groups"] = {"gpu-1": "Training"}
+        value["exclude_hosts"] = ["gpu-1"]
+        with self.assertRaisesRegex(ConfigError, "cannot be excluded"):
+            load_config(self.write(value))
+
     def test_validates_incident_stability_configuration(self) -> None:
         value = valid_config()
         value["incidents"] = {
@@ -227,6 +262,7 @@ class ConfigTests(unittest.TestCase):
             {"gpu-1": {"until": "2030-06-15T12:30:00Z", "reason": 1}},
             {"gpu-1": {"until": "2030-06-15T12:30:00Z", "reason": "x\n"}},
             {"gpu-1": {"until": "2030-06-15T12:30:00Z", "reason": "x\u007f"}},
+            {"gpu-1": {"until": "2030-06-15T12:30:00Z", "reason": "x\u202e"}},
             {"gpu-1": {"until": "2030-06-15T12:30:00Z", "extra": True}},
             {"gpu-1": {}},
         )

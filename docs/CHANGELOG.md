@@ -19,6 +19,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Added a validated, browser-local custom background with visibility control.
 - Added persistent, time-bounded maintenance windows with continuous collection, automatic expiry, and separate raw/actionable incident counts.
 - Added a snapshot-only GPU capacity matcher with same-node/model constraints, free-VRAM requests, health exclusions, and ranked near matches.
+- Added config-backed host groups with bounded dashboard editing, live state updates, grouped fleet navigation, and cached rendering.
 
 ### Changed
 

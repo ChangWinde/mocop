@@ -51,6 +51,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(snapshot["localHost"], None)
         self.assertEqual(snapshot["ignoredCodeHostCount"], 3)
         self.assertEqual(snapshot["excludedHostCount"], 1)
+        self.assertEqual(snapshot["hostGroups"], {})
         self.assertEqual(
             snapshot["collectorSettings"],
             {
@@ -134,6 +135,7 @@ class InventoryTests(unittest.TestCase):
         data["maintenance_windows"] = {
             "gpu-01": {"until": "2030-06-15T12:30:00Z", "reason": "Repair"}
         }
+        data["host_groups"] = {"gpu-01": "Training"}
         self.config_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -147,7 +149,45 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(raw["expected_gpu_counts"], {})
         self.assertEqual(raw["host_overrides"], {})
         self.assertEqual(raw["maintenance_windows"], {})
+        self.assertEqual(raw["host_groups"], {})
         self.assertEqual(self.updates[-1].hosts, ())
+
+    def test_sets_clears_and_avoids_rewriting_shared_host_groups(self) -> None:
+        changed = self.inventory.update_host_group("gpu-01", " Training ")
+
+        self.assertEqual(changed["hostGroups"], {"gpu-01": "Training"})
+        self.assertEqual(load_config(self.config_path).host_group("gpu-01"), "Training")
+        persisted_at = self.config_path.stat().st_mtime_ns
+        updates = len(self.updates)
+
+        unchanged = self.inventory.update_host_group("gpu-01", "Training")
+
+        self.assertEqual(unchanged["hostGroups"], {"gpu-01": "Training"})
+        self.assertEqual(self.config_path.stat().st_mtime_ns, persisted_at)
+        self.assertEqual(len(self.updates), updates)
+
+        cleared = self.inventory.update_host_group("gpu-01", "")
+        self.assertEqual(cleared["hostGroups"], {})
+        self.assertIsNone(load_config(self.config_path).host_group("gpu-01"))
+
+    def test_rejects_unsafe_host_groups_without_rewriting_config(self) -> None:
+        before = self.config_path.read_bytes()
+        cases = (
+            ("unknown", "Training"),
+            ("--bad", "Training"),
+            ("gpu-01", "x\n"),
+            ("gpu-01", "x\u007f"),
+            ("gpu-01", "x\u202e"),
+            ("gpu-01", "x" * 49),
+        )
+
+        for host, group in cases:
+            with (
+                self.subTest(host=host, group=group),
+                self.assertRaises(InventoryError),
+            ):
+                self.inventory.update_host_group(host, group)
+            self.assertEqual(self.config_path.read_bytes(), before)
 
     def test_sets_and_clears_bounded_maintenance_windows_atomically(self) -> None:
         changed = self.inventory.update_maintenance("gpu-01", 14_400, "Driver upgrade")
@@ -181,6 +221,7 @@ class InventoryTests(unittest.TestCase):
             ("gpu-01", 3600, ""),
             ("gpu-01", 3600, "x\n"),
             ("gpu-01", 3600, "x\u007f"),
+            ("gpu-01", 3600, "x\u202e"),
             ("gpu-01", 3600, "x" * 121),
         )
 

@@ -15,6 +15,7 @@ from .config import (
     ConfigError,
     MonitorConfig,
     is_safe_alias,
+    is_valid_host_group,
     is_valid_maintenance_reason,
     load_config,
 )
@@ -45,6 +46,8 @@ class DashboardConfigController(Protocol):
     def update_maintenance(
         self, host: str, duration_seconds: int, reason: str
     ) -> dict[str, object]: ...
+
+    def update_host_group(self, host: str, group: str) -> dict[str, object]: ...
 
 
 class ConfigInventory:
@@ -108,12 +111,43 @@ class ConfigInventory:
                     "expected_gpu_counts",
                     "host_overrides",
                     "maintenance_windows",
+                    "host_groups",
                 ):
                     metadata = data.get(field)
                     if isinstance(metadata, dict):
                         metadata.pop(host, None)
 
             data["hosts"] = configured
+            updated = self._commit(data)
+            return self._snapshot(updated)
+
+    def update_host_group(self, host: str, group: str) -> dict[str, object]:
+        """Persist or clear one explicitly configured host's shared group."""
+        if not isinstance(host, str) or not is_safe_alias(host):
+            raise InventoryRequestError("host must be a safe OpenSSH alias")
+        if not is_valid_host_group(group, required=False):
+            raise InventoryRequestError("host group is invalid")
+        assert isinstance(group, str)
+        normalized_group = group.strip()
+
+        with self._lock:
+            self._require_writable()
+            config = self._load()
+            if host not in config.hosts or host in config.exclude_hosts:
+                raise InventoryRequestError("group host is not explicitly configured")
+            current_groups = dict(config.host_groups)
+            if current_groups.get(host, "") == normalized_group:
+                return self._snapshot(config)
+            data = self._read_object()
+            raw_groups = data.get("host_groups", {})
+            if not isinstance(raw_groups, dict):
+                raise InventoryError("host group configuration is invalid")
+            groups = dict(raw_groups)
+            if normalized_group:
+                groups[host] = normalized_group
+            else:
+                groups.pop(host, None)
+            data["host_groups"] = groups
             updated = self._commit(data)
             return self._snapshot(updated)
 
@@ -265,6 +299,7 @@ class ConfigInventory:
                 for alias, window in config.maintenance_windows
                 if window.is_active()
             },
+            "hostGroups": dict(config.host_groups),
             "writable": self._is_writable_target(),
         }
 
