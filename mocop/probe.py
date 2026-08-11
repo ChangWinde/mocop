@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 
-from .config import MonitorConfig, is_safe_alias
+from .config import MonitorConfig, ThresholdConfig, is_safe_alias
 from .models import (
     DiskMetrics,
     GpuHealthMetrics,
@@ -874,6 +874,29 @@ class _ProcessSample:
     observed_at: str
     workload_mode: str
     processes_by_gpu: dict[str, tuple[GpuProcess, ...]]
+    idle_streak: int = 0
+
+
+_MAX_PROCESS_INTERVAL_STRETCH = 4
+
+
+def _gpu_activity(gpus: tuple[GpuMetrics, ...], thresholds: ThresholdConfig) -> bool:
+    """Judge whether any device shows compute activity worth fresh process data."""
+    for gpu in gpus:
+        if gpu.processes:
+            return True
+        utilization = gpu.utilization_gpu_pct
+        if utilization is not None and utilization >= thresholds.gpu_busy_pct:
+            return True
+        used = gpu.memory_used_mib
+        total = gpu.memory_total_mib
+        if (
+            used is not None
+            and total
+            and (used / total) * 100 >= thresholds.gpu_idle_memory_pct
+        ):
+            return True
+    return False
 
 
 def _safe_ssh_failure(stderr: str) -> str:
@@ -923,6 +946,7 @@ class OpenSshLinuxResourceProbe:
         self._sample_lock = threading.Lock()
         self._baselines: dict[str, _Baseline] = {}
         self._process_samples: dict[str, _ProcessSample] = {}
+        self._activity_hints: dict[str, bool] = {}
         self._processes = _ActiveProcessRegistry()
         self._environment = os.environ.copy()
         self._environment["LC_ALL"] = "C"
@@ -937,6 +961,7 @@ class OpenSshLinuxResourceProbe:
             if (
                 self._baselines.keys() <= hosts
                 and self._process_samples.keys() <= hosts
+                and self._activity_hints.keys() <= hosts
             ):
                 return
             self._baselines = {
@@ -947,6 +972,11 @@ class OpenSshLinuxResourceProbe:
             self._process_samples = {
                 host: sample
                 for host, sample in self._process_samples.items()
+                if host in hosts
+            }
+            self._activity_hints = {
+                host: hint
+                for host, hint in self._activity_hints.items()
                 if host in hosts
             }
 
@@ -1032,11 +1062,18 @@ class OpenSshLinuxResourceProbe:
     ) -> bool:
         with self._sample_lock:
             sample = self._process_samples.get(host)
-        return (
-            sample is None
-            or sample.workload_mode != workload_mode
-            or now - sample.sampled_at_monotonic >= interval_seconds
-        )
+            active = self._activity_hints.get(host, False)
+        if sample is None or sample.workload_mode != workload_mode:
+            return True
+        # Idle devices stretch the process cadence up to fourfold; any
+        # activity hint from the five-second core telemetry cancels the
+        # stretch, so detection latency never exceeds the base interval.
+        effective_interval = interval_seconds
+        if sample.idle_streak and not active:
+            effective_interval = interval_seconds * min(
+                2**sample.idle_streak, _MAX_PROCESS_INTERVAL_STRETCH
+            )
+        return now - sample.sampled_at_monotonic >= effective_interval
 
     def _merge_process_sample(
         self,
@@ -1047,23 +1084,37 @@ class OpenSshLinuxResourceProbe:
         sampled_at_monotonic: float,
         observed_at: str,
         workload_mode: str,
+        thresholds: ThresholdConfig,
     ) -> tuple[GpuMetrics, ...]:
+        activity = _gpu_activity(gpus, thresholds)
         if process_sampled:
             if not gpus or all(gpu.processes_available for gpu in gpus):
-                sample = _ProcessSample(
-                    sampled_at_monotonic=sampled_at_monotonic,
-                    observed_at=observed_at,
-                    workload_mode=workload_mode,
-                    processes_by_gpu={gpu.uuid: gpu.processes for gpu in gpus},
-                )
+                processes_by_gpu = {gpu.uuid: gpu.processes for gpu in gpus}
+                sampled_idle = not any(processes_by_gpu.values())
                 with self._sample_lock:
-                    self._process_samples[host] = sample
+                    previous = self._process_samples.get(host)
+                    idle_streak = (
+                        previous.idle_streak + 1
+                        if sampled_idle and previous is not None
+                        else int(sampled_idle)
+                    )
+                    self._process_samples[host] = _ProcessSample(
+                        sampled_at_monotonic=sampled_at_monotonic,
+                        observed_at=observed_at,
+                        workload_mode=workload_mode,
+                        processes_by_gpu=processes_by_gpu,
+                        idle_streak=idle_streak,
+                    )
+                    self._activity_hints[host] = activity
                 return tuple(
                     replace(gpu, processes_observed_at=observed_at) for gpu in gpus
                 )
+            with self._sample_lock:
+                self._activity_hints[host] = activity
             return tuple(replace(gpu, processes_observed_at=None) for gpu in gpus)
 
         with self._sample_lock:
+            self._activity_hints[host] = activity
             sample = self._process_samples.get(host)
         if sample is None:
             return tuple(
@@ -1274,6 +1325,7 @@ class OpenSshLinuxResourceProbe:
             sampled_at_monotonic=started,
             observed_at=observed_at,
             workload_mode=config.workloads.mode,
+            thresholds=config.thresholds,
         )
         return ProbeResult(
             host=host,

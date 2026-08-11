@@ -660,6 +660,104 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(result.transport_retries, 0)
         self.assertEqual(run.call_count, 1)
 
+    @patch("mocop.probe.time.monotonic", side_effect=(0.0, 0.5, 16.0, 16.5, 31.0, 31.5))
+    @patch("mocop.probe._run_bounded_process")
+    def test_idle_host_stretches_the_process_cadence(self, run, _monotonic) -> None:
+        idle_gpu = (
+            "0, GPU-abc, NVIDIA A100, 550.54, P0, 35, 0, 0, "
+            "81920, 2048, 79872, 60.0, 400"
+        )
+
+        def execute(_command, **kwargs):
+            return _BoundedProcessResult(
+                0,
+                resource_payload(
+                    protocol="MONITOR_V6",
+                    gpu_payload=idle_gpu,
+                    process_payload="",
+                ),
+                "",
+            )
+
+        run.side_effect = execute
+        probe = OpenSshLinuxResourceProbe()
+
+        for _ in range(3):
+            self.assertEqual(probe.probe("gpu-1", config()).status, "online")
+
+        scripts = [item.kwargs["input_text"] for item in run.call_args_list]
+        # First sample collects processes and observes an idle device; the
+        # base 12+ second point is stretched away; the doubled deadline
+        # passes at 31 seconds and processes are collected again.
+        self.assertEqual(
+            [("process_enabled=1" in script) for script in scripts],
+            [True, False, True],
+        )
+
+    @patch("mocop.probe.time.monotonic", side_effect=(0.0, 0.5, 5.0, 5.5, 16.0, 16.5))
+    @patch("mocop.probe._run_bounded_process")
+    def test_activity_hint_cancels_the_cadence_stretch(self, run, _monotonic) -> None:
+        idle_gpu = (
+            "0, GPU-abc, NVIDIA A100, 550.54, P0, 35, 0, 0, "
+            "81920, 2048, 79872, 60.0, 400"
+        )
+        busy_gpu = (
+            "0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 95, 34, "
+            "81920, 40960, 40960, 287.5, 400"
+        )
+        payloads = iter((idle_gpu, busy_gpu, busy_gpu))
+
+        def execute(_command, **kwargs):
+            return _BoundedProcessResult(
+                0,
+                resource_payload(
+                    protocol="MONITOR_V6",
+                    gpu_payload=next(payloads),
+                    process_payload="",
+                ),
+                "",
+            )
+
+        run.side_effect = execute
+        probe = OpenSshLinuxResourceProbe()
+
+        for _ in range(3):
+            self.assertEqual(probe.probe("gpu-1", config()).status, "online")
+
+        scripts = [item.kwargs["input_text"] for item in run.call_args_list]
+        # The idle first sample starts a stretch; the busy core sample at
+        # five seconds raises the activity hint, so the third probe returns
+        # to the base fifteen-second cadence instead of waiting thirty.
+        self.assertEqual(
+            [("process_enabled=1" in script) for script in scripts],
+            [True, False, True],
+        )
+
+    def test_process_cadence_stretch_is_bounded_and_pruned(self) -> None:
+        from mocop.probe import _ProcessSample
+
+        probe = OpenSshLinuxResourceProbe()
+        sample = _ProcessSample(
+            sampled_at_monotonic=0.0,
+            observed_at="2026-08-11T00:00:00Z",
+            workload_mode="disabled",
+            processes_by_gpu={"GPU-abc": ()},
+            idle_streak=5,
+        )
+        probe._process_samples["gpu-1"] = sample
+        probe._activity_hints["gpu-1"] = False
+
+        # Streak five is capped at a fourfold stretch: due at 60, not 480.
+        self.assertFalse(probe._processes_due("gpu-1", 59.9, 15, "disabled"))
+        self.assertTrue(probe._processes_due("gpu-1", 60.0, 15, "disabled"))
+
+        probe._activity_hints["gpu-1"] = True
+        self.assertTrue(probe._processes_due("gpu-1", 15.0, 15, "disabled"))
+
+        probe.retain_hosts(set())
+        self.assertEqual(probe._process_samples, {})
+        self.assertEqual(probe._activity_hints, {})
+
     @patch("mocop.probe._run_bounded_process")
     def test_distinguishes_transport_silence_from_partial_output(self, run) -> None:
         run.side_effect = subprocess.TimeoutExpired(["ssh"], 12, output=b"")
