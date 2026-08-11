@@ -118,7 +118,8 @@ mocop service uninstall
 - `local_host` 指定 `hosts` 中唯一一台绕过 SSH、直接在本机采集的节点。
 - `expected_gpu_counts` 用于发现 GPU 缺失。
 - `host_groups` 用于共享节点分组。
-- `host_overrides` 只用于调整经过测量的慢节点的采集周期或超时。
+- `host_overrides` 只用于调整经过测量的慢节点的采集周期或超时；可选的 `display_name` 为别名提供可读的列表显示名，不改变采集身份。
+- `maintenance_windows` 每条要么给出一次性的 `until`，要么给出每周 `recurrence`（`{"weekday": 0-6, "start": "HH:MM", "duration_minutes": N}`，全部为 UTC，周一为 0）；周期窗口在每个实例期间静默可执行告警，采集持续进行。
 - `gpu_process_poll_interval_seconds` 单独控制带时间戳的 GPU 任务刷新；默认 15 秒，核心 GPU 数据仍保持正常采集周期。
 - `incident_overrides` 可按节点或分组覆盖有界阈值，并精确排除磁盘挂载点；节点配置优先。
 - `incident_actions` 保存网页中的告警确认与静默及其 UTC 失效时间，通常由网页维护。
@@ -209,9 +210,10 @@ Mocop 按节点独立调度，同一节点不会重叠采集。只要仍有 work
 mocop doctor
 ```
 
-它会验证每个受监控别名的非交互可达性，测量冷连接与复用连接的延迟，并指出未启用
-连接复用、控制套接字目录缺失或权限过宽、以及 `ControlPersist` 失效等问题。
-也可以手动执行同样的检查：
+它会验证每个受监控别名的非交互可达性，测量冷连接与复用连接的延迟，指出未启用
+连接复用、控制套接字目录缺失或权限过宽、以及 `ControlPersist` 失效等问题，并在
+已安装版本新于运行中服务时给出重启提醒。加 `--profile` 可以把慢节点的采集延迟
+分解为传输、固定脚本与 NVIDIA 查询三段。也可以手动执行同样的检查：
 
 ```bash
 ssh -o BatchMode=yes gpu-node-01 true

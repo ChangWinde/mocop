@@ -118,7 +118,8 @@ The generated file is complete. Edit it directly only when you need fields not e
 - `local_host` names one entry in `hosts` that should be probed without SSH.
 - `expected_gpu_counts` reports missing devices.
 - `host_groups` provides shared navigation groups.
-- `host_overrides` changes cadence or timeout for a measured slow node.
+- `host_overrides` changes cadence or timeout for a measured slow node, and its optional `display_name` gives an alias a human-readable fleet label without changing collection identity.
+- `maintenance_windows` entries define either a one-shot `until` or a weekly `recurrence` (`{"weekday": 0-6, "start": "HH:MM", "duration_minutes": N}`, all in UTC, Monday is 0); recurring windows silence actionable alerts during every instance while collection continues.
 - `gpu_process_poll_interval_seconds` controls timestamped GPU task refresh independently; the 15-second default reduces NVIDIA command overhead while core GPU data keeps the normal cadence.
 - `incident_overrides` applies bounded host/group thresholds and exact disk-mount exclusions; host settings take precedence.
 - `incident_actions` stores dashboard acknowledgements and silences with UTC expiry. It is maintained by the UI in normal use.
@@ -213,9 +214,11 @@ mocop doctor
 ```
 
 It verifies non-interactive reachability for every monitored alias, measures cold
-versus multiplexed connection latency, and flags missing connection reuse, a missing
-or group-accessible control-socket directory, and an ineffective `ControlPersist`.
-The same checks are possible manually:
+versus multiplexed connection latency, flags missing connection reuse, a missing
+or group-accessible control-socket directory, and an ineffective `ControlPersist`,
+and warns when the installed package is newer than the running service. Add
+`--profile` to decompose a slow host into transport, fixed-script, and NVIDIA-query
+stages. The same checks are possible manually:
 
 ```bash
 ssh -o BatchMode=yes gpu-node-01 true

@@ -9,6 +9,12 @@ This document defines reproducible measurement conditions and architecture thres
 - One bounded transport process collects system metrics, GPU metrics, compute tasks, and optional GPU health for one host per cycle; remote targets use one logical SSH session and the optional local target bypasses SSH.
 - Base GPU and hardware-health fields share one `nvidia-smi` query. Compute tasks use a second query. If combined health fields are unsupported, collection falls back to base GPU fields without retrying the SSH connection or hiding system telemetry.
 - Core GPU and system data retain the host cadence. The independent process cadence defaults to 15 seconds, so three five-second core samples execute four NVIDIA commands instead of six. Skipped task cycles reuse a timestamped last-good sample without creating process transitions.
+- A device that keeps sampling zero processes stretches its own process cadence
+  (doubling per idle sample, capped at four times the base interval), which removes
+  another quarter of steady-state NVIDIA commands on an idle host. Any activity in
+  the five-second core telemetry — a running process, utilization at or above the
+  busy threshold, or VRAM above the idle-memory threshold — cancels the stretch, so
+  a new job is picked up within one base interval, exactly as before the stretch.
 - One persistent pool avoids per-cycle executor churn. `max_workers` bounds active
   probes, while a scheduler-owned deadline independently paces each host and prevents
   self-overlap. Oldest due deadlines run first, and an event wakes the scheduler only

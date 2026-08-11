@@ -6,7 +6,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Added optional per-host display names (`host_overrides.<alias>.display_name`) that label the fleet list without changing collection identity.
+- Added weekly recurring maintenance windows (`maintenance_windows.<alias>.recurrence` with UTC weekday, start, and duration) that silence actionable alerts during every instance while collection continues; the dashboard badge shows the current instance's end time.
+- Added a browser-local "workload owners" view that aggregates current GPU memory, device, host, and process counts per Slurm/Kubernetes/process owner from the existing snapshot without extra requests.
+- Added the stale-transport retry flag to per-host trend history points, so link flapping is visible over time and survives optional persistence restarts.
 - Added a read-only `mocop doctor` command that verifies non-interactive SSH reachability under the probe transport discipline, reports cold versus multiplexed connection latency, and flags disabled `ControlMaster`, missing or group-accessible control-socket directories, and ineffective `ControlPersist`.
+- Added `mocop doctor --profile`, which decomposes each alias's collection latency into transport, fixed-script, and NVIDIA-query stages so slow hosts can be attributed to the network path or to remote execution.
+- Added a best-effort doctor check that warns when the installed package is newer than the running user service, so an upgrade is not silently left unapplied.
 - Added per-host stale-transport retry visibility (`transportRetried` in snapshots, `mocop_host_probe_transport_retried` in OpenMetrics) and a cumulative retry counter in `/healthz`.
 
 - Added a centered per-GPU workload view with aggregate and per-process VRAM, PID and optional job context; parsing is bounded and the browser renders at most the 100 largest processes.
@@ -39,6 +45,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Stretched the process-telemetry cadence on devices that keep sampling zero processes (doubling per idle sample, capped at four times the base interval); activity in the five-second core telemetry cancels the stretch, so job pickup latency never exceeds the base interval while idle hosts run one quarter fewer steady-state NVIDIA commands.
 - Enforced a bounded SSH keepalive (`ServerAliveInterval max(2, connect_timeout / 2)`, `ServerAliveCountMax 2`) on every remote probe, so a transport that dies mid-session is detected in seconds instead of consuming the whole probe timeout; measured dead-transport detection fell from the 30-second production probe timeout to 8.9 seconds (70%).
 - Distinguished collection timeouts that produced no transport output from timeouts that stalled after partial output, and classified keepalive-detected dead transports with a dedicated redacted failure reason.
 - Merged the remote hostname read into the fixed system `awk` pass with a bounded in-process `getline`, reducing default remote helper invocations from six to five; measured controllable local overhead is 0.79 ms of a 31.43 ms sample, so remaining collection cost is NVIDIA query wall time.
