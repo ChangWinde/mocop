@@ -12,14 +12,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import TextIO
 
 from .config import MonitorConfig, is_safe_alias
+from .lifecycle import user_unit_path
 from .probe import _run_bounded_process, _safe_ssh_failure
+from .remote_script import _COMBINED_QUERY_FIELDS, _remote_script
 
 _SSH_G_TIMEOUT_SECONDS = 10
 _SSH_G_MAX_OUTPUT_BYTES = 262_144
@@ -69,10 +73,16 @@ def _resolved_options(alias: str, config: MonitorConfig) -> dict[str, str] | Non
     return options
 
 
-def _timed_probe(
-    alias: str, config: MonitorConfig, *, reuse: bool
+def _timed_remote(
+    alias: str,
+    config: MonitorConfig,
+    remote_args: tuple[str, ...],
+    *,
+    input_text: str = "",
+    reuse: bool = True,
+    max_output_bytes: int = _PROBE_MAX_OUTPUT_BYTES,
 ) -> tuple[float | None, str | None]:
-    """Run one bounded `true` over SSH; return (latency_ms, failure_reason)."""
+    """Run one bounded remote command; return (latency_ms, failure_reason)."""
     command = [
         "ssh",
         "-F",
@@ -93,14 +103,14 @@ def _timed_probe(
     ]
     if not reuse:
         command += ["-o", "ControlMaster=no", "-o", "ControlPath=none"]
-    command += ["--", alias, "true"]
+    command += ["--", alias, *remote_args]
     started = time.monotonic()
     try:
         completed = _run_bounded_process(
             command,
-            input_text="",
+            input_text=input_text,
             timeout_seconds=config.probe_timeout_seconds,
-            max_output_bytes=_PROBE_MAX_OUTPUT_BYTES,
+            max_output_bytes=max_output_bytes,
             environment=_environment(),
         )
     except subprocess.TimeoutExpired:
@@ -111,6 +121,53 @@ def _timed_probe(
     if completed.returncode != 0:
         return None, _safe_ssh_failure(completed.stderr)
     return latency_ms, None
+
+
+def _timed_probe(
+    alias: str, config: MonitorConfig, *, reuse: bool
+) -> tuple[float | None, str | None]:
+    """Run one bounded `true` over SSH; return (latency_ms, failure_reason)."""
+    return _timed_remote(alias, config, ("true",), reuse=reuse)
+
+
+def _profile_host(alias: str, config: MonitorConfig) -> dict[str, object]:
+    """Decompose one alias's collection latency into bounded stages.
+
+    All three stages run on the operator's configured connection-reuse path,
+    so the transport share reflects what production probes actually pay.
+    """
+    transport_ms, transport_failure = _timed_remote(alias, config, ("true",))
+    script_ms, script_failure = _timed_remote(
+        alias,
+        config,
+        ("sh", "-s"),
+        input_text=_remote_script("disabled", True),
+        max_output_bytes=config.max_output_bytes,
+    )
+    nvidia_ms, nvidia_failure = _timed_remote(
+        alias,
+        config,
+        (
+            "nvidia-smi",
+            f"--query-gpu={','.join(_COMBINED_QUERY_FIELDS)}",
+            "--format=csv,noheader,nounits",
+        ),
+    )
+    profile: dict[str, object] = {
+        "transportMs": transport_ms,
+        "scriptTotalMs": script_ms,
+        "nvidiaQueryMs": nvidia_ms,
+    }
+    if transport_ms is not None and script_ms is not None:
+        profile["remoteExecutionMs"] = round(max(0.0, script_ms - transport_ms), 1)
+    if transport_ms is not None and nvidia_ms is not None:
+        profile["nvidiaExecutionMs"] = round(max(0.0, nvidia_ms - transport_ms), 1)
+    failure = transport_failure or script_failure
+    if failure:
+        profile["failure"] = failure
+    elif nvidia_failure:
+        profile["nvidiaFailure"] = nvidia_failure
+    return profile
 
 
 def _reuse_findings(options: dict[str, str]) -> tuple[dict[str, object], list[str]]:
@@ -164,7 +221,7 @@ def _reuse_findings(options: dict[str, str]) -> tuple[dict[str, object], list[st
 
 
 def _diagnose_host(
-    alias: str, config: MonitorConfig, *, probe_connection: bool
+    alias: str, config: MonitorConfig, *, probe_connection: bool, profile: bool = False
 ) -> dict[str, object]:
     report: dict[str, object] = {"alias": alias, "warnings": []}
     warnings: list[str] = report["warnings"]
@@ -194,7 +251,79 @@ def _diagnose_host(
         report["reachable"] = cold_ms is not None or reuse_ms is not None
         if not report["reachable"] and failure:
             warnings.append(f"unreachable: {failure}")
+        if profile and report["reachable"]:
+            report["profile"] = _profile_host(alias, config)
     return report
+
+
+def _system_uptime_seconds() -> float:
+    return float(Path("/proc/uptime").read_text(encoding="ascii").split()[0])
+
+
+def _newest_package_mtime(python_path: Path) -> float | None:
+    """Return the newest file mtime inside the installed mocop package."""
+    tool_root = python_path.parent.parent
+    newest: float | None = None
+    for package_dir in tool_root.glob("lib/python*/site-packages/mocop"):
+        for entry in package_dir.rglob("*"):
+            if not entry.is_file():
+                continue
+            mtime = entry.stat().st_mtime
+            if newest is None or mtime > newest:
+                newest = mtime
+    return newest
+
+
+def _service_staleness() -> dict[str, object] | None:
+    """Best-effort check that the running user service executes current code.
+
+    Returns None whenever the unit, systemd state, or installation layout
+    cannot be resolved; a failed check must never break the diagnosis.
+    """
+    try:
+        unit_text = user_unit_path().read_text(encoding="utf-8")
+        match = re.search(r'^ExecStart="([^"]+)"', unit_text, re.MULTILINE)
+        if match is None:
+            return None
+        python_path = Path(match.group(1))
+        completed = _run_bounded_process(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                "mocop.service",
+                "--property=ActiveState,ExecMainStartTimestampMonotonic",
+            ],
+            input_text="",
+            timeout_seconds=_SSH_G_TIMEOUT_SECONDS,
+            max_output_bytes=_PROBE_MAX_OUTPUT_BYTES,
+            environment=_environment(),
+        )
+        if completed.returncode != 0:
+            return None
+        properties: dict[str, str] = {}
+        for line in completed.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                properties[key.strip()] = value.strip()
+        if properties.get("ActiveState") != "active":
+            return None
+        start_monotonic_usec = int(
+            properties.get("ExecMainStartTimestampMonotonic", "")
+        )
+        started_epoch = (
+            time.time() - _system_uptime_seconds() + start_monotonic_usec / 1_000_000
+        )
+        newest_mtime = _newest_package_mtime(python_path)
+        if newest_mtime is None:
+            return None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return {
+        "staleCode": newest_mtime > started_epoch + 2.0,
+        "serviceStartedEpoch": round(started_epoch, 1),
+        "installedCodeMtime": round(newest_mtime, 1),
+    }
 
 
 def run_doctor(
@@ -202,10 +331,14 @@ def run_doctor(
     *,
     host_filter: tuple[str, ...] = (),
     probe_connection: bool = True,
+    profile: bool = False,
     as_json: bool = False,
     stdout: TextIO = sys.stdout,
 ) -> int:
     """Diagnose configured aliases; return 0 when every alias is usable."""
+    if profile and not probe_connection:
+        print("--profile requires live connection tests", file=sys.stderr)
+        return 2
     remote_hosts = tuple(host for host in config.hosts if host != config.local_host)
     if host_filter:
         unknown = tuple(host for host in host_filter if host not in remote_hosts)
@@ -225,24 +358,26 @@ def run_doctor(
         "serverAliveCountMax": 2,
     }
     reports = [
-        _diagnose_host(alias, config, probe_connection=probe_connection)
+        _diagnose_host(
+            alias, config, probe_connection=probe_connection, profile=profile
+        )
         for alias in remote_hosts
     ]
     failed = tuple(
         report["alias"] for report in reports if report.get("reachable") is False
     )
+    service = _service_staleness()
 
     if as_json:
-        json.dump(
-            {
-                "transportDiscipline": transport,
-                "localHost": config.local_host,
-                "hosts": reports,
-                "status": "ok" if not failed else "failed",
-            },
-            stdout,
-            indent=2,
-        )
+        document: dict[str, object] = {
+            "transportDiscipline": transport,
+            "localHost": config.local_host,
+            "hosts": reports,
+            "status": "ok" if not failed else "failed",
+        }
+        if service is not None:
+            document["service"] = service
+        json.dump(document, stdout, indent=2)
         stdout.write("\n")
     else:
         stdout.write(
@@ -257,6 +392,14 @@ def run_doctor(
             _write_text_report(report, stdout)
         if not remote_hosts:
             stdout.write("no remote SSH aliases are configured\n")
+        if service is not None:
+            if service["staleCode"]:
+                stdout.write(
+                    "service: installed code is newer than the running service"
+                    " — restart to apply (systemctl --user restart mocop)\n"
+                )
+            else:
+                stdout.write("service: running code matches the installation\n")
 
     return 1 if failed else 0
 
@@ -287,5 +430,28 @@ def _write_text_report(report: dict[str, object], stdout: TextIO) -> None:
         )
     if report.get("proxyJump"):
         stdout.write("  route: proxy jump or command configured\n")
+    profile = report.get("profile")
+    if isinstance(profile, dict):
+        stdout.write(f"  profile: {_format_profile(profile)}\n")
+        failure = profile.get("failure") or profile.get("nvidiaFailure")
+        if failure:
+            stdout.write(f"  profile warning: {failure}\n")
     for warning in report.get("warnings", ()):
         stdout.write(f"  warning: {warning}\n")
+
+
+def _format_profile(profile: dict[str, object]) -> str:
+    def ms(key: str) -> str:
+        value = profile.get(key)
+        return f"{value:.0f} ms" if isinstance(value, float) else "failed"
+
+    parts = [f"transport {ms('transportMs')}"]
+    script = f"script {ms('scriptTotalMs')}"
+    if "remoteExecutionMs" in profile:
+        script += f" (remote {ms('remoteExecutionMs')})"
+    parts.append(script)
+    nvidia = f"nvidia {ms('nvidiaQueryMs')}"
+    if "nvidiaExecutionMs" in profile:
+        nvidia += f" (remote {ms('nvidiaExecutionMs')})"
+    parts.append(nvidia)
+    return ", ".join(parts)

@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -55,6 +56,12 @@ def ssh_g_output(
 
 
 class DoctorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Keep host-diagnosis tests independent from the local systemd state.
+        patcher = patch("mocop.doctor._service_staleness", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def run_doctor(self, config_value, **kwargs):
         stdout = io.StringIO()
         code = run_doctor(config_value, stdout=stdout, **kwargs)
@@ -223,6 +230,124 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 1)
         run.assert_not_called()
         self.assertIn("unsafe characters", output)
+
+    def test_profile_requires_connection_tests(self) -> None:
+        code, _ = self.run_doctor(config(), probe_connection=False, profile=True)
+        self.assertEqual(code, 2)
+
+    @patch(
+        "mocop.doctor.time.monotonic",
+        side_effect=(0.0, 0.1, 1.0, 1.05, 2.0, 2.2, 3.0, 3.89, 4.0, 4.62),
+    )
+    @patch("mocop.doctor._run_bounded_process")
+    def test_profile_decomposes_collection_latency(self, run, _monotonic) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),  # cold probe
+            _BoundedProcessResult(0, stdout="", stderr=""),  # reuse probe
+            _BoundedProcessResult(0, stdout="", stderr=""),  # transport stage
+            _BoundedProcessResult(0, stdout="MONITOR_V6", stderr=""),  # script
+            _BoundedProcessResult(0, stdout="0, GPU-abc", stderr=""),  # nvidia
+        )
+
+        code, output = self.run_doctor(config(), profile=True, as_json=True)
+
+        self.assertEqual(code, 0)
+        report = json.loads(output)
+        profile = report["hosts"][0]["profile"]
+        self.assertEqual(profile["transportMs"], 200.0)
+        self.assertEqual(profile["scriptTotalMs"], 890.0)
+        self.assertEqual(profile["nvidiaQueryMs"], 620.0)
+        self.assertEqual(profile["remoteExecutionMs"], 690.0)
+        self.assertEqual(profile["nvidiaExecutionMs"], 420.0)
+        script_call = run.call_args_list[4]
+        self.assertIn("MONITOR_V6", script_call.kwargs["input_text"])
+        self.assertEqual(script_call.args[0][-2:], ["sh", "-s"])
+        nvidia_call = run.call_args_list[5]
+        self.assertTrue(nvidia_call.args[0][-2].startswith("--query-gpu="))
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_profile_reports_missing_nvidia_without_failing(self, run) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(0, stdout="MONITOR_V6", stderr=""),
+            _BoundedProcessResult(127, stdout="", stderr="nvidia-smi: not found"),
+        )
+
+        code, output = self.run_doctor(config(), profile=True)
+
+        self.assertEqual(code, 0)
+        self.assertIn("profile:", output)
+        self.assertIn("profile warning:", output)
+
+
+class ServiceStalenessTests(unittest.TestCase):
+    def build_install(self, directory: Path) -> Path:
+        python_path = directory / "bin" / "python"
+        python_path.parent.mkdir(parents=True)
+        python_path.write_text("", encoding="utf-8")
+        package = directory / "lib" / "python3.10" / "site-packages" / "mocop"
+        package.mkdir(parents=True)
+        (package / "probe.py").write_text("# installed", encoding="utf-8")
+        unit = directory / "mocop.service"
+        unit.write_text(
+            f'[Service]\nExecStart="{python_path}" -m mocop --managed-service\n',
+            encoding="utf-8",
+        )
+        return unit
+
+    def staleness(self, unit: Path, *, uptime: float, start_usec: int):
+        from mocop import doctor
+
+        systemctl = _BoundedProcessResult(
+            0,
+            stdout=(
+                f"ActiveState=active\nExecMainStartTimestampMonotonic={start_usec}\n"
+            ),
+            stderr="",
+        )
+        with (
+            patch("mocop.doctor.user_unit_path", return_value=unit),
+            patch("mocop.doctor._run_bounded_process", return_value=systemctl),
+            patch("mocop.doctor._system_uptime_seconds", return_value=uptime),
+        ):
+            return doctor._service_staleness()
+
+    def test_detects_install_newer_than_running_service(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unit = self.build_install(root)
+            # Service started 4,999 seconds ago; package written just now.
+            result = self.staleness(unit, uptime=5_000.0, start_usec=1_000_000)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["staleCode"])
+
+    def test_running_service_with_current_code_is_not_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unit = self.build_install(root)
+            package_file = (
+                root / "lib" / "python3.10" / "site-packages" / "mocop" / "probe.py"
+            )
+            old = time.time() - 10_000
+            os.utime(package_file, (old, old))
+            result = self.staleness(unit, uptime=5_000.0, start_usec=1_000_000)
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result["staleCode"])
+
+    def test_missing_unit_is_silently_skipped(self) -> None:
+        from mocop import doctor
+
+        with patch(
+            "mocop.doctor.user_unit_path",
+            return_value=Path("/nonexistent/mocop.service"),
+        ):
+            self.assertIsNone(doctor._service_staleness())
 
 
 if __name__ == "__main__":
