@@ -6,6 +6,9 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Added a read-only `mocop doctor` command that verifies non-interactive SSH reachability under the probe transport discipline, reports cold versus multiplexed connection latency, and flags disabled `ControlMaster`, missing or group-accessible control-socket directories, and ineffective `ControlPersist`.
+- Added per-host stale-transport retry visibility (`transportRetried` in snapshots, `mocop_host_probe_transport_retried` in OpenMetrics) and a cumulative retry counter in `/healthz`.
+
 - Added a centered per-GPU workload view with aggregate and per-process VRAM, PID and optional job context; parsing is bounded and the browser renders at most the 100 largest processes.
 - Added an explicit `local_host` target that uses the fixed resource probe without an SSH connection.
 - Added draggable server ordering, GPU/CPU activity in the fleet list, and browser-local display preferences.
@@ -36,6 +39,11 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Enforced a bounded SSH keepalive (`ServerAliveInterval max(2, connect_timeout / 2)`, `ServerAliveCountMax 2`) on every remote probe, so a transport that dies mid-session is detected in seconds instead of consuming the whole probe timeout; measured dead-transport detection fell from the 30-second production probe timeout to 8.9 seconds (70%).
+- Distinguished collection timeouts that produced no transport output from timeouts that stalled after partial output, and classified keepalive-detected dead transports with a dedicated redacted failure reason.
+- Merged the remote hostname read into the fixed system `awk` pass with a bounded in-process `getline`, reducing default remote helper invocations from six to five; measured controllable local overhead is 0.79 ms of a 31.43 ms sample, so remaining collection cost is NVIDIA query wall time.
+- Replaced the bounded quarter-second cancellation poll in probe process supervision with a wake-up descriptor registered in the probe selector, so shutdown interrupts waits immediately without idle wake-ups.
+- Moved the fixed remote collection script and its rendering into a dedicated `remote_script` module, keeping probe parsing and process supervision separable from script content.
 - Refined all six visual styles around a shared rounded-corner language while preserving distinct density, typography, layout, and material systems.
 - Made English the default README and added a synchronized Simplified Chinese guide.
 - Added a first-run path from OpenSSH aliases to an explicit Mocop cluster allowlist.
@@ -63,6 +71,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Isolated the commit-policy repository test from operator-level git configuration such as a global `core.hooksPath`, which made the suite fail on machines with global commit hooks.
 - Debounced transient EventSource failures and added snapshot fallback so a healthy dashboard no longer sticks on a reconnecting state.
 - Stabilized incident activation and recovery so transient SSH or resource samples do not repeatedly open and resolve the same condition.
 - Prevented failed inventory discovery from spinning the scheduler and made fatal collector exits restartable by systemd.

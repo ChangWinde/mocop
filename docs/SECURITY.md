@@ -121,6 +121,16 @@ stored or emitted. Webhook URLs and signing secrets are read from environment va
 for the generated service, place them in the optional private `environment` file next
 to `config.json`. They never enter the config API, snapshot, status, or logs.
 
+`mocop doctor` is read-only: it resolves aliases with `ssh -G`, optionally runs the
+bounded non-interactive probe command, and never writes SSH configuration or keys.
+Connection tests follow the operator's existing OpenSSH policy, so a configured
+`ControlMaster auto` may create its usual control socket exactly as any probe would.
+Its report names aliases and local socket directories only — never remote
+usernames, addresses, or raw stderr. When OpenSSH connection multiplexing is enabled,
+the `ControlPath` directory must be owned by the operator with mode `0700`; a
+group- or world-accessible socket directory lets another local account hijack the
+multiplexed session, and doctor flags it.
+
 ## Deployment requirement
 
 Changing `listen_host` away from loopback is a security-sensitive deployment decision. Put the service behind TLS plus authenticated authorization (or a private VPN), restrict source networks, and do not forward `/api/events` anonymously. Credential rotation, viewer access review and proxy configuration are deployment responsibilities.

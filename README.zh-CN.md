@@ -203,12 +203,32 @@ Mocop 按节点独立调度，同一节点不会重叠采集。只要仍有 work
 采集周期是目标频率。worker 饱和或单次探测超过周期时，只会推迟对应节点，不会
 重新引入全局等待屏障。
 
-调整超时前，先在 Mocop 外测试同一条 SSH 路径：
+调整超时前，先用内置的只读诊断检查 SSH 路径：
+
+```bash
+mocop doctor
+```
+
+它会验证每个受监控别名的非交互可达性，测量冷连接与复用连接的延迟，并指出未启用
+连接复用、控制套接字目录缺失或权限过宽、以及 `ControlPersist` 失效等问题。
+也可以手动执行同样的检查：
 
 ```bash
 ssh -o BatchMode=yes gpu-node-01 true
-ssh -G gpu-node-01 | grep -E '^(hostname|port|user|proxyjump|controlmaster) '
+ssh -G gpu-node-01 | grep -E '^(controlmaster|controlpath|controlpersist) '
 ```
+
+启用 OpenSSH 连接复用可以消除远端路径上大部分的每次探测连接开销（经跳板机的
+实测降幅为 76.6%，见 [docs/PERFORMANCE.md](docs/PERFORMANCE.md)）：
+
+```sshconfig
+Host gpu-node-01
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 600
+```
+
+`~/.ssh/sockets` 目录需要操作员自行以 `0700` 权限创建；Mocop 不会修改 SSH 配置。
 
 如果多台节点共同依赖一个 `ProxyJump`、VPN 或 FRP 路径并同时离线，应先检查这条共享路径。重启 Mocop 无法修复不可用的隧道或远端 SSH 服务。
 

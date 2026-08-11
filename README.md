@@ -206,12 +206,34 @@ retries back off for up to 60 seconds with per-host jitter.
 The interval is a target cadence. Worker saturation or a probe longer than its interval
 can defer that host, but no fleet-wide barrier is introduced.
 
-Test the same SSH path outside Mocop before changing timeouts:
+Diagnose the SSH path with the bundled read-only check before changing timeouts:
+
+```bash
+mocop doctor
+```
+
+It verifies non-interactive reachability for every monitored alias, measures cold
+versus multiplexed connection latency, and flags missing connection reuse, a missing
+or group-accessible control-socket directory, and an ineffective `ControlPersist`.
+The same checks are possible manually:
 
 ```bash
 ssh -o BatchMode=yes gpu-node-01 true
-ssh -G gpu-node-01 | grep -E '^(hostname|port|user|proxyjump|controlmaster) '
+ssh -G gpu-node-01 | grep -E '^(controlmaster|controlpath|controlpersist) '
 ```
+
+Enabling OpenSSH connection reuse removes most per-probe connection cost on remote
+routes (measured 76.6% behind a jump host; see
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md)):
+
+```sshconfig
+Host gpu-node-01
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 600
+```
+
+Create `~/.ssh/sockets` yourself with mode `0700`; Mocop never edits SSH configuration.
 
 If several nodes that share one `ProxyJump`, VPN, or FRP route fail together, inspect that shared route first. Restarting Mocop does not repair an unavailable tunnel or remote SSH service.
 
