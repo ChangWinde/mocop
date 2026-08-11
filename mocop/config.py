@@ -6,7 +6,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -111,20 +111,69 @@ class WebhookConfig:
 class HostOverrideConfig:
     poll_interval_seconds: float | None = None
     probe_timeout_seconds: float | None = None
+    display_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class MaintenanceWindowConfig:
-    until: datetime
+    """One-shot (absolute `until`) or weekly recurring silence window.
+
+    Recurring windows are defined in UTC: `weekday` follows Python's Monday=0
+    convention, `start_minutes` counts from UTC midnight, and the duration is
+    bounded below one week so instances can never overlap themselves.
+    """
+
     reason: str
+    until: datetime | None = None
+    weekday: int | None = None
+    start_minutes: int | None = None
+    duration_minutes: int | None = None
+
+    @property
+    def recurring(self) -> bool:
+        return self.weekday is not None
+
+    def _instance_end(self, now: datetime) -> datetime:
+        """Return the end of the active instance, or of the next one."""
+        assert self.weekday is not None
+        assert self.start_minutes is not None
+        assert self.duration_minutes is not None
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        days_back = (now.weekday() - self.weekday) % 7
+        start = (
+            midnight - timedelta(days=days_back) + timedelta(minutes=self.start_minutes)
+        )
+        if start > now:
+            start -= timedelta(days=7)
+        end = start + timedelta(minutes=self.duration_minutes)
+        if end <= now:
+            end = start + timedelta(days=7, minutes=self.duration_minutes)
+        return end
 
     def is_active(self, at: datetime | None = None) -> bool:
-        return self.until > (at or datetime.now(timezone.utc))
+        now = at or datetime.now(timezone.utc)
+        if not self.recurring:
+            assert self.until is not None
+            return self.until > now
+        assert self.duration_minutes is not None
+        end = self._instance_end(now)
+        return end - timedelta(minutes=self.duration_minutes) <= now < end
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self, at: datetime | None = None) -> dict[str, object]:
+        if not self.recurring:
+            assert self.until is not None
+            return {
+                "until": self.until.isoformat(timespec="seconds").replace(
+                    "+00:00", "Z"
+                ),
+                "reason": self.reason,
+            }
+        now = at or datetime.now(timezone.utc)
+        end = self._instance_end(now)
         return {
-            "until": self.until.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "until": end.isoformat(timespec="seconds").replace("+00:00", "Z"),
             "reason": self.reason,
+            "recurring": True,
         }
 
 
@@ -221,6 +270,13 @@ class MonitorConfig:
     def host_override(self, host: str) -> HostOverrideConfig | None:
         return self._host_override_index.get(host)
 
+    def host_display_names(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (alias, override.display_name)
+            for alias, override in self.host_overrides
+            if override.display_name is not None
+        )
+
     def maintenance_window(self, host: str) -> MaintenanceWindowConfig | None:
         return self._maintenance_window_index.get(host)
 
@@ -277,8 +333,11 @@ _INCIDENT_KEYS = {
     "recovery_cycles",
     "gpu_idle_memory_cycles",
 }
-_HOST_OVERRIDE_KEYS = {"poll_interval_seconds", "probe_timeout_seconds"}
-_MAINTENANCE_WINDOW_KEYS = {"until", "reason"}
+_HOST_OVERRIDE_KEYS = {"poll_interval_seconds", "probe_timeout_seconds", "display_name"}
+_MAINTENANCE_WINDOW_KEYS = {"until", "reason", "recurrence"}
+_MAINTENANCE_RECURRENCE_KEYS = {"weekday", "start", "duration_minutes"}
+_RECURRENCE_START = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+DISPLAY_NAME_MAX_LENGTH = 64
 _INCIDENT_ACTION_KEYS = {"host", "condition_key", "action", "until", "reason"}
 _INCIDENT_ACTIONS = frozenset({"acknowledged", "silenced"})
 _INCIDENT_OVERRIDE_SCOPES = {"hosts", "groups"}
@@ -885,6 +944,23 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         if not raw_override:
             raise ConfigError(f"host_overrides.{alias} must not be empty")
 
+        display_name: str | None = None
+        if "display_name" in raw_override:
+            raw_display = raw_override["display_name"]
+            if (
+                not isinstance(raw_display, str)
+                or not raw_display.strip()
+                or len(raw_display.strip()) > DISPLAY_NAME_MAX_LENGTH
+                or any(
+                    unicodedata.category(character).startswith("C")
+                    for character in raw_display
+                )
+            ):
+                raise ConfigError(
+                    f"host_overrides.{alias}.display_name must be 1 to "
+                    f"{DISPLAY_NAME_MAX_LENGTH} visible characters"
+                )
+            display_name = raw_display.strip()
         override = HostOverrideConfig(
             poll_interval_seconds=_optional_bounded_number(
                 raw_override,
@@ -900,6 +976,7 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
                 2,
                 300,
             ),
+            display_name=display_name,
         )
         if (
             override.probe_timeout_seconds is not None
@@ -932,9 +1009,6 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
                 f"unknown maintenance_windows.{alias} keys: "
                 f"{', '.join(unknown_window_keys)}"
             )
-        until = _utc_timestamp(
-            raw_window.get("until"), f"maintenance_windows.{alias}.until"
-        )
         reason_value = raw_window.get("reason", "")
         if not is_valid_maintenance_reason(reason_value, required=False):
             raise ConfigError(
@@ -943,8 +1017,62 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
             )
         assert isinstance(reason_value, str)
         reason = reason_value.strip()
+        has_until = "until" in raw_window
+        has_recurrence = "recurrence" in raw_window
+        if has_until == has_recurrence:
+            raise ConfigError(
+                f"maintenance_windows.{alias} must define exactly one of "
+                "'until' or 'recurrence'"
+            )
+        if has_until:
+            until = _utc_timestamp(
+                raw_window.get("until"), f"maintenance_windows.{alias}.until"
+            )
+            maintenance_windows.append(
+                (alias, MaintenanceWindowConfig(until=until, reason=reason))
+            )
+            continue
+        recurrence = raw_window["recurrence"]
+        label = f"maintenance_windows.{alias}.recurrence"
+        if not isinstance(recurrence, dict):
+            raise ConfigError(f"{label} must be a JSON object")
+        unknown_recurrence = sorted(recurrence.keys() - _MAINTENANCE_RECURRENCE_KEYS)
+        if unknown_recurrence:
+            raise ConfigError(f"unknown {label} keys: {', '.join(unknown_recurrence)}")
+        weekday = recurrence.get("weekday")
+        if (
+            not isinstance(weekday, int)
+            or isinstance(weekday, bool)
+            or not (0 <= weekday <= 6)
+        ):
+            raise ConfigError(f"{label}.weekday must be 0 (Monday) to 6 (Sunday)")
+        start_value = recurrence.get("start")
+        start_match = (
+            _RECURRENCE_START.fullmatch(start_value)
+            if isinstance(start_value, str)
+            else None
+        )
+        if start_match is None:
+            raise ConfigError(f"{label}.start must be 'HH:MM' in UTC")
+        duration = recurrence.get("duration_minutes")
+        if (
+            not isinstance(duration, int)
+            or isinstance(duration, bool)
+            or not (1 <= duration <= 10_080)
+        ):
+            raise ConfigError(f"{label}.duration_minutes must be 1 to 10080 (one week)")
         maintenance_windows.append(
-            (alias, MaintenanceWindowConfig(until=until, reason=reason))
+            (
+                alias,
+                MaintenanceWindowConfig(
+                    reason=reason,
+                    weekday=weekday,
+                    start_minutes=(
+                        int(start_match.group(1)) * 60 + int(start_match.group(2))
+                    ),
+                    duration_minutes=duration,
+                ),
+            )
         )
 
     host_group_data = data.get("host_groups", {})

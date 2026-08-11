@@ -614,6 +614,167 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaises(ConfigError):
                     load_config(self.write(value))
 
+    def test_validates_recurring_maintenance_windows(self) -> None:
+        value = valid_config()
+        value["auto_discover"] = False
+        value["hosts"] = ["gpu-1"]
+        value["maintenance_windows"] = {
+            "gpu-1": {
+                "reason": "Weekly patching",
+                "recurrence": {
+                    "weekday": 2,
+                    "start": "18:00",
+                    "duration_minutes": 120,
+                },
+            }
+        }
+
+        window = load_config(self.write(value)).maintenance_window("gpu-1")
+
+        self.assertTrue(window.recurring)
+        # 2030-06-19 is a Wednesday (weekday 2). Active inside the window,
+        # inactive before start and after the end, active again next week.
+        inside = datetime(2030, 6, 19, 19, 0, tzinfo=timezone.utc)
+        before = datetime(2030, 6, 19, 17, 59, tzinfo=timezone.utc)
+        after = datetime(2030, 6, 19, 20, 0, tzinfo=timezone.utc)
+        next_week = datetime(2030, 6, 26, 18, 30, tzinfo=timezone.utc)
+        self.assertTrue(window.is_active(inside))
+        self.assertFalse(window.is_active(before))
+        self.assertFalse(window.is_active(after))
+        self.assertTrue(window.is_active(next_week))
+        rendered = window.to_dict(inside)
+        self.assertEqual(rendered["until"], "2030-06-19T20:00:00Z")
+        self.assertTrue(rendered["recurring"])
+        # Before the start, the rendered expiry points at the next instance.
+        self.assertEqual(window.to_dict(before)["until"], "2030-06-19T20:00:00Z")
+        self.assertEqual(window.to_dict(after)["until"], "2030-06-26T20:00:00Z")
+
+        # A window that crosses midnight stays active into the next day.
+        value["maintenance_windows"] = {
+            "gpu-1": {
+                "reason": "Overnight",
+                "recurrence": {
+                    "weekday": 4,
+                    "start": "23:00",
+                    "duration_minutes": 180,
+                },
+            }
+        }
+        overnight = load_config(self.write(value)).maintenance_window("gpu-1")
+        # 2030-06-21 is a Friday (weekday 4); 01:00 Saturday is inside.
+        saturday_early = datetime(2030, 6, 22, 1, 0, tzinfo=timezone.utc)
+        self.assertTrue(overnight.is_active(saturday_early))
+
+        invalid_windows = (
+            {
+                "gpu-1": {
+                    "reason": "x",
+                    "until": "2030-06-15T12:30:00Z",
+                    "recurrence": {
+                        "weekday": 0,
+                        "start": "00:00",
+                        "duration_minutes": 1,
+                    },
+                }
+            },
+            {
+                "gpu-1": {
+                    "reason": "x",
+                    "recurrence": {
+                        "weekday": 7,
+                        "start": "00:00",
+                        "duration_minutes": 1,
+                    },
+                }
+            },
+            {
+                "gpu-1": {
+                    "reason": "x",
+                    "recurrence": {
+                        "weekday": True,
+                        "start": "00:00",
+                        "duration_minutes": 1,
+                    },
+                }
+            },
+            {
+                "gpu-1": {
+                    "reason": "x",
+                    "recurrence": {
+                        "weekday": 0,
+                        "start": "24:00",
+                        "duration_minutes": 1,
+                    },
+                }
+            },
+            {
+                "gpu-1": {
+                    "reason": "x",
+                    "recurrence": {
+                        "weekday": 0,
+                        "start": "0:00",
+                        "duration_minutes": 1,
+                    },
+                }
+            },
+            {
+                "gpu-1": {
+                    "reason": "x",
+                    "recurrence": {
+                        "weekday": 0,
+                        "start": "00:00",
+                        "duration_minutes": 0,
+                    },
+                }
+            },
+            {
+                "gpu-1": {
+                    "reason": "x",
+                    "recurrence": {
+                        "weekday": 0,
+                        "start": "00:00",
+                        "duration_minutes": 10081,
+                    },
+                }
+            },
+            {"gpu-1": {"reason": "x", "recurrence": {"weekday": 0, "start": "00:00"}}},
+            {
+                "gpu-1": {
+                    "reason": "x",
+                    "recurrence": {
+                        "weekday": 0,
+                        "start": "00:00",
+                        "duration_minutes": 1,
+                        "extra": 1,
+                    },
+                }
+            },
+        )
+        for invalid in invalid_windows:
+            with self.subTest(invalid=invalid):
+                value["maintenance_windows"] = invalid
+                with self.assertRaises(ConfigError):
+                    load_config(self.write(value))
+
+    def test_validates_host_display_names(self) -> None:
+        value = valid_config()
+        value["auto_discover"] = False
+        value["hosts"] = ["gpu-1"]
+        value["host_overrides"] = {"gpu-1": {"display_name": "  训练节点 A100 × 8  "}}
+
+        config = load_config(self.write(value))
+
+        self.assertEqual(
+            config.host_override("gpu-1").display_name, "训练节点 A100 × 8"
+        )
+        self.assertEqual(config.host_display_names(), (("gpu-1", "训练节点 A100 × 8"),))
+
+        for invalid in ("", "   ", "x" * 65, "bad\nname", "bad\u202ename", 42):
+            with self.subTest(invalid=invalid):
+                value["host_overrides"] = {"gpu-1": {"display_name": invalid}}
+                with self.assertRaises(ConfigError):
+                    load_config(self.write(value))
+
     def test_bounds_history_points(self) -> None:
         value = valid_config()
         value["history_points"] = 120
