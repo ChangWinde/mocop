@@ -320,6 +320,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         "actionable_incidents": [],
         "actionable_critical_incidents": [],
         "latency": [],
+        "transport_retried": [],
         "cpu": [],
         "load": [],
         "uptime": [],
@@ -398,6 +399,9 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         latency = _seconds_from_milliseconds(raw_server.get("latencyMs"))
         if latency is not None:
             host_samples["latency"].append((host_labels, latency))
+        host_samples["transport_retried"].append(
+            (host_labels, int(bool(raw_server.get("transportRetried"))))
+        )
 
         system = raw_server.get("system")
         if not online or stale or not isinstance(system, Mapping):
@@ -549,6 +553,12 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
             "mocop_host_probe_latency_seconds",
             "Duration of the most recent host probe attempt.",
             "seconds",
+        ),
+        (
+            "transport_retried",
+            "mocop_host_probe_transport_retried",
+            "Whether the most recent probe retried a stale SSH transport.",
+            None,
         ),
         (
             "cpu",

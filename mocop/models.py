@@ -199,6 +199,7 @@ class ProbeResult:
     message: str | None = None
     observed_at: str = field(default_factory=utc_now)
     system: SystemMetrics | None = None
+    transport_retries: int = 0
 
 
 @dataclass(slots=True)
@@ -214,6 +215,7 @@ class ServerState:
     last_success_at: str | None = None
     next_retry_at: str | None = None
     consecutive_failures: int = 0
+    transport_retried: bool = False
 
     def apply(self, result: ProbeResult, next_retry_at: str | None = None) -> None:
         self.status = result.status
@@ -221,6 +223,7 @@ class ServerState:
         self.latency_ms = result.latency_ms
         self.message = result.message
         self.last_attempt_at = result.observed_at
+        self.transport_retried = result.transport_retries > 0
         if result.status == "online":
             self.gpus = result.gpus
             self.system = result.system
@@ -243,6 +246,7 @@ class ServerState:
             "nextRetryAt": self.next_retry_at,
             "stale": self.status != "online" and self.last_success_at is not None,
             "consecutiveFailures": self.consecutive_failures,
+            "transportRetried": self.transport_retried,
             "system": self.system.to_dict() if self.system else None,
             "gpus": [gpu.to_dict() for gpu in self.gpus],
         }

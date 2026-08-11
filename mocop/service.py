@@ -305,6 +305,7 @@ class StateStore:
         self._inventory_initialized = False
         self._version = 0
         self._collector_error: str | None = None
+        self._transport_retries_total = 0
         self._poll_interval_seconds = poll_interval_seconds
         self._collection_stale_cycles = collection_stale_cycles
         self._collection_stale_after_seconds = (
@@ -590,6 +591,7 @@ class StateStore:
                 if retry_after_seconds is not None
                 else None
             )
+            self._transport_retries_total += result.transport_retries
             state.apply(result, next_retry_at=next_retry_at)
             if result.status == "online" and result.system is not None:
                 history_point = self._history_point(result)
@@ -756,6 +758,7 @@ class StateStore:
                 "reason": reason,
                 "targets": discovered,
                 "targetsWithSuccessfulSample": successful,
+                "transportRetries": self._transport_retries_total,
                 "version": self._version,
                 "startedAt": self._started_at,
             }

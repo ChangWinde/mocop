@@ -25,221 +25,21 @@ from .models import (
     WorkloadMetadata,
     utc_now,
 )
+from .remote_script import (
+    _COMBINED_QUERY_FIELDS,
+    _HEALTH_QUERY_FIELDS,
+    _PROCESS_QUERY_FIELDS,
+    _PROTOCOL_VERSION,
+    _QUERY_FIELDS,
+    _SUPPORTED_PROTOCOL_VERSIONS,
+    _remote_script,
+)
 
-_QUERY_FIELDS = (
-    "index",
-    "uuid",
-    "name",
-    "driver_version",
-    "pstate",
-    "temperature.gpu",
-    "utilization.gpu",
-    "utilization.memory",
-    "memory.total",
-    "memory.used",
-    "memory.free",
-    "power.draw",
-    "power.limit",
-)
-_PROCESS_QUERY_FIELDS = ("gpu_uuid", "pid", "process_name", "used_gpu_memory")
-_HEALTH_QUERY_FIELDS = (
-    "uuid",
-    "ecc.errors.uncorrected.volatile.total",
-    "retired_pages.pending",
-    "remapped_rows.pending",
-    "clocks_event_reasons.hw_thermal_slowdown",
-    "clocks_event_reasons.hw_power_brake_slowdown",
-    "mig.mode.current",
-)
-_COMBINED_QUERY_FIELDS = _QUERY_FIELDS + _HEALTH_QUERY_FIELDS[1:]
 _UNAVAILABLE = {"", "n/a", "[n/a]", "not supported", "[not supported]"}
-_PROTOCOL_VERSION = "MONITOR_V6"
-_SUPPORTED_PROTOCOL_VERSIONS = frozenset(
-    {_PROTOCOL_VERSION, "MONITOR_V5", "MONITOR_V4"}
-)
 _PROCESS_READ_CHUNK_BYTES = 65_536
 _MAX_GPUS_PER_HOST = 256
 _MAX_DISKS_PER_HOST = 1_024
 _MAX_PROCESSES_PER_HOST = 4_096
-
-_REMOTE_SCRIPT_TEMPLATE = r"""
-LC_ALL=C
-export LC_ALL
-printf '__PROTOCOL_VERSION__\n'
-workload_enabled=__WORKLOAD_ENABLED__
-process_enabled=__PROCESS_ENABLED__
-host_value=$(awk 'NR == 1 { gsub(/[[:cntrl:]]/, " "); print substr($0, 1, 255); found=1; exit } END { if (!found) print "unknown" }' /proc/sys/kernel/hostname 2>/dev/null) || host_value=unknown
-[ -n "$host_value" ] || host_value=unknown
-printf 'HOST\t%s\n' "$host_value"
-awk '
-  FILENAME == "/proc/stat" {
-    if ($1 == "cpu") {
-      total=0
-      for (i=2; i<=NF; i++) total += $i
-      idle=$5+$6
-    } else if ($1 ~ /^cpu[0-9]+$/) {
-      cores++
-    }
-    next
-  }
-  FILENAME == "/proc/meminfo" {
-    if ($1 == "MemTotal:") mt=$2
-    else if ($1 == "MemAvailable:") ma=$2
-    else if ($1 == "SwapTotal:") st=$2
-    else if ($1 == "SwapFree:") sf=$2
-    next
-  }
-  FILENAME == "/proc/loadavg" { load1=$1; load5=$2; load15=$3; next }
-  FILENAME == "/proc/uptime" { uptime=$1; next }
-  FILENAME == "/proc/net/dev" && FNR > 2 {
-    gsub(/:/, "", $1)
-    if ($1 != "lo") { rx += $2; tx += $10 }
-    next
-  }
-  FILENAME ~ /\/sys\/block\/.*\/stat$/ && FILENAME !~ /\/(loop[0-9]+|ram[0-9]+|zram[0-9]+|dm-[0-9]+|md[0-9]+)\/stat$/ {
-    read_bytes += $3 * 512
-    write_bytes += $7 * 512
-  }
-  END {
-    printf "CPU\t%.0f\t%.0f\n", total, idle
-    printf "CORES\t%.0f\n", cores
-    printf "MEM\t%.0f\t%.0f\t%.0f\t%.0f\n", mt, ma, st, sf
-    printf "LOAD\t%s\t%s\t%s\n", load1, load5, load15
-    printf "UPTIME\t%s\n", uptime
-    printf "NET\t%.0f\t%.0f\n", rx, tx
-    printf "IO\t%.0f\t%.0f\n", read_bytes, write_bytes
-  }
-' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/net/dev /sys/block/*/stat 2>/dev/null
-printf 'DISKS_BEGIN\n'
-df -PTk 2>/dev/null | awk '
-  NR > 1 && $2 !~ /^(tmpfs|devtmpfs|squashfs|overlay|proc|sysfs|cgroup2?|efivarfs|tracefs|debugfs|mqueue|fusectl|securityfs|pstore|configfs|autofs|binfmt_misc|ramfs|nsfs)$/ {
-    pct=$6; gsub(/%/, "", pct)
-    printf "DISK\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $5, pct, $7
-  }
-'
-printf 'DISKS_END\n'
-printf 'GPUS_BEGIN\n'
-gpu_health_inline=0
-if command -v nvidia-smi >/dev/null 2>&1; then
-  combined_output=$(nvidia-smi --query-gpu=__COMBINED_QUERY__ --format=csv,noheader,nounits 2>/dev/null)
-  combined_status=$?
-  if [ "$combined_status" -eq 0 ]; then
-    gpu_health_inline=1
-    [ -z "$combined_output" ] || printf '%s\n' "$combined_output"
-  else
-    nvidia-smi --query-gpu=__GPU_QUERY__ --format=csv,noheader,nounits 2>/dev/null || printf 'GPU_ERROR\t%s\n' "$?"
-  fi
-else
-  printf 'GPU_UNAVAILABLE\n'
-fi
-printf 'GPUS_END\n'
-printf 'PROCESSES_BEGIN\n'
-process_output=''
-process_status=0
-if [ "$process_enabled" -eq 0 ]; then
-  printf 'PROCESS_SKIPPED\n'
-elif command -v nvidia-smi >/dev/null 2>&1; then
-  process_output=$(nvidia-smi --query-compute-apps=__PROCESS_QUERY__ --format=csv,noheader,nounits 2>/dev/null)
-  process_status=$?
-  if [ "$process_status" -eq 0 ]; then
-    [ -z "$process_output" ] || printf '%s\n' "$process_output"
-  else
-    printf 'PROCESS_ERROR\t%s\n' "$process_status"
-  fi
-fi
-printf 'PROCESSES_END\n'
-printf 'WORKLOADS_BEGIN\n'
-if [ "$workload_enabled" -eq 1 ] && [ "$process_status" -eq 0 ] && [ -n "$process_output" ]; then
-  process_pids=$(printf '%s\n' "$process_output" | awk -F, '
-    {
-      pid=$2
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", pid)
-      if (pid ~ /^[0-9]+$/ && !seen[pid]++) print pid
-    }
-  ')
-  for process_pid in $process_pids; do
-    [ -r "/proc/$process_pid/status" ] || continue
-    owner_uid=$(awk '/^Uid:/ { print $2; exit }' "/proc/$process_pid/status" 2>/dev/null)
-    cgroup_value=$(head -c 16384 "/proc/$process_pid/cgroup" 2>/dev/null)
-    if [ -r "/proc/$process_pid/environ" ]; then
-      head -c 65536 "/proc/$process_pid/environ" 2>/dev/null
-    fi | tr '\000' '\n' | awk -v pid="$process_pid" -v uid="$owner_uid" -v cgroup="$cgroup_value" '
-      function clean(value) {
-        gsub(/[[:cntrl:]]/, " ", value)
-        return substr(value, 1, 255)
-      }
-      /^SLURM_JOB_ID=/ { slurm_id=substr($0, index($0, "=") + 1) }
-      /^SLURM_JOB_NAME=/ { slurm_name=substr($0, index($0, "=") + 1) }
-      /^SLURM_JOB_PARTITION=/ { slurm_queue=substr($0, index($0, "=") + 1) }
-      /^SLURM_JOB_USER=/ { owner=substr($0, index($0, "=") + 1) }
-      /^USER=/ { if (owner == "") owner=substr($0, index($0, "=") + 1) }
-      /^LOGNAME=/ { if (owner == "") owner=substr($0, index($0, "=") + 1) }
-      /^POD_UID=/ { pod_id=substr($0, index($0, "=") + 1) }
-      /^POD_NAME=/ { pod_name=substr($0, index($0, "=") + 1) }
-      /^POD_NAMESPACE=/ { pod_namespace=substr($0, index($0, "=") + 1) }
-      /^KUEUE_LOCAL_QUEUE_NAME=/ { pod_queue=substr($0, index($0, "=") + 1) }
-      END {
-        if (slurm_id == "" && match(cgroup, /job_[0-9]+/)) {
-          slurm_id=substr(cgroup, RSTART + 4, RLENGTH - 4)
-        }
-        if (pod_id == "" && match(cgroup, /pod[0-9A-Fa-f_-]+/)) {
-          pod_id=substr(cgroup, RSTART + 3, RLENGTH - 3)
-        }
-        if (owner == "") owner=uid
-        kind="process"
-        workload_id=""
-        workload_name=""
-        workload_queue=""
-        workload_namespace=""
-        if (slurm_id != "" || cgroup ~ /slurm/) {
-          kind="slurm"
-          workload_id=slurm_id
-          workload_name=slurm_name
-          workload_queue=slurm_queue
-        } else if (pod_id != "" || cgroup ~ /kubepods/) {
-          kind="kubernetes"
-          workload_id=pod_id
-          workload_name=pod_name
-          workload_queue=pod_queue
-          workload_namespace=pod_namespace
-        }
-        printf "WORKLOAD\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-          pid, kind, clean(workload_id), clean(workload_name), clean(owner),
-          clean(workload_queue), clean(workload_namespace)
-      }
-    '
-  done
-fi
-printf 'WORKLOADS_END\n'
-printf 'GPU_HEALTH_BEGIN\n'
-[ "$gpu_health_inline" -eq 1 ] || printf 'GPU_HEALTH_ERROR\t1\n'
-printf 'GPU_HEALTH_END\n'
-"""
-
-
-def _render_remote_script(workload_enabled: bool, process_enabled: bool) -> str:
-    return (
-        _REMOTE_SCRIPT_TEMPLATE.replace("__GPU_QUERY__", ",".join(_QUERY_FIELDS))
-        .replace("__COMBINED_QUERY__", ",".join(_COMBINED_QUERY_FIELDS))
-        .replace("__PROCESS_QUERY__", ",".join(_PROCESS_QUERY_FIELDS))
-        .replace("__WORKLOAD_ENABLED__", "1" if workload_enabled else "0")
-        .replace("__PROCESS_ENABLED__", "1" if process_enabled else "0")
-        .replace("__PROTOCOL_VERSION__", _PROTOCOL_VERSION)
-    )
-
-
-_REMOTE_SCRIPTS = {
-    (workload_enabled, process_enabled): _render_remote_script(
-        workload_enabled,
-        process_enabled,
-    )
-    for workload_enabled in (False, True)
-    for process_enabled in (False, True)
-}
-
-
-def _remote_script(workload_mode: str, process_enabled: bool = True) -> str:
-    return _REMOTE_SCRIPTS[(workload_mode != "disabled", process_enabled)]
 
 
 class ResourceProbe(Protocol):
@@ -288,6 +88,10 @@ class _ActiveProcessRegistry:
         self.cancelled = threading.Event()
         self._lock = threading.Lock()
         self._processes: set[subprocess.Popen[bytes]] = set()
+        # Raw descriptors: the registry lives for the whole probe lifetime and
+        # selectors accept integer descriptors directly.
+        self.cancel_wakeup, self._cancel_write_fd = os.pipe()
+        os.set_blocking(self._cancel_write_fd, False)
 
     def register(self, process: subprocess.Popen[bytes]) -> bool:
         with self._lock:
@@ -302,6 +106,10 @@ class _ActiveProcessRegistry:
 
     def cancel(self) -> None:
         self.cancelled.set()
+        # Level-triggered wake-up: the byte is intentionally never consumed,
+        # so every selector that registered the read end stays readable.
+        with suppress(OSError):
+            os.write(self._cancel_write_fd, b"x")
         with self._lock:
             processes = tuple(self._processes)
         for process in processes:
@@ -362,19 +170,36 @@ def _run_bounded_process(
         selector = selectors.DefaultSelector()
         selector.register(stdout, selectors.EVENT_READ, "stdout")
         selector.register(stderr, selectors.EVENT_READ, "stderr")
+        stream_keys = 2
+        if process_registry is not None:
+            # A cancellation wake-up descriptor lets the wait span the full
+            # deadline; without one, a bounded poll observes the bare event.
+            selector.register(
+                process_registry.cancel_wakeup, selectors.EVENT_READ, "cancel"
+            )
         try:
-            while selector.get_map():
+            while stream_keys:
                 if cancel_event is not None and cancel_event.is_set():
                     raise _ProcessCancelled
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise subprocess.TimeoutExpired(command, timeout_seconds)
-                events = selector.select(min(remaining, 0.25))
+                    raise subprocess.TimeoutExpired(
+                        command, timeout_seconds, output=bytes(output["stdout"])
+                    )
+                wait_seconds = (
+                    remaining if process_registry is not None else min(remaining, 0.25)
+                )
+                events = selector.select(wait_seconds)
                 for key, _mask in events:
+                    if key.data == "cancel":
+                        # The wake-up byte stays unread so concurrent probes
+                        # sharing the registry observe the same level trigger.
+                        raise _ProcessCancelled
                     chunk = os.read(key.fileobj.fileno(), _PROCESS_READ_CHUNK_BYTES)
                     if not chunk:
                         selector.unregister(key.fileobj)
                         key.fileobj.close()
+                        stream_keys -= 1
                         continue
                     total_bytes += len(chunk)
                     if total_bytes > max_output_bytes:
@@ -396,9 +221,16 @@ def _run_bounded_process(
         if remaining <= 0:
             returncode = process.poll()
             if returncode is None:
-                raise subprocess.TimeoutExpired(command, timeout_seconds)
+                raise subprocess.TimeoutExpired(
+                    command, timeout_seconds, output=bytes(output["stdout"])
+                )
         else:
-            returncode = process.wait(timeout=remaining)
+            try:
+                returncode = process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                raise subprocess.TimeoutExpired(
+                    command, timeout_seconds, output=bytes(output["stdout"])
+                ) from None
         return _BoundedProcessResult(
             returncode=returncode,
             stdout=output["stdout"].decode("utf-8", errors="replace"),
@@ -1058,6 +890,10 @@ def _safe_ssh_failure(stderr: str) -> str:
         (("connection refused",), "SSH connection was refused"),
         (("connection timed out", "operation timed out"), "SSH connection timed out"),
         (("no route to host", "network is unreachable"), "SSH network is unreachable"),
+        (
+            ("timeout, server", "server not responding"),
+            "SSH transport stopped responding",
+        ),
     )
     for needles, message in categories:
         if any(needle in normalized for needle in needles):
@@ -1269,6 +1105,10 @@ class OpenSshLinuxResourceProbe:
             raise ValueError(f"unsafe SSH alias: {host!r}")
 
         local = config.local_host == host
+        # A dead transport must never consume the whole probe budget: two
+        # unanswered keepalives bound silent-death detection near the
+        # operator's connect tolerance instead of probe_timeout_seconds.
+        keepalive_interval = max(2, config.connect_timeout_seconds // 2)
         command = (
             ["sh", "-s"]
             if local
@@ -1285,6 +1125,10 @@ class OpenSshLinuxResourceProbe:
                 f"ConnectTimeout={config.connect_timeout_seconds}",
                 "-o",
                 "ConnectionAttempts=1",
+                "-o",
+                f"ServerAliveInterval={keepalive_interval}",
+                "-o",
+                "ServerAliveCountMax=2",
                 "-o",
                 "StrictHostKeyChecking=yes",
                 "-o",
@@ -1310,6 +1154,7 @@ class OpenSshLinuxResourceProbe:
         )
         deadline = started + timeout_seconds
         script = _remote_script(config.workloads.mode, process_sampled)
+        transport_retries = 0
         try:
             completed = _run_bounded_process(
                 command,
@@ -1327,6 +1172,7 @@ class OpenSshLinuxResourceProbe:
             ):
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
+                    transport_retries = 1
                     completed = _run_bounded_process(
                         command,
                         input_text=script,
@@ -1342,17 +1188,21 @@ class OpenSshLinuxResourceProbe:
                 status="error",
                 latency_ms=round((time.monotonic() - started) * 1000),
                 message="Resource collection cancelled",
+                transport_retries=transport_retries,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            if local:
+                message = "Local resource collection timed out"
+            elif exc.output:
+                message = "Remote collection stalled after partial output"
+            else:
+                message = "SSH produced no output before the collection timeout"
             return ProbeResult(
                 host=host,
                 status="unreachable",
                 latency_ms=round((time.monotonic() - started) * 1000),
-                message=(
-                    "Local resource collection timed out"
-                    if local
-                    else "SSH/resource collection timed out"
-                ),
+                message=message,
+                transport_retries=transport_retries,
             )
         except _ProcessOutputLimitExceeded:
             return ProbeResult(
@@ -1364,6 +1214,7 @@ class OpenSshLinuxResourceProbe:
                     if local
                     else "Remote resource output exceeded the configured limit"
                 ),
+                transport_retries=transport_retries,
             )
         except OSError:
             return ProbeResult(
@@ -1375,6 +1226,7 @@ class OpenSshLinuxResourceProbe:
                     if local
                     else "Local SSH client could not be started"
                 ),
+                transport_retries=transport_retries,
             )
 
         observed_monotonic = time.monotonic()
@@ -1385,6 +1237,7 @@ class OpenSshLinuxResourceProbe:
                 status="unreachable",
                 latency_ms=latency_ms,
                 message=_safe_ssh_failure(completed.stderr),
+                transport_retries=transport_retries,
             )
         if completed.returncode != 0:
             return ProbeResult(
@@ -1396,6 +1249,7 @@ class OpenSshLinuxResourceProbe:
                     if local
                     else f"Remote resource query failed (exit {completed.returncode})"
                 ),
+                transport_retries=transport_retries,
             )
         try:
             raw, gpus, gpu_message = parse_linux_resource_payload(completed.stdout)
@@ -1410,6 +1264,7 @@ class OpenSshLinuxResourceProbe:
                     if local
                     else "Remote resource output was not recognized"
                 ),
+                transport_retries=transport_retries,
             )
         observed_at = utc_now()
         gpus = self._merge_process_sample(
@@ -1428,14 +1283,19 @@ class OpenSshLinuxResourceProbe:
             message=gpu_message,
             observed_at=observed_at,
             system=system,
+            transport_retries=transport_retries,
         )
 
 
 # Legacy class and registry names remain import-compatible.
 OpenSshNvidiaSmiProbe = OpenSshLinuxResourceProbe
-_PROBES["openssh-linux-v5"] = OpenSshLinuxResourceProbe
-_PROBES["openssh-linux-v4"] = OpenSshLinuxResourceProbe
-_PROBES["openssh-linux-v2"] = OpenSshLinuxResourceProbe
-_PROBES["openssh-linux-v1"] = OpenSshLinuxResourceProbe
-_PROBES["openssh-nvidia-smi"] = OpenSshLinuxResourceProbe
-_PROBES["openssh-linux-v3"] = OpenSshLinuxResourceProbe
+_LEGACY_PROBE_NAMES = (
+    "openssh-nvidia-smi",
+    "openssh-linux-v1",
+    "openssh-linux-v2",
+    "openssh-linux-v3",
+    "openssh-linux-v4",
+    "openssh-linux-v5",
+)
+for _legacy_name in _LEGACY_PROBE_NAMES:
+    _PROBES[_legacy_name] = OpenSshLinuxResourceProbe

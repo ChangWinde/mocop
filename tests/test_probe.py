@@ -316,6 +316,8 @@ class ProbeTests(unittest.TestCase):
         arguments = run.call_args.args[0]
         self.assertIn("StrictHostKeyChecking=yes", arguments)
         self.assertIn("BatchMode=yes", arguments)
+        self.assertIn("ServerAliveInterval=2", arguments)
+        self.assertIn("ServerAliveCountMax=2", arguments)
         self.assertEqual(arguments[arguments.index("--") + 1], "gpu-1")
         self.assertEqual(arguments[-2:], ["sh", "-s"])
         self.assertIn("MONITOR_V6", run.call_args.kwargs["input_text"])
@@ -636,6 +638,7 @@ class ProbeTests(unittest.TestCase):
         result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
 
         self.assertEqual(result.status, "online")
+        self.assertEqual(result.transport_retries, 1)
         self.assertEqual(run.call_count, 2)
         self.assertEqual(run.call_args_list[0].kwargs["timeout_seconds"], 12)
         self.assertEqual(run.call_args_list[1].kwargs["timeout_seconds"], 11)
@@ -654,7 +657,35 @@ class ProbeTests(unittest.TestCase):
         result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
 
         self.assertEqual(result.status, "unreachable")
+        self.assertEqual(result.transport_retries, 0)
         self.assertEqual(run.call_count, 1)
+
+    @patch("mocop.probe._run_bounded_process")
+    def test_distinguishes_transport_silence_from_partial_output(self, run) -> None:
+        run.side_effect = subprocess.TimeoutExpired(["ssh"], 12, output=b"")
+        silent = OpenSshLinuxResourceProbe().probe("gpu-1", config())
+        self.assertEqual(silent.status, "unreachable")
+        self.assertEqual(
+            silent.message, "SSH produced no output before the collection timeout"
+        )
+
+        run.side_effect = subprocess.TimeoutExpired(
+            ["ssh"], 12, output=b"MONITOR_V6\nHOST\tnode-a\n"
+        )
+        stalled = OpenSshLinuxResourceProbe().probe("gpu-1", config())
+        self.assertEqual(stalled.status, "unreachable")
+        self.assertEqual(
+            stalled.message, "Remote collection stalled after partial output"
+        )
+
+    @patch("mocop.probe._run_bounded_process")
+    def test_classifies_dead_transport_keepalive_failure(self, run) -> None:
+        run.return_value = _BoundedProcessResult(
+            255, stdout="", stderr="Timeout, server gpu-1 not responding."
+        )
+        result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
+        self.assertEqual(result.status, "unreachable")
+        self.assertEqual(result.message, "SSH transport stopped responding")
 
     def test_bounded_process_captures_output_without_shell(self) -> None:
         result = _run_bounded_process(
@@ -777,6 +808,30 @@ class ProbeTests(unittest.TestCase):
             )
 
         self.assertLess(time.monotonic() - started, 1)
+
+    @patch("mocop.probe._kill_process_group")
+    def test_registry_cancellation_wakes_the_full_deadline_wait(self, _kill) -> None:
+        # With the child kill suppressed, only the registry wake-up pipe can
+        # interrupt the selector before the five-second deadline. The bounded
+        # one-second reap in the cleanup path is included in the budget.
+        registry = _ActiveProcessRegistry()
+        timer = threading.Timer(0.05, registry.cancel)
+        started = time.monotonic()
+        timer.start()
+        self.addCleanup(timer.cancel)
+
+        with self.assertRaises(_ProcessCancelled):
+            _run_bounded_process(
+                [sys.executable, "-c", "import time; time.sleep(5)"],
+                input_text="",
+                timeout_seconds=5,
+                max_output_bytes=65_536,
+                environment=os.environ.copy(),
+                cancel_event=registry.cancelled,
+                process_registry=registry,
+            )
+
+        self.assertLess(time.monotonic() - started, 2.5)
 
     @patch("mocop.probe._kill_process_group")
     def test_active_process_registry_kills_every_child_synchronously(
