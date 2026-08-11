@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import ConfigError, load_config, resolve_config_path
 from .discovery import create_host_source
+from .doctor import run_doctor
 from .inventory import ConfigInventory
 from .lifecycle import (
     LifecycleError,
@@ -83,6 +84,30 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
             default=None,
             help="configuration used by the service",
         )
+
+    doctor_parser = commands.add_parser(
+        "doctor",
+        help="diagnose SSH reachability and connection reuse for monitored aliases",
+    )
+    doctor_parser.add_argument(
+        "--config", type=Path, default=None, help="configuration path to diagnose"
+    )
+    doctor_parser.add_argument(
+        "--host",
+        dest="hosts",
+        action="append",
+        default=[],
+        metavar="SSH_ALIAS",
+        help="limit the diagnosis to this monitored alias; repeat for multiple",
+    )
+    doctor_parser.add_argument(
+        "--no-connect",
+        action="store_true",
+        help="inspect configuration only; skip live connection tests",
+    )
+    doctor_parser.add_argument(
+        "--json", action="store_true", help="write a machine-readable report"
+    )
     return parser.parse_args(argv)
 
 
@@ -209,6 +234,21 @@ def _run_monitor(args: argparse.Namespace) -> int:
     return 1 if collector_failed else 0
 
 
+def _run_doctor(args: argparse.Namespace) -> int:
+    config_path = resolve_config_path(args.config)
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
+    return run_doctor(
+        config,
+        host_filter=tuple(args.hosts),
+        probe_connection=not args.no_connect,
+        as_json=args.json,
+    )
+
+
 def _run_lifecycle(args: argparse.Namespace) -> int:
     if args.command == "init":
         path = (args.config or user_config_path()).expanduser().resolve()
@@ -240,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
     if args.command is None:
         return _run_monitor(args)
+    if args.command == "doctor":
+        return _run_doctor(args)
     try:
         return _run_lifecycle(args)
     except LifecycleError as exc:
