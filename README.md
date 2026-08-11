@@ -35,11 +35,13 @@ Here, **AI-native** means that the interface is built around GPU capacity, task 
 ## Features
 
 - GPU utilization, VRAM, temperature, power, model, driver, hardware health, and per-GPU processes
-- GPU capacity matching, scheduling heatmap, host groups, search, filters, and CSV export
+- GPU capacity matching, scheduling heatmap, connection map, search, filters, and CSV export
 - CPU, load, memory, swap, disk capacity and I/O, network rate, and uptime
-- Incidents with anti-flap thresholds, stale-data handling, failure backoff, and timed maintenance windows
+- Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, and timed maintenance
+- Independent per-host scheduling, possible shared-path grouping, and optional HTTPS webhooks
 - Config-backed host inventory, expected GPU counts, local-host collection, and host groups
-- Five browser-local themes, compact mode, saved ordering, and validated local backgrounds
+- Per-GPU trends and process timelines, with optional bounded SQLite retention and read-only Slurm/Kubernetes context
+- Six visual styles, six independent accents, compact mode, saved ordering, and validated local backgrounds
 - OpenMetrics 1.0 endpoint for Prometheus and Grafana
 
 ## Quick start
@@ -65,7 +67,7 @@ ssh gpu-node-01 true
 ssh -o BatchMode=yes gpu-node-01 true
 ```
 
-Keep `ProxyJump`, ports, users, and identities in OpenSSH. Do not add jump hosts or Git remotes to Mocop's monitored `hosts` list.
+Keep `ProxyJump`, ports, users, and identities in OpenSSH. Do not add jump hosts or Git remotes to Mocop's monitored `hosts` list. The optional display-only topology can show jump and FRP nodes without probing them.
 
 ### 2. Install and initialize
 
@@ -117,6 +119,40 @@ The generated file is complete. Edit it directly only when you need fields not e
 - `expected_gpu_counts` reports missing devices.
 - `host_groups` provides shared navigation groups.
 - `host_overrides` changes cadence or timeout for a measured slow node.
+- `gpu_process_poll_interval_seconds` controls timestamped GPU task refresh independently; the 15-second default reduces NVIDIA command overhead while core GPU data keeps the normal cadence.
+- `incident_overrides` applies bounded host/group thresholds and exact disk-mount exclusions; host settings take precedence.
+- `incident_actions` stores dashboard acknowledgements and silences with UTC expiry. It is maintained by the UI in normal use.
+- `manual_probe_cooldown_seconds` bounds repeated on-demand probes of one node; the default is 5 seconds.
+- `retry_jitter_pct` disperses retries after a shared SSH path fails; the default is 15%.
+- `topology` describes the connection tree. Its safe aliases are display-only unless they also appear in the active `hosts` inventory.
+- `persistence.enabled` retains bounded trends and incident context in SQLite; it is off by default.
+- `workloads.mode: "auto"` adds best-effort Slurm/Kubernetes identity from bounded `/proc` reads; it is off by default.
+
+Webhook destinations and signing secrets stay out of JSON. A minimal endpoint uses
+environment-variable names:
+
+```json
+{
+  "webhooks": [{
+    "name": "operations",
+    "url_env": "MOCOP_OPS_WEBHOOK_URL",
+    "secret_env": "MOCOP_OPS_WEBHOOK_SECRET"
+  }]
+}
+```
+
+For `mocop service install`, create a private `environment` file beside `config.json`:
+
+```bash
+install -m 600 /dev/null ~/.config/mocop/environment
+${EDITOR:-vi} ~/.config/mocop/environment
+mocop service install
+```
+
+Add `MOCOP_OPS_WEBHOOK_URL=...` and `MOCOP_OPS_WEBHOOK_SECRET=...` as separate
+lines. Use a real secret and protect this file. HTTPS is required; private-network targets
+must be explicitly allowed in the endpoint configuration. Delivery covers open,
+recovery, severity changes, deduplication, throttling, and bounded retries.
 
 See the [complete example](examples/mocop.example.json) for all fields and safe bounds. Restart the service after editing JSON manually. Changes made in the dashboard are validated, written atomically, and applied without a restart.
 
@@ -125,8 +161,9 @@ See the [complete example](examples/mocop.example.json) for all fields and safe 
 | Setting | Storage | Survives service restart | Shared across browsers |
 |---|---|---:|---:|
 | Collection interval, probe timeout, worker count | `config.json` | Yes | Yes |
-| Monitored hosts, groups, maintenance windows | `config.json` | Yes | Yes |
-| Theme, density, sorting, filters, visible GPU columns | browser `localStorage` | Yes | No |
+| Monitored hosts, groups, maintenance and incident actions | `config.json` | Yes | Yes |
+| Optional host/GPU trends and process/incident transitions | private SQLite state | Yes | Yes |
+| Visual style, accent, density, sorting, filters, visible GPU columns | browser `localStorage` | Yes | No |
 | Custom background | browser `IndexedDB` | Yes | No |
 
 Browser settings are lost only when that browser's site data is cleared or its display preferences are reset. Removing a custom background is a separate action.
@@ -135,10 +172,14 @@ The dashboard allows a 2–60 second interval, a 2–300 second probe timeout, a
 
 ## Daily use
 
-- Select a GPU row or heatmap cell to inspect its processes and per-process VRAM.
+- Select a GPU row or heatmap cell to inspect current processes, recent utilization/VRAM/temperature/power, and process start/stop events.
+- Open an incident for evidence-based guidance, then acknowledge it or silence only that condition for a fixed period.
+- Use **Probe now** on the selected node to advance one bounded collection without changing the global interval.
 - Use **Match capacity** to find same-host, same-model GPUs with enough free VRAM. The result is not a reservation.
 - Set a maintenance window to silence actionable alerts while collection continues.
 - Scan SSH aliases in **Settings → Monitored nodes** to add or remove eligible compute nodes.
+- After an upgrade, use **Settings → Service status → Restart service**. This action is
+  available only for the installed user service and reloads the page after recovery.
 - Upload a PNG, JPEG, WebP, or AVIF background up to 32 MiB. Sources above 8 MiB are compressed locally; no image is uploaded.
 - Export one current snapshot with `mocop --once > snapshot.json`.
 
@@ -153,13 +194,17 @@ scrape_configs:
       - targets: ["127.0.0.1:8787"]
 ```
 
-The endpoint includes collection health, host availability, incidents, system resources, and current GPU metrics. Stale resource values, process names, and PIDs are not exported.
+The endpoint includes collection and background-subsystem health, host availability, incidents, system resources, and current GPU metrics. Stale resource values, process names, and PIDs are not exported.
 
 ## Failure behavior
 
-Mocop publishes healthy hosts without waiting for slow hosts. Failed hosts keep their last successful sample but are marked stale and excluded from current cluster totals. Repeated failures back off for up to 60 seconds.
+Mocop schedules each host independently and never overlaps a host with itself. A slow
+node does not delay a healthy peer when worker capacity is available. Failed hosts keep
+their last successful sample but are marked stale and excluded from current totals;
+retries back off for up to 60 seconds with per-host jitter.
 
-The collection interval is the target cadence, not a guarantee that every full-cluster cycle finishes within that time. A connection timeout can make the cycle duration longer while completed hosts continue to update through SSE.
+The interval is a target cadence. Worker saturation or a probe longer than its interval
+can defer that host, but no fleet-wide barrier is introduced.
 
 Test the same SSH path outside Mocop before changing timeouts:
 

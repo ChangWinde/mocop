@@ -48,9 +48,16 @@ class LifecycleTests(unittest.TestCase):
         )
 
         self.assertIn('ExecStart="/opt/mocop env/bin/python" -m mocop', unit)
+        self.assertIn(" -m mocop --managed-service ", unit)
         self.assertIn(f'--config="{self.root}/config file.json"', unit)
         self.assertIn("NoNewPrivileges=true", unit)
+        self.assertIn(
+            f"EnvironmentFile=-{self.root}/environment",
+            unit,
+        )
         self.assertIn("ProtectSystem=strict", unit)
+        self.assertIn("StateDirectory=mocop", unit)
+        self.assertIn("StateDirectoryMode=0700", unit)
         self.assertIn(
             f'ReadWritePaths="{self.root}"',
             unit,
@@ -72,6 +79,19 @@ class LifecycleTests(unittest.TestCase):
 
         self.assertIn(f'ExecStart="{venv_python}" -m mocop', unit)
         self.assertNotIn(f'ExecStart="{base_python}"', unit)
+
+    def test_optional_environment_path_escapes_spaces_without_hiding_prefix(
+        self,
+    ) -> None:
+        unit = render_user_unit(
+            Path("/usr/bin/python3"),
+            self.root / "config directory" / "config.json",
+        )
+
+        self.assertIn(
+            f"EnvironmentFile=-{self.root}/config\\x20directory/environment",
+            unit,
+        )
 
     def test_service_install_uses_fixed_systemctl_arguments(self) -> None:
         config_path = self.root / "config.json"
@@ -112,6 +132,24 @@ class LifecycleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LifecycleError, "configuration is not ready"):
             manager.install()
+        self.assertFalse(manager.unit_path.exists())
+
+    def test_service_install_rejects_an_exposed_secret_environment(self) -> None:
+        config_path = self.root / "config.json"
+        initialize_config(config_path, ("gpu-01",))
+        environment = self.root / "environment"
+        environment.write_text("MOCOP_WEBHOOK_SECRET=secret\n", encoding="utf-8")
+        environment.chmod(0o644)
+        manager = UserServiceManager(
+            config_path=config_path,
+            unit_path=self.root / "mocop.service",
+            python_executable=Path("/usr/bin/python3"),
+            run=lambda _arguments: 0,
+        )
+
+        with self.assertRaisesRegex(LifecycleError, "private regular file"):
+            manager.install()
+
         self.assertFalse(manager.unit_path.exists())
 
     def test_status_is_read_only_and_uninstall_removes_only_its_unit(self) -> None:

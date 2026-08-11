@@ -1,25 +1,34 @@
 from __future__ import annotations
 
 import os
+import selectors
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from mocop.config import HostOverrideConfig, MonitorConfig
 from mocop.models import GpuHealthMetrics
 from mocop.probe import (
     OpenSshLinuxResourceProbe,
     OpenSshNvidiaSmiProbe,
+    _ActiveProcessRegistry,
     _BoundedProcessResult,
+    _ProcessCancelled,
     _ProcessOutputLimitExceeded,
+    _remote_script,
     _run_bounded_process,
     parse_linux_resource_payload,
+    parse_nvidia_combined_csv,
     parse_nvidia_health_csv,
     parse_nvidia_processes_csv,
     parse_nvidia_smi_csv,
+    parse_workload_records,
 )
 
 
@@ -40,6 +49,7 @@ def config() -> MonitorConfig:
 
 def resource_payload(
     *,
+    protocol: str = "MONITOR_V5",
     cpu_total: int = 1000,
     cpu_idle: int = 800,
     rx_bytes: int = 10000,
@@ -52,9 +62,10 @@ def resource_payload(
     ),
     process_payload: str = "GPU-abc, 4242, python, 2048",
     health_payload: str = "GPU-abc, 0, No, No, Not Active, Not Active, Disabled",
+    workload_payload: str = "",
 ) -> str:
     return (
-        "MONITOR_V4\n"
+        f"{protocol}\n"
         "HOST\tnode-a\n"
         f"CPU\t{cpu_total}\t{cpu_idle}\n"
         "CORES\t8\n"
@@ -72,6 +83,9 @@ def resource_payload(
         "PROCESSES_BEGIN\n"
         f"{process_payload}\n"
         "PROCESSES_END\n"
+        "WORKLOADS_BEGIN\n"
+        f"{workload_payload}\n"
+        "WORKLOADS_END\n"
         "GPU_HEALTH_BEGIN\n"
         f"{health_payload}\n"
         "GPU_HEALTH_END\n"
@@ -133,6 +147,45 @@ class ProbeTests(unittest.TestCase):
         )
         self.assertIsNone(gpus[0].health)
 
+    def test_parses_combined_gpu_and_health_query(self) -> None:
+        combined = (
+            "0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+            "81920, 40960, 40960, 287.5, 400, "
+            "2, No, Yes, Active, Not Active, Enabled"
+        )
+
+        gpus, health = parse_nvidia_combined_csv(combined)
+
+        self.assertEqual(gpus[0].uuid, "GPU-abc")
+        self.assertEqual(gpus[0].utilization_gpu_pct, 93)
+        self.assertEqual(health["GPU-abc"].ecc_uncorrected_volatile, 2)
+        self.assertTrue(health["GPU-abc"].remapped_rows_pending)
+
+        invalid_health = combined.replace(
+            "2, No, Yes, Active, Not Active, Enabled",
+            "2, Maybe, Yes, Active, Not Active, Enabled",
+        )
+        base_gpus, ignored_health = parse_nvidia_combined_csv(invalid_health)
+        self.assertEqual(base_gpus[0].uuid, "GPU-abc")
+        self.assertEqual(ignored_health, {})
+
+        duplicate_health = (
+            combined + "\n" + combined.replace("0, GPU-abc", "1, GPU-abc")
+        )
+        duplicate_gpus, ignored_duplicate_health = parse_nvidia_combined_csv(
+            duplicate_health
+        )
+        self.assertEqual(len(duplicate_gpus), 2)
+        self.assertEqual(ignored_duplicate_health, {})
+
+        _, parsed, _ = parse_linux_resource_payload(
+            resource_payload(gpu_payload=combined, health_payload="")
+        )
+        self.assertEqual(parsed[0].health, health["GPU-abc"])
+
+        with self.assertRaisesRegex(ValueError, "combined GPU columns"):
+            parse_nvidia_combined_csv(combined + ", unexpected")
+
         with self.assertRaisesRegex(ValueError, "health boolean"):
             parse_nvidia_health_csv(
                 "GPU-a, 0, Maybe, No, Not Active, Not Active, Disabled"
@@ -165,6 +218,55 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "process PID"):
             parse_nvidia_processes_csv("GPU-abc, 0, python, 10")
 
+    def test_parses_an_explicitly_skipped_process_sample(self) -> None:
+        _, gpus, _ = parse_linux_resource_payload(
+            resource_payload(
+                protocol="MONITOR_V6",
+                process_payload="PROCESS_SKIPPED",
+            )
+        )
+
+        self.assertFalse(gpus[0].processes_sampled)
+        self.assertTrue(gpus[0].processes_available)
+        self.assertEqual(gpus[0].processes, ())
+
+        with self.assertRaisesRegex(ValueError, "conflicting process telemetry"):
+            parse_linux_resource_payload(
+                resource_payload(
+                    protocol="MONITOR_V6",
+                    process_payload=("PROCESS_SKIPPED\nGPU-abc, 4242, python, 2048"),
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "process telemetry"):
+            parse_linux_resource_payload(
+                resource_payload(process_payload="PROCESS_SKIPPED")
+            )
+
+    def test_maps_gpu_processes_to_read_only_slurm_and_kubernetes_metadata(
+        self,
+    ) -> None:
+        workloads = parse_workload_records(
+            "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t\n"
+            "WORKLOAD\t4243\tkubernetes\tpod-uid\tinference\t1001\tbatch\tml"
+        )
+
+        self.assertEqual(workloads[4242].kind, "slurm")
+        self.assertEqual(workloads[4242].queue, "gpu-long")
+        self.assertEqual(workloads[4243].kind, "kubernetes")
+        self.assertEqual(workloads[4243].namespace, "ml")
+
+        _, gpus, _ = parse_linux_resource_payload(
+            resource_payload(
+                workload_payload=(
+                    "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t"
+                )
+            )
+        )
+        self.assertEqual(gpus[0].processes[0].workload, workloads[4242])
+
+        with self.assertRaisesRegex(ValueError, "workload kind"):
+            parse_workload_records("WORKLOAD\t4242\troot-shell\t1\tbad\troot\t\t")
+
     def test_rejects_unknown_resource_protocol(self) -> None:
         with self.assertRaisesRegex(ValueError, "protocol version"):
             parse_linux_resource_payload("MONITOR_V999\n")
@@ -179,6 +281,8 @@ class ProbeTests(unittest.TestCase):
             "PROCESSES_END\n",
             "GPU_HEALTH_BEGIN\n",
             "GPU_HEALTH_END\n",
+            "WORKLOADS_BEGIN\n",
+            "WORKLOADS_END\n",
         ):
             with (
                 self.subTest(marker=marker),
@@ -214,15 +318,38 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("BatchMode=yes", arguments)
         self.assertEqual(arguments[arguments.index("--") + 1], "gpu-1")
         self.assertEqual(arguments[-2:], ["sh", "-s"])
-        self.assertIn("MONITOR_V4", run.call_args.kwargs["input_text"])
+        self.assertIn("MONITOR_V6", run.call_args.kwargs["input_text"])
         self.assertIn("--query-compute-apps", run.call_args.kwargs["input_text"])
         self.assertIn(
             "ecc.errors.uncorrected.volatile.total",
             run.call_args.kwargs["input_text"],
         )
+        self.assertIn(
+            "power.limit,ecc.errors.uncorrected.volatile.total",
+            run.call_args.kwargs["input_text"],
+        )
+        self.assertNotIn(
+            "--query-gpu=uuid,ecc.errors.uncorrected.volatile.total",
+            run.call_args.kwargs["input_text"],
+        )
         self.assertIn("/proc/meminfo", run.call_args.kwargs["input_text"])
         self.assertEqual(run.call_args.kwargs["max_output_bytes"], 2_097_152)
         self.assertNotIn("shell", run.call_args.kwargs)
+
+    @patch("mocop.probe._run_bounded_process")
+    def test_workload_metadata_is_explicitly_enabled_and_read_only(self, run) -> None:
+        run.return_value = _BoundedProcessResult(
+            0, stdout=resource_payload(), stderr=""
+        )
+        enabled = replace(config(), workloads=replace(config().workloads, mode="auto"))
+
+        OpenSshLinuxResourceProbe().probe("gpu-1", enabled)
+
+        script = run.call_args.kwargs["input_text"]
+        self.assertIn("workload_enabled=1", script)
+        self.assertIn("/proc/$process_pid/environ", script)
+        self.assertNotIn("scontrol", script)
+        self.assertNotIn("kubectl", script)
 
     @patch("mocop.probe._run_bounded_process")
     def test_uses_per_host_probe_timeout(self, run) -> None:
@@ -293,6 +420,170 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(second.system.disk_read_bps, 3000)
         self.assertEqual(second.system.disk_write_bps, 5000)
 
+    @patch(
+        "mocop.probe.utc_now",
+        side_effect=(
+            "2026-08-11T00:00:00Z",
+            "2026-08-11T00:00:05Z",
+            "2026-08-11T00:00:10Z",
+            "2026-08-11T00:00:15Z",
+            "2026-08-11T00:00:20Z",
+            "2026-08-11T00:00:25Z",
+        ),
+    )
+    @patch(
+        "mocop.probe.time.monotonic",
+        side_effect=(0, 0.1, 5, 5.1, 10, 10.1, 15, 15.1, 20, 20.1, 25, 25.1),
+    )
+    @patch("mocop.probe._run_bounded_process")
+    def test_samples_gpu_processes_once_per_independent_cadence(
+        self,
+        run,
+        _monotonic,
+        _utc_now,
+    ) -> None:
+        due_processes = iter((4242, 4343))
+
+        def execute(_command, **kwargs):
+            script = kwargs["input_text"]
+            if "process_enabled=1" in script:
+                pid = next(due_processes)
+                payload = resource_payload(
+                    protocol="MONITOR_V6",
+                    process_payload=f"GPU-abc, {pid}, python, 2048",
+                )
+            else:
+                payload = resource_payload(
+                    protocol="MONITOR_V6",
+                    process_payload="PROCESS_SKIPPED",
+                )
+            return _BoundedProcessResult(0, payload, "")
+
+        run.side_effect = execute
+        probe = OpenSshLinuxResourceProbe()
+
+        results = [probe.probe("gpu-1", config()) for _ in range(6)]
+
+        scripts = [item.kwargs["input_text"] for item in run.call_args_list]
+        self.assertEqual(
+            ["process_enabled=1" in script for script in scripts],
+            [True, False, False, True, False, False],
+        )
+        self.assertEqual(
+            [result.gpus[0].processes[0].pid for result in results],
+            [4242, 4242, 4242, 4343, 4343, 4343],
+        )
+        self.assertEqual(
+            [result.gpus[0].processes_sampled for result in results],
+            [True, False, False, True, False, False],
+        )
+        self.assertEqual(
+            [result.gpus[0].processes_observed_at for result in results],
+            [
+                "2026-08-11T00:00:00Z",
+                "2026-08-11T00:00:00Z",
+                "2026-08-11T00:00:00Z",
+                "2026-08-11T00:00:15Z",
+                "2026-08-11T00:00:15Z",
+                "2026-08-11T00:00:15Z",
+            ],
+        )
+        baseline_queries = len(results) * 2
+        optimized_queries = len(results) + sum(
+            "process_enabled=1" in script for script in scripts
+        )
+        self.assertEqual(optimized_queries, 8)
+        self.assertAlmostEqual(1 - optimized_queries / baseline_queries, 1 / 3)
+
+    @patch(
+        "mocop.probe.utc_now",
+        side_effect=(
+            "2026-08-11T00:00:00Z",
+            "2026-08-11T00:00:15Z",
+            "2026-08-11T00:00:20Z",
+        ),
+    )
+    @patch(
+        "mocop.probe.time.monotonic",
+        side_effect=(0, 0.1, 15, 15.1, 20, 20.1),
+    )
+    @patch("mocop.probe._run_bounded_process")
+    def test_retries_an_unavailable_process_query_on_the_next_core_sample(
+        self,
+        run,
+        _monotonic,
+        _utc_now,
+    ) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(
+                0,
+                resource_payload(protocol="MONITOR_V6"),
+                "",
+            ),
+            _BoundedProcessResult(
+                0,
+                resource_payload(
+                    protocol="MONITOR_V6",
+                    process_payload="PROCESS_ERROR\t1",
+                ),
+                "",
+            ),
+            _BoundedProcessResult(
+                0,
+                resource_payload(
+                    protocol="MONITOR_V6",
+                    process_payload="GPU-abc, 4343, python, 1024",
+                ),
+                "",
+            ),
+        )
+        probe = OpenSshLinuxResourceProbe()
+
+        results = [probe.probe("gpu-1", config()) for _ in range(3)]
+
+        self.assertTrue(
+            all(
+                "process_enabled=1" in item.kwargs["input_text"]
+                for item in run.call_args_list
+            )
+        )
+        self.assertEqual(
+            [result.gpus[0].processes_available for result in results],
+            [True, False, True],
+        )
+        self.assertEqual(
+            [result.gpus[0].processes_observed_at for result in results],
+            ["2026-08-11T00:00:00Z", None, "2026-08-11T00:00:20Z"],
+        )
+
+    @patch("mocop.probe.time.monotonic", side_effect=(0.0, 1.0, 6.0, 7.0))
+    @patch("mocop.probe._run_bounded_process")
+    def test_removed_host_does_not_reuse_an_old_rate_baseline(
+        self, run, _monotonic
+    ) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(0, resource_payload(), ""),
+            _BoundedProcessResult(
+                0,
+                resource_payload(
+                    cpu_total=1500,
+                    cpu_idle=1000,
+                    rx_bytes=16000,
+                    tx_bytes=32000,
+                ),
+                "",
+            ),
+        )
+        probe = OpenSshLinuxResourceProbe()
+
+        first = probe.probe("gpu-1", config())
+        probe.retain_hosts(set())
+        readded = probe.probe("gpu-1", config())
+
+        self.assertIsNone(first.system.cpu_usage_pct)
+        self.assertIsNone(readded.system.cpu_usage_pct)
+        self.assertIsNone(readded.system.network_rx_bps)
+
     @patch("mocop.probe._run_bounded_process")
     def test_system_stays_online_when_gpu_tool_is_unavailable(self, run) -> None:
         run.return_value = _BoundedProcessResult(
@@ -328,6 +619,43 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(result.message, "SSH authentication failed")
         self.assertNotIn("192.0.2.4", result.message or "")
 
+    @patch("mocop.probe.time.monotonic", side_effect=(0.0, 1.0, 2.0))
+    @patch("mocop.probe._run_bounded_process")
+    def test_retries_stale_multiplexed_connection_within_total_timeout(
+        self, run, _monotonic
+    ) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(
+                255,
+                stdout="",
+                stderr="mux_client_request_session: read from master failed: Broken pipe",
+            ),
+            _BoundedProcessResult(0, stdout=resource_payload(), stderr=""),
+        )
+
+        result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
+
+        self.assertEqual(result.status, "online")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].kwargs["timeout_seconds"], 12)
+        self.assertEqual(run.call_args_list[1].kwargs["timeout_seconds"], 11)
+
+    @patch("mocop.probe.time.monotonic", side_effect=(0.0, 12.0, 12.0))
+    @patch("mocop.probe._run_bounded_process")
+    def test_does_not_retry_when_transport_failure_exhausts_timeout(
+        self, run, _monotonic
+    ) -> None:
+        run.return_value = _BoundedProcessResult(
+            255,
+            stdout="",
+            stderr="mux_client_request_session: Broken pipe",
+        )
+
+        result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
+
+        self.assertEqual(result.status, "unreachable")
+        self.assertEqual(run.call_count, 1)
+
     def test_bounded_process_captures_output_without_shell(self) -> None:
         result = _run_bounded_process(
             [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
@@ -340,6 +668,76 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "monitor-input\n")
         self.assertEqual(result.stderr, "")
+
+    def test_fixed_linux_script_collects_a_parseable_local_sample(self) -> None:
+        completed = _run_bounded_process(
+            ["sh", "-s"],
+            input_text=_remote_script("disabled"),
+            timeout_seconds=5,
+            max_output_bytes=2_097_152,
+            environment={**os.environ, "LC_ALL": "C"},
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        system, _gpus, _message = parse_linux_resource_payload(completed.stdout)
+        self.assertGreater(system.cpu_cores, 0)
+        self.assertGreater(system.memory_total_kib, 0)
+        self.assertGreater(system.uptime_seconds, 0)
+
+    def test_fixed_script_omits_the_process_query_when_not_due(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "queries.log"
+            executable = root / "nvidia-smi"
+            executable.write_text(
+                "#!/bin/sh\n"
+                'printf \'%s\\n\' "$*" >> "$MOCOP_TEST_QUERY_LOG"\n'
+                'case "$1" in\n'
+                "  --query-gpu=*) printf '%s\\n' "
+                "'0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+                "81920, 40960, 40960, 287.5, 400, 0, No, No, "
+                "Not Active, Not Active, Disabled' ;;\n"
+                "  --query-compute-apps=*) printf '%s\\n' "
+                "'GPU-abc, 4242, python, 2048' ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            environment = {
+                **os.environ,
+                "LC_ALL": "C",
+                "PATH": f"{root}:{os.environ['PATH']}",
+                "MOCOP_TEST_QUERY_LOG": str(log),
+            }
+
+            sampled = _run_bounded_process(
+                ["sh", "-s"],
+                input_text=_remote_script("disabled", True),
+                timeout_seconds=5,
+                max_output_bytes=2_097_152,
+                environment=environment,
+            )
+            skipped = _run_bounded_process(
+                ["sh", "-s"],
+                input_text=_remote_script("disabled", False),
+                timeout_seconds=5,
+                max_output_bytes=2_097_152,
+                environment=environment,
+            )
+
+            _, sampled_gpus, _ = parse_linux_resource_payload(sampled.stdout)
+            _, skipped_gpus, _ = parse_linux_resource_payload(skipped.stdout)
+            queries = log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(sampled_gpus[0].processes), 1)
+            self.assertFalse(skipped_gpus[0].processes_sampled)
+            self.assertEqual(
+                sum(query.startswith("--query-gpu=") for query in queries),
+                2,
+            )
+            self.assertEqual(
+                sum(query.startswith("--query-compute-apps=") for query in queries),
+                1,
+            )
 
     def test_bounded_process_rejects_excess_remote_output(self) -> None:
         with self.assertRaises(_ProcessOutputLimitExceeded):
@@ -360,6 +758,74 @@ class ProbeTests(unittest.TestCase):
                 max_output_bytes=65_536,
                 environment=os.environ.copy(),
             )
+
+    def test_bounded_process_cancels_active_child_promptly(self) -> None:
+        cancelled = threading.Event()
+        timer = threading.Timer(0.05, cancelled.set)
+        started = time.monotonic()
+        timer.start()
+        self.addCleanup(timer.cancel)
+
+        with self.assertRaises(_ProcessCancelled):
+            _run_bounded_process(
+                [sys.executable, "-c", "import time; time.sleep(5)"],
+                input_text="",
+                timeout_seconds=5,
+                max_output_bytes=65_536,
+                environment=os.environ.copy(),
+                cancel_event=cancelled,
+            )
+
+        self.assertLess(time.monotonic() - started, 1)
+
+    @patch("mocop.probe._kill_process_group")
+    def test_active_process_registry_kills_every_child_synchronously(
+        self, kill
+    ) -> None:
+        registry = _ActiveProcessRegistry()
+        first = object()
+        second = object()
+        late = object()
+        self.assertTrue(registry.register(first))
+        self.assertTrue(registry.register(second))
+
+        registry.cancel()
+
+        kill.assert_has_calls([call(first), call(second)], any_order=True)
+        self.assertEqual(kill.call_count, 2)
+        self.assertTrue(registry.cancelled.is_set())
+        self.assertFalse(registry.register(late))
+
+    def test_probe_cancel_terminates_an_active_child_immediately(self) -> None:
+        probe = OpenSshLinuxResourceProbe()
+        local_config = replace(
+            config(), hosts=("star-0",), local_host="star-0", probe_timeout_seconds=5
+        )
+        entered_select = threading.Event()
+        results = []
+        original_select = selectors.DefaultSelector.select
+
+        def observed_select(selector, timeout=None):
+            entered_select.set()
+            return original_select(selector, timeout)
+
+        with (
+            patch("mocop.probe._remote_script", return_value="sleep 5"),
+            patch.object(selectors.DefaultSelector, "select", observed_select),
+        ):
+            worker = threading.Thread(
+                target=lambda: results.append(probe.probe("star-0", local_config))
+            )
+            worker.start()
+            self.assertTrue(entered_select.wait(1), "probe never entered process wait")
+            probe.cancel()
+            worker.join(1)
+
+        self.assertTrue(
+            not worker.is_alive(),
+            "active probe did not stop after its process group was cancelled",
+        )
+        self.assertEqual(results[0].message, "Resource collection cancelled")
 
     @patch(
         "mocop.probe._run_bounded_process",

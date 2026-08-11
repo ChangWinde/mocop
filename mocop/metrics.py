@@ -121,7 +121,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
     _family(
         lines,
         "mocop_collection_ready",
-        "Whether at least one collection cycle has completed without a collector error.",
+        "Whether at least one scheduler submission batch completed without a collector error.",
         [
             (
                 (),
@@ -144,7 +144,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
     _family(
         lines,
         "mocop_collection_duration_seconds",
-        "Duration of the most recently completed collection cycle.",
+        "Duration of the most recently completed scheduler submission batch.",
         [((), value)]
         if (value := _seconds_from_milliseconds(snapshot.get("lastPollDurationMs")))
         is not None
@@ -154,7 +154,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
     _family(
         lines,
         "mocop_collection_last_completed_timestamp_seconds",
-        "Unix timestamp of the most recently completed collection cycle.",
+        "Unix timestamp of the most recently completed scheduler submission batch.",
         [((), value)]
         if (value := _timestamp(snapshot.get("lastPollCompletedAt"))) is not None
         else [],
@@ -169,6 +169,63 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         else [],
         unit="seconds",
     )
+
+    for key, prefix, label in (
+        ("persistence", "mocop_persistence", "history persistence subsystem"),
+        ("notifications", "mocop_notifications", "notification delivery subsystem"),
+    ):
+        component_value = snapshot.get(key)
+        component = component_value if isinstance(component_value, Mapping) else {}
+        _family(
+            lines,
+            f"{prefix}_enabled",
+            f"Whether Mocop's {label} is enabled.",
+            [((), int(component.get("enabled") is True))],
+        )
+        _family(
+            lines,
+            f"{prefix}_healthy",
+            f"Whether Mocop's {label} is healthy.",
+            [((), int(component.get("healthy") is True))],
+        )
+    persistence_value = snapshot.get("persistence")
+    persistence = persistence_value if isinstance(persistence_value, Mapping) else {}
+    notifications_value = snapshot.get("notifications")
+    notifications = (
+        notifications_value if isinstance(notifications_value, Mapping) else {}
+    )
+    for name, help_text, component, key in (
+        (
+            "mocop_persistence_queued_writes",
+            "History records waiting for persistence.",
+            persistence,
+            "queuedWrites",
+        ),
+        (
+            "mocop_persistence_dropped_writes_total",
+            "History records dropped since process start.",
+            persistence,
+            "droppedWrites",
+        ),
+        (
+            "mocop_notifications_queued_deliveries",
+            "Webhook events waiting for delivery.",
+            notifications,
+            "queuedDeliveries",
+        ),
+        (
+            "mocop_notifications_dropped_deliveries_total",
+            "Webhook events dropped since process start.",
+            notifications,
+            "droppedDeliveries",
+        ),
+    ):
+        _family(
+            lines,
+            name,
+            help_text,
+            [((), value)] if (value := _metric(component.get(key))) is not None else [],
+        )
 
     cluster_families = (
         ("mocop_cluster_servers", "Configured servers.", "servers"),
@@ -288,6 +345,8 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         "power_limit": [],
         "processes": [],
         "processes_available": [],
+        "processes_sampled": [],
+        "processes_observed_at": [],
         "ecc": [],
         "retired_pages": [],
         "remapped_rows": [],
@@ -414,6 +473,13 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
             gpu_samples["processes_available"].append(
                 (labels, int(gpu.get("processes_available") is True))
             )
+            gpu_samples["processes_sampled"].append(
+                (labels, int(gpu.get("processes_sampled") is True))
+            )
+            if (
+                process_timestamp := _timestamp(gpu.get("processes_observed_at"))
+            ) is not None:
+                gpu_samples["processes_observed_at"].append((labels, process_timestamp))
             _append_optional(
                 gpu_samples["ecc"], labels, health.get("ecc_uncorrected_volatile")
             )
@@ -581,6 +647,18 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
             "mocop_gpu_process_telemetry_available",
             "Whether GPU process telemetry is available.",
             None,
+        ),
+        (
+            "processes_sampled",
+            "mocop_gpu_process_telemetry_sampled",
+            "Whether the latest GPU sample refreshed process telemetry.",
+            None,
+        ),
+        (
+            "processes_observed_at",
+            "mocop_gpu_process_sample_timestamp_seconds",
+            "Unix timestamp of the latest successful GPU process sample.",
+            "seconds",
         ),
         (
             "ecc",

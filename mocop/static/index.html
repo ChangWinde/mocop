@@ -35,7 +35,7 @@
             <em id="refresh-feedback" class="refresh-feedback" role="status"></em>
           </label>
           <div class="sync-time">
-            <span>最近同步</span>
+            <span>最近采集</span>
             <strong id="last-sync">等待数据</strong>
           </div>
           <button id="settings-toggle" class="settings-toggle" type="button" aria-haspopup="dialog" title="个性化设置">
@@ -176,7 +176,9 @@
                     <option value="power">功耗</option>
                   </select>
                 </label>
+                <button id="topology-toggle" class="tool-button topology-trigger" type="button" aria-haspopup="dialog">连接拓扑</button>
                 <button id="capacity-toggle" class="tool-button capacity-trigger" type="button" aria-haspopup="dialog">匹配算力</button>
+                <button id="probe-now" class="tool-button probe-trigger" type="button" hidden>立即探测</button>
                 <button id="export-csv" class="tool-button" type="button">导出当前结果</button>
                 <button id="toggle-groups" class="group-toggle" type="button" hidden>全部展开</button>
                 <label class="search-box">
@@ -267,28 +269,46 @@
       <p class="dialog-intro">设置不会因服务重启自动重置：采集策略与监控节点写入本地配置；外观、密度和视图偏好保存在当前浏览器，换浏览器或清理站点数据后不保留。</p>
       <div class="settings-sections">
         <section class="settings-section appearance-settings settings-wide">
-          <h3>界面皮肤</h3>
-          <div class="theme-grid" role="radiogroup" aria-label="界面皮肤">
-            <button class="theme-choice" data-theme-choice="midnight" type="button" role="radio" aria-checked="true">
-              <span class="theme-preview midnight" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span><strong>深空蓝</strong><small>清晰、克制的专业默认</small></span>
+          <h3>界面外观</h3>
+          <div class="appearance-heading">
+            <strong>视觉风格</strong><span>切换布局、明暗、字体、材质与信息密度</span>
+          </div>
+          <div class="style-grid" role="radiogroup" aria-label="视觉风格">
+            <button class="style-choice" data-style-choice="precision" type="button" role="radio" aria-checked="true">
+              <span class="style-preview precision" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>精密仪表</strong><small>六列总览与克制的控制台层级</small></span>
             </button>
-            <button class="theme-choice" data-theme-choice="graphite" type="button" role="radio" aria-checked="false">
-              <span class="theme-preview graphite" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span><strong>石墨黑</strong><small>中性、沉稳的低干扰界面</small></span>
+            <button class="style-choice" data-style-choice="glass" type="button" role="radio" aria-checked="false">
+              <span class="style-preview glass" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>雾光玻璃</strong><small>深色景深与三列聚合视图</small></span>
             </button>
-            <button class="theme-choice" data-theme-choice="aurora" type="button" role="radio" aria-checked="false">
-              <span class="theme-preview aurora" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span><strong>极光青</strong><small>冷静、鲜明的算力氛围</small></span>
+            <button class="style-choice" data-style-choice="terminal" type="button" role="radio" aria-checked="false">
+              <span class="style-preview terminal" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>终端矩阵</strong><small>圆角命令台与高密度等宽读数</small></span>
             </button>
-            <button class="theme-choice" data-theme-choice="glass" type="button" role="radio" aria-checked="false">
-              <span class="theme-preview glass" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span><strong>雾光玻璃</strong><small>通透、柔和的沉浸层次</small></span>
+            <button class="style-choice" data-style-choice="ledger" type="button" role="radio" aria-checked="false">
+              <span class="style-preview ledger" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>研究台账</strong><small>温暖纸面与研究记录式排版</small></span>
             </button>
-            <button class="theme-choice" data-theme-choice="terminal" type="button" role="radio" aria-checked="false">
-              <span class="theme-preview terminal" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span><strong>终端矩阵</strong><small>硬朗、紧凑的工程视图</small></span>
+            <button class="style-choice" data-style-choice="blueprint" type="button" role="radio" aria-checked="false">
+              <span class="style-preview blueprint" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>工程蓝图</strong><small>圆角技术网格与结构化读数</small></span>
             </button>
+            <button class="style-choice" data-style-choice="studio" type="button" role="radio" aria-checked="false">
+              <span class="style-preview studio" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>柔和工作台</strong><small>明亮 Bento 与舒展的信息层级</small></span>
+            </button>
+          </div>
+          <div class="appearance-heading accent-heading">
+            <strong>色彩主题</strong><span>同步调整背景、面板、边框与强调色</span>
+          </div>
+          <div class="accent-grid" role="radiogroup" aria-label="色彩主题">
+            <button class="accent-choice cobalt" data-accent-choice="cobalt" type="button" role="radio" aria-checked="true"><i aria-hidden="true"></i><span>深海钴蓝</span></button>
+            <button class="accent-choice cyan" data-accent-choice="cyan" type="button" role="radio" aria-checked="false"><i aria-hidden="true"></i><span>极光冰青</span></button>
+            <button class="accent-choice violet" data-accent-choice="violet" type="button" role="radio" aria-checked="false"><i aria-hidden="true"></i><span>星云紫</span></button>
+            <button class="accent-choice emerald" data-accent-choice="emerald" type="button" role="radio" aria-checked="false"><i aria-hidden="true"></i><span>矩阵翡翠</span></button>
+            <button class="accent-choice amber" data-accent-choice="amber" type="button" role="radio" aria-checked="false"><i aria-hidden="true"></i><span>余晖琥珀</span></button>
+            <button class="accent-choice rose" data-accent-choice="rose" type="button" role="radio" aria-checked="false"><i aria-hidden="true"></i><span>霓虹玫红</span></button>
           </div>
           <label class="settings-field appearance-density">
             <span>信息密度</span>
@@ -397,6 +417,30 @@
             <input id="show-power" type="checkbox" checked>
           </label>
         </section>
+        <section class="settings-section runtime-settings">
+          <h3>监控服务状态</h3>
+          <div class="runtime-status-row">
+            <span><strong>历史数据</strong><small>内存或可选 SQLite</small></span>
+            <em id="persistence-status">等待状态</em>
+          </div>
+          <div class="runtime-status-row">
+            <span><strong>Webhook</strong><small>异步事件投递</small></span>
+            <em id="notification-status">等待状态</em>
+          </div>
+          <div class="runtime-service-row">
+            <span><strong>监控进程</strong><small id="service-restart-status">正在确认运行方式</small></span>
+            <button id="restart-service" class="inline-action restart-action" type="button" disabled>重启服务</button>
+          </div>
+          <div class="runtime-service-row">
+            <span><strong>通知链路</strong><small id="notification-test-status">配置 Webhook 后可执行受限测试</small></span>
+            <button id="test-notifications" class="inline-action" type="button" disabled>测试通知</button>
+          </div>
+          <div class="runtime-service-row">
+            <span><strong>诊断包</strong><small>脱敏导出当前状态，不含进程、路径和 SSH 错误</small></span>
+            <button id="export-diagnostics" class="inline-action" type="button">导出诊断</button>
+          </div>
+          <span class="settings-help">升级 Mocop 后可在此重启并自动载入新版本；配置、显示偏好和 SQLite 历史不会被重置。</span>
+        </section>
         <section class="settings-section inventory-settings settings-wide">
           <div class="settings-section-heading">
             <div>
@@ -420,6 +464,46 @@
         </section>
       </div>
       <button id="reset-preferences" class="secondary-action" type="button">恢复浏览器显示默认</button>
+    </dialog>
+
+    <dialog id="restart-confirm-dialog" class="confirm-dialog" aria-labelledby="restart-confirm-title" aria-describedby="restart-confirm-description">
+      <div class="confirm-dialog-mark" aria-hidden="true">↻</div>
+      <div>
+        <span class="section-kicker">SERVICE RESTART</span>
+        <h2 id="restart-confirm-title">确认重启监控服务？</h2>
+      </div>
+      <p id="restart-confirm-description">采集和网页连接会中断数秒。服务恢复后页面将自动刷新，现有配置、浏览器偏好和历史数据保持不变。</p>
+      <div class="confirm-dialog-actions">
+        <button class="secondary-action" data-close-dialog="restart-confirm-dialog" type="button">取消</button>
+        <button id="confirm-restart-service" class="primary-action" type="button">确认重启</button>
+      </div>
+    </dialog>
+
+    <dialog id="topology-dialog" class="side-dialog topology-dialog" aria-labelledby="topology-title">
+      <div class="dialog-heading">
+        <div>
+          <span class="section-kicker">CONNECTION MAP</span>
+          <h2 id="topology-title">集群连接拓扑</h2>
+        </div>
+        <button class="dialog-close" data-close-dialog="topology-dialog" type="button" aria-label="关闭连接拓扑">×</button>
+      </div>
+      <p class="dialog-intro">展示监控端经基础设施节点到各服务器的逻辑 SSH 路径。跳板机和 FRP 节点只用于说明连接关系，不会被采集；拓扑不包含 token、密钥、用户名或远端命令，打开视图也不会触发额外 SSH 请求。</p>
+      <div class="topology-summary" aria-live="polite">
+        <span><strong id="topology-node-count">0</strong> 个拓扑节点</span>
+        <span><strong id="topology-frp-count">0</strong> 条 FRP 通道</span>
+        <span id="topology-live-summary">等待实时状态</span>
+      </div>
+      <div id="topology-status" class="topology-status" role="status">正在读取本地拓扑配置…</div>
+      <div class="topology-scroll">
+        <div id="topology-tree" class="topology-tree" role="region" aria-label="SSH 集群连接树"></div>
+      </div>
+      <section id="topology-unmapped" class="topology-unmapped" hidden>
+        <div>
+          <strong>尚未映射</strong>
+          <span>节点正在被监控，但本地配置还没有描述其连接路径</span>
+        </div>
+        <div id="topology-unmapped-list" class="topology-unmapped-list"></div>
+      </section>
     </dialog>
 
     <dialog id="capacity-dialog" class="side-dialog capacity-dialog" aria-labelledby="capacity-title">
@@ -463,18 +547,76 @@
         </div>
         <button class="dialog-close" data-close-dialog="gpu-detail-dialog" type="button" aria-label="关闭 GPU 详情">×</button>
       </div>
-      <div id="gpu-detail-state" class="gpu-detail-state"></div>
-      <div id="gpu-detail-metrics" class="gpu-detail-metrics"></div>
-      <section class="gpu-task-section">
-        <div class="gpu-task-heading">
-          <div>
-            <span class="section-kicker">COMPUTE PROCESSES</span>
-            <h3>GPU 任务</h3>
-          </div>
-          <span id="gpu-task-count" class="count-badge">0</span>
+      <div class="gpu-detail-content">
+        <div class="gpu-detail-overview">
+          <div id="gpu-detail-state" class="gpu-detail-state"></div>
+          <div id="gpu-detail-metrics" class="gpu-detail-metrics"></div>
         </div>
-        <div id="gpu-task-list" class="gpu-task-list"></div>
-      </section>
+        <section class="gpu-task-section">
+          <section class="gpu-history-section" aria-label="GPU 近期历史">
+            <div class="gpu-task-heading">
+              <div>
+                <span class="section-kicker">GPU HISTORY</span>
+                <h3>单卡实时趋势</h3>
+              </div>
+              <span id="gpu-history-range" class="count-badge">等待样本</span>
+            </div>
+            <div id="gpu-history-grid" class="gpu-history-grid"></div>
+            <div class="gpu-timeline-heading"><strong>任务变化</strong><span>仅记录进程进入和退出</span></div>
+            <div id="gpu-process-timeline" class="gpu-process-timeline"></div>
+          </section>
+          <div class="gpu-task-heading">
+            <div>
+              <span class="section-kicker">GPU PROCESSES</span>
+              <h3>活跃计算进程</h3>
+            </div>
+            <span id="gpu-task-count" class="count-badge">0</span>
+          </div>
+          <div id="gpu-task-overview" class="gpu-task-overview">
+            <div><span>进程显存总计</span><strong id="gpu-task-memory-total">—</strong></div>
+            <div class="mini-track"><i id="gpu-task-memory-bar"></i></div>
+            <small id="gpu-task-note">按显存占用从高到低排列</small>
+          </div>
+          <div id="gpu-task-list" class="gpu-task-list" role="list"></div>
+        </section>
+      </div>
+    </dialog>
+
+    <dialog id="incident-detail-dialog" class="side-dialog incident-detail-dialog" aria-labelledby="incident-detail-title">
+      <div class="dialog-heading">
+        <div>
+          <span id="incident-detail-host" class="section-kicker">INCIDENT DIAGNOSIS</span>
+          <h2 id="incident-detail-title">问题诊断</h2>
+        </div>
+        <button class="dialog-close" data-close-dialog="incident-detail-dialog" type="button" aria-label="关闭问题诊断">×</button>
+      </div>
+      <div class="incident-detail-content">
+        <section class="incident-diagnosis">
+          <div id="incident-detail-status" class="incident-detail-status"></div>
+          <p id="incident-detail-summary"></p>
+          <div id="incident-evidence" class="incident-evidence"></div>
+          <div class="incident-next-steps">
+            <strong>建议检查</strong>
+            <ol id="incident-next-steps"></ol>
+          </div>
+          <button id="incident-open-gpu" class="inline-action" type="button" hidden>查看对应 GPU</button>
+        </section>
+        <section class="incident-actions">
+          <div>
+            <span class="section-kicker">OPERATOR ACTION</span>
+            <h3>处理状态</h3>
+          </div>
+          <p>确认后仍保留事件和恢复通知；静默期间不计入待处理问题，也不发送新的 Webhook 告警。</p>
+          <label><span>有效时间</span><select id="incident-action-duration"><option value="3600">1 小时</option><option value="14400">4 小时</option><option value="86400" selected>24 小时</option><option value="604800">7 天</option></select></label>
+          <label><span>备注（可选）</span><input id="incident-action-reason" type="text" maxlength="120" placeholder="例如：已通知任务负责人"></label>
+          <div class="incident-action-buttons">
+            <button id="acknowledge-incident" class="primary-action" type="button">确认问题</button>
+            <button id="silence-incident" class="inline-action" type="button">临时静默</button>
+            <button id="clear-incident-action" class="inline-action danger-action" type="button" hidden>恢复待处理</button>
+          </div>
+          <span id="incident-action-feedback" class="incident-action-feedback" role="status"></span>
+        </section>
+      </div>
     </dialog>
     <script src="/app.js" defer></script>
   </body>

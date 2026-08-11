@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
-from mocop.config import IncidentConfig, ThresholdConfig
-from mocop.incidents import IncidentTracker, ThresholdIncidentPolicy
+from mocop.config import IncidentConfig, IncidentScopeOverrideConfig, ThresholdConfig
+from mocop.incidents import (
+    IncidentCondition,
+    IncidentEvent,
+    IncidentTracker,
+    ThresholdIncidentPolicy,
+)
 from mocop.models import (
     DiskMetrics,
     GpuHealthMetrics,
@@ -43,6 +49,7 @@ def gpu(
     memory_used: float = 10,
     health: GpuHealthMetrics | None = None,
     processes_available: bool = True,
+    processes_sampled: bool = True,
 ) -> GpuMetrics:
     return GpuMetrics(
         index=0,
@@ -60,6 +67,7 @@ def gpu(
         power_limit_w=100,
         processes=(GpuProcess(42, "python", memory_used),) if memory_used else (),
         processes_available=processes_available,
+        processes_sampled=processes_sampled,
         health=health,
     )
 
@@ -95,6 +103,81 @@ class IncidentTrackerTests(unittest.TestCase):
         self.assertEqual(
             {incident["category"] for incident in snapshot["active"]},
             {"cpu", "disk", "gpu_temperature"},
+        )
+
+    def test_skipped_process_sample_is_not_an_availability_incident(self) -> None:
+        policy = ThresholdIncidentPolicy(ThresholdConfig())
+        skipped = replace(
+            gpu(60),
+            processes=(),
+            processes_available=False,
+            processes_sampled=False,
+        )
+
+        conditions = policy.conditions(
+            ProbeResult(
+                "node-a",
+                "online",
+                1,
+                (skipped,),
+                observed_at="2026-08-11T00:00:00Z",
+                system=system(20, 20),
+            )
+        )
+
+        self.assertNotIn("gpu_processes", conditions)
+
+    def test_scoped_thresholds_and_mount_exclusions_override_global_policy(
+        self,
+    ) -> None:
+        policy = ThresholdIncidentPolicy(
+            ThresholdConfig(),
+            host_overrides=(
+                (
+                    "node-a",
+                    IncidentScopeOverrideConfig(
+                        thresholds=(("cpu_warning_pct", 95.0),),
+                        exclude_disk_mounts=frozenset({"/"}),
+                    ),
+                ),
+            ),
+        )
+
+        conditions = policy.conditions(
+            ProbeResult("node-a", "online", 1, system=system(90, 99))
+        )
+
+        self.assertNotIn("cpu", conditions)
+        self.assertFalse(any(key.startswith("disk:") for key in conditions))
+
+    def test_restores_transition_context_and_continues_event_ids(self) -> None:
+        historical = IncidentEvent(
+            event_id=7,
+            host="old-node",
+            condition=IncidentCondition(
+                key="connectivity",
+                category="connectivity",
+                resource="SSH",
+                severity="critical",
+                value=None,
+                threshold=None,
+                observed_at="2026-08-09T00:00:00Z",
+            ),
+            state="opened",
+            observed_at="2026-08-09T00:00:00Z",
+        )
+        tracker = IncidentTracker(
+            ThresholdIncidentPolicy(ThresholdConfig()),
+            history_points=20,
+            historical_events=(historical,),
+        )
+
+        created = tracker.update(ProbeResult("new-node", "unreachable", 1))
+
+        self.assertEqual([event.event_id for event in created], [8])
+        self.assertEqual(
+            [event["eventId"] for event in tracker.snapshot(20)["events"]],
+            [8, 7],
         )
 
     def test_only_condition_and_severity_transitions_create_events(self) -> None:

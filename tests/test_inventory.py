@@ -87,6 +87,24 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(self.config_path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.updates[-1], reloaded)
 
+    def test_persists_and_clears_one_bounded_incident_action(self) -> None:
+        snapshot = self.inventory.update_incident_action(
+            "gpu-01", "disk:/dev/a:/data", "silenced", 3600, "cleanup running"
+        )
+
+        action = load_config(self.config_path).incident_actions[0]
+        self.assertEqual(action.host, "gpu-01")
+        self.assertEqual(action.condition_key, "disk:/dev/a:/data")
+        self.assertEqual(action.reason, "cleanup running")
+        self.assertEqual(snapshot["incidentActions"][0]["action"], "silenced")
+
+        cleared = self.inventory.update_incident_action(
+            "gpu-01", "disk:/dev/a:/data", "clear", 0, ""
+        )
+
+        self.assertEqual(load_config(self.config_path).incident_actions, ())
+        self.assertEqual(cleared["incidentActions"], [])
+
     def test_rejects_invalid_collector_settings_without_modifying_config(self) -> None:
         before = self.config_path.read_bytes()
         cases = (
@@ -136,6 +154,11 @@ class InventoryTests(unittest.TestCase):
             "gpu-01": {"until": "2030-06-15T12:30:00Z", "reason": "Repair"}
         }
         data["host_groups"] = {"gpu-01": "Training"}
+        data["incident_overrides"] = {
+            "hosts": {"gpu-01": {"thresholds": {"swap_warning_pct": 70}}},
+            "groups": {"Training": {"thresholds": {"disk_warning_pct": 92}}},
+        }
+        data["topology"] = {"root": "gpu-01", "links": []}
         self.config_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -150,7 +173,57 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(raw["host_overrides"], {})
         self.assertEqual(raw["maintenance_windows"], {})
         self.assertEqual(raw["host_groups"], {})
+        self.assertEqual(raw["incident_overrides"], {"hosts": {}, "groups": {}})
+        self.assertNotIn("topology", raw)
         self.assertEqual(self.updates[-1].hosts, ())
+
+    def test_exposes_topology_without_scanning_and_prunes_removed_links(self) -> None:
+        self.inventory.change("add", "gpu-02")
+        data = json.loads(self.config_path.read_text(encoding="utf-8"))
+        data["topology"] = {
+            "root": "monitor-host",
+            "links": [
+                {
+                    "source": "monitor-host",
+                    "target": "bastion",
+                    "transport": "frp-stcp",
+                    "label": "STCP · 7009",
+                },
+                {
+                    "source": "bastion",
+                    "target": "gpu-02",
+                    "transport": "ssh",
+                },
+            ],
+        }
+        self.config_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        with patch.object(
+            self.inventory._host_source,
+            "aliases",
+            side_effect=AssertionError("topology must not scan OpenSSH"),
+        ):
+            self.assertEqual(self.inventory.topology(), data["topology"])
+
+        self.inventory.change("remove", "gpu-02")
+
+        self.assertEqual(
+            json.loads(self.config_path.read_text(encoding="utf-8"))["topology"],
+            {
+                "root": "monitor-host",
+                "links": [
+                    {
+                        "source": "monitor-host",
+                        "target": "bastion",
+                        "transport": "frp-stcp",
+                        "label": "STCP · 7009",
+                    }
+                ],
+            },
+        )
 
     def test_sets_clears_and_avoids_rewriting_shared_host_groups(self) -> None:
         changed = self.inventory.update_host_group("gpu-01", " Training ")
@@ -166,9 +239,20 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(self.config_path.stat().st_mtime_ns, persisted_at)
         self.assertEqual(len(self.updates), updates)
 
+        data = json.loads(self.config_path.read_text(encoding="utf-8"))
+        data["incident_overrides"] = {
+            "groups": {"Training": {"thresholds": {"disk_warning_pct": 92}}}
+        }
+        self.config_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
         cleared = self.inventory.update_host_group("gpu-01", "")
         self.assertEqual(cleared["hostGroups"], {})
         self.assertIsNone(load_config(self.config_path).host_group("gpu-01"))
+        raw = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(raw["incident_overrides"]["groups"], {})
 
     def test_rejects_unsafe_host_groups_without_rewriting_config(self) -> None:
         before = self.config_path.read_bytes()

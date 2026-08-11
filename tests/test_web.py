@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import threading
 import unittest
+from http.server import ThreadingHTTPServer
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from mocop.inventory import InventoryRequestError
-from mocop.models import ProbeResult, SystemMetrics
+from mocop.models import GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
 from mocop.service import StateStore
 from mocop.web import serve_in_thread
 
@@ -22,6 +25,21 @@ class _Inventory:
         }
         self.maintenance_windows = {}
         self.host_groups = {}
+        self.incident_actions = []
+        self.connection_topology = {
+            "root": "gpu-01",
+            "links": [
+                {
+                    "source": "gpu-01",
+                    "target": "gpu-02",
+                    "transport": "frp-stcp",
+                    "label": "STCP · 7009",
+                }
+            ],
+        }
+
+    def topology(self):
+        return self.connection_topology
 
     def snapshot(self):
         return {
@@ -35,6 +53,7 @@ class _Inventory:
             "collectorSettings": dict(self.collector_settings),
             "maintenanceWindows": dict(self.maintenance_windows),
             "hostGroups": dict(self.host_groups),
+            "incidentActions": list(self.incident_actions),
             "writable": True,
         }
 
@@ -75,13 +94,47 @@ class _Inventory:
             self.host_groups.pop(host, None)
         return self.snapshot()
 
+    def update_incident_action(
+        self, host, condition_key, action, duration_seconds, reason
+    ):
+        self.incident_actions = [
+            item
+            for item in self.incident_actions
+            if (item["host"], item["condition_key"]) != (host, condition_key)
+        ]
+        if action != "clear":
+            self.incident_actions.append(
+                {
+                    "host": host,
+                    "condition_key": condition_key,
+                    "action": action,
+                    "until": "2030-08-10T00:00:00Z",
+                    "reason": reason,
+                }
+            )
+        return self.snapshot()
+
+
+class _ProbeControl:
+    def __init__(self) -> None:
+        self.hosts = []
+
+    def request_probe(self, host):
+        self.hosts.append(host)
+        return {"status": "queued", "accepted": True, "host": host}
+
 
 class WebTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state = StateStore(5)
         self.inventory = _Inventory()
+        self.probe_control = _ProbeControl()
         self.server, self.thread = serve_in_thread(
-            "127.0.0.1", 0, self.state, self.inventory
+            "127.0.0.1",
+            0,
+            self.state,
+            self.inventory,
+            probe_control=self.probe_control,
         )
         self.base = f"http://127.0.0.1:{self.server.server_port}"
 
@@ -89,6 +142,16 @@ class WebTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
+
+    def assert_http_error(self, request: Request | str, status: int):
+        """Assert one HTTP failure and close its response before returning headers."""
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request, timeout=2)
+        try:
+            self.assertEqual(raised.exception.code, status)
+            return raised.exception.headers
+        finally:
+            raised.exception.close()
 
     def test_snapshot_and_security_headers(self) -> None:
         with urlopen(f"{self.base}/api/snapshot", timeout=2) as response:
@@ -106,6 +169,32 @@ class WebTests(unittest.TestCase):
         self.assertEqual(payload["stats"]["servers"], 0)
         self.assertEqual(payload["appVersion"], "0.8.0")
 
+    def test_snapshot_serialization_is_reused_per_state_revision(self) -> None:
+        self.assertTrue(self.server.RequestHandlerClass.disable_nagle_algorithm)
+        first_snapshot = self.state.snapshot()
+        first = self.server.snapshot_payload(first_snapshot)
+        repeated = self.server.snapshot_payload(self.state.snapshot())
+
+        self.assertIs(first, repeated)
+        self.state.set_hosts(("gpu-01",))
+        changed = self.server.snapshot_payload(self.state.snapshot())
+        self.assertIsNot(first, changed)
+        self.assertNotEqual(first, changed)
+
+    def test_expected_client_disconnects_do_not_hide_server_errors(self) -> None:
+        with patch.object(ThreadingHTTPServer, "handle_error") as inherited:
+            try:
+                raise ConnectionResetError("client closed the connection")
+            except ConnectionResetError:
+                self.server.handle_error(object(), ("127.0.0.1", 1))
+            inherited.assert_not_called()
+
+            try:
+                raise RuntimeError("unexpected handler failure")
+            except RuntimeError:
+                self.server.handle_error(object(), ("127.0.0.1", 1))
+            inherited.assert_called_once()
+
     def test_exposes_current_snapshot_as_openmetrics(self) -> None:
         with urlopen(f"{self.base}/metrics", timeout=2) as response:
             body = response.read().decode()
@@ -120,9 +209,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("mocop_cluster_servers 0\n", body)
         self.assertTrue(body.endswith("# EOF\n"))
 
-        with self.assertRaises(HTTPError) as rejected:
-            urlopen(f"{self.base}/metrics?host=gpu-01", timeout=2)
-        self.assertEqual(rejected.exception.code, 400)
+        self.assert_http_error(f"{self.base}/metrics?host=gpu-01", 400)
 
     def test_index_is_served(self) -> None:
         with urlopen(f"{self.base}/", timeout=2) as response:
@@ -149,14 +236,23 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="settings-toggle"', body)
         self.assertIn('id="settings-dialog"', body)
         self.assertIn('id="collector-settings-form"', body)
+        self.assertIn('id="restart-service"', body)
+        self.assertIn('id="restart-confirm-dialog"', body)
+        self.assertIn('fetch("/api/service/restart"', script)
         self.assertIn('id="interface-density"', body)
         self.assertIn('id="default-server-filter"', body)
         self.assertIn('id="server-sort"', body)
-        self.assertIn('data-theme-choice="midnight"', body)
-        self.assertIn('data-theme-choice="graphite"', body)
-        self.assertIn('data-theme-choice="aurora"', body)
-        self.assertIn('data-theme-choice="glass"', body)
-        self.assertIn('data-theme-choice="terminal"', body)
+        for style in (
+            "precision",
+            "glass",
+            "terminal",
+            "ledger",
+            "blueprint",
+            "studio",
+        ):
+            self.assertIn(f'data-style-choice="{style}"', body)
+        for accent in ("cobalt", "cyan", "violet", "emerald", "amber", "rose"):
+            self.assertIn(f'data-accent-choice="{accent}"', body)
         self.assertIn('id="background-image-input"', body)
         self.assertIn('accept="image/png,image/jpeg,image/webp,image/avif"', body)
         self.assertIn('id="background-visibility"', body)
@@ -171,9 +267,21 @@ class WebTests(unittest.TestCase):
         self.assertIn('<option value="group">节点分组</option>', body)
         self.assertIn('id="gpu-detail-dialog"', body)
         self.assertIn('id="gpu-task-list"', body)
+        self.assertIn('id="gpu-history-grid"', body)
+        self.assertIn('id="gpu-process-timeline"', body)
+        self.assertIn('id="incident-detail-dialog"', body)
+        self.assertIn('id="probe-now"', body)
+        self.assertIn('id="export-diagnostics"', body)
+        self.assertIn('id="test-notifications"', body)
+        self.assertIn('fetch("/api/settings/incident-action"', script)
+        self.assertIn('fetch("/api/probe"', script)
         self.assertIn('id="capacity-toggle"', body)
         self.assertIn('id="capacity-dialog"', body)
         self.assertIn('id="capacity-form"', body)
+        self.assertIn('id="topology-toggle"', body)
+        self.assertIn('id="topology-dialog"', body)
+        self.assertIn('id="topology-tree"', body)
+        self.assertIn('fetch("/api/topology"', script)
         self.assertIn("不会触发额外 SSH 请求", body)
         self.assertNotIn('class="heatmap-legend"', body)
         self.assertIn('class="gpu-col-temperature"', body)
@@ -181,10 +289,72 @@ class WebTests(unittest.TestCase):
         self.assertIn("age(snapshot.lastPollCompletedAt)", script)
         self.assertNotIn("age(snapshot.generatedAt)", script)
 
+    def test_service_restart_capability_is_explicit_and_disabled_by_default(
+        self,
+    ) -> None:
+        with urlopen(f"{self.base}/api/service", timeout=2) as response:
+            capability = json.load(response)
+        self.assertEqual(capability, {"restartSupported": False})
+
+        request = self.poll_interval_request(
+            b"{}",
+            origin=self.base,
+            path="/api/service/restart",
+        )
+        self.assert_http_error(request, 503)
+
+    def test_service_restart_requires_same_origin_and_invokes_fixed_callback(
+        self,
+    ) -> None:
+        requested = threading.Event()
+        server, thread = serve_in_thread(
+            "127.0.0.1",
+            0,
+            StateStore(5),
+            restart=requested.set,
+        )
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_port}"
+
+        with urlopen(f"{base}/api/service", timeout=2) as response:
+            capability = json.load(response)
+        self.assertEqual(capability, {"restartSupported": True})
+
+        rejected = self.poll_interval_request(
+            b"{}",
+            origin="https://attacker.example",
+            path="/api/service/restart",
+            fetch_site="cross-site",
+        )
+        rejected.full_url = f"{base}/api/service/restart"
+        self.assert_http_error(rejected, 403)
+        self.assertFalse(requested.is_set())
+
+        invalid = self.poll_interval_request(
+            b'{"action":"restart"}',
+            origin=base,
+            path="/api/service/restart",
+        )
+        invalid.full_url = f"{base}/api/service/restart"
+        self.assert_http_error(invalid, 400)
+        self.assertFalse(requested.is_set())
+
+        accepted = self.poll_interval_request(
+            b"{}",
+            origin=base,
+            path="/api/service/restart",
+        )
+        accepted.full_url = f"{base}/api/service/restart"
+        with urlopen(accepted, timeout=2) as response:
+            payload = json.load(response)
+        self.assertEqual(response.status, 202)
+        self.assertEqual(payload, {"status": "restarting"})
+        self.assertTrue(requested.wait(1))
+
     def test_readiness_and_history_contract(self) -> None:
-        with self.assertRaises(HTTPError) as not_ready:
-            urlopen(f"{self.base}/readyz", timeout=2)
-        self.assertEqual(not_ready.exception.code, 503)
+        self.assert_http_error(f"{self.base}/readyz", 503)
 
         system = SystemMetrics(
             hostname="node-a",
@@ -215,9 +385,110 @@ class WebTests(unittest.TestCase):
         self.assertEqual(history["host"], "gpu-1")
         self.assertEqual(len(history["points"]), 1)
 
-        with self.assertRaises(HTTPError) as invalid:
-            urlopen(f"{self.base}/api/history?host=--proxy&limit=10", timeout=2)
-        self.assertEqual(invalid.exception.code, 400)
+        self.assert_http_error(
+            f"{self.base}/api/history?host=--proxy&limit=10",
+            400,
+        )
+
+    def test_gpu_history_and_sanitized_diagnostics_require_dashboard_reads(
+        self,
+    ) -> None:
+        gpu = GpuMetrics(
+            index=0,
+            uuid="GPU-SECRET-1",
+            name="Test GPU",
+            driver_version="550",
+            pstate="P0",
+            temperature_c=60,
+            utilization_gpu_pct=50,
+            utilization_memory_pct=20,
+            memory_total_mib=1000,
+            memory_used_mib=250,
+            memory_free_mib=750,
+            power_draw_w=100,
+            power_limit_w=200,
+            processes=(GpuProcess(42, "private-train.py", 250),),
+        )
+        self.state.set_hosts(("gpu-01",))
+        self.state.apply(ProbeResult("gpu-01", "online", 1, (gpu,)))
+        read_headers = {"X-Monitor-Request": "dashboard"}
+
+        with urlopen(
+            Request(
+                f"{self.base}/api/gpu-history?host=gpu-01&gpu=GPU-SECRET-1&limit=10",
+                headers=read_headers,
+            ),
+            timeout=2,
+        ) as response:
+            history = json.load(response)
+        with urlopen(
+            Request(f"{self.base}/api/diagnostics", headers=read_headers),
+            timeout=2,
+        ) as response:
+            diagnostics = json.load(response)
+
+        self.assertEqual(history["gpuId"], "GPU-SECRET-1")
+        serialized = json.dumps(diagnostics)
+        self.assertNotIn("GPU-SECRET-1", serialized)
+        self.assertNotIn("private-train.py", serialized)
+        self.assertEqual(diagnostics["servers"][0]["node"], "node-001")
+        self.assert_http_error(f"{self.base}/api/diagnostics", 403)
+
+    def test_condition_action_and_manual_probe_are_same_origin_bounded_writes(
+        self,
+    ) -> None:
+        action_request = self.poll_interval_request(
+            json.dumps(
+                {
+                    "host": "gpu-01",
+                    "conditionKey": "connectivity",
+                    "action": "acknowledged",
+                    "durationSeconds": 3600,
+                    "reason": "owner notified",
+                }
+            ).encode(),
+            origin=self.base,
+            path="/api/settings/incident-action",
+        )
+        with urlopen(action_request, timeout=2) as response:
+            action_result = json.load(response)
+        self.assertEqual(action_result["incidentActions"][0]["action"], "acknowledged")
+
+        probe_request = self.poll_interval_request(
+            b'{"host":"gpu-01"}', origin=self.base, path="/api/probe"
+        )
+        with urlopen(probe_request, timeout=2) as response:
+            probe_result = json.load(response)
+        self.assertTrue(probe_result["accepted"])
+        self.assertEqual(self.probe_control.hosts, ["gpu-01"])
+
+        cross_origin = self.poll_interval_request(
+            b'{"host":"gpu-01"}',
+            origin="https://attacker.example",
+            path="/api/probe",
+            fetch_site="cross-site",
+        )
+        self.assert_http_error(cross_origin, 403)
+
+    def test_exposes_static_connection_topology_without_query_parameters(self) -> None:
+        request = Request(
+            f"{self.base}/api/topology",
+            headers={"X-Monitor-Request": "dashboard"},
+        )
+        with urlopen(request, timeout=2) as response:
+            topology = json.load(response)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(topology, self.inventory.connection_topology)
+
+        self.assert_http_error(f"{self.base}/api/topology", 403)
+
+        request = Request(
+            f"{self.base}/api/topology?refresh=true",
+            headers={"X-Monitor-Request": "dashboard"},
+        )
+        self.assert_http_error(request, 400)
 
     def test_incident_query_is_bounded(self) -> None:
         self.state.set_hosts(("offline",))
@@ -234,13 +505,8 @@ class WebTests(unittest.TestCase):
         self.assertEqual(incidents["version"], 1)
         self.assertEqual(incidents["events"][0]["host"], "offline")
 
-        with self.assertRaises(HTTPError) as invalid:
-            urlopen(f"{self.base}/api/incidents?limit=201", timeout=2)
-        self.assertEqual(invalid.exception.code, 400)
-
-        with self.assertRaises(HTTPError) as unknown:
-            urlopen(f"{self.base}/api/incidents?debug=true", timeout=2)
-        self.assertEqual(unknown.exception.code, 400)
+        self.assert_http_error(f"{self.base}/api/incidents?limit=201", 400)
+        self.assert_http_error(f"{self.base}/api/incidents?debug=true", 400)
 
     def test_scans_and_changes_the_constrained_host_inventory(self) -> None:
         scan = Request(
@@ -338,9 +604,7 @@ class WebTests(unittest.TestCase):
                     origin=self.base,
                     path="/api/settings/host-group",
                 )
-                with self.assertRaises(HTTPError) as rejected:
-                    urlopen(request, timeout=2)
-                self.assertEqual(rejected.exception.code, status)
+                self.assert_http_error(request, status)
 
     def test_rejects_invalid_or_stale_maintenance_writes(self) -> None:
         cases = (
@@ -367,14 +631,10 @@ class WebTests(unittest.TestCase):
                     origin=self.base,
                     path="/api/settings/maintenance",
                 )
-                with self.assertRaises(HTTPError) as rejected:
-                    urlopen(request, timeout=2)
-                self.assertEqual(rejected.exception.code, status)
+                self.assert_http_error(request, status)
 
     def test_rejects_unmarked_or_cross_site_inventory_scans(self) -> None:
-        with self.assertRaises(HTTPError) as unmarked:
-            urlopen(f"{self.base}/api/inventory", timeout=2)
-        self.assertEqual(unmarked.exception.code, 403)
+        self.assert_http_error(f"{self.base}/api/inventory", 403)
 
         cross_site = Request(
             f"{self.base}/api/inventory",
@@ -383,9 +643,7 @@ class WebTests(unittest.TestCase):
                 "Sec-Fetch-Site": "cross-site",
             },
         )
-        with self.assertRaises(HTTPError) as rejected_cross_site:
-            urlopen(cross_site, timeout=2)
-        self.assertEqual(rejected_cross_site.exception.code, 403)
+        self.assert_http_error(cross_site, 403)
 
     def test_rejects_invalid_or_stale_inventory_writes(self) -> None:
         cases = (
@@ -402,9 +660,7 @@ class WebTests(unittest.TestCase):
                     origin=self.base,
                     path="/api/settings/hosts",
                 )
-                with self.assertRaises(HTTPError) as rejected:
-                    urlopen(request, timeout=2)
-                self.assertEqual(rejected.exception.code, status)
+                self.assert_http_error(request, status)
 
         cross_origin = self.poll_interval_request(
             b'{"action":"add","host":"gpu-02"}',
@@ -412,9 +668,7 @@ class WebTests(unittest.TestCase):
             path="/api/settings/hosts",
             fetch_site="cross-site",
         )
-        with self.assertRaises(HTTPError) as rejected_cross_origin:
-            urlopen(cross_origin, timeout=2)
-        self.assertEqual(rejected_cross_origin.exception.code, 403)
+        self.assert_http_error(cross_origin, 403)
 
     def poll_interval_request(
         self,
@@ -502,9 +756,7 @@ class WebTests(unittest.TestCase):
                     origin=self.base,
                     path="/api/settings/collector",
                 )
-                with self.assertRaises(HTTPError) as rejected:
-                    urlopen(request, timeout=2)
-                self.assertEqual(rejected.exception.code, 400)
+                self.assert_http_error(request, 400)
 
         cross_origin = self.poll_interval_request(
             b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8}',
@@ -512,9 +764,7 @@ class WebTests(unittest.TestCase):
             path="/api/settings/collector",
             fetch_site="cross-site",
         )
-        with self.assertRaises(HTTPError) as rejected_cross_origin:
-            urlopen(cross_origin, timeout=2)
-        self.assertEqual(rejected_cross_origin.exception.code, 403)
+        self.assert_http_error(cross_origin, 403)
 
         oversized = self.poll_interval_request(
             b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8,"padding":"'
@@ -523,9 +773,7 @@ class WebTests(unittest.TestCase):
             origin=self.base,
             path="/api/settings/collector",
         )
-        with self.assertRaises(HTTPError) as rejected_oversized:
-            urlopen(oversized, timeout=2)
-        self.assertEqual(rejected_oversized.exception.code, 413)
+        self.assert_http_error(oversized, 413)
 
         self.assertEqual(self.inventory.collector_settings, before)
 
@@ -555,11 +803,8 @@ class WebTests(unittest.TestCase):
             method="OPTIONS",
         )
 
-        with self.assertRaises(HTTPError) as rejected:
-            urlopen(request, timeout=2)
-
-        self.assertEqual(rejected.exception.code, 403)
-        self.assertIsNone(rejected.exception.headers.get("Access-Control-Allow-Origin"))
+        headers = self.assert_http_error(request, 403)
+        self.assertIsNone(headers.get("Access-Control-Allow-Origin"))
 
     def test_rejects_unsafe_or_invalid_poll_interval_updates(self) -> None:
         cases = (
@@ -654,9 +899,7 @@ class WebTests(unittest.TestCase):
                     content_type=content_type,
                     marker=marker,
                 )
-                with self.assertRaises(HTTPError) as rejected:
-                    urlopen(request, timeout=2)
-                self.assertEqual(rejected.exception.code, status)
+                self.assert_http_error(request, status)
 
         for fetch_site in ("cross-site", "same-site", "invalid"):
             with self.subTest(fetch_site=fetch_site):
@@ -665,18 +908,14 @@ class WebTests(unittest.TestCase):
                     origin="https://workspace-preview.example",
                     fetch_site=fetch_site,
                 )
-                with self.assertRaises(HTTPError) as rejected_cross_site:
-                    urlopen(cross_site, timeout=2)
-                self.assertEqual(rejected_cross_site.exception.code, 403)
+                self.assert_http_error(cross_site, 403)
 
         query = self.poll_interval_request(
             b'{"pollIntervalSeconds":10}',
             origin=self.base,
             path="/api/settings/poll-interval?force=true",
         )
-        with self.assertRaises(HTTPError) as rejected_query:
-            urlopen(query, timeout=2)
-        self.assertEqual(rejected_query.exception.code, 400)
+        self.assert_http_error(query, 400)
 
         self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 5)
 

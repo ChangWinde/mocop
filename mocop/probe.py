@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from .config import MonitorConfig, is_safe_alias
 from .models import (
@@ -22,6 +22,8 @@ from .models import (
     GpuProcess,
     ProbeResult,
     SystemMetrics,
+    WorkloadMetadata,
+    utc_now,
 )
 
 _QUERY_FIELDS = (
@@ -49,8 +51,12 @@ _HEALTH_QUERY_FIELDS = (
     "clocks_event_reasons.hw_power_brake_slowdown",
     "mig.mode.current",
 )
+_COMBINED_QUERY_FIELDS = _QUERY_FIELDS + _HEALTH_QUERY_FIELDS[1:]
 _UNAVAILABLE = {"", "n/a", "[n/a]", "not supported", "[not supported]"}
-_PROTOCOL_VERSION = "MONITOR_V4"
+_PROTOCOL_VERSION = "MONITOR_V6"
+_SUPPORTED_PROTOCOL_VERSIONS = frozenset(
+    {_PROTOCOL_VERSION, "MONITOR_V5", "MONITOR_V4"}
+)
 _PROCESS_READ_CHUNK_BYTES = 65_536
 _MAX_GPUS_PER_HOST = 256
 _MAX_DISKS_PER_HOST = 1_024
@@ -59,36 +65,51 @@ _MAX_PROCESSES_PER_HOST = 4_096
 _REMOTE_SCRIPT_TEMPLATE = r"""
 LC_ALL=C
 export LC_ALL
-printf 'MONITOR_V4\n'
-host_value=$(hostname 2>/dev/null || printf 'unknown')
-host_value=$(printf '%s' "$host_value" | tr '\t\r\n' '   ' | cut -c 1-255)
+printf '__PROTOCOL_VERSION__\n'
+workload_enabled=__WORKLOAD_ENABLED__
+process_enabled=__PROCESS_ENABLED__
+host_value=$(awk 'NR == 1 { gsub(/[[:cntrl:]]/, " "); print substr($0, 1, 255); found=1; exit } END { if (!found) print "unknown" }' /proc/sys/kernel/hostname 2>/dev/null) || host_value=unknown
+[ -n "$host_value" ] || host_value=unknown
 printf 'HOST\t%s\n' "$host_value"
-awk '/^cpu / { total=0; for (i=2; i<=NF; i++) total += $i; idle=$5+$6; printf "CPU\t%.0f\t%.0f\n", total, idle; exit }' /proc/stat
-cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || awk '/^processor[[:space:]]*:/ { n++ } END { print n+0 }' /proc/cpuinfo)
-printf 'CORES\t%s\n' "$cores"
 awk '
-  /^MemTotal:/ { mt=$2 }
-  /^MemAvailable:/ { ma=$2 }
-  /^SwapTotal:/ { st=$2 }
-  /^SwapFree:/ { sf=$2 }
-  END { printf "MEM\t%.0f\t%.0f\t%.0f\t%.0f\n", mt, ma, st, sf }
-' /proc/meminfo
-awk '{ printf "LOAD\t%s\t%s\t%s\n", $1, $2, $3 }' /proc/loadavg
-awk '{ printf "UPTIME\t%s\n", $1 }' /proc/uptime
-awk '
-  NR > 2 {
+  FILENAME == "/proc/stat" {
+    if ($1 == "cpu") {
+      total=0
+      for (i=2; i<=NF; i++) total += $i
+      idle=$5+$6
+    } else if ($1 ~ /^cpu[0-9]+$/) {
+      cores++
+    }
+    next
+  }
+  FILENAME == "/proc/meminfo" {
+    if ($1 == "MemTotal:") mt=$2
+    else if ($1 == "MemAvailable:") ma=$2
+    else if ($1 == "SwapTotal:") st=$2
+    else if ($1 == "SwapFree:") sf=$2
+    next
+  }
+  FILENAME == "/proc/loadavg" { load1=$1; load5=$2; load15=$3; next }
+  FILENAME == "/proc/uptime" { uptime=$1; next }
+  FILENAME == "/proc/net/dev" && FNR > 2 {
     gsub(/:/, "", $1)
     if ($1 != "lo") { rx += $2; tx += $10 }
+    next
   }
-  END { printf "NET\t%.0f\t%.0f\n", rx, tx }
-' /proc/net/dev
-awk '
-  FILENAME !~ /\/(loop[0-9]+|ram[0-9]+|zram[0-9]+|dm-[0-9]+|md[0-9]+)\/stat$/ {
+  FILENAME ~ /\/sys\/block\/.*\/stat$/ && FILENAME !~ /\/(loop[0-9]+|ram[0-9]+|zram[0-9]+|dm-[0-9]+|md[0-9]+)\/stat$/ {
     read_bytes += $3 * 512
     write_bytes += $7 * 512
   }
-  END { printf "IO\t%.0f\t%.0f\n", read_bytes, write_bytes }
-' /sys/block/*/stat 2>/dev/null || printf 'IO\t0\t0\n'
+  END {
+    printf "CPU\t%.0f\t%.0f\n", total, idle
+    printf "CORES\t%.0f\n", cores
+    printf "MEM\t%.0f\t%.0f\t%.0f\t%.0f\n", mt, ma, st, sf
+    printf "LOAD\t%s\t%s\t%s\n", load1, load5, load15
+    printf "UPTIME\t%s\n", uptime
+    printf "NET\t%.0f\t%.0f\n", rx, tx
+    printf "IO\t%.0f\t%.0f\n", read_bytes, write_bytes
+  }
+' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/net/dev /sys/block/*/stat 2>/dev/null
 printf 'DISKS_BEGIN\n'
 df -PTk 2>/dev/null | awk '
   NR > 1 && $2 !~ /^(tmpfs|devtmpfs|squashfs|overlay|proc|sysfs|cgroup2?|efivarfs|tracefs|debugfs|mqueue|fusectl|securityfs|pstore|configfs|autofs|binfmt_misc|ramfs|nsfs)$/ {
@@ -98,32 +119,145 @@ df -PTk 2>/dev/null | awk '
 '
 printf 'DISKS_END\n'
 printf 'GPUS_BEGIN\n'
+gpu_health_inline=0
 if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=__GPU_QUERY__ --format=csv,noheader,nounits 2>/dev/null || printf 'GPU_ERROR\t%s\n' "$?"
+  combined_output=$(nvidia-smi --query-gpu=__COMBINED_QUERY__ --format=csv,noheader,nounits 2>/dev/null)
+  combined_status=$?
+  if [ "$combined_status" -eq 0 ]; then
+    gpu_health_inline=1
+    [ -z "$combined_output" ] || printf '%s\n' "$combined_output"
+  else
+    nvidia-smi --query-gpu=__GPU_QUERY__ --format=csv,noheader,nounits 2>/dev/null || printf 'GPU_ERROR\t%s\n' "$?"
+  fi
 else
   printf 'GPU_UNAVAILABLE\n'
 fi
 printf 'GPUS_END\n'
 printf 'PROCESSES_BEGIN\n'
-if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-compute-apps=__PROCESS_QUERY__ --format=csv,noheader,nounits 2>/dev/null || printf 'PROCESS_ERROR\t%s\n' "$?"
+process_output=''
+process_status=0
+if [ "$process_enabled" -eq 0 ]; then
+  printf 'PROCESS_SKIPPED\n'
+elif command -v nvidia-smi >/dev/null 2>&1; then
+  process_output=$(nvidia-smi --query-compute-apps=__PROCESS_QUERY__ --format=csv,noheader,nounits 2>/dev/null)
+  process_status=$?
+  if [ "$process_status" -eq 0 ]; then
+    [ -z "$process_output" ] || printf '%s\n' "$process_output"
+  else
+    printf 'PROCESS_ERROR\t%s\n' "$process_status"
+  fi
 fi
 printf 'PROCESSES_END\n'
-printf 'GPU_HEALTH_BEGIN\n'
-if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=__HEALTH_QUERY__ --format=csv,noheader,nounits 2>/dev/null || printf 'GPU_HEALTH_ERROR\t%s\n' "$?"
+printf 'WORKLOADS_BEGIN\n'
+if [ "$workload_enabled" -eq 1 ] && [ "$process_status" -eq 0 ] && [ -n "$process_output" ]; then
+  process_pids=$(printf '%s\n' "$process_output" | awk -F, '
+    {
+      pid=$2
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", pid)
+      if (pid ~ /^[0-9]+$/ && !seen[pid]++) print pid
+    }
+  ')
+  for process_pid in $process_pids; do
+    [ -r "/proc/$process_pid/status" ] || continue
+    owner_uid=$(awk '/^Uid:/ { print $2; exit }' "/proc/$process_pid/status" 2>/dev/null)
+    cgroup_value=$(head -c 16384 "/proc/$process_pid/cgroup" 2>/dev/null)
+    if [ -r "/proc/$process_pid/environ" ]; then
+      head -c 65536 "/proc/$process_pid/environ" 2>/dev/null
+    fi | tr '\000' '\n' | awk -v pid="$process_pid" -v uid="$owner_uid" -v cgroup="$cgroup_value" '
+      function clean(value) {
+        gsub(/[[:cntrl:]]/, " ", value)
+        return substr(value, 1, 255)
+      }
+      /^SLURM_JOB_ID=/ { slurm_id=substr($0, index($0, "=") + 1) }
+      /^SLURM_JOB_NAME=/ { slurm_name=substr($0, index($0, "=") + 1) }
+      /^SLURM_JOB_PARTITION=/ { slurm_queue=substr($0, index($0, "=") + 1) }
+      /^SLURM_JOB_USER=/ { owner=substr($0, index($0, "=") + 1) }
+      /^USER=/ { if (owner == "") owner=substr($0, index($0, "=") + 1) }
+      /^LOGNAME=/ { if (owner == "") owner=substr($0, index($0, "=") + 1) }
+      /^POD_UID=/ { pod_id=substr($0, index($0, "=") + 1) }
+      /^POD_NAME=/ { pod_name=substr($0, index($0, "=") + 1) }
+      /^POD_NAMESPACE=/ { pod_namespace=substr($0, index($0, "=") + 1) }
+      /^KUEUE_LOCAL_QUEUE_NAME=/ { pod_queue=substr($0, index($0, "=") + 1) }
+      END {
+        if (slurm_id == "" && match(cgroup, /job_[0-9]+/)) {
+          slurm_id=substr(cgroup, RSTART + 4, RLENGTH - 4)
+        }
+        if (pod_id == "" && match(cgroup, /pod[0-9A-Fa-f_-]+/)) {
+          pod_id=substr(cgroup, RSTART + 3, RLENGTH - 3)
+        }
+        if (owner == "") owner=uid
+        kind="process"
+        workload_id=""
+        workload_name=""
+        workload_queue=""
+        workload_namespace=""
+        if (slurm_id != "" || cgroup ~ /slurm/) {
+          kind="slurm"
+          workload_id=slurm_id
+          workload_name=slurm_name
+          workload_queue=slurm_queue
+        } else if (pod_id != "" || cgroup ~ /kubepods/) {
+          kind="kubernetes"
+          workload_id=pod_id
+          workload_name=pod_name
+          workload_queue=pod_queue
+          workload_namespace=pod_namespace
+        }
+        printf "WORKLOAD\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+          pid, kind, clean(workload_id), clean(workload_name), clean(owner),
+          clean(workload_queue), clean(workload_namespace)
+      }
+    '
+  done
 fi
+printf 'WORKLOADS_END\n'
+printf 'GPU_HEALTH_BEGIN\n'
+[ "$gpu_health_inline" -eq 1 ] || printf 'GPU_HEALTH_ERROR\t1\n'
 printf 'GPU_HEALTH_END\n'
 """
-_REMOTE_SCRIPT = (
-    _REMOTE_SCRIPT_TEMPLATE.replace("__GPU_QUERY__", ",".join(_QUERY_FIELDS))
-    .replace("__PROCESS_QUERY__", ",".join(_PROCESS_QUERY_FIELDS))
-    .replace("__HEALTH_QUERY__", ",".join(_HEALTH_QUERY_FIELDS))
-)
+
+
+def _render_remote_script(workload_enabled: bool, process_enabled: bool) -> str:
+    return (
+        _REMOTE_SCRIPT_TEMPLATE.replace("__GPU_QUERY__", ",".join(_QUERY_FIELDS))
+        .replace("__COMBINED_QUERY__", ",".join(_COMBINED_QUERY_FIELDS))
+        .replace("__PROCESS_QUERY__", ",".join(_PROCESS_QUERY_FIELDS))
+        .replace("__WORKLOAD_ENABLED__", "1" if workload_enabled else "0")
+        .replace("__PROCESS_ENABLED__", "1" if process_enabled else "0")
+        .replace("__PROTOCOL_VERSION__", _PROTOCOL_VERSION)
+    )
+
+
+_REMOTE_SCRIPTS = {
+    (workload_enabled, process_enabled): _render_remote_script(
+        workload_enabled,
+        process_enabled,
+    )
+    for workload_enabled in (False, True)
+    for process_enabled in (False, True)
+}
+
+
+def _remote_script(workload_mode: str, process_enabled: bool = True) -> str:
+    return _REMOTE_SCRIPTS[(workload_mode != "disabled", process_enabled)]
 
 
 class ResourceProbe(Protocol):
     def probe(self, host: str, config: MonitorConfig) -> ProbeResult: ...
+
+
+@runtime_checkable
+class CancellableResourceProbe(Protocol):
+    """Optional lifecycle extension for probes that own child processes."""
+
+    def cancel(self) -> None: ...
+
+
+@runtime_checkable
+class InventoryAwareResourceProbe(Protocol):
+    """Optional extension for probes that retain per-host sampling state."""
+
+    def retain_hosts(self, hosts: set[str]) -> None: ...
 
 
 # Backward-compatible name for callers that used the first GPU-only interface.
@@ -143,6 +277,37 @@ class _ProcessOutputLimitExceeded(RuntimeError):
     pass
 
 
+class _ProcessCancelled(RuntimeError):
+    pass
+
+
+class _ActiveProcessRegistry:
+    """Own active collectors so shutdown can interrupt them without polling."""
+
+    def __init__(self) -> None:
+        self.cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._processes: set[subprocess.Popen[bytes]] = set()
+
+    def register(self, process: subprocess.Popen[bytes]) -> bool:
+        with self._lock:
+            if self.cancelled.is_set():
+                return False
+            self._processes.add(process)
+            return True
+
+    def unregister(self, process: subprocess.Popen[bytes]) -> None:
+        with self._lock:
+            self._processes.discard(process)
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+        with self._lock:
+            processes = tuple(self._processes)
+        for process in processes:
+            _kill_process_group(process)
+
+
 def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -160,8 +325,12 @@ def _run_bounded_process(
     timeout_seconds: float,
     max_output_bytes: int,
     environment: dict[str, str],
+    cancel_event: threading.Event | None = None,
+    process_registry: _ActiveProcessRegistry | None = None,
 ) -> _BoundedProcessResult:
     """Run one SSH process while bounding combined stdout/stderr in memory."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise _ProcessCancelled
     process = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
@@ -173,11 +342,13 @@ def _run_bounded_process(
     stdin = process.stdin
     stdout = process.stdout
     stderr = process.stderr
-    if stdin is None or stdout is None or stderr is None:
-        _kill_process_group(process)
-        raise RuntimeError("SSH process pipes were not created")
+    registered = process_registry.register(process) if process_registry else False
 
     try:
+        if process_registry is not None and not registered:
+            raise _ProcessCancelled
+        if stdin is None or stdout is None or stderr is None:
+            raise RuntimeError("SSH process pipes were not created")
         try:
             stdin.write(input_text.encode("utf-8"))
         except BrokenPipeError:
@@ -193,6 +364,8 @@ def _run_bounded_process(
         selector.register(stderr, selectors.EVENT_READ, "stderr")
         try:
             while selector.get_map():
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _ProcessCancelled
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(command, timeout_seconds)
@@ -207,12 +380,18 @@ def _run_bounded_process(
                     if total_bytes > max_output_bytes:
                         raise _ProcessOutputLimitExceeded
                     output[key.data].extend(chunk)
-        except (subprocess.TimeoutExpired, _ProcessOutputLimitExceeded):
+        except (
+            subprocess.TimeoutExpired,
+            _ProcessOutputLimitExceeded,
+            _ProcessCancelled,
+        ):
             _kill_process_group(process)
             raise
         finally:
             selector.close()
 
+        if cancel_event is not None and cancel_event.is_set():
+            raise _ProcessCancelled
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             returncode = process.poll()
@@ -226,13 +405,16 @@ def _run_bounded_process(
             stderr=output["stderr"].decode("utf-8", errors="replace"),
         )
     finally:
+        if process_registry is not None and registered:
+            process_registry.unregister(process)
         if process.poll() is None:
             _kill_process_group(process)
         with suppress(OSError, subprocess.TimeoutExpired):
             process.wait(timeout=1)
         for stream in (stdin, stdout, stderr):
-            with suppress(OSError):
-                stream.close()
+            if stream is not None:
+                with suppress(OSError):
+                    stream.close()
 
 
 def register_probe(name: str) -> Callable[[ResourceProbeFactory], ResourceProbeFactory]:
@@ -252,15 +434,17 @@ def create_probe(name: str) -> ResourceProbe:
         ) from exc
 
 
-def _number(value: str) -> float | None:
-    normalized = value.strip().lower()
-    if normalized in _UNAVAILABLE:
-        return None
+def _finite_number(normalized: str) -> float | None:
     try:
         result = float(normalized)
     except ValueError:
         return None
     return result if math.isfinite(result) else None
+
+
+def _number(value: str) -> float | None:
+    normalized = value.strip().lower()
+    return None if normalized in _UNAVAILABLE else _finite_number(normalized)
 
 
 def _required_number(value: str, label: str, minimum: float = 0) -> float:
@@ -277,9 +461,10 @@ def _optional_number(
     minimum: float = 0,
     maximum: float | None = None,
 ) -> float | None:
-    if value.strip().lower() in _UNAVAILABLE:
+    normalized = value.strip().lower()
+    if normalized in _UNAVAILABLE:
         return None
-    result = _number(value)
+    result = _finite_number(normalized)
     if result is None or result < minimum or (maximum is not None and result > maximum):
         raise ValueError(f"nvidia-smi returned an invalid {label}")
     return result
@@ -292,6 +477,48 @@ def _bounded_text(value: str, label: str, maximum: int, fallback: str = "") -> s
     return result or fallback
 
 
+def _parse_nvidia_smi_row(row: list[str], row_number: int) -> GpuMetrics:
+    if len(row) != len(_QUERY_FIELDS):
+        raise ValueError(
+            f"nvidia-smi returned {len(row)} columns on row {row_number}; "
+            f"expected {len(_QUERY_FIELDS)}"
+        )
+    index = _number(row[0])
+    if index is None or not index.is_integer() or not 0 <= index <= 65_535:
+        raise ValueError(
+            f"nvidia-smi returned an invalid GPU index on row {row_number}"
+        )
+    return GpuMetrics(
+        index=int(index),
+        uuid=_bounded_text(row[1], "GPU UUID", 128),
+        name=_bounded_text(row[2], "GPU name", 256, fallback="Unknown NVIDIA GPU"),
+        driver_version=_bounded_text(row[3], "driver version", 64),
+        pstate=(
+            None
+            if row[4].strip().lower() in _UNAVAILABLE
+            else _bounded_text(row[4], "performance state", 32)
+        ),
+        temperature_c=_optional_number(
+            row[5], "GPU temperature", minimum=-100, maximum=250
+        ),
+        utilization_gpu_pct=_optional_number(row[6], "GPU utilization", maximum=100),
+        utilization_memory_pct=_optional_number(
+            row[7], "memory utilization", maximum=100
+        ),
+        memory_total_mib=_optional_number(
+            row[8], "total GPU memory", maximum=1_000_000_000
+        ),
+        memory_used_mib=_optional_number(
+            row[9], "used GPU memory", maximum=1_000_000_000
+        ),
+        memory_free_mib=_optional_number(
+            row[10], "free GPU memory", maximum=1_000_000_000
+        ),
+        power_draw_w=_optional_number(row[11], "GPU power draw", maximum=1_000_000),
+        power_limit_w=_optional_number(row[12], "GPU power limit", maximum=1_000_000),
+    )
+
+
 def parse_nvidia_smi_csv(payload: str) -> tuple[GpuMetrics, ...]:
     rows = csv.reader(io.StringIO(payload), skipinitialspace=True)
     gpus: list[GpuMetrics] = []
@@ -300,55 +527,7 @@ def parse_nvidia_smi_csv(payload: str) -> tuple[GpuMetrics, ...]:
             continue
         if len(gpus) >= _MAX_GPUS_PER_HOST:
             raise ValueError("nvidia-smi returned too many GPU records")
-        if len(row) != len(_QUERY_FIELDS):
-            raise ValueError(
-                f"nvidia-smi returned {len(row)} columns on row {row_number}; "
-                f"expected {len(_QUERY_FIELDS)}"
-            )
-        index = _number(row[0])
-        if index is None or not index.is_integer() or not 0 <= index <= 65_535:
-            raise ValueError(
-                f"nvidia-smi returned an invalid GPU index on row {row_number}"
-            )
-        gpus.append(
-            GpuMetrics(
-                index=int(index),
-                uuid=_bounded_text(row[1], "GPU UUID", 128),
-                name=_bounded_text(
-                    row[2], "GPU name", 256, fallback="Unknown NVIDIA GPU"
-                ),
-                driver_version=_bounded_text(row[3], "driver version", 64),
-                pstate=(
-                    None
-                    if row[4].strip().lower() in _UNAVAILABLE
-                    else _bounded_text(row[4], "performance state", 32)
-                ),
-                temperature_c=_optional_number(
-                    row[5], "GPU temperature", minimum=-100, maximum=250
-                ),
-                utilization_gpu_pct=_optional_number(
-                    row[6], "GPU utilization", maximum=100
-                ),
-                utilization_memory_pct=_optional_number(
-                    row[7], "memory utilization", maximum=100
-                ),
-                memory_total_mib=_optional_number(
-                    row[8], "total GPU memory", maximum=1_000_000_000
-                ),
-                memory_used_mib=_optional_number(
-                    row[9], "used GPU memory", maximum=1_000_000_000
-                ),
-                memory_free_mib=_optional_number(
-                    row[10], "free GPU memory", maximum=1_000_000_000
-                ),
-                power_draw_w=_optional_number(
-                    row[11], "GPU power draw", maximum=1_000_000
-                ),
-                power_limit_w=_optional_number(
-                    row[12], "GPU power limit", maximum=1_000_000
-                ),
-            )
-        )
+        gpus.append(_parse_nvidia_smi_row(row, row_number))
     return tuple(gpus)
 
 
@@ -381,9 +560,56 @@ def parse_nvidia_processes_csv(payload: str) -> dict[str, tuple[GpuProcess, ...]
                 row[3], "GPU process memory", maximum=1_000_000_000
             ),
         )
-        processes.setdefault(gpu_uuid, []).append(process)
+        gpu_processes = processes.get(gpu_uuid)
+        if gpu_processes is None:
+            gpu_processes = []
+            processes[gpu_uuid] = gpu_processes
+        gpu_processes.append(process)
         count += 1
     return {gpu_uuid: tuple(items) for gpu_uuid, items in processes.items()}
+
+
+def parse_workload_records(payload: str) -> dict[int, WorkloadMetadata]:
+    workloads: dict[int, WorkloadMetadata] = {}
+    for row_number, line in enumerate(payload.splitlines(), start=1):
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) != 8 or fields[0] != "WORKLOAD":
+            raise ValueError(
+                f"resource payload has an invalid workload record on row {row_number}"
+            )
+        pid_value = _number(fields[1])
+        if (
+            pid_value is None
+            or not pid_value.is_integer()
+            or not 1 <= pid_value <= 2_147_483_647
+        ):
+            raise ValueError("resource payload has an invalid workload PID")
+        pid = int(pid_value)
+        if pid in workloads:
+            raise ValueError("resource payload has duplicate workload PIDs")
+        kind = fields[2].strip()
+        if kind not in {"process", "slurm", "kubernetes"}:
+            raise ValueError("resource payload has an invalid workload kind")
+
+        def optional_text(value: str, label: str) -> str | None:
+            text = value.strip()
+            if len(text) > 255 or any(ord(character) < 32 for character in text):
+                raise ValueError(f"resource payload has invalid workload {label}")
+            return text or None
+
+        workloads[pid] = WorkloadMetadata(
+            kind=kind,
+            workload_id=optional_text(fields[3], "identifier"),
+            name=optional_text(fields[4], "name"),
+            owner=optional_text(fields[5], "owner"),
+            queue=optional_text(fields[6], "queue"),
+            namespace=optional_text(fields[7], "namespace"),
+        )
+    if len(workloads) > _MAX_PROCESSES_PER_HOST:
+        raise ValueError("resource payload has too many workload records")
+    return workloads
 
 
 def _optional_health_boolean(value: str) -> bool | None:
@@ -397,6 +623,35 @@ def _optional_health_boolean(value: str) -> bool | None:
     raise ValueError("nvidia-smi returned an invalid health boolean")
 
 
+def _parse_nvidia_health_row(
+    row: list[str], row_number: int
+) -> tuple[str, GpuHealthMetrics]:
+    if len(row) != len(_HEALTH_QUERY_FIELDS):
+        raise ValueError(
+            f"nvidia-smi returned {len(row)} health columns on row {row_number}; "
+            f"expected {len(_HEALTH_QUERY_FIELDS)}"
+        )
+    gpu_uuid = _bounded_text(row[0], "health GPU UUID", 128)
+    ecc_value = _optional_number(
+        row[1], "uncorrected ECC count", maximum=9_007_199_254_740_991
+    )
+    if ecc_value is not None and not ecc_value.is_integer():
+        raise ValueError("nvidia-smi returned an invalid uncorrected ECC count")
+    mig_value = (
+        None
+        if row[6].strip().lower() in _UNAVAILABLE
+        else _bounded_text(row[6], "MIG mode", 64)
+    )
+    return gpu_uuid, GpuHealthMetrics(
+        ecc_uncorrected_volatile=int(ecc_value) if ecc_value is not None else None,
+        retired_pages_pending=_optional_health_boolean(row[2]),
+        remapped_rows_pending=_optional_health_boolean(row[3]),
+        thermal_slowdown=_optional_health_boolean(row[4]),
+        power_brake_slowdown=_optional_health_boolean(row[5]),
+        mig_mode=mig_value,
+    )
+
+
 def parse_nvidia_health_csv(payload: str) -> dict[str, GpuHealthMetrics]:
     rows = csv.reader(io.StringIO(payload), skipinitialspace=True)
     health: dict[str, GpuHealthMetrics] = {}
@@ -405,33 +660,45 @@ def parse_nvidia_health_csv(payload: str) -> dict[str, GpuHealthMetrics]:
             continue
         if len(health) >= _MAX_GPUS_PER_HOST:
             raise ValueError("nvidia-smi returned too many GPU health records")
-        if len(row) != len(_HEALTH_QUERY_FIELDS):
-            raise ValueError(
-                f"nvidia-smi returned {len(row)} health columns on row {row_number}; "
-                f"expected {len(_HEALTH_QUERY_FIELDS)}"
-            )
-        gpu_uuid = _bounded_text(row[0], "health GPU UUID", 128)
+        gpu_uuid, metrics = _parse_nvidia_health_row(row, row_number)
         if gpu_uuid in health:
             raise ValueError("nvidia-smi returned duplicate GPU health records")
-        ecc_value = _optional_number(
-            row[1], "uncorrected ECC count", maximum=9_007_199_254_740_991
-        )
-        if ecc_value is not None and not ecc_value.is_integer():
-            raise ValueError("nvidia-smi returned an invalid uncorrected ECC count")
-        mig_value = (
-            None
-            if row[6].strip().lower() in _UNAVAILABLE
-            else _bounded_text(row[6], "MIG mode", 64)
-        )
-        health[gpu_uuid] = GpuHealthMetrics(
-            ecc_uncorrected_volatile=int(ecc_value) if ecc_value is not None else None,
-            retired_pages_pending=_optional_health_boolean(row[2]),
-            remapped_rows_pending=_optional_health_boolean(row[3]),
-            thermal_slowdown=_optional_health_boolean(row[4]),
-            power_brake_slowdown=_optional_health_boolean(row[5]),
-            mig_mode=mig_value,
-        )
+        health[gpu_uuid] = metrics
     return health
+
+
+def parse_nvidia_combined_csv(
+    payload: str,
+) -> tuple[tuple[GpuMetrics, ...], dict[str, GpuHealthMetrics]]:
+    """Parse one query containing base GPU and additive health fields."""
+    gpus: list[GpuMetrics] = []
+    health: dict[str, GpuHealthMetrics] = {}
+    health_valid = True
+    rows = csv.reader(io.StringIO(payload), skipinitialspace=True)
+    for row_number, row in enumerate(rows, start=1):
+        if not row or not any(cell.strip() for cell in row):
+            continue
+        if len(gpus) >= _MAX_GPUS_PER_HOST:
+            raise ValueError("nvidia-smi returned too many GPU records")
+        if len(row) != len(_COMBINED_QUERY_FIELDS):
+            raise ValueError(
+                f"nvidia-smi returned {len(row)} combined GPU columns on row "
+                f"{row_number}; expected {len(_COMBINED_QUERY_FIELDS)}"
+            )
+        gpus.append(_parse_nvidia_smi_row(row[: len(_QUERY_FIELDS)], row_number))
+        if health_valid:
+            try:
+                gpu_uuid, metrics = _parse_nvidia_health_row(
+                    [row[1], *row[len(_QUERY_FIELDS) :]], row_number
+                )
+                if gpu_uuid in health:
+                    raise ValueError("nvidia-smi returned duplicate GPU health records")
+                health[gpu_uuid] = metrics
+            except ValueError:
+                # Optional health fields cannot hide otherwise valid GPU metrics.
+                health.clear()
+                health_valid = False
+    return tuple(gpus), health
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,21 +726,26 @@ def parse_linux_resource_payload(
     payload: str,
 ) -> tuple[_RawSystemSample, tuple[GpuMetrics, ...], str | None]:
     lines = payload.splitlines()
-    if not lines or lines[0].strip() != _PROTOCOL_VERSION:
+    if not lines or lines[0].strip() not in _SUPPORTED_PROTOCOL_VERSIONS:
         raise ValueError("resource payload has an unknown protocol version")
+    protocol_version = lines[0].strip()
 
     values: dict[str, list[str]] = {}
     disks: list[DiskMetrics] = []
     gpu_lines: list[str] = []
     process_lines: list[str] = []
     health_lines: list[str] = []
+    workload_lines: list[str] = []
     gpu_message: str | None = None
     processes_available = True
+    processes_sampled = True
+    process_status_marker: str | None = None
     health_available = True
     in_gpus = False
     in_disks = False
     in_processes = False
     in_health = False
+    in_workloads = False
     section_markers: set[str] = set()
 
     for line in lines[1:]:
@@ -483,6 +755,7 @@ def parse_linux_resource_payload(
                 or in_disks
                 or in_processes
                 or in_health
+                or in_workloads
                 or line in section_markers
             ):
                 raise ValueError("resource payload has an invalid GPU section")
@@ -501,6 +774,7 @@ def parse_linux_resource_payload(
                 or in_disks
                 or in_processes
                 or in_health
+                or in_workloads
                 or line in section_markers
             ):
                 raise ValueError("resource payload has an invalid disk section")
@@ -519,6 +793,7 @@ def parse_linux_resource_payload(
                 or in_disks
                 or in_processes
                 or in_health
+                or in_workloads
                 or line in section_markers
             ):
                 raise ValueError("resource payload has an invalid process section")
@@ -531,12 +806,32 @@ def parse_linux_resource_payload(
             section_markers.add(line)
             in_processes = False
             continue
+        if line == "WORKLOADS_BEGIN":
+            if (
+                in_gpus
+                or in_disks
+                or in_processes
+                or in_health
+                or in_workloads
+                or line in section_markers
+            ):
+                raise ValueError("resource payload has an invalid workload section")
+            section_markers.add(line)
+            in_workloads = True
+            continue
+        if line == "WORKLOADS_END":
+            if not in_workloads or line in section_markers:
+                raise ValueError("resource payload has an invalid workload section")
+            section_markers.add(line)
+            in_workloads = False
+            continue
         if line == "GPU_HEALTH_BEGIN":
             if (
                 in_gpus
                 or in_disks
                 or in_processes
                 or in_health
+                or in_workloads
                 or line in section_markers
             ):
                 raise ValueError("resource payload has an invalid GPU health section")
@@ -558,9 +853,29 @@ def parse_linux_resource_payload(
                 gpu_lines.append(line)
             continue
         if in_processes:
-            if line.startswith("PROCESS_ERROR\t"):
+            if line == "PROCESS_SKIPPED":
+                if (
+                    protocol_version != _PROTOCOL_VERSION
+                    or process_status_marker is not None
+                    or process_lines
+                ):
+                    raise ValueError(
+                        "resource payload has conflicting process telemetry"
+                    )
+                process_status_marker = "skipped"
+                processes_sampled = False
+            elif line.startswith("PROCESS_ERROR\t"):
+                if process_status_marker is not None or process_lines:
+                    raise ValueError(
+                        "resource payload has conflicting process telemetry"
+                    )
+                process_status_marker = "error"
                 processes_available = False
             elif line.strip():
+                if process_status_marker is not None:
+                    raise ValueError(
+                        "resource payload has conflicting process telemetry"
+                    )
                 process_lines.append(line)
             continue
         if in_health:
@@ -569,6 +884,10 @@ def parse_linux_resource_payload(
                 health_lines.clear()
             elif line.strip() and health_available:
                 health_lines.append(line)
+            continue
+        if in_workloads:
+            if line.strip():
+                workload_lines.append(line)
             continue
 
         parts = line.split("\t")
@@ -607,16 +926,21 @@ def parse_linux_resource_payload(
         "GPU_HEALTH_BEGIN",
         "GPU_HEALTH_END",
     }
+    if protocol_version != "MONITOR_V4":
+        expected_markers.update({"WORKLOADS_BEGIN", "WORKLOADS_END"})
     if (
         section_markers != expected_markers
         or in_disks
         or in_gpus
         or in_processes
         or in_health
+        or in_workloads
     ):
         raise ValueError("resource payload has incomplete metric sections")
     if gpu_message is not None and gpu_lines:
         raise ValueError("resource payload has conflicting GPU status")
+    if not processes_sampled and workload_lines:
+        raise ValueError("resource payload has workload data without a process sample")
 
     required = {"HOST", "CPU", "CORES", "MEM", "LOAD", "UPTIME", "NET", "IO"}
     missing = sorted(required - values.keys())
@@ -652,14 +976,37 @@ def parse_linux_resource_payload(
         disk_write_bytes=_required_number(values["IO"][1], "disk write bytes"),
         disks=tuple(disks),
     )
-    gpus = parse_nvidia_smi_csv("\n".join(gpu_lines))
+    gpu_payload = "\n".join(gpu_lines)
+    first_gpu_row = next(
+        (
+            row
+            for row in csv.reader(io.StringIO(gpu_payload), skipinitialspace=True)
+            if row and any(cell.strip() for cell in row)
+        ),
+        None,
+    )
+    inline_health: dict[str, GpuHealthMetrics] = {}
+    if first_gpu_row is not None and len(first_gpu_row) == len(_COMBINED_QUERY_FIELDS):
+        gpus, inline_health = parse_nvidia_combined_csv(gpu_payload)
+    else:
+        gpus = parse_nvidia_smi_csv(gpu_payload)
     processes = (
         parse_nvidia_processes_csv("\n".join(process_lines))
-        if processes_available
+        if processes_sampled and processes_available
         else {}
     )
-    health: dict[str, GpuHealthMetrics] = {}
-    if health_available:
+    workloads = parse_workload_records("\n".join(workload_lines))
+    processes = {
+        gpu_uuid: tuple(
+            replace(process, workload=workloads.get(process.pid))
+            for process in gpu_processes
+        )
+        for gpu_uuid, gpu_processes in processes.items()
+    }
+    health = inline_health
+    if inline_health and health_lines:
+        raise ValueError("resource payload has conflicting GPU health records")
+    if health_available and not inline_health:
         try:
             health = parse_nvidia_health_csv("\n".join(health_lines))
         except ValueError:
@@ -670,6 +1017,7 @@ def parse_linux_resource_payload(
             gpu,
             processes=processes.get(gpu.uuid, ()),
             processes_available=processes_available,
+            processes_sampled=processes_sampled,
             health=health.get(gpu.uuid),
         )
         for gpu in gpus
@@ -686,6 +1034,14 @@ class _Baseline:
     network_tx_bytes: float
     disk_read_bytes: float
     disk_write_bytes: float
+
+
+@dataclass(frozen=True, slots=True)
+class _ProcessSample:
+    sampled_at_monotonic: float
+    observed_at: str
+    workload_mode: str
+    processes_by_gpu: dict[str, tuple[GpuProcess, ...]]
 
 
 def _safe_ssh_failure(stderr: str) -> str:
@@ -709,13 +1065,54 @@ def _safe_ssh_failure(stderr: str) -> str:
     return "SSH connection failed"
 
 
-@register_probe("openssh-linux-v4")
+def _is_retryable_ssh_transport_failure(stderr: str) -> bool:
+    """Recognize stale multiplexed sessions without retrying hard failures."""
+    normalized = stderr.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "mux_client_request_session",
+            "control socket connect",
+            "master is dead",
+            "broken pipe",
+        )
+    )
+
+
+@register_probe("openssh-linux-v6")
 class OpenSshLinuxResourceProbe:
     """Collect Linux and NVIDIA metrics locally or through one fixed SSH script."""
 
     def __init__(self) -> None:
-        self._baseline_lock = threading.Lock()
+        self._sample_lock = threading.Lock()
         self._baselines: dict[str, _Baseline] = {}
+        self._process_samples: dict[str, _ProcessSample] = {}
+        self._processes = _ActiveProcessRegistry()
+        self._environment = os.environ.copy()
+        self._environment["LC_ALL"] = "C"
+
+    def cancel(self) -> None:
+        """Stop active child processes when the owning service is shutting down."""
+        self._processes.cancel()
+
+    def retain_hosts(self, hosts: set[str]) -> None:
+        """Discard rate baselines for removed hosts and later clean re-additions."""
+        with self._sample_lock:
+            if (
+                self._baselines.keys() <= hosts
+                and self._process_samples.keys() <= hosts
+            ):
+                return
+            self._baselines = {
+                host: baseline
+                for host, baseline in self._baselines.items()
+                if host in hosts
+            }
+            self._process_samples = {
+                host: sample
+                for host, sample in self._process_samples.items()
+                if host in hosts
+            }
 
     def _system_metrics(
         self, host: str, raw: _RawSystemSample, observed_monotonic: float
@@ -729,7 +1126,7 @@ class OpenSshLinuxResourceProbe:
             disk_read_bytes=raw.disk_read_bytes,
             disk_write_bytes=raw.disk_write_bytes,
         )
-        with self._baseline_lock:
+        with self._sample_lock:
             previous = self._baselines.get(host)
             self._baselines[host] = current
 
@@ -790,6 +1187,83 @@ class OpenSshLinuxResourceProbe:
             disks=raw.disks,
         )
 
+    def _processes_due(
+        self,
+        host: str,
+        now: float,
+        interval_seconds: float,
+        workload_mode: str,
+    ) -> bool:
+        with self._sample_lock:
+            sample = self._process_samples.get(host)
+        return (
+            sample is None
+            or sample.workload_mode != workload_mode
+            or now - sample.sampled_at_monotonic >= interval_seconds
+        )
+
+    def _merge_process_sample(
+        self,
+        host: str,
+        gpus: tuple[GpuMetrics, ...],
+        *,
+        process_sampled: bool,
+        sampled_at_monotonic: float,
+        observed_at: str,
+        workload_mode: str,
+    ) -> tuple[GpuMetrics, ...]:
+        if process_sampled:
+            if not gpus or all(gpu.processes_available for gpu in gpus):
+                sample = _ProcessSample(
+                    sampled_at_monotonic=sampled_at_monotonic,
+                    observed_at=observed_at,
+                    workload_mode=workload_mode,
+                    processes_by_gpu={gpu.uuid: gpu.processes for gpu in gpus},
+                )
+                with self._sample_lock:
+                    self._process_samples[host] = sample
+                return tuple(
+                    replace(gpu, processes_observed_at=observed_at) for gpu in gpus
+                )
+            return tuple(replace(gpu, processes_observed_at=None) for gpu in gpus)
+
+        with self._sample_lock:
+            sample = self._process_samples.get(host)
+        if sample is None:
+            return tuple(
+                replace(
+                    gpu,
+                    processes=(),
+                    processes_available=False,
+                    processes_sampled=False,
+                    processes_observed_at=None,
+                )
+                for gpu in gpus
+            )
+        merged: list[GpuMetrics] = []
+        for gpu in gpus:
+            if gpu.uuid not in sample.processes_by_gpu:
+                merged.append(
+                    replace(
+                        gpu,
+                        processes=(),
+                        processes_available=False,
+                        processes_sampled=False,
+                        processes_observed_at=None,
+                    )
+                )
+                continue
+            merged.append(
+                replace(
+                    gpu,
+                    processes=sample.processes_by_gpu[gpu.uuid],
+                    processes_available=True,
+                    processes_sampled=False,
+                    processes_observed_at=sample.observed_at,
+                )
+            )
+        return tuple(merged)
+
     def probe(self, host: str, config: MonitorConfig) -> ProbeResult:
         if not is_safe_alias(host):
             raise ValueError(f"unsafe SSH alias: {host!r}")
@@ -822,21 +1296,52 @@ class OpenSshLinuxResourceProbe:
             ]
         )
         started = time.monotonic()
-        environment = os.environ.copy()
-        environment["LC_ALL"] = "C"
+        process_sampled = self._processes_due(
+            host,
+            started,
+            config.gpu_process_poll_interval_seconds,
+            config.workloads.mode,
+        )
         override = config.host_override(host)
         timeout_seconds = (
             override.probe_timeout_seconds
             if override and override.probe_timeout_seconds is not None
             else config.probe_timeout_seconds
         )
+        deadline = started + timeout_seconds
+        script = _remote_script(config.workloads.mode, process_sampled)
         try:
             completed = _run_bounded_process(
                 command,
-                input_text=_REMOTE_SCRIPT,
+                input_text=script,
                 timeout_seconds=timeout_seconds,
                 max_output_bytes=config.max_output_bytes,
-                environment=environment,
+                environment=self._environment,
+                cancel_event=self._processes.cancelled,
+                process_registry=self._processes,
+            )
+            if (
+                not local
+                and completed.returncode == 255
+                and _is_retryable_ssh_transport_failure(completed.stderr)
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    completed = _run_bounded_process(
+                        command,
+                        input_text=script,
+                        timeout_seconds=remaining,
+                        max_output_bytes=config.max_output_bytes,
+                        environment=self._environment,
+                        cancel_event=self._processes.cancelled,
+                        process_registry=self._processes,
+                    )
+        except _ProcessCancelled:
+            return ProbeResult(
+                host=host,
+                status="error",
+                latency_ms=round((time.monotonic() - started) * 1000),
+                message="Resource collection cancelled",
             )
         except subprocess.TimeoutExpired:
             return ProbeResult(
@@ -906,18 +1411,30 @@ class OpenSshLinuxResourceProbe:
                     else "Remote resource output was not recognized"
                 ),
             )
+        observed_at = utc_now()
+        gpus = self._merge_process_sample(
+            host,
+            gpus,
+            process_sampled=process_sampled,
+            sampled_at_monotonic=started,
+            observed_at=observed_at,
+            workload_mode=config.workloads.mode,
+        )
         return ProbeResult(
             host=host,
             status="online",
             latency_ms=latency_ms,
             gpus=gpus,
             message=gpu_message,
+            observed_at=observed_at,
             system=system,
         )
 
 
-# The old class and registry name remain import-compatible for one release.
+# Legacy class and registry names remain import-compatible.
 OpenSshNvidiaSmiProbe = OpenSshLinuxResourceProbe
+_PROBES["openssh-linux-v5"] = OpenSshLinuxResourceProbe
+_PROBES["openssh-linux-v4"] = OpenSshLinuxResourceProbe
 _PROBES["openssh-linux-v2"] = OpenSshLinuxResourceProbe
 _PROBES["openssh-linux-v1"] = OpenSshLinuxResourceProbe
 _PROBES["openssh-nvidia-smi"] = OpenSshLinuxResourceProbe

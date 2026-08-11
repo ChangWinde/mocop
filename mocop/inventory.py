@@ -16,6 +16,8 @@ from .config import (
     MonitorConfig,
     is_safe_alias,
     is_valid_host_group,
+    is_valid_incident_action_reason,
+    is_valid_incident_condition_key,
     is_valid_maintenance_reason,
     load_config,
 )
@@ -24,6 +26,7 @@ from .models import utc_after
 
 _MAX_CONFIG_BYTES = 1_048_576
 DASHBOARD_MAINTENANCE_DURATIONS = frozenset({0, 3_600, 14_400, 86_400, 604_800})
+DASHBOARD_INCIDENT_ACTION_DURATIONS = frozenset({0, 3_600, 14_400, 86_400, 604_800})
 
 
 class InventoryError(RuntimeError):
@@ -37,6 +40,8 @@ class InventoryRequestError(InventoryError):
 class DashboardConfigController(Protocol):
     def snapshot(self) -> dict[str, object]: ...
 
+    def topology(self) -> dict[str, object]: ...
+
     def change(self, action: str, host: str) -> dict[str, object]: ...
 
     def update_collector_settings(
@@ -48,6 +53,15 @@ class DashboardConfigController(Protocol):
     ) -> dict[str, object]: ...
 
     def update_host_group(self, host: str, group: str) -> dict[str, object]: ...
+
+    def update_incident_action(
+        self,
+        host: str,
+        condition_key: str,
+        action: str,
+        duration_seconds: int,
+        reason: str,
+    ) -> dict[str, object]: ...
 
 
 class ConfigInventory:
@@ -68,6 +82,19 @@ class ConfigInventory:
         with self._lock:
             config = self._load()
             return self._snapshot(config)
+
+    def topology(self) -> dict[str, object]:
+        """Return validated display metadata without scanning or connecting."""
+        with self._lock:
+            topology = self._load().topology
+            return (
+                topology.to_dict()
+                if topology is not None
+                else {
+                    "root": None,
+                    "links": [],
+                }
+            )
 
     def change(self, action: str, host: str) -> dict[str, object]:
         if action not in {"add", "remove"}:
@@ -116,10 +143,76 @@ class ConfigInventory:
                     metadata = data.get(field)
                     if isinstance(metadata, dict):
                         metadata.pop(host, None)
+                actions = data.get("incident_actions")
+                if isinstance(actions, list):
+                    data["incident_actions"] = [
+                        item
+                        for item in actions
+                        if not isinstance(item, dict) or item.get("host") != host
+                    ]
+                self._remove_topology_host(data, host)
 
             data["hosts"] = configured
+            self._prune_incident_overrides(data)
             updated = self._commit(data)
             return self._snapshot(updated)
+
+    @staticmethod
+    def _remove_topology_host(data: dict[str, object], host: str) -> None:
+        topology = data.get("topology")
+        if not isinstance(topology, dict):
+            return
+        if topology.get("root") == host:
+            data.pop("topology", None)
+            return
+        links = topology.get("links")
+        if not isinstance(links, list):
+            return
+        topology["links"] = [
+            link
+            for link in links
+            if isinstance(link, dict)
+            and link.get("source") != host
+            and link.get("target") != host
+        ]
+
+    @staticmethod
+    def _prune_incident_overrides(data: dict[str, object]) -> None:
+        """Remove scoped overrides whose host or group no longer exists."""
+        overrides = data.get("incident_overrides")
+        if not isinstance(overrides, dict):
+            return
+        configured_hosts = {
+            host for host in data.get("hosts", ()) if isinstance(host, str)
+        }
+        excluded_hosts = {
+            host for host in data.get("exclude_hosts", ()) if isinstance(host, str)
+        }
+        active_hosts = configured_hosts - excluded_hosts
+        host_overrides = overrides.get("hosts", {})
+        group_overrides = overrides.get("groups", {})
+        groups = data.get("host_groups", {})
+        configured_groups = (
+            {
+                group
+                for host, group in groups.items()
+                if host in active_hosts and isinstance(group, str)
+            }
+            if isinstance(groups, dict)
+            else set()
+        )
+        if isinstance(host_overrides, dict):
+            overrides["hosts"] = {
+                host: value
+                for host, value in host_overrides.items()
+                if host in active_hosts
+            }
+        if isinstance(group_overrides, dict):
+            overrides["groups"] = {
+                group: value
+                for group, value in group_overrides.items()
+                if group in configured_groups
+            }
 
     def update_host_group(self, host: str, group: str) -> dict[str, object]:
         """Persist or clear one explicitly configured host's shared group."""
@@ -148,6 +241,7 @@ class ConfigInventory:
             else:
                 groups.pop(host, None)
             data["host_groups"] = groups
+            self._prune_incident_overrides(data)
             updated = self._commit(data)
             return self._snapshot(updated)
 
@@ -190,6 +284,66 @@ class ConfigInventory:
                     "reason": normalized_reason,
                 }
             data["maintenance_windows"] = windows
+            updated = self._commit(data)
+            return self._snapshot(updated)
+
+    def update_incident_action(
+        self,
+        host: str,
+        condition_key: str,
+        action: str,
+        duration_seconds: int,
+        reason: str,
+    ) -> dict[str, object]:
+        """Persist one bounded condition-level acknowledgement or silence."""
+        if not isinstance(host, str) or not is_safe_alias(host):
+            raise InventoryRequestError("incident host must be a safe alias")
+        if not is_valid_incident_condition_key(condition_key):
+            raise InventoryRequestError("incident condition key is invalid")
+        if action not in {"acknowledged", "silenced", "clear"}:
+            raise InventoryRequestError("incident action is invalid")
+        if (
+            isinstance(duration_seconds, bool)
+            or not isinstance(duration_seconds, int)
+            or duration_seconds not in DASHBOARD_INCIDENT_ACTION_DURATIONS
+            or (action == "clear") != (duration_seconds == 0)
+        ):
+            raise InventoryRequestError("incident action duration is invalid")
+        if not is_valid_incident_action_reason(reason):
+            raise InventoryRequestError("incident action reason is invalid")
+
+        with self._lock:
+            self._require_writable()
+            config = self._load()
+            if host not in config.hosts or host in config.exclude_hosts:
+                raise InventoryRequestError(
+                    "incident host is not explicitly configured"
+                )
+            data = self._read_object()
+            raw_actions = data.get("incident_actions", [])
+            if not isinstance(raw_actions, list):
+                raise InventoryError("incident action configuration is invalid")
+            now = utc_after(0)
+            actions = [
+                item
+                for item in raw_actions
+                if isinstance(item, dict)
+                and isinstance(item.get("until"), str)
+                and item["until"] > now
+                and (item.get("host"), item.get("condition_key"))
+                != (host, condition_key)
+            ]
+            if action != "clear":
+                actions.append(
+                    {
+                        "host": host,
+                        "condition_key": condition_key,
+                        "action": action,
+                        "until": utc_after(duration_seconds),
+                        "reason": reason.strip(),
+                    }
+                )
+            data["incident_actions"] = actions
             updated = self._commit(data)
             return self._snapshot(updated)
 
@@ -299,6 +453,11 @@ class ConfigInventory:
                 for alias, window in config.maintenance_windows
                 if window.is_active()
             },
+            "incidentActions": [
+                action.to_dict()
+                for action in config.incident_actions
+                if action.is_active()
+            ],
             "hostGroups": dict(config.host_groups),
             "writable": self._is_writable_target(),
         }

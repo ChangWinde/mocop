@@ -48,7 +48,7 @@ Capacity matching also remains a browser concern. It transforms the already publ
 
 - A Mocop host can be monitored without running SSH by setting `local_host` to one alias in the explicit allowlist.
 - Remote and local results share one protocol and UI data contract.
-- GPU task freshness matches the normal host cadence at the cost of one additional `nvidia-smi` process query per successful probe.
+- GPU task collection initially matched the host cadence. [ADR-0014](0014-tiered-gpu-process-telemetry.md) supersedes this part of the decision with an independent bounded cadence.
 - Invalid or stale browser preferences fall back to safe defaults and never prevent telemetry rendering.
 - No new runtime dependency, server-side preference store, or browser-triggered probe route is introduced.
 - Capacity requests add no network or target load and must be presented as placement guidance rather than resource reservation.

@@ -40,7 +40,7 @@ Cons: each newly dashboard-managed field requires an explicit contract and migra
 
 Choose Option C. The dashboard configuration controller accepts only `pollIntervalSeconds`, `probeTimeoutSeconds`, and `maxWorkers`, maps them to the canonical JSON fields, applies stricter dashboard bounds where appropriate, validates the complete candidate through `load_config`, and atomically replaces the selected user configuration. The service callback updates the active immutable configuration and wakes scheduling immediately. The existing cadence shortcut uses the same durable path.
 
-Theme, density, ordering, default fleet filter, GPU sorting, heatmap metric, and optional columns remain in a versioned browser-local record. These values affect rendering only and therefore do not enter the cluster configuration or overwrite another viewer's preferences.
+Visual style, accent, density, ordering, default fleet filter, GPU sorting, heatmap metric, and optional columns remain in a versioned browser-local record. These values affect rendering only and therefore do not enter the cluster configuration or overwrite another viewer's preferences.
 
 ## Impact
 

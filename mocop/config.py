@@ -4,9 +4,11 @@ import json
 import os
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 CONFIG_ENV_VAR = "MOCOP_CONFIG"
@@ -15,7 +17,13 @@ USER_CONFIG_RELATIVE_PATH = Path("mocop/config.json")
 BUNDLED_CONFIG_PATH = Path(__file__).with_name("default_config.json")
 _SAFE_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 MAINTENANCE_REASON_MAX_LENGTH = 120
+INCIDENT_ACTION_REASON_MAX_LENGTH = 120
+INCIDENT_ACTION_KEY_MAX_LENGTH = 512
+INCIDENT_ACTION_MAX_ENTRIES = 512
 HOST_GROUP_MAX_LENGTH = 48
+TOPOLOGY_LABEL_MAX_LENGTH = 64
+TOPOLOGY_MAX_LINKS = 512
+TOPOLOGY_TRANSPORTS = frozenset({"ssh", "frp-stcp", "frp-xtcp", "vpn"})
 
 
 class ConfigError(ValueError):
@@ -45,6 +53,61 @@ class IncidentConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class IncidentActionConfig:
+    host: str
+    condition_key: str
+    action: str
+    until: datetime
+    reason: str = ""
+
+    def is_active(self, at: datetime | None = None) -> bool:
+        return self.until > (at or datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "host": self.host,
+            "condition_key": self.condition_key,
+            "action": self.action,
+            "until": self.until.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class IncidentScopeOverrideConfig:
+    thresholds: tuple[tuple[str, float], ...] = ()
+    exclude_disk_mounts: frozenset[str] = frozenset()
+
+    def threshold(self, name: str) -> float | None:
+        return next((value for key, value in self.thresholds if key == name), None)
+
+
+@dataclass(frozen=True, slots=True)
+class PersistenceConfig:
+    enabled: bool = False
+    retention_hours: int = 168
+    max_bytes: int = 134_217_728
+
+
+@dataclass(frozen=True, slots=True)
+class WorkloadConfig:
+    mode: str = "disabled"
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookConfig:
+    name: str
+    url_env: str
+    secret_env: str | None = None
+    events: tuple[str, ...] = ("opened", "resolved", "escalated", "deescalated")
+    timeout_seconds: float = 5
+    max_attempts: int = 3
+    retry_base_seconds: float = 1
+    min_interval_seconds: float = 1
+    allow_private_networks: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class HostOverrideConfig:
     poll_interval_seconds: float | None = None
     probe_timeout_seconds: float | None = None
@@ -66,6 +129,36 @@ class MaintenanceWindowConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TopologyLinkConfig:
+    source: str
+    target: str
+    transport: str
+    label: str | None = None
+
+    def to_dict(self) -> dict[str, str]:
+        value = {
+            "source": self.source,
+            "target": self.target,
+            "transport": self.transport,
+        }
+        if self.label is not None:
+            value["label"] = self.label
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionTopologyConfig:
+    root: str
+    links: tuple[TopologyLinkConfig, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "root": self.root,
+            "links": [link.to_dict() for link in self.links],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class MonitorConfig:
     ssh_config: Path
     auto_discover: bool
@@ -77,6 +170,9 @@ class MonitorConfig:
     max_workers: int
     listen_host: str
     listen_port: int
+    gpu_process_poll_interval_seconds: float = 15
+    retry_jitter_pct: float = 15
+    manual_probe_cooldown_seconds: float = 5
     local_host: str | None = None
     max_output_bytes: int = 2_097_152
     history_points: int = 720
@@ -85,27 +181,51 @@ class MonitorConfig:
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
     expected_gpu_counts: tuple[tuple[str, int], ...] = ()
     incidents: IncidentConfig = field(default_factory=IncidentConfig)
+    incident_actions: tuple[IncidentActionConfig, ...] = ()
+    host_incident_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...] = ()
+    group_incident_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...] = ()
     host_overrides: tuple[tuple[str, HostOverrideConfig], ...] = ()
     maintenance_windows: tuple[tuple[str, MaintenanceWindowConfig], ...] = ()
     host_groups: tuple[tuple[str, str], ...] = ()
+    topology: ConnectionTopologyConfig | None = None
+    persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
+    workloads: WorkloadConfig = field(default_factory=WorkloadConfig)
+    webhooks: tuple[WebhookConfig, ...] = ()
+    _host_override_index: Mapping[str, HostOverrideConfig] = field(
+        init=False, repr=False, compare=False, hash=False
+    )
+    _maintenance_window_index: Mapping[str, MaintenanceWindowConfig] = field(
+        init=False, repr=False, compare=False, hash=False
+    )
+    _host_group_index: Mapping[str, str] = field(
+        init=False, repr=False, compare=False, hash=False
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_host_override_index",
+            MappingProxyType(dict(self.host_overrides)),
+        )
+        object.__setattr__(
+            self,
+            "_maintenance_window_index",
+            MappingProxyType(dict(self.maintenance_windows)),
+        )
+        object.__setattr__(
+            self,
+            "_host_group_index",
+            MappingProxyType(dict(self.host_groups)),
+        )
 
     def host_override(self, host: str) -> HostOverrideConfig | None:
-        return next(
-            (override for alias, override in self.host_overrides if alias == host),
-            None,
-        )
+        return self._host_override_index.get(host)
 
     def maintenance_window(self, host: str) -> MaintenanceWindowConfig | None:
-        return next(
-            (window for alias, window in self.maintenance_windows if alias == host),
-            None,
-        )
+        return self._maintenance_window_index.get(host)
 
     def host_group(self, host: str) -> str | None:
-        return next(
-            (group for alias, group in self.host_groups if alias == host),
-            None,
-        )
+        return self._host_group_index.get(host)
 
 
 _REQUIRED_KEYS = {
@@ -125,6 +245,9 @@ _OPTIONAL_KEYS = {
     "history_points",
     "incident_history_points",
     "collection_stale_cycles",
+    "gpu_process_poll_interval_seconds",
+    "retry_jitter_pct",
+    "manual_probe_cooldown_seconds",
     "max_output_bytes",
     "thresholds",
     "expected_gpu_counts",
@@ -132,6 +255,12 @@ _OPTIONAL_KEYS = {
     "host_overrides",
     "maintenance_windows",
     "host_groups",
+    "topology",
+    "persistence",
+    "workloads",
+    "webhooks",
+    "incident_actions",
+    "incident_overrides",
 }
 _THRESHOLD_KEYS = {
     "cpu_warning_pct",
@@ -150,6 +279,30 @@ _INCIDENT_KEYS = {
 }
 _HOST_OVERRIDE_KEYS = {"poll_interval_seconds", "probe_timeout_seconds"}
 _MAINTENANCE_WINDOW_KEYS = {"until", "reason"}
+_INCIDENT_ACTION_KEYS = {"host", "condition_key", "action", "until", "reason"}
+_INCIDENT_ACTIONS = frozenset({"acknowledged", "silenced"})
+_INCIDENT_OVERRIDE_SCOPES = {"hosts", "groups"}
+_INCIDENT_SCOPE_OVERRIDE_KEYS = {"thresholds", "exclude_disk_mounts"}
+_TOPOLOGY_KEYS = {"root", "links"}
+_TOPOLOGY_LINK_REQUIRED_KEYS = {"source", "target", "transport"}
+_TOPOLOGY_LINK_KEYS = _TOPOLOGY_LINK_REQUIRED_KEYS | {"label"}
+_PERSISTENCE_KEYS = {"enabled", "retention_hours", "max_bytes"}
+_WORKLOAD_KEYS = {"mode"}
+_WORKLOAD_MODES = frozenset({"disabled", "auto"})
+_WEBHOOK_KEYS = {
+    "name",
+    "url_env",
+    "secret_env",
+    "events",
+    "timeout_seconds",
+    "max_attempts",
+    "retry_base_seconds",
+    "min_interval_seconds",
+    "allow_private_networks",
+}
+_WEBHOOK_EVENT_STATES = frozenset({"opened", "resolved", "escalated", "deescalated"})
+_ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
+_WEBHOOK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$")
 _UTC_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
@@ -217,6 +370,84 @@ def is_valid_maintenance_reason(value: object, *, required: bool) -> bool:
     )
 
 
+def is_valid_incident_action_reason(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    return len(value.strip()) <= INCIDENT_ACTION_REASON_MAX_LENGTH and not any(
+        unicodedata.category(character).startswith("C") for character in value
+    )
+
+
+def is_valid_incident_condition_key(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= INCIDENT_ACTION_KEY_MAX_LENGTH
+        and not any(
+            unicodedata.category(character).startswith("C") for character in value
+        )
+    )
+
+
+def _utc_timestamp(value: object, label: str) -> datetime:
+    if not isinstance(value, str) or not _UTC_TIMESTAMP.fullmatch(value):
+        raise ConfigError(f"{label} must be a UTC timestamp")
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as exc:
+        raise ConfigError(f"{label} must be a valid UTC timestamp") from exc
+
+
+def _incident_scope_override(raw: object, label: str) -> IncidentScopeOverrideConfig:
+    if not isinstance(raw, dict) or not set(raw) <= _INCIDENT_SCOPE_OVERRIDE_KEYS:
+        raise ConfigError(f"{label} has an invalid schema")
+    if not raw:
+        raise ConfigError(f"{label} must not be empty")
+    raw_thresholds = raw.get("thresholds", {})
+    if not isinstance(raw_thresholds, dict):
+        raise ConfigError(f"{label}.thresholds must be a JSON object")
+    unknown = sorted(raw_thresholds.keys() - _THRESHOLD_KEYS)
+    if unknown:
+        raise ConfigError(f"unknown {label}.thresholds keys: {', '.join(unknown)}")
+    thresholds: list[tuple[str, float]] = []
+    for name, value in raw_thresholds.items():
+        maximum = 150 if name == "gpu_temperature_warning_c" else 100
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not 0 <= float(value) <= maximum
+        ):
+            raise ConfigError(
+                f"{label}.thresholds.{name} must be between 0 and {maximum}"
+            )
+        thresholds.append((name, float(value)))
+    raw_mounts = raw.get("exclude_disk_mounts", [])
+    if (
+        not isinstance(raw_mounts, list)
+        or len(raw_mounts) > 128
+        or not all(
+            isinstance(item, str)
+            and item.startswith("/")
+            and 0 < len(item) <= 512
+            and not any(
+                unicodedata.category(character).startswith("C") for character in item
+            )
+            for item in raw_mounts
+        )
+    ):
+        raise ConfigError(
+            f"{label}.exclude_disk_mounts must contain at most 128 absolute paths"
+        )
+    if not thresholds and not raw_mounts:
+        raise ConfigError(f"{label} must configure a threshold or disk exclusion")
+    return IncidentScopeOverrideConfig(
+        thresholds=tuple(sorted(thresholds)),
+        exclude_disk_mounts=frozenset(raw_mounts),
+    )
+
+
 def is_valid_host_group(value: object, *, required: bool) -> bool:
     if not isinstance(value, str):
         return False
@@ -228,6 +459,221 @@ def is_valid_host_group(value: object, *, required: bool) -> bool:
             unicodedata.category(character).startswith("C") for character in value
         )
     )
+
+
+def _connection_topology(raw: object) -> ConnectionTopologyConfig:
+    if not isinstance(raw, dict) or set(raw) != _TOPOLOGY_KEYS:
+        raise ConfigError("topology must contain exactly root and links")
+    root_value = raw.get("root")
+    if not isinstance(root_value, str) or not is_safe_alias(root_value):
+        raise ConfigError("topology.root must be a safe host alias")
+    root = root_value.strip()
+
+    raw_links = raw.get("links")
+    if not isinstance(raw_links, list):
+        raise ConfigError("topology.links must be a list")
+    if len(raw_links) > TOPOLOGY_MAX_LINKS:
+        raise ConfigError(
+            f"topology.links must contain at most {TOPOLOGY_MAX_LINKS} links"
+        )
+
+    links: list[TopologyLinkConfig] = []
+    targets: set[str] = set()
+    children: dict[str, list[str]] = {}
+    for index, item in enumerate(raw_links):
+        label = f"topology.links[{index}]"
+        if not isinstance(item, dict) or not (
+            _TOPOLOGY_LINK_REQUIRED_KEYS <= set(item) <= _TOPOLOGY_LINK_KEYS
+        ):
+            raise ConfigError(f"{label} has an invalid schema")
+        source = item.get("source")
+        target = item.get("target")
+        transport = item.get("transport")
+        if (
+            not isinstance(source, str)
+            or not is_safe_alias(source)
+            or not isinstance(target, str)
+            or not is_safe_alias(target)
+        ):
+            raise ConfigError(f"{label} endpoints must be safe host aliases")
+        if source == target:
+            raise ConfigError(f"{label} cannot link a host to itself")
+        if target == root:
+            raise ConfigError("topology.root cannot have an incoming link")
+        if target in targets:
+            raise ConfigError(f"topology target {target} has more than one parent")
+        if not isinstance(transport, str) or transport not in TOPOLOGY_TRANSPORTS:
+            raise ConfigError(f"{label}.transport is not supported")
+
+        label_value = item.get("label")
+        if label_value is None:
+            normalized_label = None
+        elif (
+            not isinstance(label_value, str)
+            or not label_value.strip()
+            or len(label_value.strip()) > TOPOLOGY_LABEL_MAX_LENGTH
+            or any(
+                unicodedata.category(character).startswith("C")
+                for character in label_value
+            )
+        ):
+            raise ConfigError(
+                f"{label}.label must contain at most "
+                f"{TOPOLOGY_LABEL_MAX_LENGTH} visible characters"
+            )
+        else:
+            normalized_label = label_value.strip()
+
+        targets.add(target)
+        children.setdefault(source, []).append(target)
+        links.append(
+            TopologyLinkConfig(
+                source=source,
+                target=target,
+                transport=transport,
+                label=normalized_label,
+            )
+        )
+
+    reachable = {root}
+    pending = [root]
+    while pending:
+        source = pending.pop()
+        for target in children.get(source, ()):
+            if target not in reachable:
+                reachable.add(target)
+                pending.append(target)
+    endpoints = {endpoint for link in links for endpoint in (link.source, link.target)}
+    if not endpoints <= reachable:
+        raise ConfigError("topology links must form one tree reachable from root")
+    return ConnectionTopologyConfig(root=root, links=tuple(links))
+
+
+def _persistence_config(data: dict[str, Any]) -> PersistenceConfig:
+    raw = data.get("persistence", {})
+    if not isinstance(raw, dict):
+        raise ConfigError("persistence must be a JSON object")
+    unknown = sorted(raw.keys() - _PERSISTENCE_KEYS)
+    if unknown:
+        raise ConfigError(f"unknown persistence keys: {', '.join(unknown)}")
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("persistence.enabled must be true or false")
+
+    def integer(key: str, default: int, minimum: int, maximum: int) -> int:
+        value = raw.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(f"persistence.{key} must be an integer")
+        if not minimum <= value <= maximum:
+            raise ConfigError(
+                f"persistence.{key} must be between {minimum} and {maximum}"
+            )
+        return value
+
+    return PersistenceConfig(
+        enabled=enabled,
+        retention_hours=integer("retention_hours", 168, 1, 8760),
+        max_bytes=integer("max_bytes", 134_217_728, 8_388_608, 1_073_741_824),
+    )
+
+
+def _workload_config(data: dict[str, Any]) -> WorkloadConfig:
+    raw = data.get("workloads", {"mode": "disabled"})
+    if not isinstance(raw, dict):
+        raise ConfigError("workloads must be a JSON object")
+    unknown = sorted(raw.keys() - _WORKLOAD_KEYS)
+    if unknown:
+        raise ConfigError(f"unknown workloads keys: {', '.join(unknown)}")
+    mode = raw.get("mode")
+    if mode not in _WORKLOAD_MODES:
+        raise ConfigError("workloads.mode must be disabled or auto")
+    return WorkloadConfig(mode=mode)
+
+
+def _webhook_configs(data: dict[str, Any]) -> tuple[WebhookConfig, ...]:
+    raw_items = data.get("webhooks", [])
+    if not isinstance(raw_items, list) or len(raw_items) > 16:
+        raise ConfigError("webhooks must be a list with at most 16 entries")
+    webhooks: list[WebhookConfig] = []
+    names: set[str] = set()
+
+    def number(
+        raw: dict[str, Any],
+        label: str,
+        key: str,
+        default: float,
+        minimum: float,
+        maximum: float,
+    ) -> float:
+        value = raw.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ConfigError(f"{label}.{key} must be a number")
+        parsed = float(value)
+        if not minimum <= parsed <= maximum:
+            raise ConfigError(f"{label}.{key} must be between {minimum} and {maximum}")
+        return parsed
+
+    for index, raw in enumerate(raw_items):
+        label = f"webhooks[{index}]"
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{label} must be a JSON object")
+        unknown = sorted(raw.keys() - _WEBHOOK_KEYS)
+        if unknown:
+            raise ConfigError(f"unknown {label} keys: {', '.join(unknown)}")
+        name = raw.get("name")
+        url_env = raw.get("url_env")
+        secret_env = raw.get("secret_env")
+        if not isinstance(name, str) or not _WEBHOOK_NAME.fullmatch(name):
+            raise ConfigError(f"{label}.name must be a safe identifier")
+        if name in names:
+            raise ConfigError(f"{label}.name must be unique")
+        names.add(name)
+        if not isinstance(url_env, str) or not _ENVIRONMENT_NAME.fullmatch(url_env):
+            raise ConfigError(f"{label}.url_env must be an environment variable name")
+        if secret_env is not None and (
+            not isinstance(secret_env, str)
+            or not _ENVIRONMENT_NAME.fullmatch(secret_env)
+        ):
+            raise ConfigError(
+                f"{label}.secret_env must be null or an environment variable name"
+            )
+        events = raw.get("events", ["opened", "resolved", "escalated", "deescalated"])
+        if (
+            not isinstance(events, list)
+            or not events
+            or len(events) > len(_WEBHOOK_EVENT_STATES)
+            or not all(isinstance(item, str) for item in events)
+            or any(item not in _WEBHOOK_EVENT_STATES for item in events)
+            or len(set(events)) != len(events)
+        ):
+            raise ConfigError(f"{label}.events contains invalid or duplicate states")
+
+        max_attempts = raw.get("max_attempts", 3)
+        if (
+            isinstance(max_attempts, bool)
+            or not isinstance(max_attempts, int)
+            or not 1 <= max_attempts <= 8
+        ):
+            raise ConfigError(f"{label}.max_attempts must be between 1 and 8")
+        allow_private = raw.get("allow_private_networks", False)
+        if not isinstance(allow_private, bool):
+            raise ConfigError(f"{label}.allow_private_networks must be true or false")
+        webhooks.append(
+            WebhookConfig(
+                name=name,
+                url_env=url_env,
+                secret_env=secret_env,
+                events=tuple(events),
+                timeout_seconds=number(raw, label, "timeout_seconds", 5, 0.5, 30),
+                max_attempts=max_attempts,
+                retry_base_seconds=number(raw, label, "retry_base_seconds", 1, 0.1, 60),
+                min_interval_seconds=number(
+                    raw, label, "min_interval_seconds", 1, 0, 300
+                ),
+                allow_private_networks=allow_private,
+            )
+        )
+    return tuple(webhooks)
 
 
 def resolve_config_path(
@@ -308,7 +754,18 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
             raise ConfigError("local_host must also appear in the explicit hosts list")
         if local_host in excludes:
             raise ConfigError("local_host cannot be excluded")
+    topology = _connection_topology(data["topology"]) if "topology" in data else None
     poll_interval = _bounded_number(data, "poll_interval_seconds", 1, 3600)
+    gpu_process_poll_interval = _bounded_number(
+        {
+            "gpu_process_poll_interval_seconds": data.get(
+                "gpu_process_poll_interval_seconds", 15
+            )
+        },
+        "gpu_process_poll_interval_seconds",
+        2,
+        3600,
+    )
     probe_timeout = _bounded_number(data, "probe_timeout_seconds", 2, 300)
     connect_timeout = _bounded_integer(data, "connect_timeout_seconds", 1, 120)
     max_output_bytes = _bounded_integer(
@@ -338,6 +795,22 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         or not 2 <= collection_stale_cycles <= 12
     ):
         raise ConfigError("collection_stale_cycles must be between 2 and 12")
+    retry_jitter_pct = _bounded_number(
+        {"retry_jitter_pct": data.get("retry_jitter_pct", 15)},
+        "retry_jitter_pct",
+        0,
+        50,
+    )
+    manual_probe_cooldown_seconds = _bounded_number(
+        {"manual_probe_cooldown_seconds": data.get("manual_probe_cooldown_seconds", 5)},
+        "manual_probe_cooldown_seconds",
+        1,
+        300,
+    )
+
+    persistence = _persistence_config(data)
+    workloads = _workload_config(data)
+    webhooks = _webhook_configs(data)
 
     if probe_timeout <= connect_timeout:
         raise ConfigError(
@@ -459,21 +932,9 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
                 f"unknown maintenance_windows.{alias} keys: "
                 f"{', '.join(unknown_window_keys)}"
             )
-        until_value = raw_window.get("until")
-        if not isinstance(until_value, str) or not _UTC_TIMESTAMP.fullmatch(
-            until_value
-        ):
-            raise ConfigError(
-                f"maintenance_windows.{alias}.until must be a UTC timestamp"
-            )
-        try:
-            until = datetime.strptime(until_value, "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=timezone.utc
-            )
-        except ValueError as exc:
-            raise ConfigError(
-                f"maintenance_windows.{alias}.until must be a valid UTC timestamp"
-            ) from exc
+        until = _utc_timestamp(
+            raw_window.get("until"), f"maintenance_windows.{alias}.until"
+        )
         reason_value = raw_window.get("reason", "")
         if not is_valid_maintenance_reason(reason_value, required=False):
             raise ConfigError(
@@ -505,6 +966,54 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         assert isinstance(group_value, str)
         host_groups.append((alias, group_value.strip()))
 
+    raw_incident_overrides = data.get("incident_overrides", {})
+    if (
+        not isinstance(raw_incident_overrides, dict)
+        or not set(raw_incident_overrides) <= _INCIDENT_OVERRIDE_SCOPES
+    ):
+        raise ConfigError("incident_overrides must contain only hosts and groups")
+    host_incident_overrides: list[tuple[str, IncidentScopeOverrideConfig]] = []
+    raw_host_overrides = raw_incident_overrides.get("hosts", {})
+    if not isinstance(raw_host_overrides, dict) or len(raw_host_overrides) > 256:
+        raise ConfigError("incident_overrides.hosts must be a bounded JSON object")
+    for alias, raw_override in raw_host_overrides.items():
+        if not isinstance(alias, str) or not is_safe_alias(alias):
+            raise ConfigError("incident_overrides.hosts keys must be safe aliases")
+        if alias not in hosts or alias in excludes:
+            raise ConfigError(
+                f"incident_overrides.hosts.{alias} must reference an active host"
+            )
+        host_incident_overrides.append(
+            (
+                alias,
+                _incident_scope_override(
+                    raw_override, f"incident_overrides.hosts.{alias}"
+                ),
+            )
+        )
+    group_incident_overrides: list[tuple[str, IncidentScopeOverrideConfig]] = []
+    raw_group_overrides = raw_incident_overrides.get("groups", {})
+    if not isinstance(raw_group_overrides, dict) or len(raw_group_overrides) > 256:
+        raise ConfigError("incident_overrides.groups must be a bounded JSON object")
+    configured_groups = {group for _, group in host_groups}
+    for group, raw_override in raw_group_overrides.items():
+        if (
+            not is_valid_host_group(group, required=True)
+            or group not in configured_groups
+        ):
+            raise ConfigError(
+                f"incident_overrides.groups.{group} must reference a configured group"
+            )
+        assert isinstance(group, str)
+        group_incident_overrides.append(
+            (
+                group.strip(),
+                _incident_scope_override(
+                    raw_override, f"incident_overrides.groups.{group}"
+                ),
+            )
+        )
+
     incident_data = data.get("incidents", {})
     if not isinstance(incident_data, dict):
         raise ConfigError("incidents must be a JSON object")
@@ -527,6 +1036,56 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         gpu_idle_memory_cycles=incident_cycles("gpu_idle_memory_cycles"),
     )
 
+    raw_actions = data.get("incident_actions", [])
+    if (
+        not isinstance(raw_actions, list)
+        or len(raw_actions) > INCIDENT_ACTION_MAX_ENTRIES
+    ):
+        raise ConfigError(
+            f"incident_actions must be a list with at most "
+            f"{INCIDENT_ACTION_MAX_ENTRIES} entries"
+        )
+    incident_actions: list[IncidentActionConfig] = []
+    action_keys: set[tuple[str, str]] = set()
+    for index, raw_action in enumerate(raw_actions):
+        label = f"incident_actions[{index}]"
+        if not isinstance(raw_action, dict) or set(raw_action) != _INCIDENT_ACTION_KEYS:
+            raise ConfigError(f"{label} has an invalid schema")
+        host = raw_action.get("host")
+        condition_key = raw_action.get("condition_key")
+        action = raw_action.get("action")
+        reason = raw_action.get("reason")
+        if not isinstance(host, str) or not is_safe_alias(host):
+            raise ConfigError(f"{label}.host must be a safe host alias")
+        if host not in hosts or host in excludes:
+            raise ConfigError(f"{label}.host must reference an active explicit host")
+        if not is_valid_incident_condition_key(condition_key):
+            raise ConfigError(f"{label}.condition_key is invalid")
+        if action not in _INCIDENT_ACTIONS:
+            raise ConfigError(f"{label}.action must be acknowledged or silenced")
+        if not is_valid_incident_action_reason(reason):
+            raise ConfigError(
+                f"{label}.reason must contain at most "
+                f"{INCIDENT_ACTION_REASON_MAX_LENGTH} visible characters"
+            )
+        until = _utc_timestamp(raw_action.get("until"), f"{label}.until")
+        assert isinstance(condition_key, str)
+        assert isinstance(action, str)
+        assert isinstance(reason, str)
+        key = (host, condition_key)
+        if key in action_keys:
+            raise ConfigError(f"{label} duplicates an incident action")
+        action_keys.add(key)
+        incident_actions.append(
+            IncidentActionConfig(
+                host=host,
+                condition_key=condition_key,
+                action=action,
+                until=until,
+                reason=reason.strip(),
+            )
+        )
+
     ssh_config = Path(data["ssh_config"]).expanduser()
     if not ssh_config.is_absolute():
         ssh_config = config_path.parent / ssh_config
@@ -543,6 +1102,9 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         max_workers=max_workers,
         listen_host=data["listen_host"].strip(),
         listen_port=listen_port,
+        gpu_process_poll_interval_seconds=gpu_process_poll_interval,
+        retry_jitter_pct=retry_jitter_pct,
+        manual_probe_cooldown_seconds=manual_probe_cooldown_seconds,
         local_host=local_host,
         history_points=history_value,
         incident_history_points=incident_history_value,
@@ -550,7 +1112,14 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         thresholds=thresholds,
         expected_gpu_counts=tuple(expected_gpu_counts),
         incidents=incidents,
+        incident_actions=tuple(incident_actions),
+        host_incident_overrides=tuple(host_incident_overrides),
+        group_incident_overrides=tuple(group_incident_overrides),
         host_overrides=tuple(host_overrides),
         maintenance_windows=tuple(maintenance_windows),
         host_groups=tuple(host_groups),
+        topology=topology,
+        persistence=persistence,
+        workloads=workloads,
+        webhooks=webhooks,
     )

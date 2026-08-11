@@ -16,6 +16,16 @@ from .lifecycle import (
     user_config_path,
     user_unit_path,
 )
+from .notifications import (
+    DisabledNotificationSink,
+    NotificationError,
+    create_notification_sink,
+)
+from .persistence import (
+    DisabledPersistence,
+    PersistenceError,
+    create_persistence,
+)
 from .probe import create_probe
 from .service import MonitorService, StateStore
 from .web import MonitorHttpServer
@@ -38,6 +48,11 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "--once",
         action="store_true",
         help="collect one snapshot, write it as JSON, and exit",
+    )
+    parser.add_argument(
+        "--managed-service",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     commands = parser.add_subparsers(dest="command")
 
@@ -79,6 +94,28 @@ def _run_monitor(args: argparse.Namespace) -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
+    persistence = DisabledPersistence()
+    restored = persistence.load(config.history_points, config.incident_history_points)
+    if not args.once:
+        try:
+            persistence = create_persistence(config.persistence)
+            restored = persistence.load(
+                config.history_points, config.incident_history_points
+            )
+        except PersistenceError as exc:
+            persistence.close()
+            print(f"Persistence error: {exc}", file=sys.stderr)
+            return 2
+
+    notifications = DisabledNotificationSink()
+    if not args.once:
+        try:
+            notifications = create_notification_sink(config.webhooks)
+        except NotificationError as exc:
+            persistence.close()
+            print(f"Notification error: {exc}", file=sys.stderr)
+            return 2
+
     state = StateStore(
         config.poll_interval_seconds,
         config.thresholds,
@@ -87,14 +124,21 @@ def _run_monitor(args: argparse.Namespace) -> int:
         collection_stale_cycles=config.collection_stale_cycles,
         expected_gpu_counts=config.expected_gpu_counts,
         incidents=config.incidents,
+        incident_actions=config.incident_actions,
+        host_incident_overrides=config.host_incident_overrides,
+        group_incident_overrides=config.group_incident_overrides,
         maintenance_windows=config.maintenance_windows,
         host_groups=config.host_groups,
+        persistence=persistence,
+        restored=restored,
+        topology=config.topology,
+        notifications=notifications,
     )
     host_source = create_host_source("openssh-config")
     monitor = MonitorService(
         config=config,
         host_source=host_source,
-        probe=create_probe("openssh-linux-v4"),
+        probe=create_probe("openssh-linux-v6"),
         state=state,
     )
     if args.once:
@@ -105,6 +149,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
         return 0
 
     stop_event = threading.Event()
+    restart_event = threading.Event()
 
     def stop(_signum: int, _frame: object) -> None:
         stop_event.set()
@@ -115,13 +160,19 @@ def _run_monitor(args: argparse.Namespace) -> int:
     try:
         inventory = ConfigInventory(config_path, host_source, monitor.update_config)
         server = MonitorHttpServer(
-            (config.listen_host, config.listen_port), state, inventory
+            (config.listen_host, config.listen_port),
+            state,
+            inventory,
+            restart_event.set if args.managed_service else None,
+            monitor,
         )
     except OSError as exc:
         print(
             f"Cannot listen on {config.listen_host}:{config.listen_port}: {exc}",
             file=sys.stderr,
         )
+        persistence.close()
+        notifications.close()
         return 1
     server.timeout = 0.5
 
@@ -134,21 +185,28 @@ def _run_monitor(args: argparse.Namespace) -> int:
     collector.start()
     print(f"Configuration: {config_path}")
     print(f"Mocop: http://{config.listen_host}:{config.listen_port}")
+    collector_failed = False
     try:
-        while not stop_event.is_set():
+        while not stop_event.is_set() and not restart_event.is_set():
             server.handle_request()
+            if (
+                not collector.is_alive()
+                and not stop_event.is_set()
+                and not restart_event.is_set()
+            ):
+                print("Collector scheduler stopped unexpectedly", file=sys.stderr)
+                collector_failed = True
+                break
     finally:
         stop_event.set()
+        monitor.stop()
         server.server_close()
-        configured_timeouts = [
-            override.probe_timeout_seconds
-            for _, override in config.host_overrides
-            if override.probe_timeout_seconds is not None
-        ]
-        collector.join(
-            timeout=max([config.probe_timeout_seconds, *configured_timeouts]) + 1
-        )
-    return 0
+        collector.join(timeout=monitor.shutdown_timeout_seconds())
+        persistence.close()
+        notifications.close()
+    if restart_event.is_set():
+        return 75  # EX_TEMPFAIL: systemd Restart=on-failure starts the new process.
+    return 1 if collector_failed else 0
 
 
 def _run_lifecycle(args: argparse.Namespace) -> int:

@@ -2,11 +2,14 @@
   "ssh_config": "~/.ssh/config",
   "auto_discover": false,
   "hosts": [
+    "monitor-host",
     "gpu-node-01",
     "gpu-node-02"
   ],
-  "exclude_hosts": [],
-  "local_host": null,
+  "exclude_hosts": [
+    "gpu-gateway"
+  ],
+  "local_host": "monitor-host",
   "expected_gpu_counts": {
     "gpu-node-01": 8,
     "gpu-node-02": 8
@@ -17,9 +20,33 @@
     "gpu-node-01": "training",
     "gpu-node-02": "inference"
   },
+  "topology": {
+    "root": "monitor-host",
+    "links": [
+      {
+        "source": "monitor-host",
+        "target": "gpu-gateway",
+        "transport": "frp-stcp",
+        "label": "STCP · 7005"
+      },
+      {
+        "source": "gpu-gateway",
+        "target": "gpu-node-01",
+        "transport": "ssh"
+      },
+      {
+        "source": "gpu-gateway",
+        "target": "gpu-node-02",
+        "transport": "ssh"
+      }
+    ]
+  },
   "poll_interval_seconds": 5,
+  "gpu_process_poll_interval_seconds": 15,
   "probe_timeout_seconds": 12,
   "connect_timeout_seconds": 5,
+  "retry_jitter_pct": 15,
+  "manual_probe_cooldown_seconds": 5,
   "max_output_bytes": 2097152,
   "max_workers": 8,
   "listen_host": "127.0.0.1",
@@ -27,6 +54,28 @@
   "history_points": 720,
   "incident_history_points": 500,
   "collection_stale_cycles": 3,
+  "persistence": {
+    "enabled": false,
+    "retention_hours": 168,
+    "max_bytes": 134217728
+  },
+  "workloads": {
+    "mode": "disabled"
+  },
+  "webhooks": [],
+  "incident_actions": [],
+  "incident_overrides": {
+    "hosts": {
+      "gpu-node-02": {
+        "thresholds": {
+          "swap_warning_pct": 75
+        },
+        "exclude_disk_mounts": [
+          "/mnt/archive"
+        ]
+      }
+    }
+  },
   "incidents": {
     "resource_open_cycles": 2,
     "recovery_cycles": 2,

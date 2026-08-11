@@ -35,11 +35,13 @@ Mocop 是面向 NVIDIA GPU 集群的本地网页监控工具。它复用已有 O
 ## 功能
 
 - GPU 利用率、显存、温度、功耗、型号、驱动、硬件健康和每卡进程
-- GPU 算力匹配、调度热力图、节点分组、搜索、筛选和 CSV 导出
+- GPU 算力匹配、调度热力图、连接拓扑、搜索、筛选和 CSV 导出
 - CPU、Load、内存、Swap、磁盘容量与 I/O、网络速率和运行时间
-- 带防抖阈值、陈旧数据处理、失败退避和定时维护窗口的告警
+- 带诊断、确认/静默、分级阈值、防抖处理和定时维护的告警
+- 节点级独立调度、可能的共享链路聚合和可选 HTTPS Webhook
 - 基于配置的节点资产、预期 GPU 数、本机采集和节点分组
-- 五套浏览器本地皮肤、紧凑模式、排序记忆和经过校验的本地背景
+- 单卡趋势和进程时间线，以及可选的有界 SQLite 留存与只读 Slurm/Kubernetes 上下文
+- 六种视觉风格、六种独立主题色、紧凑模式、排序记忆和经过校验的本地背景
 - 可供 Prometheus 和 Grafana 使用的 OpenMetrics 1.0 端点
 
 ## 快速开始
@@ -65,7 +67,7 @@ ssh gpu-node-01 true
 ssh -o BatchMode=yes gpu-node-01 true
 ```
 
-`ProxyJump`、端口、用户和身份文件应继续由 OpenSSH 管理。不要把跳板机或 Git 远端加入 Mocop 的被监控 `hosts` 列表。
+`ProxyJump`、端口、用户和身份文件应继续由 OpenSSH 管理。不要把跳板机或 Git 远端加入 Mocop 的被监控 `hosts` 列表。可选的展示拓扑可以呈现跳板机和 FRP 节点，但不会采集它们。
 
 ### 2. 安装并初始化
 
@@ -117,6 +119,39 @@ mocop service uninstall
 - `expected_gpu_counts` 用于发现 GPU 缺失。
 - `host_groups` 用于共享节点分组。
 - `host_overrides` 只用于调整经过测量的慢节点的采集周期或超时。
+- `gpu_process_poll_interval_seconds` 单独控制带时间戳的 GPU 任务刷新；默认 15 秒，核心 GPU 数据仍保持正常采集周期。
+- `incident_overrides` 可按节点或分组覆盖有界阈值，并精确排除磁盘挂载点；节点配置优先。
+- `incident_actions` 保存网页中的告警确认与静默及其 UTC 失效时间，通常由网页维护。
+- `manual_probe_cooldown_seconds` 限制同一节点的手动探测频率；默认 5 秒。
+- `retry_jitter_pct` 分散共享 SSH 路径故障后的重试；默认值为 15%。
+- `topology` 描述连接树；其中的安全别名只有同时进入有效 `hosts` 清单时才会被采集。
+- `persistence.enabled` 使用 SQLite 保留有界趋势和告警上下文；默认关闭。
+- `workloads.mode: "auto"` 通过有界 `/proc` 读取补充 Slurm/Kubernetes 身份；默认关闭。
+
+Webhook 地址和签名密钥不写入 JSON。配置中只保存环境变量名：
+
+```json
+{
+  "webhooks": [{
+    "name": "operations",
+    "url_env": "MOCOP_OPS_WEBHOOK_URL",
+    "secret_env": "MOCOP_OPS_WEBHOOK_SECRET"
+  }]
+}
+```
+
+使用 `mocop service install` 时，在 `config.json` 同目录创建私有
+`environment` 文件：
+
+```bash
+install -m 600 /dev/null ~/.config/mocop/environment
+${EDITOR:-vi} ~/.config/mocop/environment
+mocop service install
+```
+
+分别写入 `MOCOP_OPS_WEBHOOK_URL=...` 和 `MOCOP_OPS_WEBHOOK_SECRET=...`。
+请使用真实密钥并保护该文件。Webhook 强制使用 HTTPS；访问私有网络需在
+端点配置中明确允许。它支持故障开启、恢复、严重性变化、去重、节流和有界重试。
 
 全部字段和安全范围见[完整配置示例](examples/mocop.example.json)。直接修改 JSON 后需要重启服务；网页中的修改会先校验，再原子写入，并立即生效。
 
@@ -125,8 +160,9 @@ mocop service uninstall
 | 设置 | 保存位置 | 服务重启后保留 | 不同浏览器共享 |
 |---|---|---:|---:|
 | 采集周期、探测超时、并发数 | `config.json` | 是 | 是 |
-| 监控节点、分组、维护窗口 | `config.json` | 是 | 是 |
-| 皮肤、密度、排序、筛选、GPU 列 | 浏览器 `localStorage` | 是 | 否 |
+| 监控节点、分组、维护和告警操作 | `config.json` | 是 | 是 |
+| 可选节点/GPU 趋势及进程/告警转移 | 私有 SQLite 状态 | 是 | 是 |
+| 视觉风格、主题色、密度、排序、筛选、GPU 列 | 浏览器 `localStorage` | 是 | 否 |
 | 自定义背景 | 浏览器 `IndexedDB` | 是 | 否 |
 
 只有清理当前浏览器的站点数据或恢复显示偏好时，浏览器设置才会丢失。移除自定义背景是单独操作。
@@ -135,10 +171,13 @@ mocop service uninstall
 
 ## 日常使用
 
-- 点击 GPU 行或热力图单元格，查看进程及每个进程的显存占用。
+- 点击 GPU 行或热力图单元格，查看当前进程、近期利用率/显存/温度/功耗趋势及进程进出记录。
+- 打开告警查看基于证据的处理建议，再按固定时长确认或仅静默该条件。
+- 在选中节点上使用“立即探测”，提前执行一次有界采集，不改变全局刷新周期。
 - 使用“匹配算力”查找同一主机、同一型号且剩余显存足够的 GPU。结果不代表资源预留。
 - 设置维护窗口后，采集继续进行，但对应问题不会进入待处理告警。
 - 在“设置 → 监控节点”中扫描 SSH 别名，添加或删除符合条件的计算节点。
+- 升级后可使用“设置 → 监控服务状态 → 重启服务”；该按钮只在用户级服务模式下可用，恢复后页面会自动刷新。
 - 可上传最大 32 MiB 的 PNG、JPEG、WebP 或 AVIF 背景；超过 8 MiB 时只在浏览器内压缩，不会上传。
 - 使用 `mocop --once > snapshot.json` 导出一次当前快照。
 
@@ -153,13 +192,16 @@ scrape_configs:
       - targets: ["127.0.0.1:8787"]
 ```
 
-该端点包含采集健康、节点可用性、告警、系统资源和当前 GPU 指标。陈旧资源值、进程名称和 PID 不会被导出。
+该端点包含采集与后台子系统健康、节点可用性、告警、系统资源和当前 GPU 指标。陈旧资源值、进程名称和 PID 不会被导出。
 
 ## 故障行为
 
-Mocop 不会等待慢节点才发布正常节点的数据。失败节点保留最后一次成功样本，但会标记为陈旧，并从当前集群总量中排除。连续失败的重试间隔最长为 60 秒。
+Mocop 按节点独立调度，同一节点不会重叠采集。只要仍有 worker 容量，慢节点就
+不会推迟健康节点。失败节点保留最后一次成功样本，但会标记为陈旧并从当前汇总中
+排除；重试最长退避 60 秒，并按节点分散。
 
-采集周期是目标频率，不保证每轮完整集群采集都能在该时间内结束。连接超时可能让整轮耗时更长，但已经完成的节点仍会通过 SSE 立即更新。
+采集周期是目标频率。worker 饱和或单次探测超过周期时，只会推迟对应节点，不会
+重新引入全局等待屏障。
 
 调整超时前，先在 Mocop 外测试同一条 SSH 路径：
 

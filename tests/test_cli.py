@@ -18,6 +18,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.config, Path("/tmp/config.json"))
         self.assertTrue(args.once)
 
+    def test_managed_service_mode_is_explicit(self) -> None:
+        args = _arguments(["--managed-service"])
+
+        self.assertTrue(args.managed_service)
+
     def test_init_and_service_commands_are_unambiguous(self) -> None:
         init_args = _arguments(["init", "--host", "gpu-01", "--host", "gpu-02"])
         install_args = _arguments(["service", "install", "--config", "/tmp/c.json"])

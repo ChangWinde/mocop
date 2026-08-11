@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,19 +47,319 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.history_points, 720)
         self.assertEqual(config.incident_history_points, 500)
         self.assertEqual(config.collection_stale_cycles, 3)
+        self.assertEqual(config.gpu_process_poll_interval_seconds, 15)
+        self.assertEqual(config.retry_jitter_pct, 15)
+        self.assertEqual(config.manual_probe_cooldown_seconds, 5)
         self.assertEqual(config.expected_gpu_counts, ())
         self.assertEqual(config.host_overrides, ())
         self.assertEqual(config.maintenance_windows, ())
         self.assertEqual(config.host_groups, ())
+        self.assertIsNone(config.topology)
+        self.assertFalse(config.persistence.enabled)
+        self.assertEqual(config.persistence.retention_hours, 168)
+        self.assertEqual(config.persistence.max_bytes, 134_217_728)
+        self.assertEqual(config.workloads.mode, "disabled")
+        self.assertEqual(config.webhooks, ())
+        self.assertEqual(config.incident_actions, ())
+        self.assertEqual(config.host_incident_overrides, ())
+        self.assertEqual(config.group_incident_overrides, ())
         self.assertEqual(config.incidents.resource_open_cycles, 2)
         self.assertEqual(config.incidents.recovery_cycles, 2)
         self.assertEqual(config.incidents.gpu_idle_memory_cycles, 12)
+
+    def test_validates_durable_incident_actions_and_scoped_overrides(self) -> None:
+        value = valid_config()
+        value.update(
+            {
+                "auto_discover": False,
+                "hosts": ["gpu-01"],
+                "host_groups": {"gpu-01": "training"},
+                "incident_actions": [
+                    {
+                        "host": "gpu-01",
+                        "condition_key": "disk:/dev/a:/data",
+                        "action": "acknowledged",
+                        "until": "2030-08-10T00:00:00Z",
+                        "reason": "owner notified",
+                    }
+                ],
+                "incident_overrides": {
+                    "hosts": {
+                        "gpu-01": {
+                            "thresholds": {"swap_warning_pct": 75},
+                            "exclude_disk_mounts": ["/archive"],
+                        }
+                    },
+                    "groups": {
+                        "training": {"thresholds": {"gpu_temperature_warning_c": 84}}
+                    },
+                },
+            }
+        )
+
+        config = load_config(self.write(value))
+
+        self.assertEqual(config.incident_actions[0].action, "acknowledged")
+        host_override = dict(config.host_incident_overrides)["gpu-01"]
+        self.assertEqual(host_override.threshold("swap_warning_pct"), 75)
+        self.assertEqual(host_override.exclude_disk_mounts, frozenset({"/archive"}))
+        self.assertEqual(
+            dict(config.group_incident_overrides)["training"].threshold(
+                "gpu_temperature_warning_c"
+            ),
+            84,
+        )
+
+    def test_rejects_ambiguous_or_unsafe_incident_operations(self) -> None:
+        cases = (
+            [
+                {
+                    "host": "gpu-01",
+                    "condition_key": "cpu",
+                    "action": "forever",
+                    "until": "2030-08-10T00:00:00Z",
+                    "reason": "",
+                }
+            ],
+            [
+                {
+                    "host": "gpu-01",
+                    "condition_key": "cpu\nlog",
+                    "action": "silenced",
+                    "until": "2030-08-10T00:00:00Z",
+                    "reason": "",
+                }
+            ],
+        )
+        for actions in cases:
+            with self.subTest(actions=actions):
+                value = valid_config()
+                value.update(
+                    {
+                        "auto_discover": False,
+                        "hosts": ["gpu-01"],
+                        "incident_actions": actions,
+                    }
+                )
+                with self.assertRaisesRegex(ConfigError, "incident_actions"):
+                    load_config(self.write(value))
+
+        value = valid_config()
+        value.update(
+            {
+                "auto_discover": False,
+                "hosts": ["gpu-01"],
+                "incident_overrides": {
+                    "hosts": {"gpu-01": {"exclude_disk_mounts": ["relative"]}}
+                },
+            }
+        )
+        with self.assertRaisesRegex(ConfigError, "exclude_disk_mounts"):
+            load_config(self.write(value))
 
     def test_rejects_unknown_keys(self) -> None:
         value = valid_config()
         value["surprise"] = True
         with self.assertRaisesRegex(ConfigError, "unknown config keys"):
             load_config(self.write(value))
+
+    def test_loads_and_bounds_optional_history_persistence(self) -> None:
+        value = valid_config()
+        value["persistence"] = {
+            "enabled": True,
+            "retention_hours": 24,
+            "max_bytes": 16_777_216,
+        }
+
+        persistence = load_config(self.write(value)).persistence
+
+        self.assertTrue(persistence.enabled)
+        self.assertEqual(persistence.retention_hours, 24)
+        self.assertEqual(persistence.max_bytes, 16_777_216)
+
+        invalid_values = (
+            {"enabled": "yes"},
+            {"enabled": False, "unknown": 1},
+            {"enabled": True, "retention_hours": 0},
+            {"enabled": True, "retention_hours": 1.5},
+            {"enabled": True, "max_bytes": 1024},
+            {"enabled": True, "max_bytes": 16_777_216.0},
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid):
+                candidate = valid_config()
+                candidate["persistence"] = invalid
+                with self.assertRaisesRegex(ConfigError, "persistence"):
+                    load_config(self.write(candidate))
+
+    def test_validates_read_only_workload_metadata_mode(self) -> None:
+        value = valid_config()
+        value["workloads"] = {"mode": "auto"}
+
+        self.assertEqual(load_config(self.write(value)).workloads.mode, "auto")
+
+        for invalid in (None, {}, {"mode": "slurm-write"}, {"unknown": True}):
+            with self.subTest(invalid=invalid):
+                candidate = valid_config()
+                candidate["workloads"] = invalid
+                with self.assertRaisesRegex(ConfigError, "workloads"):
+                    load_config(self.write(candidate))
+
+    def test_validates_bounded_environment_backed_webhooks(self) -> None:
+        value = valid_config()
+        value["webhooks"] = [
+            {
+                "name": "operations",
+                "url_env": "MOCOP_OPS_WEBHOOK_URL",
+                "secret_env": "MOCOP_OPS_WEBHOOK_SECRET",
+                "events": ["opened", "resolved"],
+                "timeout_seconds": 4,
+                "max_attempts": 3,
+                "retry_base_seconds": 1,
+                "min_interval_seconds": 2,
+                "allow_private_networks": False,
+            }
+        ]
+
+        webhook = load_config(self.write(value)).webhooks[0]
+
+        self.assertEqual(webhook.name, "operations")
+        self.assertEqual(webhook.events, ("opened", "resolved"))
+        self.assertEqual(webhook.timeout_seconds, 4)
+        self.assertFalse(webhook.allow_private_networks)
+
+        invalid_values = (
+            {},
+            {"name": "ops", "url_env": "bad-name"},
+            {"name": "ops", "url_env": "MOCOP_URL", "events": ["unknown"]},
+            {"name": "ops", "url_env": "MOCOP_URL", "timeout_seconds": 31},
+            {"name": "ops", "url_env": "MOCOP_URL", "unknown": True},
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid):
+                candidate = valid_config()
+                candidate["webhooks"] = [invalid]
+                with self.assertRaisesRegex(ConfigError, "webhooks"):
+                    load_config(self.write(candidate))
+
+    def test_validates_retry_jitter_percentage(self) -> None:
+        value = valid_config()
+        value["retry_jitter_pct"] = 50
+        self.assertEqual(load_config(self.write(value)).retry_jitter_pct, 50)
+
+        value["retry_jitter_pct"] = 51
+        with self.assertRaisesRegex(ConfigError, "retry_jitter_pct"):
+            load_config(self.write(value))
+
+    def test_loads_a_bounded_logical_connection_topology(self) -> None:
+        value = valid_config()
+        value["auto_discover"] = False
+        value["hosts"] = ["gpu-1", "unmapped"]
+        value["exclude_hosts"] = ["gateway"]
+        value["topology"] = {
+            "root": "monitor",
+            "links": [
+                {
+                    "source": "monitor",
+                    "target": "gateway",
+                    "transport": "frp-stcp",
+                    "label": "STCP · 7005",
+                },
+                {
+                    "source": "gateway",
+                    "target": "gpu-1",
+                    "transport": "ssh",
+                },
+            ],
+        }
+
+        topology = load_config(self.write(value)).topology
+
+        self.assertIsNotNone(topology)
+        assert topology is not None
+        self.assertEqual(
+            topology.to_dict(),
+            {
+                "root": "monitor",
+                "links": [
+                    {
+                        "source": "monitor",
+                        "target": "gateway",
+                        "transport": "frp-stcp",
+                        "label": "STCP · 7005",
+                    },
+                    {
+                        "source": "gateway",
+                        "target": "gpu-1",
+                        "transport": "ssh",
+                    },
+                ],
+            },
+        )
+
+    def test_rejects_unsafe_or_ambiguous_connection_topologies(self) -> None:
+        base = valid_config()
+        base["auto_discover"] = False
+        base["hosts"] = ["gpu-1", "gpu-2"]
+        cases = (
+            None,
+            {"root": "monitor", "links": [], "unknown": True},
+            {"root": "--monitor", "links": []},
+            {
+                "root": "monitor",
+                "links": [{"source": "monitor", "target": "gpu-1", "transport": "tcp"}],
+            },
+            {
+                "root": "monitor",
+                "links": [
+                    {
+                        "source": "monitor",
+                        "target": "gpu-1",
+                        "transport": "ssh",
+                        "label": "bad\nlabel",
+                    }
+                ],
+            },
+            {
+                "root": "monitor",
+                "links": [
+                    {"source": "monitor", "target": "gpu-1", "transport": "ssh"},
+                    {"source": "gateway", "target": "gpu-1", "transport": "ssh"},
+                ],
+            },
+            {
+                "root": "monitor",
+                "links": [
+                    {"source": "monitor", "target": "gateway", "transport": "ssh"},
+                    {"source": "gateway", "target": "monitor", "transport": "ssh"},
+                ],
+            },
+            {
+                "root": "monitor",
+                "links": [{"source": "gpu-2", "target": "gpu-1", "transport": "ssh"}],
+            },
+            {
+                "root": "monitor",
+                "links": [{"source": "gpu-1", "target": "gpu-1", "transport": "ssh"}],
+            },
+            {
+                "root": "monitor",
+                "links": [
+                    {
+                        "source": "monitor",
+                        "target": "--missing",
+                        "transport": "ssh",
+                    }
+                ],
+            },
+        )
+
+        for topology in cases:
+            with self.subTest(topology=topology):
+                value = dict(base)
+                value["topology"] = topology
+                with self.assertRaisesRegex(ConfigError, "topology"):
+                    load_config(self.write(value))
 
     def test_rejects_timeout_order(self) -> None:
         value = valid_config()
@@ -176,6 +477,47 @@ class ConfigTests(unittest.TestCase):
         value["exclude_hosts"] = ["gpu-1"]
         with self.assertRaisesRegex(ConfigError, "cannot be excluded"):
             load_config(self.write(value))
+
+    def test_rebuilds_host_lookup_indexes_when_config_is_replaced(self) -> None:
+        original_data = valid_config()
+        original_data.update(
+            {
+                "auto_discover": False,
+                "hosts": ["gpu-1"],
+                "host_groups": {"gpu-1": "Training"},
+                "host_overrides": {"gpu-1": {"poll_interval_seconds": 10}},
+                "maintenance_windows": {"gpu-1": {"until": "2030-06-15T12:30:00Z"}},
+            }
+        )
+        replacement_data = valid_config()
+        replacement_data.update(
+            {
+                "auto_discover": False,
+                "hosts": ["gpu-2"],
+                "host_groups": {"gpu-2": "Inference"},
+                "host_overrides": {"gpu-2": {"poll_interval_seconds": 20}},
+                "maintenance_windows": {"gpu-2": {"until": "2031-06-15T12:30:00Z"}},
+            }
+        )
+        original = load_config(self.write(original_data))
+        replacement = load_config(self.write(replacement_data))
+
+        updated = replace(
+            original,
+            host_overrides=replacement.host_overrides,
+            maintenance_windows=replacement.maintenance_windows,
+            host_groups=replacement.host_groups,
+        )
+
+        self.assertIsNone(updated.host_override("gpu-1"))
+        self.assertIsNone(updated.maintenance_window("gpu-1"))
+        self.assertIsNone(updated.host_group("gpu-1"))
+        self.assertEqual(updated.host_override("gpu-2").poll_interval_seconds, 20)
+        self.assertEqual(
+            updated.maintenance_window("gpu-2").to_dict()["until"],
+            "2031-06-15T12:30:00Z",
+        )
+        self.assertEqual(updated.host_group("gpu-2"), "Inference")
 
     def test_validates_incident_stability_configuration(self) -> None:
         value = valid_config()
@@ -303,6 +645,23 @@ class ConfigTests(unittest.TestCase):
                 ):
                     load_config(self.write(value))
 
+    def test_bounds_gpu_process_poll_interval(self) -> None:
+        value = valid_config()
+        value["gpu_process_poll_interval_seconds"] = 30
+        self.assertEqual(
+            load_config(self.write(value)).gpu_process_poll_interval_seconds,
+            30,
+        )
+
+        for invalid in (1, 3601, True, "15"):
+            with self.subTest(invalid=invalid):
+                value["gpu_process_poll_interval_seconds"] = invalid
+                with self.assertRaisesRegex(
+                    ConfigError,
+                    "gpu_process_poll_interval_seconds must be",
+                ):
+                    load_config(self.write(value))
+
     def test_example_uses_an_explicit_host_whitelist(self) -> None:
         example = (
             Path(__file__).resolve().parents[1] / "examples" / "mocop.example.json"
@@ -310,10 +669,16 @@ class ConfigTests(unittest.TestCase):
         config = load_config(example)
 
         self.assertFalse(config.auto_discover)
-        self.assertEqual(config.hosts, ("gpu-node-01", "gpu-node-02"))
-        self.assertEqual(config.exclude_hosts, frozenset())
+        self.assertEqual(
+            config.hosts,
+            ("monitor-host", "gpu-node-01", "gpu-node-02"),
+        )
+        self.assertEqual(config.exclude_hosts, frozenset({"gpu-gateway"}))
         self.assertEqual(config.poll_interval_seconds, 5)
-        self.assertIsNone(config.local_host)
+        self.assertEqual(config.local_host, "monitor-host")
+        self.assertIsNotNone(config.topology)
+        assert config.topology is not None
+        self.assertEqual(config.topology.root, "monitor-host")
 
     def test_local_host_must_be_an_explicit_non_excluded_target(self) -> None:
         value = valid_config()

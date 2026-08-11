@@ -49,6 +49,8 @@ def _gpu() -> GpuMetrics:
         power_limit_w=700,
         processes=(),
         processes_available=True,
+        processes_sampled=True,
+        processes_observed_at="2030-06-15T12:30:00Z",
         health=GpuHealthMetrics(
             ecc_uncorrected_volatile=0,
             retired_pages_pending=False,
@@ -105,7 +107,16 @@ class OpenMetricsTests(unittest.TestCase):
         self.assertIn("} 0.75\n", body)
         self.assertIn("mocop_gpu_memory_total_bytes", body)
         self.assertIn(" 85899345920\n", body)
+        self.assertIn("mocop_gpu_process_telemetry_sampled", body)
+        self.assertIn(
+            "mocop_gpu_process_sample_timestamp_seconds",
+            body,
+        )
         self.assertIn("mocop_collection_duration_seconds 0.5\n", body)
+        self.assertIn("mocop_persistence_enabled 0\n", body)
+        self.assertIn("mocop_persistence_healthy 1\n", body)
+        self.assertIn("mocop_notifications_enabled 0\n", body)
+        self.assertIn("mocop_notifications_healthy 1\n", body)
 
         self.store.set_maintenance_windows(
             (

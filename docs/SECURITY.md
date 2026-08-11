@@ -2,35 +2,124 @@
 
 ## Threat contract
 
-**Assets and sensitive data:** SSH private keys and agent capabilities, SSH usernames/addresses in local configuration, remote inventory, system/GPU telemetry including GPU process names and PIDs, monitor host availability.
+**Assets and sensitive data:** SSH private keys and agent capabilities, SSH
+usernames/addresses in local configuration, the operator-authored logical connection
+topology, remote inventory, system/GPU telemetry including GPU process and optional
+job/user metadata, optional SQLite history, webhook URLs and signing secrets, and
+monitor host availability.
 
-**Actors and privileges:** the local operator can edit the JSON and OpenSSH configuration; a dashboard user can read telemetry, persist three bounded collector fields, add or remove only locally discovered SSH aliases, assign a bounded group to an explicit host, and set finite maintenance windows through the constrained configuration controller; remote SSH servers return telemetry. There are no application tenants or built-in viewer identities. Because the dashboard has no built-in accounts, access to its loopback listener is the authorization boundary for dashboard-managed configuration changes.
+**Actors and privileges:** the local operator can edit the JSON, logical connection topology, and OpenSSH configuration; a dashboard user can read telemetry and the approved logical topology, persist three bounded collector fields, add or remove only locally discovered SSH aliases, assign a bounded group to an explicit host, set finite maintenance windows, and request a restart only when the process explicitly reports that it is supervised; remote SSH servers return telemetry. There are no application tenants or built-in viewer identities. Because the dashboard has no built-in accounts, access to its loopback listener is the authorization boundary for dashboard-managed configuration changes.
 
-**Entry points and trust boundaries:** operator-owned JSON and OpenSSH files enter host discovery; versioned tab-separated system data plus GPU, process, and hardware-health CSV enter the collector; HTTP GET requests enter a fixed route table; JSON, SSE, and OpenMetrics leave the service for a browser or scraper. One optional `local_host` value selects local execution only after it passes alias validation and matches the explicit host allowlist; it never becomes a command argument. Expected GPU-count, per-host override, maintenance-window, and host-group keys must also match active explicit aliases; their values are type-checked and bounded. The browser can select an already active alias for an in-memory history lookup, provide an integer event limit, persist one 2–60 second cadence through `POST /api/settings/poll-interval`, persist exactly cadence, complete-probe timeout, and worker concurrency through `POST /api/settings/collector`, send one exact `{action, host}` object to `POST /api/settings/hosts`, assign or clear one visible group through `POST /api/settings/host-group`, and send an explicit host, fixed duration, and bounded reason to `POST /api/settings/maintenance`. The server generates the UTC expiry. An inventory add must match a fresh literal-alias scan after code-host and explicit exclusion filters; a removal must match the current active inventory. These routes do not accept SSH options, paths, commands, listeners, thresholds, destinations, discovery controls, host overrides, arbitrary durations, or raw JSON configuration. A user-initiated browser action can also transform already visible telemetry into a local CSV download.
+**Entry points and trust boundaries:** operator-owned JSON, OpenSSH files, and optional
+service environment variables enter the process; versioned tab-separated system,
+GPU, process, health, and workload records enter the collector; HTTP enters a fixed
+route table; JSON, SSE, OpenMetrics, and explicitly configured HTTPS webhook bodies
+leave the service. Optional SQLite stores successful trends and incident transitions
+in the user state directory. One optional `local_host` selects local execution only
+after allowlist validation. Workload mode reads `/proc` only for PIDs already returned
+by `nvidia-smi`; it does not call a Slurm or Kubernetes API. Topology aliases remain
+display/correlation input and never authorize a probe or assert a root cause. Dashboard
+writes remain limited to the existing collector, inventory, group, and maintenance
+schemas; they cannot set persistence, workload mode, webhook destinations, paths, or
+secrets.
 
-**Local lifecycle boundary:** `mocop init` creates a `0600` configuration without overwrite. Service management writes only the fixed user unit path and invokes `systemctl --user` with fixed argument tuples, never a shell. The generated unit preserves the active virtual-environment interpreter path and applies `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, restricted address families and `UMask=0077`. `ReadWritePaths` makes only the selected Mocop configuration directory writable so same-directory atomic replacement remains possible. The service intentionally retains read access to the operator's home directory because OpenSSH configuration, `known_hosts`, keys and control sockets live there.
+**Local lifecycle boundary:** `mocop init` creates a `0600` configuration without
+overwrite. Service management writes only the fixed user unit path and invokes
+`systemctl --user` with fixed arguments, never a shell. The unit applies
+`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, restricted address families,
+`UMask=0077`, and a private `StateDirectory=mocop`. `ReadWritePaths` grants only the
+configuration directory. If an optional `environment` file exists beside the selected
+configuration, installation rejects symlinks, non-regular files, foreign ownership,
+or group/other permissions before systemd may read it.
+The generated unit marks its process as supervised. In that mode an exact empty JSON
+restart request sets a fixed in-process event and exits with status 75 after the HTTP
+acknowledgement; systemd's existing failure policy starts the replacement. The web
+process never constructs or invokes a lifecycle command. Foreground launches do not
+expose this capability. Shutdown cancels child process groups owned by the probe.
 
-**External dependencies and execution environments:** the system `ssh` executable, local ssh-agent/keys, configured SSH proxies, remote POSIX shell, Linux `/proc`, `df`, optional `nvidia-smi`, and the browser. A viewer may select one raster background that is decoded, bounded and stored locally by the browser; it never enters an HTTP request or service storage. Exact hardening of SSH servers and reverse proxies is **UNABLE TO DETERMINE** from this repository.
+**External dependencies and execution environments:** the system `ssh` executable,
+local ssh-agent/keys, configured SSH proxies, remote POSIX shell, Linux `/proc`, `df`,
+optional `nvidia-smi`, SQLite from the Python standard library, configured HTTPS
+webhook services, DNS/TLS infrastructure, and the browser. Exact hardening of SSH
+servers, webhook receivers, and reverse proxies is **UNABLE TO DETERMINE** here.
 
-**Required properties:** never put secrets or a deployment inventory into source artifacts or browser errors; never accept command construction or an arbitrary destination from HTTP; persist only a complete strictly valid configuration through a private atomic write; preserve host-key verification; bound connection time, total probe time, output memory and concurrency; correctly escape remote text in DOM, CSV, and OpenMetrics labels; listen locally by default.
+**Required properties:** never put secrets or deployment inventory into source
+artifacts, JSON, or browser errors; never accept command construction or an outbound
+destination from HTTP; preserve host-key and TLS verification; reject webhook SSRF by
+default; bound probe time, output, concurrency, storage retention/size, background
+queues, retries, and remote metadata; keep persistence and notifications out of the
+collection critical path; listen locally by default.
 
-**Credible abuse cases:** a browser attempts path traversal, command injection, adding an alias absent from the local SSH inventory, or increasing collection cost beyond safe bounds; a cross-site page tries to change collection policy or host membership; a client sends duplicate fields, booleans as numbers, non-finite numbers, fractional concurrency or an oversized body to amplify SSH work or desynchronize an HTTP/1.1 connection; a stale browser races another configuration edit; a configuration write fails between validation and replacement; a malicious alias attempts to become an SSH option; a compromised remote server floods stdout/stderr, returns HTML/script or supplies a spreadsheet formula in its GPU name; a slow server exhausts workers; an unauthenticated network user reads telemetry or changes configuration after an operator exposes the listener.
+**Credible abuse cases:** the existing browser, configuration, SSH-option, remote
+output, CSV, and exposed-listener attacks; a remote process supplies excessive or
+control-character metadata; SQLite fills the operator's disk or blocks collection; a
+webhook URL targets loopback/cloud metadata, changes DNS after validation, stalls a
+sender, returns failures to amplify retries, or exposes a secret through configuration
+or status output; a dashboard reader repeatedly requests service restarts, probes, or
+notification tests; a support bundle leaks aliases, GPU UUIDs, command lines, or raw
+connection errors.
 
-**Enforcement:** static routes use an exact allowlist; the history route validates alias grammar, inventory membership and a 300-point cap; the event route accepts only one integer capped at 200. The inventory scan requires `X-Monitor-Request: dashboard` and rejects cross-site Fetch Metadata before reading SSH files, so ordinary cross-site image/form requests cannot amplify local parsing work. All write routes require an exact queryless path, a syntactically valid HTTP(S) `Origin`, the same dashboard marker, non-cross-site Fetch Metadata when present, exact JSON media type, unique keys and a route-specific body cap. The cadence schema is one finite non-boolean number from 2 to 60 in at most 128 bytes. The collector schema contains exactly a 2–60 second cadence, a finite 2–300 second complete-probe timeout greater than the configured SSH connection timeout, and integer concurrency from 1 to 64 in at most 512 bytes. The inventory schema is exactly one `add` or `remove` action plus one safe alias in at most 512 bytes. The host-group schema is exactly one safe explicit alias plus an empty value or visible group name of at most 48 characters in at most 512 bytes. The maintenance schema is exactly one safe explicit alias, one integer duration from the fixed set 0, 1 hour, 4 hours, 24 hours, or 7 days, and one visible reason of at most 120 characters in at most 512 bytes; nonzero windows require a reason. An add is authorized again against a fresh server-side scan, and recognizable Git/GitHub/GitLab aliases plus `exclude_hosts` entries are ineligible. A remove must still be explicitly configured; automatic discovery adds the removed alias to the final deny-list. Removal also clears matching expected counts, host overrides, maintenance windows, and groups, and clears `local_host` instead of accidentally converting it into a remote target.
+**Enforcement:** static routes use an exact allowlist; host and GPU history routes validate alias/identity grammar, current telemetry membership, and a 300-point cap; the incident route accepts only one integer capped at 200. GPU history and redacted diagnostics require `X-Monitor-Request: dashboard` and reject cross-site Fetch Metadata. The diagnostic serializer uses an explicit field allowlist, aliases nodes in its output, and omits raw errors, UUIDs, paths, configuration, processes, and workload identity. The inventory scan and topology projection use the same read guard. The topology endpoint accepts no query, reads only the already validated local JSON, starts no process, and returns no resolved OpenSSH field. Topology aliases use the same option-safe grammar as inventory aliases, but only `HostSource.hosts()` can authorize a probe. All write routes require an exact queryless path, a syntactically valid HTTP(S) `Origin`, the same dashboard marker, non-cross-site Fetch Metadata when present, exact JSON media type, unique keys and a route-specific body cap. The cadence schema is one finite non-boolean number from 2 to 60 in at most 128 bytes. The collector schema contains exactly a 2–60 second cadence, a finite 2–300 second complete-probe timeout greater than the configured SSH connection timeout, and integer concurrency from 1 to 64 in at most 512 bytes. Inventory, group, maintenance, and condition-action mutations accept exact bounded schemas and only explicitly monitored aliases. Condition actions use fixed durations and a bounded condition key/reason; expired entries have no effect. A manual-probe request contains one current host alias, enters the existing fixed scheduler, cannot overlap that host, coalesces duplicates, and is rate-limited. A notification test accepts only an empty object and targets only startup-validated configured workers, which also enforce their own test cooldown. The restart schema is exactly an empty object in at most 32 bytes and is unavailable without the supervised-process callback. An add is authorized again against a fresh server-side scan, and recognizable Git/GitHub/GitLab aliases plus `exclude_hosts` entries are ineligible. A removal must match the active inventory; automatic discovery adds a removed alias to the final deny-list. Removal also clears matching expected counts, host overrides, maintenance windows, condition actions, groups, and topology links, and clears `local_host` instead of accidentally converting it into a remote target. Removing the topology root clears the topology rather than selecting another root implicitly.
 
-The write guard does not compare external Origin to the proxy-rewritten backend Host: JSON plus the custom header make each POST non-simple, while every CORS preflight is rejected with no `Access-Control-Allow-Origin`; forms cannot add the marker or required media type. This preserves browser CSRF protection behind a same-origin Host-rewriting proxy. Non-browser local clients could forge the required headers and therefore remain inside the existing loopback/operator trust boundary. POST connections close so rejected unread bytes cannot be reused as another request. Configuration mutation serializes concurrent changes, reloads the current file, limits the file to 1 MiB, refuses the bundled template and non-regular or differently owned files, writes a `0600` same-directory temporary file, validates the complete candidate through the normal strict loader, fsyncs it, atomically replaces the target, fsyncs the directory, and then wakes the scheduler with the new immutable configuration. A no-op settings update does not rewrite the file. A partial temporary file never replaces the active configuration.
+The write guard intentionally does not compare external Origin with a proxy-rewritten
+backend Host. JSON plus the custom header make every POST non-simple, every CORS
+preflight is rejected with no `Access-Control-Allow-Origin`, forms cannot add the
+marker or required media type, and browser-supplied Fetch Metadata must not be
+cross-site. This preserves browser CSRF protection behind a same-origin Host-rewriting
+proxy. Non-browser local clients could forge these headers and remain inside the
+existing loopback/operator trust boundary. POST connections close so rejected unread
+bytes cannot be reused as another request. Configuration mutation serializes
+concurrent changes, reloads the current file, limits the file to 1 MiB, refuses the
+bundled template and non-regular or differently owned files, writes a `0600`
+same-directory temporary file, validates the complete candidate through the normal
+strict loader, fsyncs it, atomically replaces the target, fsyncs the directory, and
+then wakes the scheduler with the new immutable configuration. A no-op settings update
+does not rewrite the file. A partial temporary file never replaces the active
+configuration.
 
 `/metrics` is read-only and inherits the same listener-level confidentiality boundary as JSON/SSE telemetry. It does not accept a target, query, or collection control and never starts remote work. Operators who expose Mocop beyond loopback must apply the same authenticated TLS or VPN policy to this route as to the dashboard.
 
 All remote values—including shared-storage devices, mountpoints and heatmap labels—enter the DOM only through `textContent` or property assignment. Shared-resource grouping and focus filters transform only the in-memory snapshot; they do not construct URLs, commands or HTML. CSV cells are always quoted, embedded quotes are doubled, and values whose trimmed form starts with `=`, `+`, `-` or `@` receive a leading apostrophe before the browser creates a short-lived object URL. OpenMetrics labels escape backslashes, quotes, and newlines; current GPU and system resource series omit stale hosts, and process names/PIDs are not exported. Browser-selected backgrounds accept only PNG, JPEG, WebP or AVIF sources up to 32 MiB, must match the declared container signature, and must decode within 8,192 pixels per side and 32 megapixels. Sources above 8 MiB are locally resized to at most 4,096 pixels per side and 12 megapixels, encoded as a static WebP no larger than 8 MiB, and revalidated before one IndexedDB `Blob` is replaced. SVG and animated formats are rejected before decode. Rendering uses a browser-generated, revocable `blob:` URL; CSP grants `blob:` only to `img-src`, and no upload endpoint exists.
 
-Aliases pass a strict grammar; remote aliases follow `--`, while the local target uses the constant `sh -s` argv. Both transports receive the same repository-owned fixed script through stdin. A selector drains stdout and stderr incrementally into buffers sharing the configured 64 KiB–16 MiB hard limit; crossing it kills the isolated process group and returns a finite error. The parser rejects unknown protocol versions, incomplete metric sections, missing fields, invalid GPU or health values, duplicate health UUIDs, oversized text and more than 256 GPU or health, 1,024 disk, or 4,096 GPU-process records per host. The optional health section fails independently, so malformed or unsupported health output cannot suppress valid base telemetry. Strict host-key checking and batch mode are mandatory for remote targets; configured timeouts, worker bounds and failure backoff isolate slow targets; security headers include a same-origin CSP. Network abuse is prevented by the default loopback bind and requires authenticated TLS proxy/VPN controls if the operator changes that default.
+Aliases pass a strict grammar; remote aliases follow `--`, while the local target uses the constant `sh -s` argv. Both transports receive the same repository-owned fixed script through stdin. A selector drains stdout and stderr incrementally into buffers sharing the configured 64 KiB–16 MiB hard limit; crossing it kills the isolated process group and returns a finite error. The parser rejects unknown protocol versions, incomplete metric sections, conflicting sampled/skipped process states, missing fields, invalid GPU or health values, duplicate health UUIDs, oversized text and more than 256 GPU or health, 1,024 disk, or 4,096 GPU-process records per host. `MONITOR_V6` can explicitly skip the fixed process query between its bounded deadlines; no browser value controls that decision. Base GPU and health fields share one fixed query, but parsing still treats health as additive: malformed or unsupported health fields cannot suppress valid base telemetry, and an unsupported combined query falls back to the fixed base query. Strict host-key checking and batch mode are mandatory for remote targets; configured timeouts, worker bounds and jittered failure backoff isolate slow targets and disperse shared-path retries; security headers include a same-origin CSP. Network abuse is prevented by the default loopback bind and requires authenticated TLS proxy/VPN controls if the operator changes that default.
 
-**Out of scope / assumptions:** configured aliases and the local operator configuration are trusted administrative inputs. A fully compromised remote SSH endpoint can still consume up to one probe timeout and the configured output allowance per active worker, but cannot cause unbounded capture. Process metadata is intentionally visible to dashboard readers because it is required for per-GPU task diagnosis, but it is omitted from OpenMetrics. Historical telemetry confidentiality and multi-user authorization are out of scope because the service does not persist data or expose itself remotely by default.
+Optional workload records are capped at the GPU-process limit, accept only the
+`process`, `slurm`, and `kubernetes` kinds, and bound every field. The fixed script
+reads at most 16 KiB of cgroup data and 64 KiB of environment data per active GPU PID.
+It selects only workload identity fields and never executes a scheduler client.
+
+SQLite is disabled by default. When enabled, its directory and database are `0700` and
+`0600`, symlink database paths are rejected, SQL values are parameterized, retention is
+enforced at startup and periodically, and `max_page_count` enforces the configured
+database-file cap. Collection only uses non-blocking writes to a 4,096-item queue; a
+full queue or database error is reported in status rather than delaying a probe. The
+SQLite rollback journal can temporarily consume additional bounded transaction space,
+so the configured value is a database-file cap rather than a filesystem quota.
+
+Webhook configuration stores environment variable names only. Startup requires a
+credential-free HTTPS URL, validates DNS, rejects every non-global address unless
+`allow_private_networks` is explicit, and repeats validation immediately before each
+request. The TLS connection is pinned to the validated address while retaining SNI and
+hostname verification, which closes the normal DNS-rebinding gap. Each endpoint owns a
+1,024-item queue, finite timeout, event-ID dedupe window, throttle, and bounded jittered
+retry count. Optional request signing is HMAC-SHA256 over canonical JSON. Status exposes
+only endpoint names and finite counters, never URLs, secrets, or response bodies.
+
+**Out of scope / assumptions:** configured aliases, explicitly allowed private webhook
+networks, and local operator configuration are trusted administrative inputs. A fully
+compromised SSH endpoint can consume one probe timeout and output allowance per active
+worker. Process and opted-in workload metadata are intentionally visible to dashboard
+readers and omitted from OpenMetrics. SQLite is not encrypted at rest; protect the user
+account and state directory. Webhook delivery is not a persistent outbox. Multi-user
+authorization remains out of scope because the service is local by default.
 
 ## Secret handling
 
-The process inherits the operator's SSH environment so OpenSSH can use ssh-agent. It never opens private-key files itself. Raw SSH stderr is used only for local classification and is neither stored in `StateStore` nor sent through JSON/SSE. If this process is supervised, protect its environment and logs with the same care as other SSH-capable operator processes.
+The process inherits the operator's SSH environment so OpenSSH can use ssh-agent. It
+never opens private-key files itself. Raw SSH stderr is classified locally and is not
+stored or emitted. Webhook URLs and signing secrets are read from environment variables;
+for the generated service, place them in the optional private `environment` file next
+to `config.json`. They never enter the config API, snapshot, status, or logs.
 
 ## Deployment requirement
 

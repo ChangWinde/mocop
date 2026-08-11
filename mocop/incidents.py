@@ -4,7 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from .config import IncidentConfig, ThresholdConfig
+from .config import IncidentConfig, IncidentScopeOverrideConfig, ThresholdConfig
 from .models import ProbeResult
 
 IncidentSeverity = Literal["warning", "critical"]
@@ -72,15 +72,81 @@ class ThresholdIncidentPolicy:
         thresholds: ThresholdConfig,
         expected_gpu_counts: tuple[tuple[str, int], ...] = (),
         incidents: IncidentConfig | None = None,
+        host_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...] = (),
+        group_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...] = (),
+        host_groups: tuple[tuple[str, str], ...] = (),
     ) -> None:
-        self._thresholds = thresholds
+        self._threshold_values = thresholds.to_dict()
         self._expected_gpu_counts = dict(expected_gpu_counts)
         self._incidents = incidents or IncidentConfig()
+        self._host_overrides = dict(host_overrides)
+        self._group_overrides = dict(group_overrides)
+        self._host_groups = dict(host_groups)
+        self._effective_thresholds: dict[str, dict[str, float]] = {}
+        self._effective_disk_exclusions: dict[str, frozenset[str]] = {}
 
     def update_expected_gpu_counts(
         self, expected_gpu_counts: tuple[tuple[str, int], ...]
     ) -> None:
         self._expected_gpu_counts = dict(expected_gpu_counts)
+
+    def update_overrides(
+        self,
+        host_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...],
+        group_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...],
+        host_groups: tuple[tuple[str, str], ...],
+    ) -> None:
+        self._host_overrides = dict(host_overrides)
+        self._group_overrides = dict(group_overrides)
+        self._host_groups = dict(host_groups)
+        self._effective_thresholds.clear()
+        self._effective_disk_exclusions.clear()
+
+    def retain_hosts(self, hosts: set[str]) -> None:
+        if (
+            self._effective_thresholds.keys() <= hosts
+            and self._effective_disk_exclusions.keys() <= hosts
+        ):
+            return
+        self._effective_thresholds = {
+            host: values
+            for host, values in self._effective_thresholds.items()
+            if host in hosts
+        }
+        self._effective_disk_exclusions = {
+            host: mounts
+            for host, mounts in self._effective_disk_exclusions.items()
+            if host in hosts
+        }
+
+    def _thresholds_for(self, host: str) -> dict[str, float]:
+        cached = self._effective_thresholds.get(host)
+        if cached is not None:
+            return cached
+        values = dict(self._threshold_values)
+        group = self._host_groups.get(host)
+        group_override = self._group_overrides.get(group) if group else None
+        if group_override is not None:
+            values.update(group_override.thresholds)
+        host_override = self._host_overrides.get(host)
+        if host_override is not None:
+            values.update(host_override.thresholds)
+        self._effective_thresholds[host] = values
+        return values
+
+    def _excluded_disk_mounts(self, host: str) -> frozenset[str]:
+        cached = self._effective_disk_exclusions.get(host)
+        if cached is not None:
+            return cached
+        excluded: set[str] = set()
+        group = self._host_groups.get(host)
+        if group and group in self._group_overrides:
+            excluded.update(self._group_overrides[group].exclude_disk_mounts)
+        if host in self._host_overrides:
+            excluded.update(self._host_overrides[host].exclude_disk_mounts)
+        result = frozenset(excluded)
+        self._effective_disk_exclusions[host] = result
+        return result
 
     @staticmethod
     def _percentage(used: float, total: float) -> float:
@@ -102,6 +168,11 @@ class ThresholdIncidentPolicy:
         return f"{filesystem}|{device}" if is_network else None
 
     def conditions(self, result: ProbeResult) -> dict[str, IncidentCondition]:
+        thresholds = self._thresholds_for(result.host)
+
+        def threshold(name: str) -> float:
+            return thresholds[name]
+
         if result.status != "online":
             return {
                 "connectivity": IncidentCondition(
@@ -162,7 +233,7 @@ class ThresholdIncidentPolicy:
                 category="cpu",
                 resource="CPU",
                 value=system.cpu_usage_pct,
-                threshold=self._thresholds.cpu_warning_pct,
+                threshold=threshold("cpu_warning_pct"),
                 observed_at=result.observed_at,
             )
             self._add_percentage(
@@ -171,7 +242,7 @@ class ThresholdIncidentPolicy:
                 category="memory",
                 resource="RAM",
                 value=self._percentage(system.memory_used_mib, system.memory_total_mib),
-                threshold=self._thresholds.memory_warning_pct,
+                threshold=threshold("memory_warning_pct"),
                 observed_at=result.observed_at,
             )
             if system.swap_total_mib > 0:
@@ -181,25 +252,29 @@ class ThresholdIncidentPolicy:
                     category="swap",
                     resource="Swap",
                     value=self._percentage(system.swap_used_mib, system.swap_total_mib),
-                    threshold=self._thresholds.swap_warning_pct,
+                    threshold=threshold("swap_warning_pct"),
                     observed_at=result.observed_at,
                     critical_at=90,
                 )
             for disk in system.disks:
+                if disk.mountpoint in self._excluded_disk_mounts(result.host):
+                    continue
                 self._add_percentage(
                     conditions,
                     key=f"disk:{disk.device}:{disk.mountpoint}",
                     category="disk",
                     resource=disk.mountpoint,
                     value=disk.used_pct,
-                    threshold=self._thresholds.disk_warning_pct,
+                    threshold=threshold("disk_warning_pct"),
                     observed_at=result.observed_at,
                     group_key=self._network_disk_group_key(
                         disk.device, disk.filesystem_type
                     ),
                 )
 
-        if result.gpus and any(not gpu.processes_available for gpu in result.gpus):
+        if result.gpus and any(
+            gpu.processes_sampled and not gpu.processes_available for gpu in result.gpus
+        ):
             conditions["gpu_processes"] = IncidentCondition(
                 key="gpu_processes",
                 category="gpu_processes",
@@ -216,15 +291,15 @@ class ThresholdIncidentPolicy:
         for gpu in result.gpus:
             identity = gpu.uuid or str(gpu.index)
             temperature = gpu.temperature_c
-            threshold = self._thresholds.gpu_temperature_warning_c
-            if temperature is not None and temperature >= threshold:
+            temperature_threshold = threshold("gpu_temperature_warning_c")
+            if temperature is not None and temperature >= temperature_threshold:
                 conditions[f"gpu_temperature:{identity}"] = IncidentCondition(
                     key=f"gpu_temperature:{identity}",
                     category="gpu_temperature",
                     resource=f"GPU {gpu.index}",
-                    severity=self._severity(temperature, threshold + 5),
+                    severity=self._severity(temperature, temperature_threshold + 5),
                     value=round(float(temperature), 2),
-                    threshold=threshold,
+                    threshold=temperature_threshold,
                     observed_at=result.observed_at,
                     open_after_cycles=self._incidents.resource_open_cycles,
                     recovery_cycles=self._incidents.recovery_cycles,
@@ -233,7 +308,8 @@ class ThresholdIncidentPolicy:
             memory_pct = self._percentage(
                 gpu.memory_used_mib or 0, gpu.memory_total_mib or 0
             )
-            if memory_pct >= self._thresholds.gpu_memory_warning_pct:
+            memory_threshold = threshold("gpu_memory_warning_pct")
+            if memory_pct >= memory_threshold:
                 key = f"gpu_memory:{identity}"
                 conditions[key] = IncidentCondition(
                     key=key,
@@ -241,16 +317,16 @@ class ThresholdIncidentPolicy:
                     resource=f"GPU {gpu.index} VRAM",
                     severity=self._severity(memory_pct),
                     value=memory_pct,
-                    threshold=self._thresholds.gpu_memory_warning_pct,
+                    threshold=memory_threshold,
                     observed_at=result.observed_at,
                     open_after_cycles=self._incidents.resource_open_cycles,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
             utilization = gpu.utilization_gpu_pct
             if (
-                memory_pct >= self._thresholds.gpu_idle_memory_pct
+                memory_pct >= threshold("gpu_idle_memory_pct")
                 and utilization is not None
-                and utilization < self._thresholds.gpu_busy_pct
+                and utilization < threshold("gpu_busy_pct")
                 and (gpu.memory_used_mib or 0) > 0
             ):
                 key = f"gpu_idle_memory:{identity}"
@@ -260,7 +336,7 @@ class ThresholdIncidentPolicy:
                     resource=f"GPU {gpu.index} VRAM",
                     severity="warning",
                     value=memory_pct,
-                    threshold=self._thresholds.gpu_idle_memory_pct,
+                    threshold=threshold("gpu_idle_memory_pct"),
                     observed_at=result.observed_at,
                     detail=f"GPU utilization is {round(utilization, 2)}%",
                     open_after_cycles=self._incidents.gpu_idle_memory_cycles,
@@ -355,15 +431,26 @@ class IncidentTracker:
     missing telemetry cannot be mistaken for recovery.
     """
 
-    def __init__(self, policy: IncidentPolicy, history_points: int) -> None:
+    def __init__(
+        self,
+        policy: IncidentPolicy,
+        history_points: int,
+        historical_events: tuple[IncidentEvent, ...] = (),
+    ) -> None:
         self._policy = policy
         self._active: dict[str, dict[str, IncidentCondition]] = {}
         self._candidates: dict[str, dict[str, tuple[IncidentCondition, int]]] = {}
         self._recoveries: dict[str, dict[str, int]] = {}
+        self._opened_at: dict[str, dict[str, str]] = {}
+        self._last_observed_at: dict[str, dict[str, str]] = {}
         self._initialized: set[str] = set()
-        self._events: deque[IncidentEvent] = deque(maxlen=history_points)
-        self._version = 0
-        self._next_event_id = 1
+        retained_events = historical_events[-history_points:]
+        self._events: deque[IncidentEvent] = deque(
+            retained_events, maxlen=history_points
+        )
+        last_event_id = max((event.event_id for event in retained_events), default=0)
+        self._version = last_event_id
+        self._next_event_id = last_event_id + 1
 
     @property
     def version(self) -> int:
@@ -375,11 +462,14 @@ class IncidentTracker:
             del self._active[host]
             self._candidates.pop(host, None)
             self._recoveries.pop(host, None)
+            self._opened_at.pop(host, None)
+            self._last_observed_at.pop(host, None)
             self._initialized.discard(host)
             if had_active_conditions:
                 self._version += 1
 
-    def update(self, result: ProbeResult) -> None:
+    def update(self, result: ProbeResult) -> tuple[IncidentEvent, ...]:
+        created: list[IncidentEvent] = []
         previous = self._active.get(result.host, {})
         observed = self._policy.conditions(result)
 
@@ -398,18 +488,28 @@ class IncidentTracker:
                 if condition.open_after_cycles > 1
             }
             self._recoveries[result.host] = {}
+            self._opened_at[result.host] = {
+                key: condition.observed_at for key, condition in immediate.items()
+            }
+            self._last_observed_at[result.host] = {
+                key: condition.observed_at for key, condition in immediate.items()
+            }
             if result.status != "online":
                 for key in sorted(immediate):
-                    self._append(
-                        result.host, immediate[key], "opened", result.observed_at
+                    created.append(
+                        self._append(
+                            result.host, immediate[key], "opened", result.observed_at
+                        )
                     )
             elif immediate:
                 # Initial conditions are visible without fabricating historical events.
                 self._version += 1
-            return
+            return tuple(created)
 
-        candidates = self._candidates.setdefault(result.host, {})
-        recoveries = self._recoveries.setdefault(result.host, {})
+        candidates = self._candidates[result.host]
+        recoveries = self._recoveries[result.host]
+        opened_at = self._opened_at[result.host]
+        last_observed_at = self._last_observed_at[result.host]
         current = dict(previous)
         if result.status == "online":
             for key in set(candidates) - set(observed):
@@ -420,12 +520,15 @@ class IncidentTracker:
             old = previous.get(key)
             if old is not None:
                 candidates.pop(key, None)
+                current[key] = new
+                last_observed_at[key] = new.observed_at
                 if old.severity != new.severity:
                     state: IncidentState = (
                         "escalated" if new.severity == "critical" else "deescalated"
                     )
-                    self._append(result.host, new, state, result.observed_at)
-                    current[key] = new
+                    created.append(
+                        self._append(result.host, new, state, result.observed_at)
+                    )
                 continue
 
             candidate, count = candidates.get(key, (new, 0))
@@ -435,7 +538,11 @@ class IncidentTracker:
             if count >= new.open_after_cycles:
                 candidates.pop(key, None)
                 current[key] = new
-                self._append(result.host, new, "opened", result.observed_at)
+                opened_at[key] = new.observed_at
+                last_observed_at[key] = new.observed_at
+                created.append(
+                    self._append(result.host, new, "opened", result.observed_at)
+                )
             else:
                 candidates[key] = (new, count)
 
@@ -446,18 +553,29 @@ class IncidentTracker:
                 if recovery_count >= old.recovery_cycles:
                     recoveries.pop(key, None)
                     current.pop(key, None)
-                    self._append(result.host, old, "resolved", result.observed_at)
+                    opened_at.pop(key, None)
+                    last_observed_at.pop(key, None)
+                    created.append(
+                        self._append(result.host, old, "resolved", result.observed_at)
+                    )
                 else:
                     recoveries[key] = recovery_count
 
         self._active[result.host] = current
+        return tuple(created)
 
     def snapshot(self, limit: int) -> dict[str, object]:
-        active = [
-            condition.active_dict(host)
-            for host in sorted(self._active)
-            for _, condition in sorted(self._active[host].items())
-        ]
+        active = []
+        for host in sorted(self._active):
+            for key, condition in sorted(self._active[host].items()):
+                item = condition.active_dict(host)
+                item["firstObservedAt"] = self._opened_at.get(host, {}).get(
+                    key, condition.observed_at
+                )
+                item["lastObservedAt"] = self._last_observed_at.get(host, {}).get(
+                    key, condition.observed_at
+                )
+                active.append(item)
         active.sort(
             key=lambda item: (
                 item["severity"] != "critical",
@@ -501,21 +619,37 @@ class IncidentTracker:
             if active
         }
 
+    def has_active(self, host: str) -> bool:
+        return bool(self._active.get(host))
+
+    def active_signature(self, host: str) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            (
+                key,
+                condition.severity,
+                condition.value,
+                condition.threshold,
+                condition.detail,
+                condition.resource,
+            )
+            for key, condition in sorted(self._active.get(host, {}).items())
+        )
+
     def _append(
         self,
         host: str,
         condition: IncidentCondition,
         state: IncidentState,
         observed_at: str,
-    ) -> None:
-        self._events.append(
-            IncidentEvent(
-                event_id=self._next_event_id,
-                host=host,
-                condition=condition,
-                state=state,
-                observed_at=observed_at,
-            )
+    ) -> IncidentEvent:
+        event = IncidentEvent(
+            event_id=self._next_event_id,
+            host=host,
+            condition=condition,
+            state=state,
+            observed_at=observed_at,
         )
+        self._events.append(event)
         self._next_event_id += 1
         self._version += 1
+        return event

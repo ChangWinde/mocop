@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -80,6 +81,25 @@ def _systemd_quote(value: Path) -> str:
     return f'"{escaped}"'
 
 
+def _systemd_optional_environment_file(value: Path) -> str:
+    """Render an optional absolute path with systemd-compatible byte escapes."""
+    text = str(value)
+    if any(ord(character) < 32 or ord(character) == 127 for character in text):
+        raise LifecycleError("service paths cannot contain control characters")
+    safe = frozenset(
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._-"
+    )
+    escaped = []
+    for byte in text.encode("utf-8"):
+        if byte in safe:
+            escaped.append(chr(byte))
+        elif byte == ord("%"):
+            escaped.append("%%")
+        else:
+            escaped.append(f"\\x{byte:02x}")
+    return f"-{''.join(escaped)}"
+
+
 def _absolute_without_resolving_symlinks(path: Path) -> Path:
     return Path(os.path.abspath(path.expanduser()))
 
@@ -91,6 +111,9 @@ def render_user_unit(python_executable: Path, config_path: Path) -> str:
     resolved_config = config_path.expanduser().resolve()
     config = _systemd_quote(resolved_config)
     config_directory = _systemd_quote(resolved_config.parent)
+    environment_file = _systemd_optional_environment_file(
+        resolved_config.with_name("environment")
+    )
     return f"""[Unit]
 Description=Mocop AI-native GPU cluster monitor
 Wants=network-online.target
@@ -98,14 +121,17 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart={executable} -m mocop --config={config}
+ExecStart={executable} -m mocop --managed-service --config={config}
 Restart=on-failure
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile={environment_file}
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths={config_directory}
+StateDirectory=mocop
+StateDirectoryMode=0700
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0077
 
@@ -170,6 +196,25 @@ class UserServiceManager:
             raise LifecycleError(
                 f"configuration is not ready: {self.config_path}: {exc}"
             ) from exc
+
+        environment_path = self.config_path.with_name("environment")
+        if environment_path.exists() or environment_path.is_symlink():
+            try:
+                metadata = environment_path.lstat()
+            except OSError as exc:
+                raise LifecycleError(
+                    f"cannot inspect service environment: {environment_path}"
+                ) from exc
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or environment_path.is_symlink()
+                or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o077
+            ):
+                raise LifecycleError(
+                    "service environment must be a private regular file owned "
+                    "by the current user"
+                )
 
         unit = render_user_unit(self.python_executable, self.config_path)
         _atomic_write(self.unit_path, unit, 0o644)

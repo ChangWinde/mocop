@@ -10,13 +10,15 @@ const MAX_BACKGROUND_DIMENSION = 8192;
 const MAX_BACKGROUND_PIXELS = 32_000_000;
 const MAX_COMPRESSED_BACKGROUND_DIMENSION = 4096;
 const MAX_COMPRESSED_BACKGROUND_PIXELS = 12_000_000;
+const MAX_GPU_DETAIL_PROCESSES = 100;
 const BACKGROUND_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
 const DEFAULT_PREFERENCES = Object.freeze({
   serverSort: "custom",
   serverOrder: [],
   gpuSort: "host",
   heatMetric: "utilization",
-  theme: "midnight",
+  visualStyle: "precision",
+  accent: "cobalt",
   density: "comfortable",
   backgroundVisibility: 38,
   serverFilter: "all",
@@ -26,7 +28,17 @@ const DEFAULT_PREFERENCES = Object.freeze({
 const SERVER_SORT_VALUES = new Set(["custom", "group", "host", "status", "gpu", "cpu"]);
 const GPU_SORT_VALUES = new Set(["host", "utilization", "memory", "temperature", "power"]);
 const HEAT_METRIC_VALUES = new Set(["utilization", "memory", "temperature"]);
-const THEME_VALUES = new Set(["midnight", "graphite", "aurora", "glass", "terminal"]);
+const VISUAL_STYLE_VALUES = new Set([
+  "precision", "glass", "terminal", "ledger", "blueprint", "studio",
+]);
+const ACCENT_VALUES = new Set(["cobalt", "cyan", "violet", "emerald", "amber", "rose"]);
+const LEGACY_THEME_MIGRATIONS = Object.freeze({
+  midnight: { visualStyle: "precision", accent: "cobalt" },
+  graphite: { visualStyle: "ledger", accent: "amber" },
+  aurora: { visualStyle: "blueprint", accent: "cyan" },
+  glass: { visualStyle: "glass", accent: "cobalt" },
+  terminal: { visualStyle: "terminal", accent: "emerald" },
+});
 const DENSITY_VALUES = new Set(["comfortable", "compact"]);
 const SERVER_FILTER_VALUES = new Set(["all", "issues", "busy", "available", "stale"]);
 const CAPACITY_HOST_BLOCKERS = new Set(["connectivity", "gpu_availability", "gpu_count"]);
@@ -36,6 +48,13 @@ const CAPACITY_GPU_BLOCKERS = new Set([
   "gpu_slowdown",
   "gpu_temperature",
 ]);
+const TOPOLOGY_TRANSPORT_VALUES = new Set(["ssh", "frp-stcp", "frp-xtcp", "vpn"]);
+const TOPOLOGY_TRANSPORT_LABELS = Object.freeze({
+  ssh: "SSH",
+  "frp-stcp": "FRP · STCP",
+  "frp-xtcp": "FRP · XTCP",
+  vpn: "VPN",
+});
 
 function safeBackgroundVisibility(value) {
   return Number.isInteger(value) && value >= 15 && value <= 70
@@ -55,6 +74,10 @@ function loadPreferences() {
     if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
       return { ...DEFAULT_PREFERENCES };
     }
+    const legacyAppearance = (
+      typeof stored.theme === "string"
+      && Object.prototype.hasOwnProperty.call(LEGACY_THEME_MIGRATIONS, stored.theme)
+    ) ? LEGACY_THEME_MIGRATIONS[stored.theme] : {};
     return {
       serverSort: SERVER_SORT_VALUES.has(stored.serverSort)
         ? stored.serverSort : DEFAULT_PREFERENCES.serverSort,
@@ -63,8 +86,12 @@ function loadPreferences() {
         ? stored.gpuSort : DEFAULT_PREFERENCES.gpuSort,
       heatMetric: HEAT_METRIC_VALUES.has(stored.heatMetric)
         ? stored.heatMetric : DEFAULT_PREFERENCES.heatMetric,
-      theme: THEME_VALUES.has(stored.theme)
-        ? stored.theme : DEFAULT_PREFERENCES.theme,
+      visualStyle: VISUAL_STYLE_VALUES.has(stored.visualStyle)
+        ? stored.visualStyle
+        : legacyAppearance.visualStyle || DEFAULT_PREFERENCES.visualStyle,
+      accent: ACCENT_VALUES.has(stored.accent)
+        ? stored.accent
+        : legacyAppearance.accent || DEFAULT_PREFERENCES.accent,
       density: DENSITY_VALUES.has(stored.density)
         ? stored.density : DEFAULT_PREFERENCES.density,
       backgroundVisibility: safeBackgroundVisibility(stored.backgroundVisibility),
@@ -81,7 +108,8 @@ function loadPreferences() {
 }
 
 const preferences = loadPreferences();
-document.documentElement.dataset.theme = preferences.theme;
+document.documentElement.dataset.style = preferences.visualStyle;
+document.documentElement.dataset.accent = preferences.accent;
 document.documentElement.dataset.density = preferences.density;
 document.documentElement.style.setProperty(
   "--custom-background-opacity",
@@ -90,6 +118,14 @@ document.documentElement.style.setProperty(
 
 const view = {
   snapshot: null,
+  topology: null,
+  topologyLoading: false,
+  topologyError: "",
+  topologyRevision: 0,
+  topologyRenderedRevision: -1,
+  topologyNodeRefs: new Map(),
+  topologyMappedHosts: new Set(),
+  topologyUnmappedKey: "",
   selectedHost: "all",
   serverFilter: preferences.serverFilter,
   attentionFilter: "all",
@@ -131,6 +167,14 @@ const view = {
   draggedHost: null,
   suppressServerClick: false,
   selectedGpu: null,
+  gpuHistory: null,
+  gpuHistoryKey: "",
+  gpuHistoryRequest: 0,
+  gpuHistoryLoading: false,
+  selectedIncident: null,
+  incidentActionPending: false,
+  manualProbePending: false,
+  notificationTestPending: false,
   capacityRequest: { gpuCount: 1, minVramGiB: 24, model: "any" },
   capacityModelSignature: "",
   inventory: null,
@@ -146,6 +190,9 @@ const view = {
   groupPendingHost: null,
   collectorSettingsDirty: false,
   collectorSettingsSaving: false,
+  serviceRestartSupported: false,
+  serviceRestartLoading: false,
+  serviceRestarting: false,
   backgroundObjectUrl: null,
   backgroundRequestId: 0,
 };
@@ -170,6 +217,15 @@ const elements = {
   connectionText: $("#connection-text"),
   settingsToggle: $("#settings-toggle"),
   settingsDialog: $("#settings-dialog"),
+  topologyToggle: $("#topology-toggle"),
+  topologyDialog: $("#topology-dialog"),
+  topologyNodeCount: $("#topology-node-count"),
+  topologyFrpCount: $("#topology-frp-count"),
+  topologyLiveSummary: $("#topology-live-summary"),
+  topologyStatus: $("#topology-status"),
+  topologyTree: $("#topology-tree"),
+  topologyUnmapped: $("#topology-unmapped"),
+  topologyUnmappedList: $("#topology-unmapped-list"),
   capacityToggle: $("#capacity-toggle"),
   capacityDialog: $("#capacity-dialog"),
   capacityForm: $("#capacity-form"),
@@ -199,6 +255,15 @@ const elements = {
   settingsMaxWorkers: $("#settings-max-workers"),
   saveCollectorSettings: $("#save-collector-settings"),
   collectorSettingsStatus: $("#collector-settings-status"),
+  persistenceStatus: $("#persistence-status"),
+  notificationStatus: $("#notification-status"),
+  notificationTest: $("#test-notifications"),
+  notificationTestStatus: $("#notification-test-status"),
+  exportDiagnostics: $("#export-diagnostics"),
+  restartService: $("#restart-service"),
+  restartConfirmDialog: $("#restart-confirm-dialog"),
+  confirmRestartService: $("#confirm-restart-service"),
+  serviceRestartStatus: $("#service-restart-status"),
   inventoryRefresh: $("#inventory-refresh"),
   inventoryStatus: $("#inventory-status"),
   configuredHostCount: $("#configured-host-count"),
@@ -259,6 +324,7 @@ const elements = {
   search: $("#search"),
   gpuSort: $("#gpu-sort"),
   exportCsv: $("#export-csv"),
+  probeNow: $("#probe-now"),
   groupToggle: $("#toggle-groups"),
   gpuGroups: $("#gpu-groups"),
   emptyState: $("#empty-state"),
@@ -268,10 +334,32 @@ const elements = {
   gpuDetailTitle: $("#gpu-detail-title"),
   gpuDetailState: $("#gpu-detail-state"),
   gpuDetailMetrics: $("#gpu-detail-metrics"),
+  gpuHistoryRange: $("#gpu-history-range"),
+  gpuHistoryGrid: $("#gpu-history-grid"),
+  gpuProcessTimeline: $("#gpu-process-timeline"),
   gpuTaskCount: $("#gpu-task-count"),
+  gpuTaskOverview: $("#gpu-task-overview"),
+  gpuTaskMemoryTotal: $("#gpu-task-memory-total"),
+  gpuTaskMemoryBar: $("#gpu-task-memory-bar"),
+  gpuTaskNote: $("#gpu-task-note"),
   gpuTaskList: $("#gpu-task-list"),
+  incidentDetailDialog: $("#incident-detail-dialog"),
+  incidentDetailHost: $("#incident-detail-host"),
+  incidentDetailTitle: $("#incident-detail-title"),
+  incidentDetailStatus: $("#incident-detail-status"),
+  incidentDetailSummary: $("#incident-detail-summary"),
+  incidentEvidence: $("#incident-evidence"),
+  incidentNextSteps: $("#incident-next-steps"),
+  incidentOpenGpu: $("#incident-open-gpu"),
+  incidentActionDuration: $("#incident-action-duration"),
+  incidentActionReason: $("#incident-action-reason"),
+  acknowledgeIncident: $("#acknowledge-incident"),
+  silenceIncident: $("#silence-incident"),
+  clearIncidentAction: $("#clear-incident-action"),
+  incidentActionFeedback: $("#incident-action-feedback"),
 };
-const themeChoiceButtons = [...document.querySelectorAll("[data-theme-choice]")];
+const styleChoiceButtons = [...document.querySelectorAll("[data-style-choice]")];
+const accentChoiceButtons = [...document.querySelectorAll("[data-accent-choice]")];
 
 function create(tag, className, text) {
   const element = document.createElement(tag);
@@ -721,7 +809,8 @@ function savePreferences() {
     serverOrder: view.serverOrder,
     gpuSort: view.sort,
     heatMetric: view.heatMetric,
-    theme: preferences.theme,
+    visualStyle: preferences.visualStyle,
+    accent: preferences.accent,
     density: preferences.density,
     backgroundVisibility: preferences.backgroundVisibility,
     serverFilter: view.serverFilter,
@@ -746,7 +835,8 @@ function syncPreferenceControls() {
   elements.settingsHeatMetric.value = view.heatMetric;
   elements.showTemperature.checked = preferences.showTemperature;
   elements.showPower.checked = preferences.showPower;
-  document.documentElement.dataset.theme = preferences.theme;
+  document.documentElement.dataset.style = preferences.visualStyle;
+  document.documentElement.dataset.accent = preferences.accent;
   document.documentElement.dataset.density = preferences.density;
   document.documentElement.style.setProperty(
     "--custom-background-opacity",
@@ -755,8 +845,14 @@ function syncPreferenceControls() {
   document.querySelectorAll(".fleet-filter").forEach((button) => {
     button.classList.toggle("active", button.dataset.serverFilter === view.serverFilter);
   });
-  themeChoiceButtons.forEach((button) => {
-    const selected = button.dataset.themeChoice === preferences.theme;
+  styleChoiceButtons.forEach((button) => {
+    const selected = button.dataset.styleChoice === preferences.visualStyle;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-checked", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
+  accentChoiceButtons.forEach((button) => {
+    const selected = button.dataset.accentChoice === preferences.accent;
     button.classList.toggle("active", selected);
     button.setAttribute("aria-checked", String(selected));
     button.tabIndex = selected ? 0 : -1;
@@ -770,7 +866,8 @@ function resetPreferences() {
   view.serverOrder = [];
   view.sort = DEFAULT_PREFERENCES.gpuSort;
   view.heatMetric = DEFAULT_PREFERENCES.heatMetric;
-  preferences.theme = DEFAULT_PREFERENCES.theme;
+  preferences.visualStyle = DEFAULT_PREFERENCES.visualStyle;
+  preferences.accent = DEFAULT_PREFERENCES.accent;
   preferences.density = DEFAULT_PREFERENCES.density;
   preferences.backgroundVisibility = DEFAULT_PREFERENCES.backgroundVisibility;
   view.serverFilter = DEFAULT_PREFERENCES.serverFilter;
@@ -910,13 +1007,13 @@ function renderConnectionStatus() {
     if (health.state === "waiting") {
       kind = "connecting";
       label = "等待采集";
-      title = "实时通道已连接，正在等待首轮采集完成";
+      title = "实时通道已连接，正在等待首个采集批次完成";
     } else if (health.state === "delayed") {
       kind = "delayed";
       label = "采集延迟";
-      title = `实时通道已连接，但上轮采集完成于 ${age(view.snapshot.lastPollCompletedAt)}`;
+      title = `实时通道已连接，但最近采集批次完成于 ${age(view.snapshot.lastPollCompletedAt)}`;
     } else {
-      title = `上轮采集完成于 ${age(view.snapshot.lastPollCompletedAt)}`;
+      title = `最近采集批次完成于 ${age(view.snapshot.lastPollCompletedAt)}`;
     }
   }
   elements.connection.className = `connection ${kind}`;
@@ -1097,6 +1194,275 @@ function normalizeInventory(payload) {
     maintenanceWindows,
     hostGroups,
   };
+}
+
+function normalizeTopology(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TypeError("Invalid topology response");
+  }
+  if (payload.root == null && Array.isArray(payload.links) && payload.links.length === 0) {
+    return { root: null, links: [] };
+  }
+  const root = safeStoredHosts([payload.root])[0];
+  if (!root || !Array.isArray(payload.links) || payload.links.length > 512) {
+    throw new TypeError("Invalid topology response");
+  }
+  const targets = new Set();
+  const children = new Map();
+  const links = payload.links.map((link) => {
+    if (!link || typeof link !== "object" || Array.isArray(link)) {
+      throw new TypeError("Invalid topology link");
+    }
+    const keys = Object.keys(link);
+    if (
+      !["source", "target", "transport"].every((key) => keys.includes(key))
+      || keys.some((key) => !["source", "target", "transport", "label"].includes(key))
+    ) {
+      throw new TypeError("Invalid topology link");
+    }
+    const source = safeStoredHosts([link.source])[0];
+    const target = safeStoredHosts([link.target])[0];
+    const label = link.label == null ? null : link.label;
+    if (
+      !source
+      || !target
+      || source === target
+      || target === root
+      || targets.has(target)
+      || !TOPOLOGY_TRANSPORT_VALUES.has(link.transport)
+      || (label != null && (
+        typeof label !== "string"
+        || !label
+        || label !== label.trim()
+        || [...label].length > 64
+        || /\p{C}/u.test(label)
+      ))
+    ) {
+      throw new TypeError("Invalid topology link");
+    }
+    targets.add(target);
+    if (!children.has(source)) children.set(source, []);
+    children.get(source).push(target);
+    return { source, target, transport: link.transport, label };
+  });
+  const reachable = new Set([root]);
+  const pending = [root];
+  while (pending.length) {
+    (children.get(pending.pop()) || []).forEach((target) => {
+      if (reachable.has(target)) return;
+      reachable.add(target);
+      pending.push(target);
+    });
+  }
+  if (links.some((link) => !reachable.has(link.source) || !reachable.has(link.target))) {
+    throw new TypeError("Invalid topology tree");
+  }
+  return { root, links };
+}
+
+function topologyServer(host) {
+  return view.snapshot?.servers.find((server) => server.host === host) || null;
+}
+
+function updateTopologyNode(reference, host, server) {
+  if (!server && reference.signature === "infrastructure") return;
+  const state = !server
+    ? "infrastructure"
+    : server.status === "online" && !server.stale ? "online" : "offline";
+  let metaText;
+  let statusLabel;
+  if (!server) {
+    metaText = "连接路径节点 · 不采集资源";
+    statusLabel = "连接路径节点，不采集资源";
+  } else if (state === "offline") {
+    metaText = server.stale ? "数据陈旧" : "连接不可用";
+    statusLabel = metaText;
+  } else {
+    const cpu = numeric(server.system?.cpu_usage_pct, NaN);
+    metaText = `${server.gpus.length} GPU · CPU ${Number.isFinite(cpu) ? `${format(cpu)}%` : "—"}`;
+    statusLabel = metaText;
+  }
+  const signature = server ? `${state}\u0000${metaText}` : "infrastructure";
+  if (reference.signature === signature) return;
+  reference.signature = signature;
+  reference.button.className = `topology-node ${state}`;
+  reference.button.disabled = !server;
+  reference.meta.textContent = metaText;
+  reference.button.setAttribute("aria-label", `${host}，${statusLabel}`);
+}
+
+function topologyNode(host, isRoot, nodeRefs) {
+  const button = create("button", "topology-node infrastructure");
+  button.type = "button";
+  button.dataset.host = host;
+  const heading = create("span", "topology-node-heading");
+  heading.append(
+    create("i", "topology-node-dot"),
+    create("strong", "", host),
+  );
+  if (isRoot) heading.append(create("small", "topology-root-badge", "起点"));
+  const meta = create("span", "topology-node-meta");
+  button.append(heading, meta);
+  button.addEventListener("click", () => {
+    const server = topologyServer(host);
+    if (!server) return;
+    selectHost(host);
+    elements.topologyDialog.close();
+  });
+  const reference = { button, meta, signature: "" };
+  nodeRefs.set(host, reference);
+  return button;
+}
+
+function topologyBranch(host, linksBySource, nodeRefs, isRoot = false) {
+  const branch = create("li", "topology-branch");
+  branch.append(topologyNode(host, isRoot, nodeRefs));
+  const links = linksBySource.get(host) || [];
+  if (!links.length) return branch;
+  const children = create("ul", "topology-children");
+  links.forEach((link) => {
+    const child = create("li", "topology-child");
+    const connector = create("div", `topology-connector ${link.transport}`);
+    const label = link.label || TOPOLOGY_TRANSPORT_LABELS[link.transport];
+    connector.setAttribute("role", "note");
+    connector.setAttribute(
+      "aria-label",
+      `${host} 通过 ${label} 连接到 ${link.target}`,
+    );
+    const visibleLabel = create(
+      "span",
+      "topology-link-label",
+      label,
+    );
+    visibleLabel.setAttribute("aria-hidden", "true");
+    connector.append(visibleLabel);
+    child.append(connector, topologyBranch(link.target, linksBySource, nodeRefs));
+    children.append(child);
+  });
+  branch.append(children);
+  return branch;
+}
+
+function resetTopologyGraph() {
+  elements.topologyTree.replaceChildren();
+  elements.topologyUnmappedList.replaceChildren();
+  view.topologyRenderedRevision = -1;
+  view.topologyNodeRefs = new Map();
+  view.topologyMappedHosts = new Set();
+  view.topologyUnmappedKey = "";
+  elements.topologyUnmapped.hidden = true;
+}
+
+function buildTopologyGraph(topology) {
+  const linksBySource = new Map();
+  topology.links.forEach((link) => {
+    if (!linksBySource.has(link.source)) linksBySource.set(link.source, []);
+    linksBySource.get(link.source).push(link);
+  });
+  const nodeRefs = new Map();
+  const tree = create("ul", "topology-tree-list");
+  tree.append(topologyBranch(topology.root, linksBySource, nodeRefs, true));
+  elements.topologyTree.replaceChildren(tree);
+  view.topologyNodeRefs = nodeRefs;
+  view.topologyMappedHosts = new Set([
+    topology.root,
+    ...topology.links.map((link) => link.target),
+  ]);
+  view.topologyRenderedRevision = view.topologyRevision;
+}
+
+function syncTopologyUnmapped(servers) {
+  const key = servers.map((server) => server.host).join("\u0000");
+  if (view.topologyUnmappedKey === key) return;
+  view.topologyUnmappedKey = key;
+  const buttons = servers.map((server) => {
+    const button = create("button", "topology-unmapped-node", server.host);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      selectHost(server.host);
+      elements.topologyDialog.close();
+    });
+    return button;
+  });
+  elements.topologyUnmappedList.replaceChildren(...buttons);
+}
+
+function renderTopology() {
+  if (!elements.topologyDialog.open) return;
+  const topology = view.topology;
+  if (view.topologyLoading && !topology) {
+    resetTopologyGraph();
+    elements.topologyStatus.hidden = false;
+    elements.topologyStatus.className = "topology-status";
+    elements.topologyStatus.textContent = "正在读取本地拓扑配置…";
+    return;
+  }
+  if (view.topologyError) {
+    resetTopologyGraph();
+    elements.topologyStatus.hidden = false;
+    elements.topologyStatus.className = "topology-status error";
+    elements.topologyStatus.textContent = view.topologyError;
+    return;
+  }
+  if (!topology?.root) {
+    resetTopologyGraph();
+    elements.topologyStatus.hidden = false;
+    elements.topologyStatus.className = "topology-status";
+    elements.topologyStatus.textContent = "尚未在 config.json 中配置连接拓扑";
+    elements.topologyNodeCount.textContent = "0";
+    elements.topologyFrpCount.textContent = "0";
+    elements.topologyLiveSummary.textContent = "无拓扑配置";
+    return;
+  }
+  if (view.topologyRenderedRevision !== view.topologyRevision) {
+    buildTopologyGraph(topology);
+  }
+  const monitored = view.snapshot?.servers || [];
+  const serverByHost = new Map(monitored.map((server) => [server.host, server]));
+  view.topologyNodeRefs.forEach((reference, host) => {
+    updateTopologyNode(reference, host, serverByHost.get(host) || null);
+  });
+  const mappedServers = monitored.filter(
+    (server) => view.topologyMappedHosts.has(server.host),
+  );
+  const online = mappedServers.filter(
+    (server) => server.status === "online" && !server.stale,
+  ).length;
+  elements.topologyNodeCount.textContent = String(view.topologyMappedHosts.size);
+  elements.topologyFrpCount.textContent = String(
+    topology.links.filter((link) => link.transport.startsWith("frp-")).length,
+  );
+  elements.topologyLiveSummary.textContent = `${online} / ${mappedServers.length} 个监控节点在线`;
+  elements.topologyStatus.hidden = true;
+
+  const unmapped = monitored.filter(
+    (server) => !view.topologyMappedHosts.has(server.host),
+  );
+  elements.topologyUnmapped.hidden = unmapped.length === 0;
+  syncTopologyUnmapped(unmapped);
+}
+
+async function fetchTopology() {
+  if (view.topologyLoading) return;
+  view.topologyLoading = true;
+  view.topologyError = "";
+  renderTopology();
+  try {
+    const response = await fetch("/api/topology", {
+      cache: "no-store",
+      headers: { "X-Monitor-Request": "dashboard" },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    view.topology = normalizeTopology(await response.json());
+    view.topologyRevision += 1;
+  } catch (_error) {
+    view.topology = null;
+    view.topologyError = "拓扑读取失败，请检查本地配置与 Mocop 服务权限";
+    view.topologyRevision += 1;
+  } finally {
+    view.topologyLoading = false;
+    renderTopology();
+  }
 }
 
 function normalizeHostGroups(payload, configuredHosts) {
@@ -1571,7 +1937,7 @@ async function changeInventory(action, host) {
       : `${host} 已从监控配置移除`;
     view.inventoryMessageKind = "success";
     if (action === "remove" && view.selectedHost === host) selectHost("all");
-    await fetchSnapshot();
+    await Promise.all([fetchSnapshot(), fetchTopology()]);
   } catch (error) {
     view.inventoryMessage = error instanceof RangeError
       ? "节点清单已变化，已重新扫描，请再试一次"
@@ -1727,7 +2093,7 @@ function incidentConditionMessage(condition) {
 function serverConditions(server) {
   if (!Array.isArray(view.incidents?.active)) return [];
   return view.incidents.active
-    .filter((condition) => condition.host === server.host && !condition.silenced)
+    .filter((condition) => condition.host === server.host && condition.actionable !== false)
     .map((condition) => ({
       id: condition.conditionKey,
       kind: condition.category,
@@ -1740,6 +2106,7 @@ function serverConditions(server) {
       device: String(condition.resource || ""),
       usage: condition.value == null ? -1 : numeric(condition.value, -1),
       sharedKey: condition.groupKey || null,
+      source: condition,
     }));
 }
 
@@ -1966,6 +2333,7 @@ function issueFromConditions(server, conditions) {
     messages,
     categories: [...new Set(conditions.map(conditionCategory))].sort(),
     sortName: server.host,
+    conditions,
   };
 }
 
@@ -1977,6 +2345,35 @@ function attentionIssues() {
   const conditionsByHost = new Map(
     view.snapshot.servers.map((server) => [server.host, serverConditions(server)]),
   );
+  const consumed = new Set();
+  const issues = [];
+  const correlations = Array.isArray(view.incidents?.correlations)
+    ? view.incidents.correlations : [];
+  correlations.forEach((correlation) => {
+    if (
+      correlation?.kind !== "configured_shared_path"
+      || correlation.confidence !== "possible"
+    ) return;
+    const anchor = safeStoredHosts([correlation.anchor])[0];
+    const hosts = safeStoredHosts(correlation.hosts).filter((host) =>
+      conditionsByHost.get(host)?.some((condition) => condition.kind === "connectivity"));
+    if (!anchor || hosts.length < 2) return;
+    hosts.forEach((host) => {
+      conditionsByHost.get(host)
+        .filter((condition) => condition.kind === "connectivity")
+        .forEach((condition) => consumed.add(`${host}|${condition.id}`));
+    });
+    issues.push({
+      shared: true,
+      sharedLabel: "可能的共享链路",
+      hosts,
+      severity: "critical",
+      priority: 3,
+      messages: [`${hosts.length} 台节点不可达 · 配置路径经过 ${anchor}`],
+      categories: ["connection"],
+      sortName: anchor,
+    });
+  });
   const sharedGroups = new Map();
   conditionsByHost.forEach((conditions, host) => {
     conditions.filter((condition) => condition.sharedKey).forEach((condition) => {
@@ -1986,8 +2383,6 @@ function attentionIssues() {
     });
   });
 
-  const consumed = new Set();
-  const issues = [];
   sharedGroups.forEach((occurrences) => {
     const byHost = new Map();
     occurrences.forEach((occurrence) => {
@@ -2005,6 +2400,7 @@ function attentionIssues() {
     const hosts = unique.map(({ host }) => host).sort((a, b) => a.localeCompare(b));
     issues.push({
       shared: true,
+      sharedLabel: "共享存储",
       hosts,
       severity: unique.some(({ condition }) => condition.severity === "critical") ? "critical" : "warning",
       priority: Math.max(...unique.map(({ condition }) => condition.priority)),
@@ -2045,6 +2441,7 @@ function renderAttention() {
     filter: view.attentionFilter,
     issues: issues.map((issue) => ({
       shared: Boolean(issue.shared),
+      sharedLabel: issue.sharedLabel || null,
       hosts: issue.hosts,
       severity: issue.severity,
       priority: issue.priority,
@@ -2079,11 +2476,12 @@ function renderAttention() {
   visibleIssues.forEach((issue) => {
     const item = create(issue.shared ? "article" : "button", `attention-item ${issue.severity}${issue.shared ? " shared" : ""}`);
     if (!issue.shared) item.type = "button";
-    item.title = `${issue.shared ? "共享存储" : issue.server.host}：${issue.messages.join(" · ")}`;
+    const issueLabel = issue.shared ? issue.sharedLabel : issue.server.host;
+    item.title = `${issueLabel}：${issue.messages.join(" · ")}`;
     const heading = create("span", "attention-item-heading");
     heading.append(
       create("i"),
-      create("strong", "", issue.shared ? "共享存储" : issue.server.host),
+      create("strong", "", issueLabel),
       create("em", "", issue.severity === "critical" ? "严重" : "警告"),
     );
     item.append(heading, create("span", "attention-message", issue.messages.join(" · ")));
@@ -2097,7 +2495,14 @@ function renderAttention() {
       });
       item.append(hosts);
     } else {
-      item.addEventListener("click", () => selectHost(issue.server.host));
+      item.addEventListener("click", () => {
+        const condition = issue.conditions
+          ?.slice()
+          .sort((first, second) => second.priority - first.priority)[0]
+          ?.source;
+        if (condition) openIncidentDetail(condition);
+        else selectHost(issue.server.host);
+      });
     }
     fragment.append(item);
   });
@@ -2124,6 +2529,189 @@ function incidentDescription(event) {
   return event.state === "resolved"
     ? `${event.resource} 恢复正常`
     : incidentConditionMessage(event);
+}
+
+function selectedIncidentRecord() {
+  if (!view.selectedIncident || !Array.isArray(view.incidents?.active)) return null;
+  return view.incidents.active.find((condition) =>
+    condition.host === view.selectedIncident.host
+      && condition.conditionKey === view.selectedIncident.conditionKey) || null;
+}
+
+function diagnosticEvidenceLabel(label) {
+  return {
+    current: "当前值",
+    threshold: "告警阈值",
+    consecutiveFailures: "连续失败",
+    lastSuccessAt: "最近成功",
+    gpuUtilizationPct: "GPU 负载",
+    memoryUsedMiB: "进程显存",
+    processCount: "活跃进程",
+  }[label] || label;
+}
+
+function diagnosticEvidenceValue(item) {
+  if (item.value == null) return "—";
+  if (item.label === "lastSuccessAt") return age(item.value);
+  if (typeof item.value === "number") {
+    return `${format(item.value, 1)}${item.unit || ""}`;
+  }
+  return String(item.value);
+}
+
+function localizedDiagnosis(condition) {
+  const resource = condition.resource || "资源";
+  const descriptions = {
+    connectivity: [
+      "采集链路不可用",
+      "固定 SSH 探针未能完成，当前资源数据不可用。",
+      ["使用同一 OpenSSH 别名验证非交互连接。", "若多台节点同时失败，优先检查共享跳板机或隧道。"],
+    ],
+    disk: [
+      "文件系统空间不足",
+      `${resource} 已超过配置的使用率阈值。`,
+      ["确认该文件系统是否仍在按预期增长。", "检查大目录以及日志、缓存和检查点保留策略。"],
+    ],
+    swap: [
+      "Swap 压力偏高",
+      "Swap 使用率超过阈值，可能存在持续内存压力。",
+      ["对照可用内存和当前任务规模。", "观察 Swap 是否持续增长或已趋于稳定。"],
+    ],
+    memory: [
+      "内存压力偏高",
+      "内存使用率超过配置阈值。",
+      ["检查当前节点上的主要任务。", "观察采样之间的可用内存是否恢复。"],
+    ],
+    cpu: [
+      "CPU 负载偏高",
+      "CPU 使用率超过配置阈值。",
+      ["确认数据加载或预处理是否限制 GPU。", "对照同一时段的 CPU 与 GPU 利用率。"],
+    ],
+    gpu_idle_memory: [
+      "显存占用但计算空闲",
+      "显存仍被进程占用，但 GPU 计算负载持续低于忙碌阈值。",
+      ["查看该 GPU 的进程与任务归属。", "确认进程是在正常等待，还是已经停滞。"],
+    ],
+    gpu_temperature: [
+      "GPU 温度偏高",
+      "GPU 温度超过配置的警告阈值。",
+      ["检查散热、风扇和相邻设备温度。", "继续长任务前确认硬件降频状态。"],
+    ],
+    gpu_count: [
+      "GPU 数量与配置不一致",
+      "当前可见 GPU 数量与 expected_gpu_counts 不一致。",
+      ["检查设备可见性和驱动初始化。", "仅在硬件确实调整后修改预期数量。"],
+    ],
+    gpu_ecc: ["GPU 硬件健康异常", "检测到未纠正 ECC 错误。", ["保留任务上下文并按集群硬件维护流程处理。"]],
+    gpu_memory_repair: ["GPU 显存需要修复", "硬件遥测报告待处理的显存修复状态。", ["保留任务上下文并按集群硬件维护流程处理。"]],
+    gpu_slowdown: ["GPU 已触发硬件降频", "温度或功率相关硬件状态触发了降频。", ["检查温度、功耗上限和散热条件。"]],
+  };
+  return descriptions[condition.category] || [
+    condition.diagnosis?.title || "资源状态需要处理",
+    condition.diagnosis?.summary || incidentConditionMessage(condition),
+    condition.diagnosis?.nextSteps || ["确认当前状态是否符合任务预期。"],
+  ];
+}
+
+function renderIncidentDetail() {
+  if (!elements.incidentDetailDialog.open) return;
+  const condition = selectedIncidentRecord();
+  if (!condition) {
+    elements.incidentDetailDialog.close();
+    view.selectedIncident = null;
+    return;
+  }
+  const diagnosis = condition.diagnosis || {};
+  const [diagnosisTitle, diagnosisSummary, diagnosisSteps] = localizedDiagnosis(condition);
+  const actionLabel = condition.action === "silenced"
+    ? "已静默" : condition.action === "acknowledged" ? "已确认" : "待处理";
+  elements.incidentDetailHost.textContent = `${condition.host} · ${condition.resource || "资源"}`;
+  elements.incidentDetailTitle.textContent = diagnosisTitle;
+  elements.incidentDetailStatus.className = `incident-detail-status ${condition.severity}`;
+  elements.incidentDetailStatus.textContent = [
+    condition.severity === "critical" ? "严重" : "警告",
+    actionLabel,
+    `首次 ${age(condition.firstObservedAt || condition.observedAt)}`,
+    condition.actionUntil ? `有效至 ${new Date(condition.actionUntil).toLocaleString("zh-CN")}` : null,
+  ].filter(Boolean).join(" · ");
+  elements.incidentDetailSummary.textContent = diagnosisSummary;
+  const evidence = Array.isArray(diagnosis.evidence) ? diagnosis.evidence : [];
+  elements.incidentEvidence.replaceChildren(...evidence.map((item) => {
+    const node = create("article", "incident-evidence-item");
+    node.append(
+      create("span", "", diagnosticEvidenceLabel(item.label)),
+      create("strong", "", diagnosticEvidenceValue(item)),
+    );
+    return node;
+  }));
+  const steps = Array.isArray(diagnosisSteps) ? diagnosisSteps : [];
+  elements.incidentNextSteps.replaceChildren(...steps.map((step) => create("li", "", step)));
+  const targetIndex = diagnosis.targetGpuIndex;
+  elements.incidentOpenGpu.hidden = !Number.isInteger(targetIndex);
+  elements.incidentOpenGpu.dataset.gpuIndex = Number.isInteger(targetIndex) ? targetIndex : "";
+  elements.incidentActionReason.value = condition.actionReason || "";
+  elements.clearIncidentAction.hidden = !condition.action;
+  [
+    elements.acknowledgeIncident,
+    elements.silenceIncident,
+    elements.clearIncidentAction,
+    elements.incidentActionDuration,
+    elements.incidentActionReason,
+  ].forEach((element) => { element.disabled = view.incidentActionPending; });
+}
+
+function openIncidentDetail(condition) {
+  view.selectedIncident = {
+    host: condition.host,
+    conditionKey: condition.conditionKey,
+  };
+  elements.incidentActionFeedback.textContent = "";
+  elements.incidentActionFeedback.className = "incident-action-feedback";
+  if (elements.settingsDialog.open) elements.settingsDialog.close();
+  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
+  if (!elements.incidentDetailDialog.open) elements.incidentDetailDialog.showModal();
+  renderIncidentDetail();
+}
+
+async function updateIncidentAction(action) {
+  const condition = selectedIncidentRecord();
+  if (!condition || view.incidentActionPending) return;
+  view.incidentActionPending = true;
+  renderIncidentDetail();
+  elements.incidentActionFeedback.textContent = "正在保存处理状态…";
+  elements.incidentActionFeedback.className = "incident-action-feedback";
+  const duration = action === "clear"
+    ? 0 : Number.parseInt(elements.incidentActionDuration.value, 10);
+  try {
+    const response = await fetch("/api/settings/incident-action", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Monitor-Request": "dashboard",
+      },
+      body: JSON.stringify({
+        host: condition.host,
+        conditionKey: condition.conditionKey,
+        action,
+        durationSeconds: duration,
+        reason: action === "clear" ? "" : elements.incidentActionReason.value,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "保存失败");
+    view.incidentVersion = -1;
+    view.incidentLoadingVersion = null;
+    await syncIncidents();
+    elements.incidentActionFeedback.textContent = action === "clear"
+      ? "已恢复为待处理" : action === "silenced" ? "已保存静默" : "已确认问题";
+    elements.incidentActionFeedback.className = "incident-action-feedback success";
+  } catch (error) {
+    elements.incidentActionFeedback.textContent = error.message || "处理状态保存失败";
+    elements.incidentActionFeedback.className = "incident-action-feedback error";
+  } finally {
+    view.incidentActionPending = false;
+    renderIncidentDetail();
+  }
 }
 
 function renderIncidents() {
@@ -2181,7 +2769,12 @@ function renderIncidents() {
       body,
       observedAge,
     );
-    item.addEventListener("click", () => selectHost(event.host));
+    item.addEventListener("click", () => {
+      const active = view.incidents.active?.find((condition) =>
+        condition.host === event.host && condition.conditionKey === event.conditionKey);
+      if (active) openIncidentDetail(active);
+      else selectHost(event.host);
+    });
     fragment.append(item);
   });
   elements.incidentList.replaceChildren(fragment);
@@ -2452,20 +3045,257 @@ function renderSummary() {
   elements.serverCount.textContent = snapshot.stats.servers;
   const cycleMilliseconds = snapshot.lastPollDurationMs;
   const cycleText = cycleMilliseconds == null
-    ? "等待首轮完成"
-    : `上轮 ${(numeric(cycleMilliseconds) / 1000).toLocaleString("zh-CN", { maximumFractionDigits: 1 })} 秒`;
+    ? "等待首批完成"
+    : `最近批次 ${(numeric(cycleMilliseconds) / 1000).toLocaleString("zh-CN", { maximumFractionDigits: 1 })} 秒`;
   const cycleSlow = cycleMilliseconds != null
     && numeric(cycleMilliseconds) > numeric(snapshot.pollIntervalSeconds) * 1000;
   const collectionDelayed = collectionHealth().state === "delayed";
   elements.pollInfo.textContent = `每 ${format(snapshot.pollIntervalSeconds)} 秒 · ${cycleText}${collectionDelayed ? " · 采集延迟" : ""} · v${snapshot.appVersion}`;
   elements.pollInfo.classList.toggle("warning", cycleSlow || collectionDelayed);
   elements.pollInfo.title = collectionDelayed
-    ? "上轮采集完成时间已超过配置的新鲜度窗口"
-    : cycleSlow ? "上一轮采集耗时超过目标轮询间隔" : "";
+    ? "最近采集批次完成时间已超过配置的新鲜度窗口"
+    : cycleSlow ? "最近采集批次耗时超过目标轮询间隔" : "";
   elements.collectorError.hidden = !snapshot.collectorError;
   elements.collectorError.textContent = snapshot.collectorError || "";
+  renderRuntimeStatus(snapshot);
   syncRefreshControl();
   renderConnectionStatus();
+}
+
+function setRuntimeStatus(element, text, kind = "") {
+  element.textContent = text;
+  element.className = kind;
+}
+
+function renderServiceRestartStatus(message = "", kind = "") {
+  let text = message;
+  if (!text && view.serviceRestartLoading) text = "正在确认运行方式";
+  if (!text && view.serviceRestarting) text = "正在等待新进程恢复";
+  if (!text && view.serviceRestartSupported) text = "受 systemd 管理 · 可安全重启";
+  if (!text) text = "当前启动方式不支持网页重启";
+  elements.serviceRestartStatus.textContent = text;
+  elements.serviceRestartStatus.className = kind;
+  elements.restartService.disabled = (
+    !view.serviceRestartSupported
+    || view.serviceRestartLoading
+    || view.serviceRestarting
+  );
+}
+
+async function fetchServiceCapability() {
+  if (view.serviceRestartLoading || view.serviceRestarting) return;
+  view.serviceRestartLoading = true;
+  let errorMessage = "";
+  renderServiceRestartStatus();
+  try {
+    const response = await fetch("/api/service", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const capability = await response.json();
+    if (typeof capability.restartSupported !== "boolean") {
+      throw new TypeError("Invalid service capability");
+    }
+    view.serviceRestartSupported = capability.restartSupported;
+    renderServiceRestartStatus();
+  } catch (_error) {
+    view.serviceRestartSupported = false;
+    errorMessage = "无法读取服务运行方式";
+  } finally {
+    view.serviceRestartLoading = false;
+    renderServiceRestartStatus(errorMessage, errorMessage ? "error" : "");
+  }
+}
+
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function waitForServiceRestart(previousStartedAt) {
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch("/api/snapshot", { cache: "no-store" });
+      if (response.ok) {
+        const snapshot = await response.json();
+        if (
+          typeof snapshot.startedAt === "string"
+          && snapshot.startedAt !== previousStartedAt
+        ) {
+          window.location.reload();
+          return;
+        }
+      }
+    } catch (_error) {
+      // The expected connection gap proves the old process is stopping.
+    }
+    await wait(500);
+  }
+  view.serviceRestarting = false;
+  renderServiceRestartStatus("服务未在 45 秒内恢复，请检查 systemd 状态", "error");
+  setConnection("offline", "重启超时");
+}
+
+async function restartManagedService() {
+  if (!view.serviceRestartSupported || view.serviceRestarting) return;
+  const previousStartedAt = view.snapshot?.startedAt;
+  if (typeof previousStartedAt !== "string") {
+    renderServiceRestartStatus("尚未获得有效服务状态，请稍后重试", "error");
+    return;
+  }
+  view.serviceRestarting = true;
+  elements.restartConfirmDialog.close();
+  renderServiceRestartStatus();
+  setConnection("connecting", "正在重启");
+  try {
+    const response = await fetch("/api/service/restart", {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Monitor-Request": "dashboard",
+      },
+      body: "{}",
+    });
+    if (!response.ok) {
+      view.serviceRestarting = false;
+      renderServiceRestartStatus("服务拒绝了重启请求，请刷新状态后重试", "error");
+      renderConnectionStatus();
+      return;
+    }
+  } catch (_error) {
+    // The connection may close after the restart was accepted, so recovery is
+    // authoritative; the POST is never retried.
+  }
+  await waitForServiceRestart(previousStartedAt);
+}
+
+function renderRuntimeStatus(snapshot) {
+  const persistence = snapshot.persistence || {};
+  if (!persistence.enabled) {
+    setRuntimeStatus(elements.persistenceStatus, "仅内存 · 重启后清空");
+  } else if (persistence.healthy) {
+    const queued = numeric(persistence.queuedWrites);
+    const written = numeric(persistence.writtenRecords);
+    setRuntimeStatus(
+      elements.persistenceStatus,
+      queued ? `SQLite 正常 · ${format(queued)} 项待写` : `SQLite 正常 · 已写 ${format(written)} 条`,
+      "success",
+    );
+  } else {
+    setRuntimeStatus(
+      elements.persistenceStatus,
+      `SQLite 异常 · 丢弃 ${format(numeric(persistence.droppedWrites))} 条`,
+      "error",
+    );
+  }
+
+  const notifications = snapshot.notifications || {};
+  elements.notificationTest.disabled = !notifications.enabled || view.notificationTestPending;
+  if (!notifications.enabled) {
+    setRuntimeStatus(elements.notificationStatus, "未配置");
+  } else if (notifications.healthy) {
+    const endpoints = Array.isArray(notifications.endpoints)
+      ? notifications.endpoints.length : 0;
+    const queued = numeric(notifications.queuedDeliveries);
+    setRuntimeStatus(
+      elements.notificationStatus,
+      `${format(endpoints)} 个端点正常${queued ? ` · ${format(queued)} 项待发` : ""}`,
+      "success",
+    );
+  } else {
+    setRuntimeStatus(
+      elements.notificationStatus,
+      `投递异常 · ${format(numeric(notifications.droppedDeliveries))} 次失败`,
+      "error",
+    );
+  }
+}
+
+function downloadJson(value, filename) {
+  const blob = new Blob([`${JSON.stringify(value, null, 2)}\n`], {
+    type: "application/json;charset=utf-8",
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.hidden = true;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function exportDiagnostics() {
+  elements.exportDiagnostics.disabled = true;
+  try {
+    const query = view.selectedHost === "all"
+      ? "" : `?host=${encodeURIComponent(view.selectedHost)}`;
+    const response = await fetch(`/api/diagnostics${query}`, {
+      cache: "no-store",
+      headers: { "X-Monitor-Request": "dashboard" },
+    });
+    const bundle = await response.json();
+    if (!response.ok) throw new Error(bundle.error || "诊断导出失败");
+    const scope = view.selectedHost === "all" ? "fleet" : view.selectedHost;
+    downloadJson(bundle, `mocop-diagnostics-${scope}.json`);
+  } catch (_error) {
+    elements.notificationTestStatus.textContent = "诊断包导出失败";
+  } finally {
+    elements.exportDiagnostics.disabled = false;
+  }
+}
+
+async function testNotifications() {
+  if (view.notificationTestPending) return;
+  view.notificationTestPending = true;
+  elements.notificationTest.disabled = true;
+  elements.notificationTestStatus.textContent = "正在加入安全投递队列…";
+  try {
+    const response = await fetch("/api/notifications/test", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Monitor-Request": "dashboard",
+      },
+      body: "{}",
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "测试投递失败");
+    elements.notificationTestStatus.textContent = "测试通知已排队，请查看最新投递状态";
+  } catch (_error) {
+    elements.notificationTestStatus.textContent = "测试不可用或触发过于频繁";
+  } finally {
+    view.notificationTestPending = false;
+    renderRuntimeStatus(view.snapshot || {});
+  }
+}
+
+async function requestManualProbe() {
+  if (view.selectedHost === "all" || view.manualProbePending) return;
+  const host = view.selectedHost;
+  view.manualProbePending = true;
+  elements.probeNow.disabled = true;
+  elements.probeNow.textContent = "正在排队";
+  try {
+    const response = await fetch("/api/probe", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Monitor-Request": "dashboard",
+      },
+      body: JSON.stringify({ host }),
+    });
+    const result = await response.json();
+    if (!response.ok && result.status !== "in_progress") {
+      throw new Error(result.error || result.status || "探测请求失败");
+    }
+    elements.probeNow.textContent = result.status === "in_progress" ? "正在探测" : "已加入队列";
+  } catch (_error) {
+    elements.probeNow.textContent = "稍后重试";
+  } finally {
+    view.manualProbePending = false;
+    setTimeout(() => {
+      if (view.snapshot) renderTable();
+    }, 1200);
+  }
 }
 
 function serverItem(server, selectedHost) {
@@ -3171,6 +4001,82 @@ function selectedGpuRecord() {
   return server && gpu ? { server, gpu } : null;
 }
 
+function renderGpuHistory() {
+  const points = view.gpuHistory?.points || [];
+  if (view.gpuHistoryLoading && !view.gpuHistory) {
+    elements.gpuHistoryRange.textContent = "正在读取";
+    elements.gpuHistoryGrid.replaceChildren(
+      create("div", "gpu-history-empty", "正在加载单卡历史…"),
+    );
+    elements.gpuProcessTimeline.replaceChildren();
+    return;
+  }
+  elements.gpuHistoryRange.textContent = historyDuration(points);
+  if (!points.length) {
+    elements.gpuHistoryGrid.replaceChildren(
+      create("div", "gpu-history-empty", "完成两次成功采集后显示趋势"),
+    );
+  } else {
+    elements.gpuHistoryGrid.replaceChildren(
+      trendCard("GPU 负载", points, (point) => optionalMetric(point, "utilizationGpuPct"), (value) => `${format(value, 1)}%`, "#6d8cff", 100),
+      trendCard("显存", points, (point) => ratio(point.memoryUsedMiB, point.memoryTotalMiB), (value) => `${format(value, 1)}%`, "#b68cff", 100),
+      trendCard("温度", points, (point) => optionalMetric(point, "temperatureC"), (value) => `${format(value, 1)}°C`, "#f5b95f"),
+      trendCard("功耗", points, (point) => optionalMetric(point, "powerDrawW"), (value) => `${format(value, 1)} W`, "#5de0a0"),
+    );
+  }
+  const events = Array.isArray(view.gpuHistory?.processEvents)
+    ? view.gpuHistory.processEvents.slice().reverse() : [];
+  if (!events.length) {
+    elements.gpuProcessTimeline.replaceChildren(
+      create("div", "gpu-history-empty", "暂未记录到进程进入或退出"),
+    );
+    return;
+  }
+  elements.gpuProcessTimeline.replaceChildren(...events.slice(0, 24).map((event) => {
+    const item = create("article", `gpu-timeline-item ${event.event}`);
+    const process = gpuProcessName(event);
+    const summary = `${event.event === "started" ? "进入" : "退出"} · ${process} · PID ${event.pid}`;
+    item.append(
+      create("i"),
+      create("span", "", summary),
+      create("strong", "age-relative", age(event.observedAt)),
+    );
+    item.lastElementChild.dataset.ageAt = event.observedAt;
+    return item;
+  }));
+}
+
+async function syncGpuHistory(record) {
+  if (!record || !elements.gpuDetailDialog.open) return;
+  const gpuId = String(record.gpu.uuid || `index:${record.gpu.index}`);
+  const key = `${record.server.host}|${gpuId}|${record.server.lastAttemptAt || ""}`;
+  if (view.gpuHistoryKey === key) return;
+  view.gpuHistoryKey = key;
+  view.gpuHistoryLoading = true;
+  const request = ++view.gpuHistoryRequest;
+  renderGpuHistory();
+  try {
+    const response = await fetch(
+      `/api/gpu-history?host=${encodeURIComponent(record.server.host)}&gpu=${encodeURIComponent(gpuId)}&limit=120`,
+      {
+        cache: "no-store",
+        headers: { "X-Monitor-Request": "dashboard" },
+      },
+    );
+    const history = await response.json();
+    if (!response.ok) throw new Error(history.error || "GPU history unavailable");
+    if (request !== view.gpuHistoryRequest) return;
+    view.gpuHistory = history;
+  } catch (_error) {
+    if (request === view.gpuHistoryRequest) view.gpuHistory = { points: [], processEvents: [] };
+  } finally {
+    if (request === view.gpuHistoryRequest) {
+      view.gpuHistoryLoading = false;
+      renderGpuHistory();
+    }
+  }
+}
+
 function renderGpuDetail() {
   if (!elements.gpuDetailDialog.open) return;
   const record = selectedGpuRecord();
@@ -3185,6 +4091,19 @@ function renderGpuDetail() {
   const processes = Array.isArray(gpu.processes) ? gpu.processes.slice() : [];
   processes.sort((a, b) => numeric(b.used_memory_mib, -1) - numeric(a.used_memory_mib, -1)
     || numeric(a.pid) - numeric(b.pid));
+  const visibleProcesses = processes.slice(0, MAX_GPU_DETAIL_PROCESSES);
+  const knownProcessMemory = processes.filter(
+    (process) => process.used_memory_mib != null
+      && Number.isFinite(Number(process.used_memory_mib)),
+  );
+  const processMemoryTotal = knownProcessMemory.reduce(
+    (total, process) => total + Number(process.used_memory_mib),
+    0,
+  );
+  const processMemoryPct = ratio(processMemoryTotal, gpu.memory_total_mib);
+  const processFreshness = gpu.processes_observed_at
+    ? `任务数据 ${age(gpu.processes_observed_at)}`
+    : "等待任务数据";
 
   elements.gpuDetailHost.textContent = `${server.host} · GPU ${gpu.index}`;
   elements.gpuDetailTitle.textContent = gpu.name || "Unknown NVIDIA GPU";
@@ -3204,32 +4123,79 @@ function renderGpuDetail() {
     gpuDetailMetric("硬件健康", healthState, healthDetail),
     gpuDetailMetric("MIG 模式", gpu.health?.mig_mode || "—"),
   );
+  renderGpuHistory();
+  syncGpuHistory(record);
   elements.gpuTaskCount.textContent = String(processes.length);
   if (gpu.processes_available === false) {
+    elements.gpuTaskOverview.hidden = true;
     elements.gpuTaskList.replaceChildren(
       create("div", "gpu-task-empty", "任务数据暂不可用；GPU 指标仍会继续刷新。"),
     );
     return;
   }
+  elements.gpuTaskOverview.hidden = false;
+  elements.gpuTaskMemoryTotal.textContent = `${memory(processMemoryTotal)} / ${memory(gpu.memory_total_mib)}`;
+  elements.gpuTaskMemoryBar.style.width = `${clamp(processMemoryPct)}%`;
+  if (processes.length > visibleProcesses.length) {
+    elements.gpuTaskNote.textContent = `共 ${processes.length} 个进程，仅展示显存占用最高的 ${visibleProcesses.length} 个 · ${processFreshness}`;
+  } else if (knownProcessMemory.length < processes.length) {
+    elements.gpuTaskNote.textContent = `${processes.length - knownProcessMemory.length} 个进程未返回显存占用 · ${processFreshness}`;
+  } else {
+    elements.gpuTaskNote.textContent = `按显存占用从高到低排列 · ${processFreshness}`;
+  }
   if (!processes.length) {
     elements.gpuTaskList.replaceChildren(
-      create("div", "gpu-task-empty", "当前没有活跃的 CUDA 计算进程。"),
+      create("div", "gpu-task-empty", `当前没有活跃的 CUDA 计算进程 · ${processFreshness}`),
     );
     return;
   }
-  elements.gpuTaskList.replaceChildren(...processes.map((process) => {
+  elements.gpuTaskList.replaceChildren(...visibleProcesses.map((process) => {
     const item = create("article", "gpu-task");
+    item.setAttribute("role", "listitem");
+    const identity = create("div", "gpu-task-identity");
     const name = create("strong", "gpu-task-name", gpuProcessName(process));
     name.title = process.name || "unknown process";
+    identity.append(name);
+    const fullName = String(process.name || "");
+    if (fullName && fullName !== name.textContent) {
+      const command = create("small", "gpu-task-command", fullName);
+      command.title = fullName;
+      identity.append(command);
+    }
     const used = process.used_memory_mib == null ? "显存未知" : memory(process.used_memory_mib);
     const usage = ratio(process.used_memory_mib, gpu.memory_total_mib);
+    const memorySummary = create("div", "gpu-task-memory");
+    memorySummary.append(
+      create("strong", "", used),
+      create("small", "", process.used_memory_mib == null ? "占比未知" : `${format(usage, 1)}% GPU 显存`),
+    );
     const track = create("div", "mini-track");
     const bar = create("i");
     bar.style.width = `${clamp(usage)}%`;
     track.append(bar);
     const meta = create("div", "gpu-task-meta");
     meta.append(create("span", "", `PID ${process.pid}`), track);
-    item.append(name, create("span", "gpu-task-memory", used), meta);
+    item.append(identity, memorySummary);
+    const workload = process.workload;
+    if (workload && ["process", "slurm", "kubernetes"].includes(workload.kind)) {
+      const context = create("div", "gpu-task-workload");
+      const kind = workload.kind === "slurm"
+        ? "Slurm" : workload.kind === "kubernetes" ? "Kubernetes" : "进程";
+      const workloadIdentity = workload.name || workload.workload_id;
+      context.append(create(
+        "span",
+        "primary",
+        workloadIdentity ? `${kind} · ${workloadIdentity}` : kind,
+      ));
+      if (workload.name && workload.workload_id) {
+        context.append(create("span", "", `ID ${workload.workload_id}`));
+      }
+      if (workload.owner) context.append(create("span", "", `用户 ${workload.owner}`));
+      if (workload.queue) context.append(create("span", "", `队列 ${workload.queue}`));
+      if (workload.namespace) context.append(create("span", "", `命名空间 ${workload.namespace}`));
+      item.append(context);
+    }
+    item.append(meta);
     return item;
   }));
 }
@@ -3239,8 +4205,12 @@ function openGpuDetail(server, gpu) {
     host: server.host,
     key: String(gpu.uuid || gpu.index),
   };
+  view.gpuHistory = null;
+  view.gpuHistoryKey = "";
+  view.gpuHistoryRequest += 1;
   if (elements.settingsDialog.open) elements.settingsDialog.close();
   if (elements.capacityDialog.open) elements.capacityDialog.close();
+  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   if (!elements.gpuDetailDialog.open) elements.gpuDetailDialog.showModal();
   renderGpuDetail();
 }
@@ -3558,6 +4528,9 @@ function renderTable() {
   elements.inventoryTitle.textContent = selected
     ? selected.host
     : view.serverFilter === "all" ? "全局资源" : SERVER_FILTER_LABELS[view.serverFilter];
+  elements.probeNow.hidden = !selected;
+  elements.probeNow.disabled = !selected || selected.polling || view.manualProbePending;
+  elements.probeNow.textContent = selected?.polling ? "正在探测" : "立即探测";
   elements.visibleCount.textContent = records.length;
   elements.exportCsv.disabled = records.length === 0;
   elements.gpuGroups.classList.toggle("single", Boolean(selected));
@@ -3596,7 +4569,9 @@ function render() {
   renderTrends();
   renderTable();
   renderGpuDetail();
+  renderIncidentDetail();
   renderCapacityMatcher();
+  renderTopology();
   refreshRelativeTimes();
 }
 
@@ -3655,6 +4630,7 @@ async function syncIncidents() {
     renderServers();
     renderTable();
     renderGpuDetail();
+    renderIncidentDetail();
     renderCapacityMatcher();
   } catch (_error) {
     // Current telemetry remains usable if the optional transition feed is unavailable.
@@ -3774,15 +4750,30 @@ elements.gpuSort.addEventListener("change", () => {
 
 elements.settingsToggle.addEventListener("click", () => {
   syncPreferenceControls();
+  if (elements.topologyDialog.open) elements.topologyDialog.close();
   if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
   if (elements.capacityDialog.open) elements.capacityDialog.close();
+  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   elements.settingsDialog.showModal();
   refreshInventory();
+  fetchServiceCapability();
+});
+
+elements.topologyToggle.addEventListener("click", () => {
+  if (elements.settingsDialog.open) elements.settingsDialog.close();
+  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
+  if (elements.capacityDialog.open) elements.capacityDialog.close();
+  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
+  elements.topologyDialog.showModal();
+  renderTopology();
+  if (!view.topology && !view.topologyLoading) fetchTopology();
 });
 
 elements.capacityToggle.addEventListener("click", () => {
   if (!view.snapshot) return;
   if (elements.settingsDialog.open) elements.settingsDialog.close();
+  if (elements.topologyDialog.open) elements.topologyDialog.close();
+  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
   elements.capacityGpuCount.value = String(view.capacityRequest.gpuCount);
   elements.capacityVram.value = String(view.capacityRequest.minVramGiB);
@@ -3887,30 +4878,69 @@ elements.showPower.addEventListener("change", () => {
   savePreferences();
 });
 
-themeChoiceButtons.forEach((button, index) => {
-  button.addEventListener("click", () => {
-    const theme = button.dataset.themeChoice;
-    if (!THEME_VALUES.has(theme)) return;
-    preferences.theme = theme;
-    syncPreferenceControls();
-    savePreferences();
+function bindAppearanceChoices(buttons, datasetKey, values, select) {
+  buttons.forEach((button, index) => {
+    button.addEventListener("click", () => {
+      const value = button.dataset[datasetKey];
+      if (!values.has(value)) return;
+      select(value);
+      syncPreferenceControls();
+      savePreferences();
+    });
+    button.addEventListener("keydown", (event) => {
+      const direction = {
+        ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1,
+      }[event.key];
+      let targetIndex = direction == null ? null : index + direction;
+      if (event.key === "Home") targetIndex = 0;
+      if (event.key === "End") targetIndex = buttons.length - 1;
+      if (targetIndex == null) return;
+      event.preventDefault();
+      const target = buttons[(targetIndex + buttons.length) % buttons.length];
+      target.focus();
+      target.click();
+    });
   });
-  button.addEventListener("keydown", (event) => {
-    const direction = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
-    let targetIndex = direction == null ? null : index + direction;
-    if (event.key === "Home") targetIndex = 0;
-    if (event.key === "End") targetIndex = themeChoiceButtons.length - 1;
-    if (targetIndex == null) return;
-    event.preventDefault();
-    const target = themeChoiceButtons[
-      (targetIndex + themeChoiceButtons.length) % themeChoiceButtons.length
-    ];
-    target.focus();
-    target.click();
-  });
-});
+}
+
+bindAppearanceChoices(
+  styleChoiceButtons,
+  "styleChoice",
+  VISUAL_STYLE_VALUES,
+  (value) => { preferences.visualStyle = value; },
+);
+bindAppearanceChoices(
+  accentChoiceButtons,
+  "accentChoice",
+  ACCENT_VALUES,
+  (value) => { preferences.accent = value; },
+);
 
 elements.resetPreferences.addEventListener("click", resetPreferences);
+elements.restartService.addEventListener("click", () => {
+  if (!view.serviceRestartSupported || view.serviceRestarting) return;
+  elements.restartConfirmDialog.showModal();
+});
+elements.confirmRestartService.addEventListener("click", restartManagedService);
+elements.notificationTest.addEventListener("click", testNotifications);
+elements.exportDiagnostics.addEventListener("click", exportDiagnostics);
+elements.probeNow.addEventListener("click", requestManualProbe);
+elements.acknowledgeIncident.addEventListener(
+  "click", () => updateIncidentAction("acknowledged"),
+);
+elements.silenceIncident.addEventListener(
+  "click", () => updateIncidentAction("silenced"),
+);
+elements.clearIncidentAction.addEventListener(
+  "click", () => updateIncidentAction("clear"),
+);
+elements.incidentOpenGpu.addEventListener("click", () => {
+  const condition = selectedIncidentRecord();
+  const server = view.snapshot?.servers.find((item) => item.host === condition?.host);
+  const index = Number.parseInt(elements.incidentOpenGpu.dataset.gpuIndex, 10);
+  const gpu = server?.gpus.find((item) => item.index === index);
+  if (server && gpu) openGpuDetail(server, gpu);
+});
 elements.inventoryRefresh.addEventListener("click", refreshInventory);
 elements.collectorSettingsForm.addEventListener("submit", saveCollectorSettings);
 [
@@ -3954,4 +4984,5 @@ syncPreferenceControls();
 renderInventory();
 loadStoredBackground();
 fetchSnapshot();
+fetchTopology();
 connect();

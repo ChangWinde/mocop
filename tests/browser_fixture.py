@@ -13,6 +13,7 @@ from mocop.models import (
     GpuProcess,
     ProbeResult,
     SystemMetrics,
+    WorkloadMetadata,
 )
 from mocop.service import StateStore
 from mocop.web import MonitorHttpServer
@@ -34,6 +35,35 @@ class DemoInventory:
             "atlas-02": "Training",
             "atlas-03": "Lab",
         }
+        self.incident_actions = []
+
+    def topology(self) -> dict[str, object]:
+        return {
+            "root": "monitor-console",
+            "links": [
+                {
+                    "source": "monitor-console",
+                    "target": "atlas-gateway",
+                    "transport": "frp-stcp",
+                    "label": "STCP · 7005",
+                },
+                {
+                    "source": "atlas-gateway",
+                    "target": "atlas-01",
+                    "transport": "ssh",
+                },
+                {
+                    "source": "atlas-gateway",
+                    "target": "atlas-02",
+                    "transport": "ssh",
+                },
+                {
+                    "source": "atlas-02",
+                    "target": "atlas-03",
+                    "transport": "ssh",
+                },
+            ],
+        }
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -47,6 +77,7 @@ class DemoInventory:
             "collectorSettings": dict(self.collector_settings),
             "maintenanceWindows": dict(self.maintenance_windows),
             "hostGroups": dict(self.host_groups),
+            "incidentActions": list(self.incident_actions),
             "writable": True,
         }
 
@@ -92,6 +123,32 @@ class DemoInventory:
         self.state.set_host_groups(tuple(self.host_groups.items()))
         return self.snapshot()
 
+    def update_incident_action(
+        self,
+        host: str,
+        condition_key: str,
+        action: str,
+        duration_seconds: int,
+        reason: str,
+    ) -> dict[str, object]:
+        del duration_seconds
+        self.incident_actions = [
+            item
+            for item in self.incident_actions
+            if (item["host"], item["condition_key"]) != (host, condition_key)
+        ]
+        if action != "clear":
+            self.incident_actions.append(
+                {
+                    "host": host,
+                    "condition_key": condition_key,
+                    "action": action,
+                    "until": "2030-06-15T12:30:00Z",
+                    "reason": reason,
+                }
+            )
+        return self.snapshot()
+
 
 def gpu(
     host: str,
@@ -106,6 +163,13 @@ def gpu(
                 pid=10_000 + index,
                 name="/workspace/train.py",
                 used_memory_mib=max(512, memory_used - 1024),
+                workload=WorkloadMetadata(
+                    kind="slurm",
+                    workload_id="4821",
+                    name="llm-train",
+                    owner="researcher",
+                    queue="gpu-long",
+                ),
             ),
             GpuProcess(
                 pid=20_000 + index,

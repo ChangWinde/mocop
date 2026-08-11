@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 ProbeStatus = Literal["online", "unreachable", "no_nvidia_smi", "error"]
+WorkloadKind = Literal["process", "slurm", "kubernetes"]
 
 
 def utc_now() -> str:
@@ -22,13 +23,39 @@ def utc_after(seconds: float) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkloadMetadata:
+    kind: WorkloadKind
+    workload_id: str | None = None
+    name: str | None = None
+    owner: str | None = None
+    queue: str | None = None
+    namespace: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "workload_id": self.workload_id,
+            "name": self.name,
+            "owner": self.owner,
+            "queue": self.queue,
+            "namespace": self.namespace,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class GpuProcess:
     pid: int
     name: str
     used_memory_mib: float | None
+    workload: WorkloadMetadata | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        return {
+            "pid": self.pid,
+            "name": self.name,
+            "used_memory_mib": self.used_memory_mib,
+            "workload": self.workload.to_dict() if self.workload else None,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +68,14 @@ class GpuHealthMetrics:
     mig_mode: str | None
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        return {
+            "ecc_uncorrected_volatile": self.ecc_uncorrected_volatile,
+            "retired_pages_pending": self.retired_pages_pending,
+            "remapped_rows_pending": self.remapped_rows_pending,
+            "thermal_slowdown": self.thermal_slowdown,
+            "power_brake_slowdown": self.power_brake_slowdown,
+            "mig_mode": self.mig_mode,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,13 +95,31 @@ class GpuMetrics:
     power_limit_w: float | None
     processes: tuple[GpuProcess, ...] = ()
     processes_available: bool = True
+    processes_sampled: bool = True
+    processes_observed_at: str | None = None
     health: GpuHealthMetrics | None = None
 
     def to_dict(self) -> dict[str, object]:
-        value = asdict(self)
-        value["processes"] = [process.to_dict() for process in self.processes]
-        value["health"] = self.health.to_dict() if self.health else None
-        return value
+        return {
+            "index": self.index,
+            "uuid": self.uuid,
+            "name": self.name,
+            "driver_version": self.driver_version,
+            "pstate": self.pstate,
+            "temperature_c": self.temperature_c,
+            "utilization_gpu_pct": self.utilization_gpu_pct,
+            "utilization_memory_pct": self.utilization_memory_pct,
+            "memory_total_mib": self.memory_total_mib,
+            "memory_used_mib": self.memory_used_mib,
+            "memory_free_mib": self.memory_free_mib,
+            "power_draw_w": self.power_draw_w,
+            "power_limit_w": self.power_limit_w,
+            "processes": [process.to_dict() for process in self.processes],
+            "processes_available": self.processes_available,
+            "processes_sampled": self.processes_sampled,
+            "processes_observed_at": self.processes_observed_at,
+            "health": self.health.to_dict() if self.health else None,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +133,15 @@ class DiskMetrics:
     used_pct: float
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        return {
+            "device": self.device,
+            "filesystem_type": self.filesystem_type,
+            "mountpoint": self.mountpoint,
+            "total_mib": self.total_mib,
+            "used_mib": self.used_mib,
+            "available_mib": self.available_mib,
+            "used_pct": self.used_pct,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,9 +167,27 @@ class SystemMetrics:
     disks: tuple[DiskMetrics, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
-        value = asdict(self)
-        value["disks"] = [disk.to_dict() for disk in self.disks]
-        return value
+        return {
+            "hostname": self.hostname,
+            "uptime_seconds": self.uptime_seconds,
+            "load_1m": self.load_1m,
+            "load_5m": self.load_5m,
+            "load_15m": self.load_15m,
+            "cpu_cores": self.cpu_cores,
+            "cpu_usage_pct": self.cpu_usage_pct,
+            "memory_total_mib": self.memory_total_mib,
+            "memory_used_mib": self.memory_used_mib,
+            "memory_available_mib": self.memory_available_mib,
+            "swap_total_mib": self.swap_total_mib,
+            "swap_used_mib": self.swap_used_mib,
+            "disk_total_mib": self.disk_total_mib,
+            "disk_used_mib": self.disk_used_mib,
+            "network_rx_bps": self.network_rx_bps,
+            "network_tx_bps": self.network_tx_bps,
+            "disk_read_bps": self.disk_read_bps,
+            "disk_write_bps": self.disk_write_bps,
+            "disks": [disk.to_dict() for disk in self.disks],
+        }
 
 
 @dataclass(frozen=True, slots=True)
