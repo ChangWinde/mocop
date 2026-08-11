@@ -717,6 +717,74 @@ class StateStoreTests(unittest.TestCase):
         self.assertIsNotNone(snapshot["lastPollCompletedAt"])
         self.assertEqual(store.incidents(10)["events"][0]["state"], "opened")
 
+    def test_snapshot_carries_display_name_and_history_transport_retry(self) -> None:
+        system = SystemMetrics(
+            hostname="gpu-1",
+            uptime_seconds=100,
+            load_1m=1,
+            load_5m=1,
+            load_15m=1,
+            cpu_cores=8,
+            cpu_usage_pct=20,
+            memory_total_mib=16000,
+            memory_used_mib=4000,
+            memory_available_mib=12000,
+            swap_total_mib=1000,
+            swap_used_mib=0,
+            disk_total_mib=100000,
+            disk_used_mib=20000,
+            network_rx_bps=100,
+            network_tx_bps=200,
+        )
+        store = StateStore(5, host_display_names=(("gpu-1", "训练 A100 节点"),))
+        store.set_hosts(("gpu-1",))
+        store.apply(
+            ProbeResult(
+                "gpu-1",
+                "online",
+                42,
+                system=system,
+                transport_retries=1,
+            )
+        )
+
+        server = store.snapshot()["servers"][0]
+        self.assertEqual(server["displayName"], "训练 A100 节点")
+        self.assertTrue(server["transportRetried"])
+        history = store.history("gpu-1", 10)
+        self.assertTrue(history["points"][-1]["transportRetried"])
+        self.assertEqual(store.health()["transportRetries"], 1)
+
+        store.set_host_display_names(())
+        self.assertIsNone(store.snapshot()["servers"][0]["displayName"])
+
+    def test_recurring_maintenance_window_activates_in_snapshot(self) -> None:
+        # 2030-06-19 is a Wednesday (weekday 2); the window runs 18:00-20:00.
+        window = MaintenanceWindowConfig(
+            reason="Weekly patching",
+            weekday=2,
+            start_minutes=18 * 60,
+            duration_minutes=120,
+        )
+        current = [datetime(2030, 6, 19, 19, 0, tzinfo=timezone.utc)]
+        store = StateStore(
+            5,
+            maintenance_windows=(("gpu-1", window),),
+            utc_clock=lambda: current[0],
+        )
+        store.set_hosts(("gpu-1",))
+
+        active = store.snapshot()["servers"][0]["maintenance"]
+        self.assertIsNotNone(active)
+        self.assertEqual(active["until"], "2030-06-19T20:00:00Z")
+        self.assertTrue(active["recurring"])
+
+        current[0] = datetime(2030, 6, 19, 20, 1, tzinfo=timezone.utc)
+        self.assertIsNone(store.snapshot()["servers"][0]["maintenance"])
+
+        current[0] = datetime(2030, 6, 26, 18, 30, tzinfo=timezone.utc)
+        self.assertIsNotNone(store.snapshot()["servers"][0]["maintenance"])
+
     def test_maintenance_silences_actionable_incidents_without_hiding_truth(
         self,
     ) -> None:

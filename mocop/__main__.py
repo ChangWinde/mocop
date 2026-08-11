@@ -106,6 +106,14 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="inspect configuration only; skip live connection tests",
     )
     doctor_parser.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "decompose collection latency per alias into transport, fixed "
+            "script, and NVIDIA query stages"
+        ),
+    )
+    doctor_parser.add_argument(
         "--json", action="store_true", help="write a machine-readable report"
     )
     return parser.parse_args(argv)
@@ -154,6 +162,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
         group_incident_overrides=config.group_incident_overrides,
         maintenance_windows=config.maintenance_windows,
         host_groups=config.host_groups,
+        host_display_names=config.host_display_names(),
         persistence=persistence,
         restored=restored,
         topology=config.topology,
@@ -245,6 +254,7 @@ def _run_doctor(args: argparse.Namespace) -> int:
         config,
         host_filter=tuple(args.hosts),
         probe_connection=not args.no_connect,
+        profile=args.profile,
         as_json=args.json,
     )
 

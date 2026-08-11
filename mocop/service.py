@@ -46,7 +46,7 @@ _MAX_FAILURE_BACKOFF_SECONDS = 60.0
 _MAX_PROBE_WORKERS = 64
 _MIN_RUNTIME_POLL_INTERVAL_SECONDS = 1.0
 _MAX_RUNTIME_POLL_INTERVAL_SECONDS = 3600.0
-_HOST_HISTORY_VALUES = Struct("<11d")
+_HOST_HISTORY_VALUES = Struct("<12d")
 _GPU_HISTORY_VALUES = Struct("<i5d")
 
 
@@ -83,6 +83,7 @@ class _HostHistoryPoint:
         gpu_usage_pct: float | None,
         gpu_memory_usage_pct: float,
         gpu_temperature_c: float | None,
+        transport_retried: bool = False,
     ) -> _HostHistoryPoint:
         return cls(
             observed_at,
@@ -98,6 +99,7 @@ class _HostHistoryPoint:
                 _packed_optional_float(gpu_usage_pct),
                 gpu_memory_usage_pct,
                 _packed_optional_float(gpu_temperature_c),
+                float(transport_retried),
             ),
         )
 
@@ -116,6 +118,7 @@ class _HostHistoryPoint:
             gpu_usage_pct=_optional_float(point.get("gpuUsagePct")),
             gpu_memory_usage_pct=float(point["gpuMemoryUsagePct"]),
             gpu_temperature_c=_optional_float(point.get("gpuTemperatureC")),
+            transport_retried=bool(point.get("transportRetried")),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -131,6 +134,7 @@ class _HostHistoryPoint:
             gpu_usage_pct,
             gpu_memory_usage_pct,
             gpu_temperature_c,
+            transport_retried,
         ) = _HOST_HISTORY_VALUES.unpack(self.values)
         return {
             "observedAt": self.observed_at,
@@ -145,6 +149,7 @@ class _HostHistoryPoint:
             "gpuUsagePct": _unpacked_optional_float(gpu_usage_pct),
             "gpuMemoryUsagePct": gpu_memory_usage_pct,
             "gpuTemperatureC": _unpacked_optional_float(gpu_temperature_c),
+            "transportRetried": bool(transport_retried),
         }
 
 
@@ -287,6 +292,7 @@ class StateStore:
         ] = (),
         maintenance_windows: tuple[tuple[str, MaintenanceWindowConfig], ...] = (),
         host_groups: tuple[tuple[str, str], ...] = (),
+        host_display_names: tuple[tuple[str, str], ...] = (),
         utc_clock: Callable[[], datetime] | None = None,
         persistence: TelemetryPersistence | None = None,
         restored: LoadedTelemetry | None = None,
@@ -353,6 +359,7 @@ class StateStore:
             (action.host, action.condition_key): action for action in incident_actions
         }
         self._host_groups = dict(host_groups)
+        self._display_names = dict(host_display_names)
         self._host_incident_overrides = host_incident_overrides
         self._group_incident_overrides = group_incident_overrides
         self._topology = topology
@@ -496,6 +503,16 @@ class StateStore:
             self._incident_actions = updated
             self._active_action_signature = self._incident_action_signature_locked()
             self._incident_revision += 1
+            self._publish_locked()
+
+    def set_host_display_names(
+        self, host_display_names: tuple[tuple[str, str], ...]
+    ) -> None:
+        with self._condition:
+            updated = dict(host_display_names)
+            if updated == self._display_names:
+                return
+            self._display_names = updated
             self._publish_locked()
 
     def set_host_groups(self, host_groups: tuple[tuple[str, str], ...]) -> None:
@@ -806,9 +823,10 @@ class StateStore:
         }
 
     def _maintenance_signature_locked(self) -> tuple[tuple[str, str, str], ...]:
+        now = self._utc_clock()
         return tuple(
-            (host, window.to_dict()["until"], window.reason)
-            for host, window in sorted(self._active_maintenance_locked().items())
+            (host, str(window.to_dict(now)["until"]), window.reason)
+            for host, window in sorted(self._active_maintenance_locked(now).items())
         )
 
     def _refresh_maintenance_expiry_locked(self) -> None:
@@ -891,7 +909,7 @@ class StateStore:
         item["actionUntil"] = action.to_dict()["until"] if action is not None else None
         item["actionReason"] = action.reason if action is not None else None
         if window is not None:
-            item["maintenanceUntil"] = window.to_dict()["until"]
+            item["maintenanceUntil"] = window.to_dict(self._utc_clock())["until"]
             item["maintenanceReason"] = window.reason
 
     def _track_gpu_telemetry_locked(
@@ -1065,6 +1083,7 @@ class StateStore:
             round(sum(gpu_usage) / len(gpu_usage), 2) if gpu_usage else None,
             percentage(gpu_memory_used, gpu_memory_total),
             max(temperatures) if temperatures else None,
+            transport_retried=result.transport_retries > 0,
         )
 
     def _snapshot_locked(self) -> dict[str, object]:
@@ -1100,8 +1119,11 @@ class StateStore:
         for server in servers:
             host = str(server["host"])
             window = active_maintenance.get(host)
-            server["maintenance"] = window.to_dict() if window else None
+            server["maintenance"] = (
+                window.to_dict(self._utc_clock()) if window else None
+            )
             server["group"] = self._host_groups.get(host)
+            server["displayName"] = self._display_names.get(host)
             conditions = host_incidents.get(host, [])
             incident_count = len(conditions)
             critical_count = sum(
@@ -1307,6 +1329,7 @@ class MonitorService:
                 config.host_groups,
             )
             self._state.set_host_groups(config.host_groups)
+            self._state.set_host_display_names(config.host_display_names())
             self._state.set_topology(config.topology)
             try:
                 hosts = self._host_source.hosts(config)
