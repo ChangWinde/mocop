@@ -178,6 +178,7 @@
                 </label>
                 <button id="topology-toggle" class="tool-button topology-trigger" type="button" aria-haspopup="dialog">连接拓扑</button>
                 <button id="capacity-toggle" class="tool-button capacity-trigger" type="button" aria-haspopup="dialog">匹配算力</button>
+                <button id="owners-toggle" class="tool-button owners-trigger" type="button" aria-haspopup="dialog">使用者</button>
                 <button id="probe-now" class="tool-button probe-trigger" type="button" hidden>立即探测</button>
                 <button id="export-csv" class="tool-button" type="button">导出当前结果</button>
                 <button id="toggle-groups" class="group-toggle" type="button" hidden>全部展开</button>
@@ -537,6 +538,23 @@
       </div>
       <div id="capacity-results" class="capacity-results"></div>
       <p class="capacity-footnote">匹配结果不是资源预留；启动任务前请重新确认节点状态和调度系统中的实际占用。</p>
+    </dialog>
+
+    <dialog id="owners-dialog" class="side-dialog capacity-dialog owners-dialog" aria-labelledby="owners-title">
+      <div class="dialog-heading">
+        <div>
+          <span class="section-kicker">WORKLOAD OWNERS</span>
+          <h2 id="owners-title">谁在使用集群</h2>
+        </div>
+        <button class="dialog-close" data-close-dialog="owners-dialog" type="button" aria-label="关闭使用者视图">×</button>
+      </div>
+      <p class="dialog-intro">按进程归属聚合当前快照中的 GPU 显存占用。归属来自可选的 Slurm / Kubernetes / 进程属主采集，计算完全在浏览器内进行，不会触发额外请求。</p>
+      <div class="capacity-heading">
+        <div><span class="section-kicker">CURRENT OWNERS</span><h3 id="owners-summary">等待 GPU 快照</h3></div>
+        <span id="owners-updated">实时更新</span>
+      </div>
+      <div id="owners-results" class="capacity-results"></div>
+      <p class="capacity-footnote">未开启 workloads 采集时无法区分用户，进程会归入「未归属」。</p>
     </dialog>
 
     <dialog id="gpu-detail-dialog" class="side-dialog gpu-detail-dialog" aria-labelledby="gpu-detail-title">

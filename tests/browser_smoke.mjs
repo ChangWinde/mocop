@@ -481,6 +481,28 @@ try {
   assert.match(capacity.rule, /60 GiB/);
   assert(capacity.centerDelta < 2);
 
+  const owners = await cdp.evaluate(`(() => {
+    document.querySelector("#owners-toggle").click();
+    const dialog = document.querySelector("#owners-dialog");
+    const rows = [...document.querySelectorAll("#owners-results .capacity-candidate")];
+    const rect = dialog.getBoundingClientRect();
+    const result = {
+      open: dialog.open,
+      rows: rows.length,
+      ownerNames: rows.map((row) => row.querySelector("strong")?.textContent),
+      firstVram: rows[0]?.querySelector("em")?.textContent,
+      summary: document.querySelector("#owners-summary")?.textContent,
+      centerDelta: Math.abs((rect.left + rect.right) / 2 - document.documentElement.clientWidth / 2),
+    };
+    dialog.close();
+    return result;
+  })()`);
+  assert.equal(owners.open, true);
+  assert(owners.rows >= 1, "owners view lists at least one attribution");
+  assert(owners.ownerNames.includes("researcher"), "slurm owner is aggregated");
+  assert.match(owners.firstVram, /GiB/);
+  assert(owners.centerDelta < 2);
+
   const grouping = await cdp.evaluate(`(() => {
     const sort = document.querySelector("#server-sort");
     sort.value = "group";

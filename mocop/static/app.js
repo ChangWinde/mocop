@@ -236,6 +236,11 @@ const elements = {
   capacitySummary: $("#capacity-summary"),
   capacityUpdated: $("#capacity-updated"),
   capacityResults: $("#capacity-results"),
+  ownersToggle: $("#owners-toggle"),
+  ownersDialog: $("#owners-dialog"),
+  ownersSummary: $("#owners-summary"),
+  ownersUpdated: $("#owners-updated"),
+  ownersResults: $("#owners-results"),
   serverSort: $("#server-sort"),
   defaultServerFilter: $("#default-server-filter"),
   interfaceDensity: $("#interface-density"),
@@ -2280,6 +2285,90 @@ function capacityCandidateCard(candidate) {
   return card;
 }
 
+function renderOwners() {
+  if (!elements.ownersDialog?.open) return;
+  if (!view.snapshot) {
+    elements.ownersSummary.textContent = "等待 GPU 快照";
+    return;
+  }
+  const owners = new Map();
+  for (const server of view.snapshot.servers) {
+    const hostLabel = server.displayName || server.host;
+    for (const gpu of server.gpus) {
+      for (const process of gpu.processes || []) {
+        const owner = process.workload?.owner;
+        const key = owner || "\u0000unattributed";
+        let entry = owners.get(key);
+        if (!entry) {
+          entry = {
+            label: owner || "未归属",
+            attributed: Boolean(owner),
+            vramMiB: 0,
+            processes: 0,
+            gpus: new Set(),
+            hosts: new Set(),
+            kinds: new Set(),
+          };
+          owners.set(key, entry);
+        }
+        entry.vramMiB += process.used_memory_mib || 0;
+        entry.processes += 1;
+        entry.gpus.add(`${server.host}\u0000${gpu.uuid}`);
+        entry.hosts.add(hostLabel);
+        const kind = process.workload?.kind;
+        if (kind && kind !== "process") entry.kinds.add(kind);
+      }
+    }
+  }
+  const ranked = [...owners.values()].sort(
+    (first, second) => second.vramMiB - first.vramMiB
+      || second.gpus.size - first.gpus.size
+      || first.label.localeCompare(second.label),
+  ).slice(0, 50);
+  elements.ownersResults.replaceChildren();
+  if (!ranked.length) {
+    elements.ownersSummary.textContent = "当前快照没有 GPU 进程";
+    return;
+  }
+  const totalVram = ranked.reduce((sum, entry) => sum + entry.vramMiB, 0);
+  const attributedCount = ranked.filter((entry) => entry.attributed).length;
+  elements.ownersSummary.textContent =
+    `${ranked.length} 个归属方 · 共占用 ${memory(totalVram)}`
+    + (attributedCount < ranked.length ? " · 含未归属进程" : "");
+  for (const entry of ranked) {
+    const card = create(
+      "article",
+      `capacity-candidate ${entry.attributed ? "match" : "near"}`,
+    );
+    const heading = create("div", "capacity-candidate-heading");
+    const identity = create("span", "capacity-candidate-identity");
+    identity.append(
+      create("strong", "", entry.label),
+      create(
+        "small",
+        "",
+        entry.kinds.size ? [...entry.kinds].sort().join(" · ") : "进程",
+      ),
+    );
+    heading.append(identity, create("em", "", memory(entry.vramMiB)));
+    const metrics = create("div", "capacity-candidate-metrics");
+    metrics.append(
+      create("span", "", `${entry.gpus.size} 张 GPU`),
+      create("span", "", `${entry.hosts.size} 个节点`),
+      create("span", "", `${entry.processes} 个进程`),
+    );
+    const devices = create("div", "capacity-devices");
+    [...entry.hosts].sort().slice(0, 8).forEach((host) => {
+      devices.append(create("span", "", host));
+    });
+    if (entry.hosts.size > 8) {
+      devices.append(create("span", "", `+${entry.hosts.size - 8}`));
+    }
+    card.append(heading, metrics, devices);
+    elements.ownersResults.append(card);
+  }
+}
+
 function renderCapacityMatcher() {
   if (!elements.capacityDialog.open || !view.snapshot) return;
   syncCapacityModels();
@@ -3318,7 +3407,7 @@ function serverItem(server, selectedHost) {
 
   const main = create("div", "server-main");
   const identity = create("div", "server-main");
-  identity.append(create("i", `status-dot ${stateClass}`), create("span", "server-name", server.host));
+  identity.append(create("i", `status-dot ${stateClass}`), create("span", "server-name", server.displayName || server.host));
   const group = hostGroupName(server);
   if (group) identity.append(create("span", "server-group-badge", group));
   const gpuLabel = `${server.gpus.length} GPU${server.stale ? " · 历史" : ""}`;
@@ -4210,6 +4299,7 @@ function openGpuDetail(server, gpu) {
   view.gpuHistoryRequest += 1;
   if (elements.settingsDialog.open) elements.settingsDialog.close();
   if (elements.capacityDialog.open) elements.capacityDialog.close();
+  if (elements.ownersDialog.open) elements.ownersDialog.close();
   if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   if (!elements.gpuDetailDialog.open) elements.gpuDetailDialog.showModal();
   renderGpuDetail();
@@ -4571,6 +4661,7 @@ function render() {
   renderGpuDetail();
   renderIncidentDetail();
   renderCapacityMatcher();
+  renderOwners();
   renderTopology();
   refreshRelativeTimes();
 }
@@ -4753,6 +4844,7 @@ elements.settingsToggle.addEventListener("click", () => {
   if (elements.topologyDialog.open) elements.topologyDialog.close();
   if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
   if (elements.capacityDialog.open) elements.capacityDialog.close();
+  if (elements.ownersDialog.open) elements.ownersDialog.close();
   if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   elements.settingsDialog.showModal();
   refreshInventory();
@@ -4763,6 +4855,7 @@ elements.topologyToggle.addEventListener("click", () => {
   if (elements.settingsDialog.open) elements.settingsDialog.close();
   if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
   if (elements.capacityDialog.open) elements.capacityDialog.close();
+  if (elements.ownersDialog.open) elements.ownersDialog.close();
   if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   elements.topologyDialog.showModal();
   renderTopology();
@@ -4775,12 +4868,24 @@ elements.capacityToggle.addEventListener("click", () => {
   if (elements.topologyDialog.open) elements.topologyDialog.close();
   if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
+  if (elements.ownersDialog.open) elements.ownersDialog.close();
   elements.capacityGpuCount.value = String(view.capacityRequest.gpuCount);
   elements.capacityVram.value = String(view.capacityRequest.minVramGiB);
   syncCapacityModels();
   elements.capacityModel.value = view.capacityRequest.model;
   elements.capacityDialog.showModal();
   renderCapacityMatcher();
+});
+
+elements.ownersToggle.addEventListener("click", () => {
+  if (!view.snapshot) return;
+  if (elements.settingsDialog.open) elements.settingsDialog.close();
+  if (elements.topologyDialog.open) elements.topologyDialog.close();
+  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
+  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
+  if (elements.capacityDialog.open) elements.capacityDialog.close();
+  elements.ownersDialog.showModal();
+  renderOwners();
 });
 
 elements.capacityForm.addEventListener("submit", (event) => {

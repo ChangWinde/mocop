@@ -599,6 +599,8 @@ html[data-style="glass"] .metric-card.primary {
 .group-toggle:hover, .tool-button:hover { border-color: color-mix(in srgb, var(--blue) 38%, transparent); color: var(--text); }
 .capacity-trigger { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 32%, transparent); background: var(--accent-2-soft); }
 .capacity-trigger:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent-2) 52%, transparent); background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
+.owners-trigger { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 32%, transparent); background: var(--blue-soft); }
+.owners-trigger:hover { color: var(--text); border-color: color-mix(in srgb, var(--blue) 52%, transparent); background: color-mix(in srgb, var(--blue) 16%, transparent); }
 .tool-button:disabled { opacity: .42; cursor: not-allowed; }
 
 .filter-row { gap: 5px; min-height: 50px; padding: 0 20px; border-bottom: 1px solid var(--line-soft); background: var(--panel-deep); }
