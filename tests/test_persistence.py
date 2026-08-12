@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from mocop.config import PersistenceConfig
 from mocop.incidents import IncidentCondition, IncidentEvent
@@ -18,7 +21,13 @@ from mocop.persistence import (
 from mocop.service import StateStore
 
 
-def history_point(observed_at: str, cpu: float) -> dict[str, object]:
+def utc_text(moment: datetime) -> str:
+    return moment.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def history_point(
+    observed_at: str, cpu: float, transport_retried: bool = False
+) -> dict[str, object]:
     return {
         "observedAt": observed_at,
         "cpuUsagePct": cpu,
@@ -32,6 +41,35 @@ def history_point(observed_at: str, cpu: float) -> dict[str, object]:
         "gpuUsagePct": 50.0,
         "gpuMemoryUsagePct": 60.0,
         "gpuTemperatureC": 70.0,
+        "transportRetried": transport_retried,
+    }
+
+
+def gpu_point(observed_at: str, utilization: float) -> dict[str, object]:
+    return {
+        "observedAt": observed_at,
+        "gpuId": "GPU-1",
+        "index": 0,
+        "utilizationGpuPct": utilization,
+        "memoryUsedMiB": 1024.0,
+        "memoryTotalMiB": 8192.0,
+        "temperatureC": 60.0,
+        "powerDrawW": 120.0,
+    }
+
+
+def process_event(
+    observed_at: str, gpu_id: str, pid: int, event: str = "started"
+) -> dict[str, object]:
+    return {
+        "observedAt": observed_at,
+        "gpuId": gpu_id,
+        "index": 0,
+        "event": event,
+        "pid": pid,
+        "name": "train.py",
+        "usedMemoryMiB": 512.0,
+        "workload": None,
     }
 
 
@@ -52,6 +90,110 @@ def incident_event(event_id: int, observed_at: str) -> IncidentEvent:
         state="opened",
         observed_at=observed_at,
     )
+
+
+# Schemas exactly as historical releases created them, so migrations are
+# exercised against real legacy layouts instead of the current DDL.
+_LEGACY_TABLES: dict[str, tuple[str, ...]] = {
+    "history": (
+        """
+        CREATE TABLE history (
+            host TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            cpu_usage_pct REAL,
+            memory_usage_pct REAL,
+            swap_usage_pct REAL,
+            disk_usage_pct REAL,
+            network_rx_bps REAL,
+            network_tx_bps REAL,
+            disk_read_bps REAL,
+            disk_write_bps REAL,
+            gpu_usage_pct REAL,
+            gpu_memory_usage_pct REAL,
+            gpu_temperature_c REAL,
+            PRIMARY KEY (host, observed_at)
+        ) WITHOUT ROWID
+        """,
+        "CREATE INDEX history_observed_at ON history(observed_at)",
+    ),
+    "incident_events": (
+        """
+        CREATE TABLE incident_events (
+            event_id INTEGER PRIMARY KEY,
+            host TEXT NOT NULL,
+            condition_key TEXT NOT NULL,
+            category TEXT NOT NULL,
+            resource TEXT NOT NULL,
+            severity TEXT NOT NULL CHECK (severity IN ('warning', 'critical')),
+            value REAL,
+            threshold REAL,
+            condition_observed_at TEXT NOT NULL,
+            detail TEXT,
+            group_key TEXT,
+            state TEXT NOT NULL CHECK (
+                state IN ('opened', 'resolved', 'escalated', 'deescalated')
+            ),
+            observed_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX incident_events_observed_at ON incident_events(observed_at)",
+    ),
+    "gpu_history": (
+        """
+        CREATE TABLE gpu_history (
+            host TEXT NOT NULL,
+            gpu_id TEXT NOT NULL,
+            gpu_index INTEGER NOT NULL,
+            observed_at TEXT NOT NULL,
+            utilization_gpu_pct REAL,
+            memory_used_mib REAL,
+            memory_total_mib REAL,
+            temperature_c REAL,
+            power_draw_w REAL,
+            PRIMARY KEY (host, gpu_id, observed_at)
+        ) WITHOUT ROWID
+        """,
+        "CREATE INDEX gpu_history_observed_at ON gpu_history(observed_at)",
+    ),
+    "process_events": (
+        """
+        CREATE TABLE process_events (
+            host TEXT NOT NULL,
+            gpu_id TEXT NOT NULL,
+            gpu_index INTEGER NOT NULL,
+            observed_at TEXT NOT NULL,
+            event_type TEXT NOT NULL CHECK (
+                event_type IN ('started', 'stopped')
+            ),
+            pid INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            used_memory_mib REAL,
+            workload_json TEXT,
+            PRIMARY KEY (
+                host, gpu_id, observed_at, event_type, pid, name
+            )
+        ) WITHOUT ROWID
+        """,
+        "CREATE INDEX process_events_observed_at ON process_events(observed_at)",
+    ),
+}
+_LEGACY_VERSION_TABLES = {
+    0: (),
+    1: ("history", "incident_events"),
+    2: ("history", "incident_events", "gpu_history", "process_events"),
+}
+
+
+def create_legacy_database(
+    path: Path, version: int, tables: tuple[str, ...] | None = None
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    selected = tables if tables is not None else _LEGACY_VERSION_TABLES[version]
+    with closing(sqlite3.connect(path)) as connection, connection:
+        for table in selected:
+            for statement in _LEGACY_TABLES[table]:
+                connection.execute(statement)
+        connection.execute(f"PRAGMA user_version = {version}")
 
 
 class SqliteTelemetryPersistenceTests(unittest.TestCase):
@@ -150,13 +292,46 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         self.assertEqual(events[0]["workload"]["workload_id"], "7")
         self.assertEqual(store.status()["writtenRecords"], 4)
 
+    def test_roundtrips_the_transport_retried_flag_across_restart(self) -> None:
+        now = datetime.now(timezone.utc)
+        first = utc_text(now - timedelta(minutes=10))
+        second = utc_text(now - timedelta(minutes=5))
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        store.record_history("gpu-01", history_point(first, 10))
+        store.record_history(
+            "gpu-01", history_point(second, 20, transport_retried=True)
+        )
+        self.assertTrue(store.flush())
+        store.close()
+
+        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(reopened.close)
+        points = reopened.load(10, 10).history["gpu-01"]
+
+        self.assertEqual([point["transportRetried"] for point in points], [False, True])
+
     def test_migrates_the_v1_database_without_losing_existing_history(self) -> None:
-        self.path.parent.mkdir(parents=True)
+        create_legacy_database(self.path, 1)
+        observed_at = utc_text(datetime.now(timezone.utc) - timedelta(minutes=5))
         with closing(sqlite3.connect(self.path)) as connection, connection:
-            SqliteTelemetryPersistence._create_schema(connection)
-            connection.execute("DROP TABLE gpu_history")
-            connection.execute("DROP TABLE process_events")
-            connection.execute("PRAGMA user_version = 1")
+            connection.execute(
+                "INSERT INTO history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "gpu-01",
+                    observed_at,
+                    10.0,
+                    20.0,
+                    0.0,
+                    40.0,
+                    100.0,
+                    200.0,
+                    300.0,
+                    400.0,
+                    50.0,
+                    60.0,
+                    70.0,
+                ),
+            )
 
         store = SqliteTelemetryPersistence(self.config, self.path)
         self.addCleanup(store.close)
@@ -169,9 +344,344 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 )
             }
-        self.assertEqual(version, 2)
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(history)")
+            }
+        self.assertEqual(version, 3)
         self.assertIn("gpu_history", tables)
         self.assertIn("process_events", tables)
+        self.assertIn("transport_retried", columns)
+        points = store.load(10, 10).history["gpu-01"]
+        self.assertEqual(
+            [(point["observedAt"], point["transportRetried"]) for point in points],
+            [(observed_at, False)],
+        )
+
+    def test_migrates_a_v2_database_preserving_existing_history(self) -> None:
+        create_legacy_database(self.path, 2)
+        now = datetime.now(timezone.utc)
+        old_observed_at = utc_text(now - timedelta(minutes=10))
+        new_observed_at = utc_text(now - timedelta(minutes=5))
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute(
+                "INSERT INTO history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "gpu-01",
+                    old_observed_at,
+                    10.0,
+                    20.0,
+                    0.0,
+                    40.0,
+                    100.0,
+                    200.0,
+                    300.0,
+                    400.0,
+                    50.0,
+                    60.0,
+                    70.0,
+                ),
+            )
+
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        store.record_history(
+            "gpu-01", history_point(new_observed_at, 20, transport_retried=True)
+        )
+        self.assertTrue(store.flush())
+        store.close()
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(history)")
+            }
+        self.assertEqual(version, 3)
+        self.assertIn("transport_retried", columns)
+
+        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(reopened.close)
+        points = reopened.load(10, 10).history["gpu-01"]
+        self.assertEqual([point["transportRetried"] for point in points], [False, True])
+
+    def test_recovers_from_a_partially_created_schema(self) -> None:
+        # As if the initial schema creation crashed after the first table and
+        # before user_version was stamped.
+        create_legacy_database(self.path, 0, tables=("history",))
+        observed_at = utc_text(datetime.now(timezone.utc) - timedelta(minutes=5))
+
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+        store.record_history("gpu-01", history_point(observed_at, 10))
+        self.assertTrue(store.flush())
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        self.assertEqual(version, 3)
+        self.assertLessEqual(
+            {"history", "incident_events", "gpu_history", "process_events"}, tables
+        )
+        self.assertEqual(len(store.load(10, 10).history["gpu-01"]), 1)
+
+    def test_recovers_from_a_partially_migrated_v1_database(self) -> None:
+        # As if the v1 migration crashed between the two table creations.
+        create_legacy_database(
+            self.path, 1, tables=("history", "incident_events", "gpu_history")
+        )
+
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        self.assertEqual(version, 3)
+        self.assertIn("process_events", tables)
+        self.assertTrue(store.status()["healthy"])
+
+    def test_enforces_the_size_limit_for_runtime_writes(self) -> None:
+        config = PersistenceConfig(enabled=True, retention_hours=24, max_bytes=131_072)
+        store = SqliteTelemetryPersistence(config, self.path)
+        self.addCleanup(store.close)
+        base = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        for index in range(4000):
+            observed_at = utc_text(base + timedelta(seconds=index))
+            store.record_history("gpu-01", history_point(observed_at, 10.0))
+        store.flush(30.0)
+
+        status = store.status()
+        self.assertGreater(status["droppedWrites"], 0)
+        self.assertFalse(status["healthy"])
+        self.assertLessEqual(self.path.stat().st_size, config.max_bytes)
+
+    def test_prunes_and_retries_when_the_database_reports_full(self) -> None:
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+        stale_observed_at = utc_text(datetime.now(timezone.utc) - timedelta(hours=48))
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute(
+                "INSERT INTO history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "gpu-01",
+                    stale_observed_at,
+                    10.0,
+                    20.0,
+                    0.0,
+                    40.0,
+                    100.0,
+                    200.0,
+                    300.0,
+                    400.0,
+                    50.0,
+                    60.0,
+                    70.0,
+                    0,
+                ),
+            )
+        recent_observed_at = utc_text(datetime.now(timezone.utc))
+        original_write = SqliteTelemetryPersistence._write
+        failed_once = []
+
+        def full_once(connection: sqlite3.Connection, item: object) -> int:
+            if not failed_once:
+                failed_once.append(True)
+                raise sqlite3.OperationalError("database or disk is full")
+            return original_write(connection, item)
+
+        with mock.patch.object(
+            SqliteTelemetryPersistence, "_write", staticmethod(full_once)
+        ):
+            store.record_history("gpu-01", history_point(recent_observed_at, 20.0))
+            self.assertTrue(store.flush())
+
+        loaded = store.load(10, 10)
+        self.assertEqual(
+            [point["observedAt"] for point in loaded.history["gpu-01"]],
+            [recent_observed_at],
+        )
+        status = store.status()
+        self.assertEqual(status["droppedWrites"], 0)
+        self.assertTrue(status["healthy"])
+
+    def test_prunes_stale_records_during_idle_periods(self) -> None:
+        config = PersistenceConfig(enabled=True, retention_hours=1, max_bytes=8_388_608)
+        with mock.patch("mocop.persistence._PRUNE_INTERVAL_SECONDS", 0.2):
+            store = SqliteTelemetryPersistence(config, self.path)
+            self.addCleanup(store.close)
+            nearly_stale = utc_text(
+                datetime.now(timezone.utc) - timedelta(hours=1) + timedelta(seconds=1)
+            )
+            store.record_history("gpu-01", history_point(nearly_stale, 10.0))
+            self.assertTrue(store.flush())
+
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline and store.load(10, 10).history:
+                time.sleep(0.1)
+            self.assertEqual(store.load(10, 10).history, {})
+
+    def test_flush_reports_batches_dropped_by_write_failures(self) -> None:
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def failing_write(connection: sqlite3.Connection, item: object) -> int:
+            entered.set()
+            release.wait(30.0)
+            raise sqlite3.OperationalError("no such table: injected")
+
+        with mock.patch.object(
+            SqliteTelemetryPersistence, "_write", staticmethod(failing_write)
+        ):
+            store.record_history("gpu-01", history_point("2026-08-10T00:00:00Z", 10.0))
+            self.assertTrue(entered.wait(10.0))
+            # The writer is now blocked inside the first batch, so the next
+            # write and the flush barrier are guaranteed to share a batch.
+            store.record_history("gpu-01", history_point("2026-08-10T00:00:05Z", 20.0))
+            results: list[bool] = []
+            flusher = threading.Thread(target=lambda: results.append(store.flush(15.0)))
+            flusher.start()
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and store.status()["queuedWrites"] < 2:
+                time.sleep(0.01)
+            self.assertGreaterEqual(store.status()["queuedWrites"], 2)
+            release.set()
+            flusher.join(20.0)
+
+        self.assertFalse(flusher.is_alive())
+        self.assertEqual(results, [False])
+        status = store.status()
+        self.assertEqual(status["droppedWrites"], 2)
+        self.assertFalse(status["healthy"])
+
+    def test_restores_process_events_for_every_gpu(self) -> None:
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+        now = datetime.now(timezone.utc)
+        busy = tuple(
+            process_event(
+                utc_text(now - timedelta(minutes=5 - index)),
+                "GPU-busy",
+                101 + index,
+            )
+            for index in range(5)
+        )
+        quiet = (process_event(utc_text(now - timedelta(minutes=30)), "GPU-quiet", 7),)
+        store.record_gpu_telemetry("gpu-01", (), busy + quiet)
+        self.assertTrue(store.flush())
+
+        loaded = store.load(history_points=10, incident_points=2)
+
+        self.assertEqual(
+            [event["pid"] for event in loaded.process_events[("gpu-01", "GPU-quiet")]],
+            [7],
+        )
+        self.assertEqual(
+            [event["pid"] for event in loaded.process_events[("gpu-01", "GPU-busy")]],
+            [104, 105],
+        )
+
+    def test_new_incident_events_replace_corrupt_id_placeholders(self) -> None:
+        now = datetime.now(timezone.utc)
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        store.record_incidents(
+            (
+                incident_event(1, utc_text(now - timedelta(minutes=10))),
+                incident_event(2, utc_text(now - timedelta(minutes=9))),
+            )
+        )
+        self.assertTrue(store.flush())
+        store.close()
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute(
+                "UPDATE incident_events SET value = 'invalid' WHERE event_id = 2"
+            )
+
+        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        restored = reopened.load(20, 20)
+        self.assertEqual([event.event_id for event in restored.incident_events], [1])
+
+        # A restarted tracker resumes numbering right after the last valid
+        # event, so its next event reuses the id held by the corrupt row.
+        replacement_observed_at = utc_text(now - timedelta(minutes=1))
+        reopened.record_incidents((incident_event(2, replacement_observed_at),))
+        self.assertTrue(reopened.flush())
+        reopened.close()
+
+        final = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(final.close)
+        events = final.load(20, 20).incident_events
+        self.assertEqual([event.event_id for event in events], [1, 2])
+        self.assertEqual(events[1].observed_at, replacement_observed_at)
+
+    def test_corrupt_rows_do_not_displace_older_valid_records(self) -> None:
+        now = datetime.now(timezone.utc)
+        old_observed_at = utc_text(now - timedelta(minutes=10))
+        new_observed_at = utc_text(now - timedelta(minutes=5))
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        store.record_history("gpu-01", history_point(old_observed_at, 10.0))
+        store.record_history("gpu-01", history_point(new_observed_at, 20.0))
+        store.record_incidents(
+            (
+                incident_event(1, old_observed_at),
+                incident_event(2, new_observed_at),
+            )
+        )
+        store.record_gpu_telemetry(
+            "gpu-01",
+            (gpu_point(old_observed_at, 50.0), gpu_point(new_observed_at, 60.0)),
+            (
+                process_event(old_observed_at, "GPU-1", 41),
+                process_event(new_observed_at, "GPU-1", 42),
+            ),
+        )
+        self.assertTrue(store.flush())
+        store.close()
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute(
+                "UPDATE history SET cpu_usage_pct = 'invalid' WHERE observed_at = ?",
+                (new_observed_at,),
+            )
+            connection.execute(
+                "UPDATE incident_events SET value = 'invalid' WHERE event_id = 2"
+            )
+            connection.execute(
+                "UPDATE gpu_history SET utilization_gpu_pct = 'invalid'"
+                " WHERE observed_at = ?",
+                (new_observed_at,),
+            )
+            connection.execute(
+                "UPDATE process_events SET gpu_index = 'invalid' WHERE observed_at = ?",
+                (new_observed_at,),
+            )
+
+        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(reopened.close)
+        loaded = reopened.load(history_points=1, incident_points=1)
+
+        self.assertEqual(
+            [point["observedAt"] for point in loaded.history["gpu-01"]],
+            [old_observed_at],
+        )
+        self.assertEqual([event.event_id for event in loaded.incident_events], [1])
+        self.assertEqual(
+            [point["observedAt"] for point in loaded.gpu_history[("gpu-01", "GPU-1")]],
+            [old_observed_at],
+        )
+        self.assertEqual(
+            [event["pid"] for event in loaded.process_events[("gpu-01", "GPU-1")]],
+            [41],
+        )
 
     def test_prunes_records_older_than_the_retention_window(self) -> None:
         old = datetime.now(timezone.utc) - timedelta(hours=2)
@@ -263,7 +773,11 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
             power_draw_w=100,
             power_limit_w=200,
         )
-        state.apply(ProbeResult("gpu-01", "online", 1, (gpu,), system=system))
+        state.apply(
+            ProbeResult(
+                "gpu-01", "online", 1, (gpu,), system=system, transport_retries=1
+            )
+        )
         state.apply(ProbeResult("gpu-01", "unreachable", 1))
         self.assertTrue(persistence.flush())
         persistence.close()
@@ -274,7 +788,9 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         restarted_state = StateStore(5, persistence=reopened, restored=restored)
         restarted_state.set_hosts(("gpu-01",))
 
-        self.assertEqual(len(restarted_state.history("gpu-01", 20)["points"]), 1)
+        restored_points = restarted_state.history("gpu-01", 20)["points"]
+        self.assertEqual(len(restored_points), 1)
+        self.assertTrue(restored_points[0]["transportRetried"])
         self.assertEqual(
             restarted_state.gpu_history("gpu-01", "GPU-1", 20)["points"][0][
                 "utilizationGpuPct"
