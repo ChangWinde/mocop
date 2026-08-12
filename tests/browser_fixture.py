@@ -156,6 +156,7 @@ def gpu(
     utilization: float,
     memory_used: float,
     temperature: float,
+    unknown_memory_worker: bool = False,
 ) -> GpuMetrics:
     processes = (
         (
@@ -171,8 +172,10 @@ def gpu(
                     queue="gpu-long",
                 ),
             ),
+            # One host-wide PID visible on every busy GPU: the owners view must
+            # count it once per host, not once per GPU record.
             GpuProcess(
-                pid=20_000 + index,
+                pid=20_000,
                 name="python data_worker.py",
                 used_memory_mib=512,
             ),
@@ -180,6 +183,14 @@ def gpu(
         if utilization >= 50
         else ()
     )
+    if unknown_memory_worker:
+        processes = processes + (
+            GpuProcess(
+                pid=21_000,
+                name="python telemetry_probe.py",
+                used_memory_mib=None,
+            ),
+        )
     return GpuMetrics(
         index=index,
         uuid=f"GPU-DEMO-{host}-{index:02d}",
@@ -272,7 +283,7 @@ def demo_state() -> StateStore:
             latency_ms=44,
             gpus=(
                 gpu("atlas-02", 0, 88, 68_096, 70),
-                gpu("atlas-02", 1, 76, 61_440, 67),
+                gpu("atlas-02", 1, 76, 61_440, 67, unknown_memory_worker=True),
                 gpu("atlas-02", 2, 8, 12_288, 42),
                 gpu("atlas-02", 3, 0, 1_024, 32),
             ),

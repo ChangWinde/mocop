@@ -485,11 +485,28 @@ try {
     document.querySelector("#owners-toggle").click();
     const dialog = document.querySelector("#owners-dialog");
     const rows = [...document.querySelectorAll("#owners-results .capacity-candidate")];
+    const metricNumbers = (row) => [...row.querySelectorAll(".capacity-candidate-metrics span")]
+      .map((item) => Number.parseInt(item.textContent, 10));
+    const rowInfo = (row) => ({
+      name: row.querySelector("strong")?.textContent,
+      nameTitle: row.querySelector("strong")?.title,
+      vram: row.querySelector("em")?.textContent,
+      metrics: metricNumbers(row),
+      hostChips: [...row.querySelectorAll(".capacity-devices span")].map(
+        (chip) => chip.textContent,
+      ),
+    });
+    const researcherRows = rows.filter(
+      (row) => row.querySelector("strong")?.textContent === "researcher",
+    );
     const rect = dialog.getBoundingClientRect();
     const result = {
       open: dialog.open,
       rows: rows.length,
       ownerNames: rows.map((row) => row.querySelector("strong")?.textContent),
+      researcherRowCount: researcherRows.length,
+      researcher: researcherRows.length ? rowInfo(researcherRows[0]) : null,
+      unattributed: rows.length > 1 ? rowInfo(rows[1]) : null,
       firstVram: rows[0]?.querySelector("em")?.textContent,
       summary: document.querySelector("#owners-summary")?.textContent,
       centerDelta: Math.abs((rect.left + rect.right) / 2 - document.documentElement.clientWidth / 2),
@@ -498,9 +515,22 @@ try {
     return result;
   })()`);
   assert.equal(owners.open, true);
-  assert(owners.rows >= 1, "owners view lists at least one attribution");
+  assert.equal(owners.rows, 2);
   assert(owners.ownerNames.includes("researcher"), "slurm owner is aggregated");
+  assert.equal(owners.researcherRowCount, 1, "researcher aggregates into one row");
+  assert.equal(owners.ownerNames[0], "researcher");
+  assert.equal(owners.researcher.nameTitle, "researcher");
+  // researcher: 4 GPUs on 2 nodes, 4 distinct host+pid processes.
+  assert.deepEqual(owners.researcher.metrics, [4, 2, 4]);
+  assert.equal(owners.researcher.vram, "262.8 GiB");
+  assert.deepEqual(owners.researcher.hostChips, ["atlas-01", "atlas-02"]);
   assert.match(owners.firstVram, /GiB/);
+  // Unattributed: the shared data-worker PID counts once per host and the
+  // unknown-memory probe keeps the VRAM sum an explicit lower bound.
+  assert.deepEqual(owners.unattributed.metrics, [4, 2, 3]);
+  assert.equal(owners.unattributed.vram, "至少 2 GiB");
+  assert.match(owners.summary, /共占用至少 264\.8 GiB/);
+  assert.match(owners.summary, /部分进程显存未知/);
   assert(owners.centerDelta < 2);
 
   const grouping = await cdp.evaluate(`(() => {
@@ -1160,7 +1190,12 @@ try {
         - document.documentElement.clientWidth / 2
     );
     result.topologyWidth = topologyRect.width;
-    result.topologyScrollContained = topologyScroll.scrollWidth >= topologyScroll.clientWidth;
+    result.topologyScrollOverflow = topologyScroll.scrollWidth > topologyScroll.clientWidth;
+    topologyScroll.scrollLeft = topologyScroll.scrollWidth;
+    result.topologyScrolledToEnd = topologyScroll.scrollLeft > 0
+      && topologyScroll.scrollLeft + topologyScroll.clientWidth
+        >= topologyScroll.scrollWidth - 1;
+    topologyScroll.scrollLeft = 0;
     result.topologyDocumentOverflow = document.documentElement.scrollWidth
       > document.documentElement.clientWidth;
     topologyDialog.close();
@@ -1194,7 +1229,8 @@ try {
   assert(mobile.settingsCenterDelta < 2);
   assert(mobile.topologyCenterDelta < 2);
   assert(mobile.topologyWidth <= 390);
-  assert.equal(mobile.topologyScrollContained, true);
+  assert.equal(mobile.topologyScrollOverflow, true, "fixture topology overflows on mobile");
+  assert.equal(mobile.topologyScrolledToEnd, true, "topology scroll area actually scrolls");
   assert.equal(mobile.topologyDocumentOverflow, false);
   assert(mobile.gpuDetailCenterDelta < 2);
   assert(mobile.gpuDetailWidth <= 390);
