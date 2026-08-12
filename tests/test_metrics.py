@@ -117,6 +117,13 @@ class OpenMetricsTests(unittest.TestCase):
         self.assertIn("mocop_persistence_healthy 1\n", body)
         self.assertIn("mocop_notifications_enabled 0\n", body)
         self.assertIn("mocop_notifications_healthy 1\n", body)
+        self.assertIn("# TYPE mocop_persistence_queued_writes gauge\n", body)
+        self.assertIn("# TYPE mocop_persistence_dropped_writes counter\n", body)
+        self.assertIn("mocop_persistence_dropped_writes_total 0\n", body)
+        self.assertNotIn("# TYPE mocop_persistence_dropped_writes_total ", body)
+        self.assertIn("# TYPE mocop_notifications_dropped_deliveries counter\n", body)
+        self.assertIn("mocop_notifications_dropped_deliveries_total 0\n", body)
+        self.assertNotIn("# TYPE mocop_notifications_dropped_deliveries_total ", body)
 
         self.store.set_maintenance_windows(
             (
@@ -164,6 +171,52 @@ class OpenMetricsTests(unittest.TestCase):
         body = render_openmetrics(payload).decode()
 
         self.assertNotIn("mocop_collection_poll_interval_seconds", body)
+        self.assertTrue(body.endswith("# EOF\n"))
+
+    def test_exports_gpu_metrics_when_system_metrics_are_missing(self) -> None:
+        self.store.apply(
+            ProbeResult(
+                "gpu-01",
+                "online",
+                250,
+                gpus=(_gpu(),),
+                observed_at="2030-06-15T12:32:00Z",
+                system=None,
+            )
+        )
+
+        body = render_openmetrics(self.store.snapshot()).decode()
+
+        self.assertIn('mocop_host_up{host="gpu-01"} 1\n', body)
+        self.assertNotIn('mocop_host_cpu_utilization_ratio{host="gpu-01"', body)
+        self.assertNotIn('mocop_host_memory_total_bytes{host="gpu-01"', body)
+        self.assertIn('mocop_gpu_info{host="gpu-01"', body)
+        self.assertIn(
+            'mocop_gpu_utilization_ratio{host="gpu-01",index="0",uuid=',
+            body,
+        )
+
+    def test_omits_mib_samples_that_overflow_when_scaled_to_bytes(self) -> None:
+        payload = {
+            "appVersion": "test",
+            "stats": {"memoryTotalMiB": 1e308, "memoryUsedMiB": 1024},
+            "servers": [
+                {
+                    "host": "gpu-01",
+                    "status": "online",
+                    "stale": False,
+                    "system": {"memory_total_mib": 1e308, "memory_used_mib": 512},
+                    "gpus": [],
+                }
+            ],
+        }
+
+        body = render_openmetrics(payload).decode()
+
+        self.assertNotIn("mocop_cluster_gpu_memory_total_bytes", body)
+        self.assertIn("mocop_cluster_gpu_memory_used_bytes 1073741824\n", body)
+        self.assertNotIn("mocop_host_memory_total_bytes", body)
+        self.assertIn('mocop_host_memory_used_bytes{host="gpu-01"} 536870912\n', body)
         self.assertTrue(body.endswith("# EOF\n"))
 
 
