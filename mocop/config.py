@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -10,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
+from urllib.parse import urlsplit
 
 CONFIG_ENV_VAR = "MOCOP_CONFIG"
 LOCAL_CONFIG_PATH = Path("config/mocop.json")
@@ -24,6 +26,7 @@ HOST_GROUP_MAX_LENGTH = 48
 TOPOLOGY_LABEL_MAX_LENGTH = 64
 TOPOLOGY_MAX_LINKS = 512
 TOPOLOGY_TRANSPORTS = frozenset({"ssh", "frp-stcp", "frp-xtcp", "vpn"})
+TRUSTED_WEB_HOSTS_MAX_ENTRIES = 32
 
 
 class ConfigError(ValueError):
@@ -219,6 +222,7 @@ class MonitorConfig:
     max_workers: int
     listen_host: str
     listen_port: int
+    trusted_web_hosts: tuple[str, ...] = ()
     gpu_process_poll_interval_seconds: float = 15
     retry_jitter_pct: float = 15
     manual_probe_cooldown_seconds: float = 5
@@ -298,6 +302,7 @@ _REQUIRED_KEYS = {
 }
 _OPTIONAL_KEYS = {
     "local_host",
+    "trusted_web_hosts",
     "history_points",
     "incident_history_points",
     "collection_stale_cycles",
@@ -371,7 +376,8 @@ def _bounded_number(
     value = data.get(key)
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f"{key} must be a number")
-    if not minimum <= float(value) <= maximum:
+    # Compare before converting: float() overflows on huge JSON integers.
+    if not minimum <= value <= maximum:
         raise ConfigError(f"{key} must be between {minimum} and {maximum}")
     return float(value)
 
@@ -397,10 +403,9 @@ def _optional_bounded_number(
         return None
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f"{label} must be a number")
-    number = float(value)
-    if not minimum <= number <= maximum:
+    if not minimum <= value <= maximum:
         raise ConfigError(f"{label} must be between {minimum} and {maximum}")
-    return number
+    return float(value)
 
 
 def _string_list(data: dict[str, Any], key: str) -> tuple[str, ...]:
@@ -416,6 +421,56 @@ def is_safe_alias(value: str) -> bool:
     return bool(_SAFE_ALIAS.fullmatch(value))
 
 
+def normalize_web_hostname(value: object, *, allow_port: bool = False) -> str | None:
+    """Return the canonical lowercase hostname for a Host-style value.
+
+    Accepts DNS names, IPv4 literals, and IPv6 literals (bare or bracketed).
+    A port suffix is accepted only when ``allow_port`` is true; schemes,
+    credentials, paths, and queries are always rejected. Returns ``None``
+    when the value cannot be interpreted as a plain hostname.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > 260:
+        return None
+    if candidate.count(":") >= 2 and not candidate.startswith("["):
+        candidate = f"[{candidate}]"  # bare IPv6 literal
+    try:
+        parsed = urlsplit(f"//{candidate}")
+        port = parsed.port
+    except ValueError:
+        return None
+    hostname = parsed.hostname
+    if (
+        hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and not allow_port)
+    ):
+        return None
+    if "[" in parsed.netloc:
+        # Bracketed hosts must be IP literals even on Pythons whose urlsplit
+        # does not validate them.
+        try:
+            ipaddress.ip_address(hostname)
+        except ValueError:
+            return None
+    return hostname
+
+
+def _has_disallowed_text_characters(value: str) -> bool:
+    """Reject control/format characters plus line and paragraph separators."""
+    for character in value:
+        category = unicodedata.category(character)
+        if category.startswith("C") or category in ("Zl", "Zp"):
+            return True
+    return False
+
+
 def is_valid_maintenance_reason(value: object, *, required: bool) -> bool:
     if not isinstance(value, str):
         return False
@@ -423,9 +478,7 @@ def is_valid_maintenance_reason(value: object, *, required: bool) -> bool:
     return (
         (bool(normalized) or not required)
         and len(normalized) <= MAINTENANCE_REASON_MAX_LENGTH
-        and not any(
-            unicodedata.category(character).startswith("C") for character in value
-        )
+        and not _has_disallowed_text_characters(value)
     )
 
 
@@ -476,7 +529,7 @@ def _incident_scope_override(raw: object, label: str) -> IncidentScopeOverrideCo
         if (
             isinstance(value, bool)
             or not isinstance(value, int | float)
-            or not 0 <= float(value) <= maximum
+            or not 0 <= value <= maximum
         ):
             raise ConfigError(
                 f"{label}.thresholds.{name} must be between 0 and {maximum}"
@@ -667,10 +720,9 @@ def _webhook_configs(data: dict[str, Any]) -> tuple[WebhookConfig, ...]:
         value = raw.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise ConfigError(f"{label}.{key} must be a number")
-        parsed = float(value)
-        if not minimum <= parsed <= maximum:
+        if not minimum <= value <= maximum:
             raise ConfigError(f"{label}.{key} must be between {minimum} and {maximum}")
-        return parsed
+        return float(value)
 
     for index, raw in enumerate(raw_items):
         label = f"webhooks[{index}]"
@@ -762,17 +814,50 @@ def resolve_config_path(
     return BUNDLED_CONFIG_PATH.resolve()
 
 
+class _JsonObjectPairs:
+    """Raw key/value pairs of one JSON object, kept so duplicates survive."""
+
+    __slots__ = ("pairs",)
+
+    def __init__(self, pairs: list[tuple[str, Any]]) -> None:
+        self.pairs = pairs
+
+
+def _resolve_json_objects(node: Any, path: str, source: Path) -> Any:
+    """Convert parsed pairs into dicts, rejecting duplicate keys at any depth."""
+    if isinstance(node, _JsonObjectPairs):
+        result: dict[str, Any] = {}
+        for key, value in node.pairs:
+            child_path = f"{path}.{key}" if path else key
+            if key in result:
+                raise ConfigError(f"duplicate JSON key in {source}: {child_path}")
+            result[key] = _resolve_json_objects(value, child_path, source)
+        return result
+    if isinstance(node, list):
+        return [
+            _resolve_json_objects(item, f"{path}[{index}]", source)
+            for index, item in enumerate(node)
+        ]
+    return node
+
+
 def load_config(path: Path | str | None = None) -> MonitorConfig:
     config_path = resolve_config_path(path)
     try:
-        raw = config_path.read_text(encoding="utf-8")
+        raw = config_path.read_bytes().decode("utf-8")
     except OSError as exc:
         raise ConfigError(f"cannot read config: {config_path}") from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            f"config file {config_path} is not valid UTF-8 "
+            f"at byte {exc.start}: {exc.reason}"
+        ) from exc
 
     try:
-        data = json.loads(raw)
+        parsed = json.loads(raw, object_pairs_hook=_JsonObjectPairs)
     except json.JSONDecodeError as exc:
         raise ConfigError(f"invalid JSON in {config_path}: {exc.msg}") from exc
+    data = _resolve_json_objects(parsed, "", config_path)
 
     if not isinstance(data, dict):
         raise ConfigError("config root must be a JSON object")
@@ -835,6 +920,24 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
     )
     max_workers = _bounded_integer(data, "max_workers", 1, 64)
     listen_port = _bounded_integer(data, "listen_port", 1, 65535)
+    raw_trusted_hosts = data.get("trusted_web_hosts", [])
+    if (
+        not isinstance(raw_trusted_hosts, list)
+        or len(raw_trusted_hosts) > TRUSTED_WEB_HOSTS_MAX_ENTRIES
+    ):
+        raise ConfigError(
+            "trusted_web_hosts must be a list with at most "
+            f"{TRUSTED_WEB_HOSTS_MAX_ENTRIES} entries"
+        )
+    trusted_web_hosts: list[str] = []
+    for item in raw_trusted_hosts:
+        hostname = normalize_web_hostname(item)
+        if hostname is None:
+            raise ConfigError(
+                "trusted_web_hosts entries must be hostnames or IP literals "
+                "without scheme, port, credentials, or path"
+            )
+        trusted_web_hosts.append(hostname)
     history_value = data.get("history_points", 720)
     if isinstance(history_value, bool) or not isinstance(history_value, int):
         raise ConfigError("history_points must be an integer")
@@ -888,7 +991,7 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         value = threshold_data.get(name, getattr(defaults, name))
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise ConfigError(f"thresholds.{name} must be a number")
-        if not 0 <= float(value) <= maximum:
+        if not 0 <= value <= maximum:
             raise ConfigError(f"thresholds.{name} must be between 0 and {maximum}")
         return float(value)
 
@@ -951,10 +1054,7 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
                 not isinstance(raw_display, str)
                 or not raw_display.strip()
                 or len(raw_display.strip()) > DISPLAY_NAME_MAX_LENGTH
-                or any(
-                    unicodedata.category(character).startswith("C")
-                    for character in raw_display
-                )
+                or _has_disallowed_text_characters(raw_display)
             ):
                 raise ConfigError(
                     f"host_overrides.{alias}.display_name must be 1 to "
@@ -1058,9 +1158,11 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         if (
             not isinstance(duration, int)
             or isinstance(duration, bool)
-            or not (1 <= duration <= 10_080)
+            or not (1 <= duration <= 10_079)
         ):
-            raise ConfigError(f"{label}.duration_minutes must be 1 to 10080 (one week)")
+            raise ConfigError(
+                f"{label}.duration_minutes must be 1 to 10079 (less than one week)"
+            )
         maintenance_windows.append(
             (
                 alias,
@@ -1230,6 +1332,7 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         max_workers=max_workers,
         listen_host=data["listen_host"].strip(),
         listen_port=listen_port,
+        trusted_web_hosts=tuple(dict.fromkeys(trusted_web_hosts)),
         gpu_process_poll_interval_seconds=gpu_process_poll_interval,
         retry_jitter_pct=retry_jitter_pct,
         manual_probe_cooldown_seconds=manual_probe_cooldown_seconds,

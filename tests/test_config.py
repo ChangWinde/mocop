@@ -39,6 +39,16 @@ class ConfigTests(unittest.TestCase):
         path.write_text(json.dumps(value), encoding="utf-8")
         return path
 
+    def write_raw(self, raw: str | bytes) -> Path:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "config.json"
+        if isinstance(raw, bytes):
+            path.write_bytes(raw)
+        else:
+            path.write_text(raw, encoding="utf-8")
+        return path
+
     def test_loads_valid_config(self) -> None:
         config = load_config(self.write(valid_config()))
         self.assertTrue(config.auto_discover)
@@ -66,6 +76,43 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.incidents.resource_open_cycles, 2)
         self.assertEqual(config.incidents.recovery_cycles, 2)
         self.assertEqual(config.incidents.gpu_idle_memory_cycles, 12)
+
+    def test_validates_trusted_web_hosts(self) -> None:
+        default = load_config(self.write(valid_config()))
+        self.assertEqual(default.trusted_web_hosts, ())
+
+        value = valid_config()
+        value["trusted_web_hosts"] = [
+            "Dashboard.Example",
+            "10.0.0.8",
+            "fd00::5",
+            "[fd00::6]",
+            "dashboard.example",
+        ]
+        config = load_config(self.write(value))
+        self.assertEqual(
+            config.trusted_web_hosts,
+            ("dashboard.example", "10.0.0.8", "fd00::5", "fd00::6"),
+        )
+
+        invalid_cases = (
+            "not-a-list",
+            ["dashboard.example:8787"],
+            ["https://dashboard.example"],
+            ["dashboard.example/path"],
+            ["user@dashboard.example"],
+            [""],
+            ["   "],
+            [42],
+            ["[not-an-ip]"],
+            ["a" * 300],
+            ["dashboard.example"] * 33,
+        )
+        for entries in invalid_cases:
+            broken = valid_config()
+            broken["trusted_web_hosts"] = entries
+            with self.subTest(entries=entries), self.assertRaises(ConfigError):
+                load_config(self.write(broken))
 
     def test_validates_durable_incident_actions_and_scoped_overrides(self) -> None:
         value = valid_config()
@@ -162,6 +209,35 @@ class ConfigTests(unittest.TestCase):
         value["surprise"] = True
         with self.assertRaisesRegex(ConfigError, "unknown config keys"):
             load_config(self.write(value))
+
+    def test_rejects_duplicate_json_keys_at_any_depth(self) -> None:
+        root_duplicate = json.dumps(valid_config())[:-1] + ', "listen_port": 9999}'
+        with self.assertRaisesRegex(ConfigError, "duplicate JSON key.*listen_port"):
+            load_config(self.write_raw(root_duplicate))
+
+        # The same alias declared twice would silently drop the first window
+        # and bypass the "exactly one of until/recurrence" validation.
+        value = valid_config()
+        value.update({"auto_discover": False, "hosts": ["gpu-1"]})
+        nested_duplicate = json.dumps(value)[:-1] + (
+            ', "maintenance_windows": {'
+            '"gpu-1": {"until": "2030-06-15T12:30:00Z"}, '
+            '"gpu-1": {"reason": "x", "recurrence": '
+            '{"weekday": 0, "start": "00:00", "duration_minutes": 60}}}}'
+        )
+        with self.assertRaisesRegex(
+            ConfigError, r"duplicate JSON key.*maintenance_windows\.gpu-1"
+        ):
+            load_config(self.write_raw(nested_duplicate))
+
+    def test_rejects_non_utf8_config_files_with_location(self) -> None:
+        path = self.write_raw(b'{"ssh_config": "\xff\xfe"}')
+        with self.assertRaises(ConfigError) as context:
+            load_config(path)
+        message = str(context.exception)
+        self.assertIn("not valid UTF-8", message)
+        self.assertIn(str(path), message)
+        self.assertIn("byte 16", message)
 
     def test_loads_and_bounds_optional_history_persistence(self) -> None:
         value = valid_config()
@@ -416,6 +492,53 @@ class ConfigTests(unittest.TestCase):
         value["thresholds"] = {"disk_warning_pct": 101}
         with self.assertRaisesRegex(ConfigError, "must be between"):
             load_config(self.write(value))
+
+    def test_rejects_numbers_too_large_for_float_conversion(self) -> None:
+        huge = 10**400
+        cases: tuple[tuple[dict[str, object], str], ...] = (
+            ({"poll_interval_seconds": huge}, "poll_interval_seconds must be between"),
+            ({"poll_interval_seconds": -huge}, "poll_interval_seconds must be between"),
+            (
+                {"thresholds": {"cpu_warning_pct": huge}},
+                "cpu_warning_pct must be between",
+            ),
+            (
+                {
+                    "auto_discover": False,
+                    "hosts": ["gpu-1"],
+                    "host_overrides": {"gpu-1": {"poll_interval_seconds": huge}},
+                },
+                "host_overrides.gpu-1.poll_interval_seconds must be between",
+            ),
+            (
+                {
+                    "webhooks": [
+                        {
+                            "name": "ops",
+                            "url_env": "MOCOP_URL",
+                            "timeout_seconds": huge,
+                        }
+                    ]
+                },
+                "timeout_seconds must be between",
+            ),
+            (
+                {
+                    "auto_discover": False,
+                    "hosts": ["gpu-1"],
+                    "incident_overrides": {
+                        "hosts": {"gpu-1": {"thresholds": {"cpu_warning_pct": huge}}}
+                    },
+                },
+                "cpu_warning_pct must be between",
+            ),
+        )
+        for update, expected in cases:
+            with self.subTest(expected=expected):
+                value = valid_config()
+                value.update(update)
+                with self.assertRaisesRegex(ConfigError, expected):
+                    load_config(self.write(value))
 
     def test_validates_expected_gpu_counts_against_explicit_hosts(self) -> None:
         value = valid_config()
@@ -756,6 +879,41 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaises(ConfigError):
                     load_config(self.write(value))
 
+    def test_bounds_recurring_window_duration_strictly_below_one_week(self) -> None:
+        value = valid_config()
+        value["auto_discover"] = False
+        value["hosts"] = ["gpu-1"]
+        value["maintenance_windows"] = {
+            "gpu-1": {
+                "reason": "Long window",
+                "recurrence": {
+                    "weekday": 0,
+                    "start": "00:00",
+                    "duration_minutes": 10_079,
+                },
+            }
+        }
+
+        window = load_config(self.write(value)).maintenance_window("gpu-1")
+
+        self.assertEqual(window.duration_minutes, 10_079)
+        # 2030-06-17 is a Monday; the instance ends 23:59 on Sunday the 23rd,
+        # so the window goes inactive in the minute before the next instance.
+        self.assertTrue(
+            window.is_active(datetime(2030, 6, 23, 23, 58, tzinfo=timezone.utc))
+        )
+        self.assertFalse(
+            window.is_active(datetime(2030, 6, 23, 23, 59, 30, tzinfo=timezone.utc))
+        )
+
+        # A full week would make consecutive instances seamless and the
+        # window permanently active, so exactly one week is rejected.
+        value["maintenance_windows"]["gpu-1"]["recurrence"]["duration_minutes"] = 10_080
+        with self.assertRaisesRegex(
+            ConfigError, r"duration_minutes must be 1 to 10079 \(less than one week\)"
+        ):
+            load_config(self.write(value))
+
     def test_validates_host_display_names(self) -> None:
         value = valid_config()
         value["auto_discover"] = False
@@ -773,6 +931,30 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 value["host_overrides"] = {"gpu-1": {"display_name": invalid}}
                 with self.assertRaises(ConfigError):
+                    load_config(self.write(value))
+
+    def test_rejects_line_and_paragraph_separators_in_text_fields(self) -> None:
+        for separator in ("\u2028", "\u2029"):
+            with self.subTest(separator=separator, field="display_name"):
+                value = valid_config()
+                value["auto_discover"] = False
+                value["hosts"] = ["gpu-1"]
+                value["host_overrides"] = {
+                    "gpu-1": {"display_name": f"bad{separator}name"}
+                }
+                with self.assertRaisesRegex(ConfigError, "display_name"):
+                    load_config(self.write(value))
+            with self.subTest(separator=separator, field="reason"):
+                value = valid_config()
+                value["auto_discover"] = False
+                value["hosts"] = ["gpu-1"]
+                value["maintenance_windows"] = {
+                    "gpu-1": {
+                        "until": "2030-06-15T12:30:00Z",
+                        "reason": f"bad{separator}reason",
+                    }
+                }
+                with self.assertRaisesRegex(ConfigError, "reason"):
                     load_config(self.write(value))
 
     def test_bounds_history_points(self) -> None:
