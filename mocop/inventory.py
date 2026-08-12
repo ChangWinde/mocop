@@ -7,6 +7,7 @@ import stat
 import tempfile
 import threading
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -436,6 +437,9 @@ class ConfigInventory:
         except (OSError, ValueError) as exc:
             raise InventoryError("active inventory could not be resolved") from exc
         active_set = set(active)
+        # One clock sample keeps the active-window decision and the serialized
+        # instance end consistent when a recurring boundary is being crossed.
+        now = datetime.now(timezone.utc)
         return {
             "configuredHosts": list(config.hosts),
             "activeHosts": list(active),
@@ -449,14 +453,14 @@ class ConfigInventory:
             ),
             "collectorSettings": self._collector_settings(config),
             "maintenanceWindows": {
-                alias: window.to_dict()
+                alias: window.to_dict(now)
                 for alias, window in config.maintenance_windows
-                if window.is_active()
+                if window.is_active(now)
             },
             "incidentActions": [
                 action.to_dict()
                 for action in config.incident_actions
-                if action.is_active()
+                if action.is_active(now)
             ],
             "hostGroups": dict(config.host_groups),
             "writable": self._is_writable_target(),
