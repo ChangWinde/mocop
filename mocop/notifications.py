@@ -61,6 +61,9 @@ class WebhookSender(Protocol):
     ) -> DeliveryResult: ...
 
 
+ActionableCheck = Callable[[IncidentEvent], bool]
+
+
 class IncidentNotificationSink(Protocol):
     def publish(
         self,
@@ -82,6 +85,9 @@ class DisabledNotificationSink:
         correlations: Sequence[dict[str, object]],
     ) -> None:
         del events, correlations
+
+    def set_actionable_check(self, check: ActionableCheck | None) -> None:
+        del check
 
     def status(self) -> dict[str, object]:
         return {
@@ -129,17 +135,55 @@ def _validated_addresses(
     return tuple(dict.fromkeys(addresses))
 
 
+def _resolver_with_deadline(
+    resolver: AddressResolver, deadline: float
+) -> AddressResolver:
+    """Bound DNS resolution by the same delivery deadline as the request."""
+
+    def resolve(*args: object, **kwargs: object) -> list[tuple[object, ...]]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("webhook DNS resolution deadline exceeded")
+        outcome: queue.SimpleQueue[object] = queue.SimpleQueue()
+
+        def run() -> None:
+            try:
+                outcome.put(resolver(*args, **kwargs))
+            except Exception as exc:
+                outcome.put(exc)
+
+        worker = threading.Thread(target=run, name="mocop-webhook-resolve", daemon=True)
+        worker.start()
+        try:
+            value = outcome.get(timeout=remaining)
+        except queue.Empty:
+            raise TimeoutError("webhook DNS resolution deadline exceeded") from None
+        if isinstance(value, BaseException):
+            raise value
+        return value  # type: ignore[return-value]
+
+    return resolve
+
+
 class PinnedHttpsWebhookSender:
-    """Send HTTPS while pinning the validated address for this request."""
+    """Send HTTPS to validated addresses under one delivery deadline.
+
+    `timeout_seconds` bounds the whole attempt: DNS resolution, connecting,
+    the TLS handshake, sending, and reading the response all draw from the
+    same monotonic deadline. Every validated address is tried in order until
+    one produces an HTTP response or the deadline expires.
+    """
 
     def __init__(
         self,
         *,
         resolver: AddressResolver = socket.getaddrinfo,
         tls_context: ssl.SSLContext | None = None,
+        connect: Callable[..., socket.socket] = socket.create_connection,
     ) -> None:
         self._resolver = resolver
         self._tls_context = tls_context or ssl.create_default_context()
+        self._connect = connect
 
     def send(
         self,
@@ -147,10 +191,43 @@ class PinnedHttpsWebhookSender:
         body: bytes,
         headers: dict[str, str],
     ) -> DeliveryResult:
-        addresses = _validated_addresses(endpoint, self._resolver)
+        deadline = time.monotonic() + endpoint.config.timeout_seconds
+        try:
+            addresses = _validated_addresses(
+                endpoint, _resolver_with_deadline(self._resolver, deadline)
+            )
+        except NotificationError:
+            return DeliveryResult(False, True)
         hostname = endpoint.parsed_url.hostname
         assert hostname is not None
         port = endpoint.parsed_url.port or 443
+        for address in addresses:
+            if deadline - time.monotonic() <= 0:
+                break
+            status = self._request_status(
+                endpoint, address, hostname, port, body, headers, deadline
+            )
+            if status is None:
+                continue
+            if 200 <= status < 300:
+                return DeliveryResult(True, False)
+            return DeliveryResult(
+                False,
+                status in {408, 425, 429} or status >= 500,
+            )
+        return DeliveryResult(False, True)
+
+    def _request_status(
+        self,
+        endpoint: _Endpoint,
+        address: str,
+        hostname: str,
+        port: int,
+        body: bytes,
+        headers: dict[str, str],
+        deadline: float,
+    ) -> int | None:
+        """POST via one pinned address; None means no HTTP response arrived."""
         connection = http.client.HTTPSConnection(
             hostname,
             port,
@@ -159,33 +236,63 @@ class PinnedHttpsWebhookSender:
         )
         raw_socket: socket.socket | None = None
         try:
-            raw_socket = socket.create_connection(
-                (addresses[0], port),
-                timeout=endpoint.config.timeout_seconds,
-            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            raw_socket = self._connect((address, port), timeout=remaining)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            raw_socket.settimeout(remaining)
             connection.sock = self._tls_context.wrap_socket(
                 raw_socket,
                 server_hostname=hostname,
             )
             raw_socket = None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            connection.sock.settimeout(remaining)
             target = endpoint.parsed_url.path or "/"
             if endpoint.parsed_url.query:
                 target = f"{target}?{endpoint.parsed_url.query}"
             connection.request("POST", target, body=body, headers=headers)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            connection.sock.settimeout(remaining)
             response = connection.getresponse()
-            response.read(_WEBHOOK_RESPONSE_LIMIT_BYTES + 1)
-            if 200 <= response.status < 300:
-                return DeliveryResult(True, False)
-            return DeliveryResult(
-                False,
-                response.status in {408, 425, 429} or response.status >= 500,
-            )
+            self._drain(connection, response, deadline)
+            return response.status
         except (OSError, ssl.SSLError, http.client.HTTPException):
-            return DeliveryResult(False, True)
+            return None
         finally:
             if raw_socket is not None:
                 raw_socket.close()
             connection.close()
+
+    @staticmethod
+    def _drain(
+        connection: http.client.HTTPSConnection,
+        response: http.client.HTTPResponse,
+        deadline: float,
+    ) -> None:
+        """Read a bounded response body without outliving the deadline."""
+        remaining_bytes = _WEBHOOK_RESPONSE_LIMIT_BYTES + 1
+        try:
+            while remaining_bytes > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                if connection.sock is not None:
+                    connection.sock.settimeout(remaining)
+                chunk = response.read(min(8192, remaining_bytes))
+                if not chunk:
+                    return
+                remaining_bytes -= len(chunk)
+        except (OSError, ssl.SSLError, http.client.HTTPException):
+            # The status line already arrived; a stalled body is tolerable.
+            return
 
 
 class _Stop:
@@ -193,9 +300,15 @@ class _Stop:
 
 
 class _WebhookWorker:
-    def __init__(self, endpoint: _Endpoint, sender: WebhookSender) -> None:
+    def __init__(
+        self,
+        endpoint: _Endpoint,
+        sender: WebhookSender,
+        actionable_check: ActionableCheck | None = None,
+    ) -> None:
         self._endpoint = endpoint
         self._sender = sender
+        self._actionable_check = actionable_check
         self._queue: queue.Queue[NotificationEnvelope | _Stop] = queue.Queue(
             _WEBHOOK_QUEUE_CAPACITY
         )
@@ -216,6 +329,21 @@ class _WebhookWorker:
             daemon=True,
         )
         self._thread.start()
+
+    def set_actionable_check(self, check: ActionableCheck | None) -> None:
+        self._actionable_check = check
+
+    def _still_actionable(self, envelope: NotificationEnvelope) -> bool:
+        if envelope.is_test:
+            return True
+        check = self._actionable_check
+        if check is None:
+            return True
+        try:
+            return bool(check(envelope.event))
+        except Exception:
+            # A broken callback must not silence alerts or kill this worker.
+            return True
 
     def publish(self, envelope: NotificationEnvelope) -> None:
         event = envelope.event
@@ -289,13 +417,18 @@ class _WebhookWorker:
                 )
                 if (
                     paired_delivery
-                    and item.event.state != "opened"
+                    and item.event.state == "resolved"
                     and condition_key not in self._active_conditions
                 ):
+                    # A recovery for a condition the receiver never saw would
+                    # only confuse it; drop the event but keep it accounted.
+                    with self._status_lock:
+                        self._dropped += 1
                     continue
                 body = self._payload(item)
                 headers = self._headers(item.event, body)
                 delivered = False
+                suppressed = False
                 for attempt in range(self._endpoint.config.max_attempts):
                     if attempt:
                         retry_delay = self._retry_delay(item.event.event_id, attempt)
@@ -304,6 +437,11 @@ class _WebhookWorker:
                     throttle_delay = max(0.0, next_delivery_at - time.monotonic())
                     if self._stop.wait(throttle_delay):
                         return
+                    if not self._still_actionable(item):
+                        # The event stopped being actionable (for example a
+                        # maintenance window started) while queued or retried.
+                        suppressed = True
+                        break
                     try:
                         with self._status_lock:
                             self._last_attempt_at = utc_now()
@@ -324,16 +462,19 @@ class _WebhookWorker:
                         self._delivered += 1
                         self._last_error = None
                         self._last_success_at = utc_now()
-                        if paired_delivery and item.event.state == "opened":
+                        if paired_delivery and item.event.state == "resolved":
+                            self._active_conditions.pop(condition_key, None)
+                        elif paired_delivery:
+                            # opened, escalated, and deescalated all prove the
+                            # receiver knows about this condition.
                             self._active_conditions[condition_key] = None
                             self._active_conditions.move_to_end(condition_key)
                             while len(self._active_conditions) > _WEBHOOK_SEEN_CAPACITY:
                                 self._active_conditions.popitem(last=False)
-                        elif paired_delivery and item.event.state == "resolved":
-                            self._active_conditions.pop(condition_key, None)
                     else:
                         self._dropped += 1
-                        self._last_error = "delivery failed"
+                        if not suppressed:
+                            self._last_error = "delivery failed"
             finally:
                 self._queue.task_done()
 
@@ -387,11 +528,18 @@ class WebhookNotificationSink:
         self,
         endpoints: tuple[_Endpoint, ...],
         sender: WebhookSender | None = None,
+        actionable_check: ActionableCheck | None = None,
     ) -> None:
         selected_sender = sender or PinnedHttpsWebhookSender()
         self._workers = tuple(
-            _WebhookWorker(endpoint, selected_sender) for endpoint in endpoints
+            _WebhookWorker(endpoint, selected_sender, actionable_check)
+            for endpoint in endpoints
         )
+
+    def set_actionable_check(self, check: ActionableCheck | None) -> None:
+        """Re-check queued events with this callback right before delivery."""
+        for worker in self._workers:
+            worker.set_actionable_check(check)
 
     def publish(
         self,
@@ -505,6 +653,7 @@ def create_notification_sink(
     environ: dict[str, str] | None = None,
     resolver: AddressResolver = socket.getaddrinfo,
     sender: WebhookSender | None = None,
+    actionable_check: ActionableCheck | None = None,
 ) -> IncidentNotificationSink:
     if not configs:
         return DisabledNotificationSink()
@@ -513,4 +662,4 @@ def create_notification_sink(
         dict(os.environ if environ is None else environ),
         resolver,
     )
-    return WebhookNotificationSink(endpoints, sender)
+    return WebhookNotificationSink(endpoints, sender, actionable_check)
