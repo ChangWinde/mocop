@@ -10,24 +10,34 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mocop.config import MonitorConfig
+from mocop import doctor
+from mocop.config import HostOverrideConfig, MonitorConfig
+from mocop.diagnostics import diagnose_condition
 from mocop.doctor import run_doctor
-from mocop.probe import _BoundedProcessResult
+from mocop.probe import _BoundedProcessResult, _ProcessOutputLimitExceeded
 
 
-def config(hosts: tuple[str, ...] = ("gpu-1",), local_host: str | None = None):
+def config(
+    hosts: tuple[str, ...] = ("gpu-1",),
+    local_host: str | None = None,
+    *,
+    max_workers: int = 1,
+    poll_interval_seconds: float = 5,
+    host_overrides: tuple[tuple[str, HostOverrideConfig], ...] = (),
+):
     return MonitorConfig(
         ssh_config=Path("/tmp/ssh-config"),
         auto_discover=False,
         hosts=hosts,
         exclude_hosts=frozenset(),
-        poll_interval_seconds=5,
+        poll_interval_seconds=poll_interval_seconds,
         probe_timeout_seconds=12,
         connect_timeout_seconds=5,
-        max_workers=1,
+        max_workers=max_workers,
         listen_host="127.0.0.1",
         listen_port=8787,
         local_host=local_host,
+        host_overrides=host_overrides,
     )
 
 
@@ -53,6 +63,18 @@ def ssh_g_output(
     if proxyjump:
         lines.append(f"proxyjump {proxyjump}")
     return "\n".join(lines) + "\n"
+
+
+def profile_marker(
+    *,
+    start_ns: int = 100_000_000,
+    script_ns: int = 270_000_000,
+    nvidia_ns: int = 420_000_000,
+    nvidia_status: int = 0,
+) -> str:
+    t1 = start_ns + script_ns
+    t2 = t1 + nvidia_ns
+    return f"MOCOP_PROFILE_V1\t{start_ns}\t{t1}\t{t2}\t{nvidia_status}\n"
 
 
 class DoctorTests(unittest.TestCase):
@@ -83,8 +105,9 @@ class DoctorTests(unittest.TestCase):
                     ),
                     stderr="",
                 ),
-                _BoundedProcessResult(0, stdout="", stderr=""),
-                _BoundedProcessResult(0, stdout="", stderr=""),
+                _BoundedProcessResult(0, stdout="", stderr=""),  # cold probe
+                _BoundedProcessResult(0, stdout="", stderr=""),  # reuse warm-up
+                _BoundedProcessResult(0, stdout="", stderr=""),  # timed reuse
             )
 
             code, output = self.run_doctor(config(), as_json=True)
@@ -99,6 +122,7 @@ class DoctorTests(unittest.TestCase):
         self.assertTrue(host["reuse"]["reuseEnabled"])
         self.assertEqual(host["reuse"]["socketDirectoryMode"], "0700")
         self.assertIsInstance(host["coldLatencyMs"], float)
+        self.assertEqual(host["probeTimeoutSeconds"], 12)
         reuse_warnings = [warning for warning in host["warnings"] if "reuse" in warning]
         self.assertEqual(reuse_warnings, [])
         self.assertEqual(report["transportDiscipline"]["serverAliveIntervalSeconds"], 2)
@@ -162,6 +186,111 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("control socket directory does not exist", output)
 
     @patch("mocop.doctor._run_bounded_process")
+    def test_warns_when_socket_parent_is_not_a_directory(self, run) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "sockets"
+            parent.write_text("", encoding="utf-8")
+            run.side_effect = (
+                _BoundedProcessResult(
+                    0,
+                    stdout=ssh_g_output(
+                        controlmaster="auto",
+                        controlpath=str(parent / "probe@example:22"),
+                        controlpersist="600",
+                    ),
+                    stderr="",
+                ),
+            )
+
+            code, output = self.run_doctor(config(), probe_connection=False)
+
+        self.assertEqual(code, 0)
+        self.assertIn("not a directory", output)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_warns_when_socket_directory_owned_by_another_user(self, run) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            socket_dir = Path(directory) / "sockets"
+            socket_dir.mkdir(mode=0o700)
+            run.side_effect = (
+                _BoundedProcessResult(
+                    0,
+                    stdout=ssh_g_output(
+                        controlmaster="auto",
+                        controlpath=str(socket_dir / "probe@example:22"),
+                        controlpersist="600",
+                    ),
+                    stderr="",
+                ),
+            )
+
+            with patch("mocop.doctor.os.geteuid", return_value=os.geteuid() + 1):
+                code, output = self.run_doctor(config(), probe_connection=False)
+
+        self.assertEqual(code, 0)
+        self.assertIn("not owned by the current user", output)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_warns_when_controlpersist_is_shorter_than_poll_interval(self, run) -> None:
+        cases = (
+            ("1", True),
+            ("3s", True),
+            ("600", False),
+            ("10m", False),
+            ("yes", False),
+        )
+        for persist, expect_warning in cases:
+            with self.subTest(controlpersist=persist):
+                with tempfile.TemporaryDirectory() as directory:
+                    socket_dir = Path(directory) / "sockets"
+                    socket_dir.mkdir(mode=0o700)
+                    run.side_effect = (
+                        _BoundedProcessResult(
+                            0,
+                            stdout=ssh_g_output(
+                                controlmaster="auto",
+                                controlpath=str(socket_dir / "probe@example:22"),
+                                controlpersist=persist,
+                            ),
+                            stderr="",
+                        ),
+                    )
+
+                    code, output = self.run_doctor(config(), probe_connection=False)
+
+                self.assertEqual(code, 0)
+                if expect_warning:
+                    self.assertIn("shorter than the 5s collection interval", output)
+                else:
+                    self.assertNotIn("shorter than", output)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_controlpersist_compares_against_host_poll_override(self, run) -> None:
+        override = HostOverrideConfig(poll_interval_seconds=600.0)
+        with tempfile.TemporaryDirectory() as directory:
+            socket_dir = Path(directory) / "sockets"
+            socket_dir.mkdir(mode=0o700)
+            run.side_effect = (
+                _BoundedProcessResult(
+                    0,
+                    stdout=ssh_g_output(
+                        controlmaster="auto",
+                        controlpath=str(socket_dir / "probe@example:22"),
+                        controlpersist="300",
+                    ),
+                    stderr="",
+                ),
+            )
+
+            code, output = self.run_doctor(
+                config(host_overrides=(("gpu-1", override),)),
+                probe_connection=False,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn("shorter than the 600s collection interval", output)
+
+    @patch("mocop.doctor._run_bounded_process")
     def test_unreachable_alias_fails_with_redacted_reason(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -185,6 +314,21 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("192.0.2.10", output)
 
     @patch("mocop.doctor._run_bounded_process")
+    def test_remote_command_failure_is_not_reported_as_ssh_failure(self, run) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(127, stdout="", stderr="sh: true: not found"),
+            _BoundedProcessResult(127, stdout="", stderr="sh: true: not found"),
+        )
+
+        code, output = self.run_doctor(config())
+
+        self.assertEqual(code, 1)
+        self.assertIn("remote command failed (exit 127)", output)
+        self.assertNotIn("SSH connection failed", output)
+        self.assertNotIn("not found", output)
+
+    @patch("mocop.doctor._run_bounded_process")
     def test_timeout_during_connection_test_is_bounded(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -196,6 +340,28 @@ class DoctorTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("SSH connection attempt timed out", output)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_output_limit_during_probe_is_a_redacted_failure(self, run) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _ProcessOutputLimitExceeded(),
+            _ProcessOutputLimitExceeded(),
+        )
+
+        code, output = self.run_doctor(config())
+
+        self.assertEqual(code, 1)
+        self.assertIn("remote output exceeded the configured limit", output)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_output_limit_during_alias_resolution_is_reported(self, run) -> None:
+        run.side_effect = (_ProcessOutputLimitExceeded(),)
+
+        code, output = self.run_doctor(config(), probe_connection=False)
+
+        self.assertEqual(code, 1)
+        self.assertIn("ssh -G could not resolve the alias", output)
 
     @patch("mocop.doctor._run_bounded_process")
     def test_unresolvable_alias_is_a_failure(self, run) -> None:
@@ -231,23 +397,125 @@ class DoctorTests(unittest.TestCase):
         run.assert_not_called()
         self.assertIn("unsafe characters", output)
 
+    @patch("mocop.doctor._run_bounded_process")
+    def test_probe_uses_keepalive_and_host_timeout_override(self, run) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+        )
+        override = HostOverrideConfig(probe_timeout_seconds=44.0)
+
+        code, output = self.run_doctor(
+            config(host_overrides=(("gpu-1", override),)), as_json=True
+        )
+
+        self.assertEqual(code, 0)
+        report = json.loads(output)
+        self.assertEqual(report["hosts"][0]["probeTimeoutSeconds"], 44.0)
+        probe_call = run.call_args_list[1]
+        command = probe_call.args[0]
+        self.assertIn("ServerAliveInterval=2", command)
+        self.assertIn("ServerAliveCountMax=2", command)
+        self.assertEqual(probe_call.kwargs["timeout_seconds"], 44.0)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_reuse_probe_warms_up_master_before_timing(self, run) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            socket_dir = Path(directory) / "sockets"
+            socket_dir.mkdir(mode=0o700)
+            run.side_effect = (
+                _BoundedProcessResult(
+                    0,
+                    stdout=ssh_g_output(
+                        controlmaster="auto",
+                        controlpath=str(socket_dir / "probe@example:22"),
+                        controlpersist="600",
+                    ),
+                    stderr="",
+                ),
+                _BoundedProcessResult(0, stdout="", stderr=""),  # cold probe
+                _BoundedProcessResult(0, stdout="", stderr=""),  # reuse warm-up
+                _BoundedProcessResult(0, stdout="", stderr=""),  # timed reuse
+            )
+
+            code, _ = self.run_doctor(config())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_count, 4)
+        cold_command = run.call_args_list[1].args[0]
+        self.assertIn("ControlMaster=no", cold_command)
+        for call in run.call_args_list[2:]:
+            self.assertNotIn("ControlMaster=no", call.args[0])
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_expired_budget_short_circuits_all_stages(self, run) -> None:
+        report = doctor._diagnose_host(
+            "gpu-1",
+            config(),
+            probe_connection=True,
+            profile=True,
+            budget_seconds=0.0,
+        )
+
+        run.assert_not_called()
+        self.assertFalse(report["reachable"])
+        self.assertIn("host diagnosis time budget exhausted", report["warnings"])
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_hosts_are_diagnosed_concurrently_in_config_order(self, run) -> None:
+        def fake_run(command, **kwargs):
+            if "-G" in command:
+                return _BoundedProcessResult(0, stdout=ssh_g_output(), stderr="")
+            return _BoundedProcessResult(0, stdout="", stderr="")
+
+        run.side_effect = fake_run
+        hosts = ("gpu-1", "gpu-2", "gpu-3")
+
+        code, output = self.run_doctor(config(hosts=hosts, max_workers=4), as_json=True)
+
+        self.assertEqual(code, 0)
+        report = json.loads(output)
+        self.assertEqual([host["alias"] for host in report["hosts"]], list(hosts))
+        self.assertTrue(all(host["reachable"] for host in report["hosts"]))
+
     def test_profile_requires_connection_tests(self) -> None:
         code, _ = self.run_doctor(config(), probe_connection=False, profile=True)
         self.assertEqual(code, 2)
 
-    @patch(
-        "mocop.doctor.time.monotonic",
-        side_effect=(0.0, 0.1, 1.0, 1.05, 2.0, 2.2, 3.0, 3.89, 4.0, 4.62),
-    )
+    @patch("mocop.doctor._run_remote")
+    def test_profile_stages_are_exclusive_and_sum_to_total(self, run_remote) -> None:
+        run_remote.return_value = (
+            890.0,
+            _BoundedProcessResult(0, stdout=profile_marker(), stderr=""),
+            None,
+        )
+
+        profile = doctor._profile_host("gpu-1", config(), timeout_seconds=12.0)
+
+        self.assertEqual(profile["totalMs"], 890.0)
+        self.assertEqual(profile["scriptMs"], 270.0)
+        self.assertEqual(profile["nvidiaQueryMs"], 420.0)
+        self.assertEqual(profile["transportMs"], 200.0)
+        self.assertAlmostEqual(
+            profile["transportMs"] + profile["scriptMs"] + profile["nvidiaQueryMs"],
+            profile["totalMs"],
+        )
+        self.assertNotIn("failure", profile)
+        self.assertNotIn("nvidiaFailure", profile)
+        self.assertEqual(run_remote.call_args.args[2], ("sh", "-s"))
+        script = run_remote.call_args.kwargs["input_text"]
+        self.assertIn("date +%s%N", script)
+        self.assertIn("nvidia-smi --query-gpu=", script)
+        self.assertIn("MOCOP_PROFILE_V1", script)
+
     @patch("mocop.doctor._run_bounded_process")
-    def test_profile_decomposes_collection_latency(self, run, _monotonic) -> None:
+    def test_profile_runs_one_instrumented_remote_call(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
             _BoundedProcessResult(0, stdout="", stderr=""),  # cold probe
             _BoundedProcessResult(0, stdout="", stderr=""),  # reuse probe
-            _BoundedProcessResult(0, stdout="", stderr=""),  # transport stage
-            _BoundedProcessResult(0, stdout="MONITOR_V6", stderr=""),  # script
-            _BoundedProcessResult(0, stdout="0, GPU-abc", stderr=""),  # nvidia
+            _BoundedProcessResult(0, stdout=profile_marker(), stderr=""),  # profile
         )
 
         code, output = self.run_doctor(config(), profile=True, as_json=True)
@@ -255,16 +523,28 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 0)
         report = json.loads(output)
         profile = report["hosts"][0]["profile"]
-        self.assertEqual(profile["transportMs"], 200.0)
-        self.assertEqual(profile["scriptTotalMs"], 890.0)
-        self.assertEqual(profile["nvidiaQueryMs"], 620.0)
-        self.assertEqual(profile["remoteExecutionMs"], 690.0)
-        self.assertEqual(profile["nvidiaExecutionMs"], 420.0)
-        script_call = run.call_args_list[4]
-        self.assertIn("MONITOR_V6", script_call.kwargs["input_text"])
-        self.assertEqual(script_call.args[0][-2:], ["sh", "-s"])
-        nvidia_call = run.call_args_list[5]
-        self.assertTrue(nvidia_call.args[0][-2].startswith("--query-gpu="))
+        self.assertEqual(profile["scriptMs"], 270.0)
+        self.assertEqual(profile["nvidiaQueryMs"], 420.0)
+        self.assertIsInstance(profile["totalMs"], float)
+        self.assertIsInstance(profile["transportMs"], float)
+        self.assertEqual(run.call_count, 4)
+        profile_call = run.call_args_list[3]
+        self.assertEqual(profile_call.args[0][-2:], ["sh", "-s"])
+        self.assertIn("MOCOP_PROFILE_V1", profile_call.kwargs["input_text"])
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_profile_is_skipped_when_transport_failed(self, run) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(255, stdout="", stderr="Permission denied"),
+            _BoundedProcessResult(255, stdout="", stderr="Permission denied"),
+        )
+
+        code, output = self.run_doctor(config(), profile=True, as_json=True)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(run.call_count, 3)
+        self.assertNotIn("profile", json.loads(output)["hosts"][0])
 
     @patch("mocop.doctor._run_bounded_process")
     def test_profile_reports_missing_nvidia_without_failing(self, run) -> None:
@@ -272,9 +552,11 @@ class DoctorTests(unittest.TestCase):
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
             _BoundedProcessResult(0, stdout="", stderr=""),
             _BoundedProcessResult(0, stdout="", stderr=""),
-            _BoundedProcessResult(0, stdout="", stderr=""),
-            _BoundedProcessResult(0, stdout="MONITOR_V6", stderr=""),
-            _BoundedProcessResult(127, stdout="", stderr="nvidia-smi: not found"),
+            _BoundedProcessResult(
+                0,
+                stdout=profile_marker(nvidia_ns=0, nvidia_status=127),
+                stderr="",
+            ),
         )
 
         code, output = self.run_doctor(config(), profile=True)
@@ -282,6 +564,39 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("profile:", output)
         self.assertIn("profile warning:", output)
+        self.assertIn("nvidia-smi is unavailable", output)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_profile_stage_failure_fails_doctor(self, run) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(127, stdout="", stderr="sh: not found"),
+        )
+
+        code, output = self.run_doctor(config(), profile=True, as_json=True)
+
+        self.assertEqual(code, 1)
+        report = json.loads(output)
+        self.assertEqual(report["status"], "failed")
+        host = report["hosts"][0]
+        self.assertTrue(host["reachable"])
+        self.assertEqual(host["profile"]["failure"], "remote command failed (exit 127)")
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_profile_unrecognized_output_is_a_failure(self, run) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(0, stdout="banner noise\n", stderr=""),
+        )
+
+        code, output = self.run_doctor(config(), profile=True)
+
+        self.assertEqual(code, 1)
+        self.assertIn("remote profiling output was not recognized", output)
 
 
 class ServiceStalenessTests(unittest.TestCase):
@@ -300,8 +615,6 @@ class ServiceStalenessTests(unittest.TestCase):
         return unit
 
     def staleness(self, unit: Path, *, uptime: float, start_usec: int):
-        from mocop import doctor
-
         systemctl = _BoundedProcessResult(
             0,
             stdout=(
@@ -325,6 +638,7 @@ class ServiceStalenessTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertTrue(result["staleCode"])
+        self.assertEqual(result["startedEpochSource"], "uptime-estimate")
 
     def test_running_service_with_current_code_is_not_stale(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -341,13 +655,247 @@ class ServiceStalenessTests(unittest.TestCase):
         self.assertFalse(result["staleCode"])
 
     def test_missing_unit_is_silently_skipped(self) -> None:
-        from mocop import doctor
-
         with patch(
             "mocop.doctor.user_unit_path",
             return_value=Path("/nonexistent/mocop.service"),
         ):
             self.assertIsNone(doctor._service_staleness())
+
+    def test_staleness_prefers_systemd_realtime_start(self) -> None:
+        start_epoch = 1_700_000_000
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unit = self.build_install(root)
+            package_file = (
+                root / "lib" / "python3.10" / "site-packages" / "mocop" / "probe.py"
+            )
+            # Written 50 s after the realtime start: stale under the systemd
+            # timestamp, but far in the past for the uptime estimate.
+            os.utime(package_file, (start_epoch + 50, start_epoch + 50))
+            systemctl = _BoundedProcessResult(
+                0,
+                stdout=(
+                    "ActiveState=active\n"
+                    f"ExecMainStartTimestamp=@{start_epoch}\n"
+                    "ExecMainStartTimestampMonotonic=1000000\n"
+                ),
+                stderr="",
+            )
+            find_spec = _BoundedProcessResult(1, stdout="", stderr="")
+            with (
+                patch("mocop.doctor.user_unit_path", return_value=unit),
+                patch(
+                    "mocop.doctor._run_bounded_process",
+                    side_effect=(systemctl, find_spec),
+                ),
+                patch("mocop.doctor._system_uptime_seconds", return_value=1.0),
+            ):
+                result = doctor._service_staleness()
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["staleCode"])
+        self.assertEqual(result["startedEpochSource"], "systemd")
+        self.assertEqual(result["serviceStartedEpoch"], float(start_epoch))
+
+    def test_staleness_falls_back_when_unix_timestamps_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unit = self.build_install(root)
+            package_file = (
+                root / "lib" / "python3.10" / "site-packages" / "mocop" / "probe.py"
+            )
+            old = time.time() - 10_000
+            os.utime(package_file, (old, old))
+            rejected = _BoundedProcessResult(1, stdout="", stderr="unknown option")
+            systemctl = _BoundedProcessResult(
+                0,
+                stdout=(
+                    "ActiveState=active\nExecMainStartTimestampMonotonic=1000000\n"
+                ),
+                stderr="",
+            )
+            find_spec = _BoundedProcessResult(1, stdout="", stderr="")
+            with (
+                patch("mocop.doctor.user_unit_path", return_value=unit),
+                patch(
+                    "mocop.doctor._run_bounded_process",
+                    side_effect=(rejected, systemctl, find_spec),
+                ) as run,
+                patch("mocop.doctor._system_uptime_seconds", return_value=5_000.0),
+            ):
+                result = doctor._service_staleness()
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result["staleCode"])
+        self.assertEqual(result["startedEpochSource"], "uptime-estimate")
+        self.assertIn("--timestamp=unix", run.call_args_list[0].args[0])
+        self.assertNotIn("--timestamp=unix", run.call_args_list[1].args[0])
+
+    def test_staleness_locates_install_through_unit_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python_path = root / "bin" / "python"
+            python_path.parent.mkdir(parents=True)
+            python_path.write_text("", encoding="utf-8")
+            # A layout the fixed virtualenv glob can never find.
+            package = root / "custom" / "dist-packages" / "mocop"
+            package.mkdir(parents=True)
+            (package / "probe.py").write_text("# installed", encoding="utf-8")
+            unit = root / "mocop.service"
+            unit.write_text(
+                f'[Service]\nExecStart="{python_path}" -m mocop --managed-service\n',
+                encoding="utf-8",
+            )
+            systemctl = _BoundedProcessResult(
+                0,
+                stdout=(
+                    "ActiveState=active\nExecMainStartTimestampMonotonic=1000000\n"
+                ),
+                stderr="",
+            )
+            find_spec = _BoundedProcessResult(0, stdout=f"{package}\n", stderr="")
+            with (
+                patch("mocop.doctor.user_unit_path", return_value=unit),
+                patch(
+                    "mocop.doctor._run_bounded_process",
+                    side_effect=(systemctl, find_spec),
+                ) as run,
+                patch("mocop.doctor._system_uptime_seconds", return_value=5_000.0),
+            ):
+                result = doctor._service_staleness()
+
+        self.assertIsNotNone(result)
+        # Service started 4,999 seconds ago; package written just now.
+        self.assertTrue(result["staleCode"])
+        interpreter_call = run.call_args_list[1].args[0]
+        self.assertEqual(interpreter_call[0], str(python_path))
+        self.assertEqual(interpreter_call[1], "-c")
+        self.assertIn("find_spec", interpreter_call[2])
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def gpu_server(self) -> dict[str, object]:
+        return {
+            "gpus": [
+                {
+                    "index": 1,
+                    "uuid": "GPU-one",
+                    "utilization_gpu_pct": 5.0,
+                    "memory_used_mib": 100.0,
+                    "processes": [],
+                },
+                {
+                    "index": 10,
+                    "uuid": "GPU-ten",
+                    "utilization_gpu_pct": 90.0,
+                    "memory_used_mib": 900.0,
+                    "processes": [],
+                },
+            ]
+        }
+
+    def evidence_units(self, diagnosis: dict[str, object]) -> dict[str, object]:
+        return {
+            item["label"]: item.get("unit")
+            for item in diagnosis["evidence"]
+            if item["label"] in ("current", "threshold")
+        }
+
+    def test_gpu_temperature_evidence_uses_celsius(self) -> None:
+        diagnosis = diagnose_condition(
+            {
+                "category": "gpu_temperature",
+                "resource": "GPU 0",
+                "value": 91,
+                "threshold": 80,
+            },
+            None,
+        )
+        self.assertEqual(
+            self.evidence_units(diagnosis), {"current": "°C", "threshold": "°C"}
+        )
+
+    def test_count_evidence_has_no_unit(self) -> None:
+        for category in ("gpu_count", "gpu_ecc"):
+            with self.subTest(category=category):
+                diagnosis = diagnose_condition(
+                    {
+                        "category": category,
+                        "resource": "GPU inventory",
+                        "value": 7,
+                        "threshold": 8,
+                    },
+                    None,
+                )
+                self.assertEqual(
+                    self.evidence_units(diagnosis),
+                    {"current": None, "threshold": None},
+                )
+                for item in diagnosis["evidence"]:
+                    self.assertNotIn("unit", item)
+
+    def test_ratio_categories_keep_percent_unit(self) -> None:
+        categories = ("cpu", "memory", "swap", "disk", "gpu_memory", "gpu_idle_memory")
+        for category in categories:
+            with self.subTest(category=category):
+                diagnosis = diagnose_condition(
+                    {
+                        "category": category,
+                        "resource": "GPU 0 VRAM",
+                        "value": 95,
+                        "threshold": 90,
+                    },
+                    None,
+                )
+                self.assertEqual(
+                    self.evidence_units(diagnosis),
+                    {"current": "%", "threshold": "%"},
+                )
+
+    def test_gpu_ten_does_not_match_gpu_one(self) -> None:
+        diagnosis = diagnose_condition(
+            {
+                "category": "gpu_memory",
+                "resource": "GPU 10 VRAM",
+                "conditionKey": "gpu_memory:10",
+                "value": 95,
+                "threshold": 90,
+            },
+            self.gpu_server(),
+        )
+        self.assertEqual(diagnosis["targetGpuIndex"], 10)
+        utilization = next(
+            item
+            for item in diagnosis["evidence"]
+            if item["label"] == "gpuUtilizationPct"
+        )
+        self.assertEqual(utilization["value"], 90.0)
+
+    def test_gpu_uuid_match_takes_precedence_over_resource_label(self) -> None:
+        diagnosis = diagnose_condition(
+            {
+                "category": "gpu_temperature",
+                "resource": "GPU 10",
+                "conditionKey": "gpu_temperature:GPU-one",
+                "value": 85,
+                "threshold": 80,
+            },
+            self.gpu_server(),
+        )
+        self.assertEqual(diagnosis["targetGpuIndex"], 1)
+
+    def test_unmatched_gpu_resource_targets_no_gpu(self) -> None:
+        diagnosis = diagnose_condition(
+            {
+                "category": "gpu_memory",
+                "resource": "GPU 7 VRAM",
+                "conditionKey": "gpu_memory:GPU-absent",
+                "value": 95,
+                "threshold": 90,
+            },
+            self.gpu_server(),
+        )
+        self.assertIsNone(diagnosis["targetGpuIndex"])
 
 
 if __name__ == "__main__":
