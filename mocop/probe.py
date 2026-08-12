@@ -9,6 +9,8 @@ import signal
 import subprocess
 import threading
 import time
+import weakref
+from collections import Counter
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -89,9 +91,26 @@ class _ActiveProcessRegistry:
         self._lock = threading.Lock()
         self._processes: set[subprocess.Popen[bytes]] = set()
         # Raw descriptors: the registry lives for the whole probe lifetime and
-        # selectors accept integer descriptors directly.
+        # selectors accept integer descriptors directly. A finalizer reclaims
+        # both ends so recreating probes never leaks the wake-up pipe.
         self.cancel_wakeup, self._cancel_write_fd = os.pipe()
         os.set_blocking(self._cancel_write_fd, False)
+        self._finalizer = weakref.finalize(
+            self,
+            _ActiveProcessRegistry._close_fds,
+            self.cancel_wakeup,
+            self._cancel_write_fd,
+        )
+
+    @staticmethod
+    def _close_fds(read_fd: int, write_fd: int) -> None:
+        for fd in (read_fd, write_fd):
+            with suppress(OSError):
+                os.close(fd)
+
+    def close(self) -> None:
+        """Idempotently reclaim the wake-up pipe once the probe is done."""
+        self._finalizer()
 
     def register(self, process: subprocess.Popen[bytes]) -> bool:
         with self._lock:
@@ -162,7 +181,11 @@ def _run_bounded_process(
         except BrokenPipeError:
             pass
         finally:
-            stdin.close()
+            # A process that exits before draining stdin makes both the write
+            # above and the implicit flush on close raise EPIPE; swallow it so
+            # the real exit status still drives classification and mux retries.
+            with suppress(BrokenPipeError):
+                stdin.close()
 
         output = {"stdout": bytearray(), "stderr": bytearray()}
         total_bytes = 0
@@ -554,10 +577,21 @@ class _RawSystemSample:
     disks: tuple[DiskMetrics, ...]
 
 
-def parse_linux_resource_payload(
-    payload: str,
-) -> tuple[_RawSystemSample, tuple[GpuMetrics, ...], str | None]:
-    lines = payload.splitlines()
+@dataclass(frozen=True, slots=True)
+class _ParsedResource:
+    system: _RawSystemSample
+    gpus: tuple[GpuMetrics, ...]
+    gpu_message: str | None
+    processes_available: bool
+    processes_sampled: bool
+
+
+def _parse_resource_payload(payload: str) -> _ParsedResource:
+    # Split on the ASCII newline only: the protocol is line-delimited, and
+    # Unicode line boundaries (U+0085/U+2028/U+2029) embedded in a GPU or
+    # process name must stay inside their field instead of forging a record
+    # separator or a premature section marker.
+    lines = payload.split("\n")
     if not lines or lines[0].strip() not in _SUPPORTED_PROTOCOL_VERSIONS:
         raise ValueError("resource payload has an unknown protocol version")
     protocol_version = lines[0].strip()
@@ -822,19 +856,36 @@ def parse_linux_resource_payload(
         gpus, inline_health = parse_nvidia_combined_csv(gpu_payload)
     else:
         gpus = parse_nvidia_smi_csv(gpu_payload)
-    processes = (
-        parse_nvidia_processes_csv("\n".join(process_lines))
-        if processes_sampled and processes_available
-        else {}
-    )
-    workloads = parse_workload_records("\n".join(workload_lines))
-    processes = {
-        gpu_uuid: tuple(
+    if processes_sampled and processes_available:
+        try:
+            processes = parse_nvidia_processes_csv("\n".join(process_lines))
+        except ValueError:
+            # A malformed process row is isolated: the core system and GPU
+            # sample stays online while the process view degrades to
+            # unavailable, prompting a retry on the next core cadence.
+            processes = {}
+            processes_available = False
+    else:
+        processes = {}
+    try:
+        workloads = parse_workload_records("\n".join(workload_lines))
+    except ValueError:
+        # Workload metadata is additive; a malformed record only drops the
+        # ownership overlay, never the underlying process or GPU sample.
+        workloads = {}
+    # Attach processes only through an unambiguous UUID foreign key: an empty,
+    # unavailable or duplicated GPU UUID must not double-count or misattribute
+    # another device's processes.
+    uuid_counts = Counter(gpu.uuid for gpu in gpus)
+
+    def _processes_for(uuid: str) -> tuple[GpuProcess, ...]:
+        if not uuid or uuid.strip().lower() in _UNAVAILABLE or uuid_counts[uuid] != 1:
+            return ()
+        return tuple(
             replace(process, workload=workloads.get(process.pid))
-            for process in gpu_processes
+            for process in processes.get(uuid, ())
         )
-        for gpu_uuid, gpu_processes in processes.items()
-    }
+
     health = inline_health
     if inline_health and health_lines:
         raise ValueError("resource payload has conflicting GPU health records")
@@ -847,14 +898,27 @@ def parse_linux_resource_payload(
     gpus = tuple(
         replace(
             gpu,
-            processes=processes.get(gpu.uuid, ()),
+            processes=_processes_for(gpu.uuid),
             processes_available=processes_available,
             processes_sampled=processes_sampled,
             health=health.get(gpu.uuid),
         )
         for gpu in gpus
     )
-    return raw, gpus, gpu_message
+    return _ParsedResource(
+        system=raw,
+        gpus=gpus,
+        gpu_message=gpu_message,
+        processes_available=processes_available,
+        processes_sampled=processes_sampled,
+    )
+
+
+def parse_linux_resource_payload(
+    payload: str,
+) -> tuple[_RawSystemSample, tuple[GpuMetrics, ...], str | None]:
+    parsed = _parse_resource_payload(payload)
+    return parsed.system, parsed.gpus, parsed.gpu_message
 
 
 @dataclass(frozen=True, slots=True)
@@ -881,20 +945,23 @@ _MAX_PROCESS_INTERVAL_STRETCH = 4
 
 
 def _gpu_activity(gpus: tuple[GpuMetrics, ...], thresholds: ThresholdConfig) -> bool:
-    """Judge whether any device shows compute activity worth fresh process data."""
+    """Judge whether any device shows compute activity worth fresh process data.
+
+    Unknown utilization or memory cannot prove a device is idle, so it counts
+    as activity: the stretch is only ever cancelled, never extended, which
+    keeps new-task discovery latency within the base interval.
+    """
     for gpu in gpus:
         if gpu.processes:
             return True
         utilization = gpu.utilization_gpu_pct
-        if utilization is not None and utilization >= thresholds.gpu_busy_pct:
+        if utilization is None or utilization >= thresholds.gpu_busy_pct:
             return True
         used = gpu.memory_used_mib
         total = gpu.memory_total_mib
-        if (
-            used is not None
-            and total
-            and (used / total) * 100 >= thresholds.gpu_idle_memory_pct
-        ):
+        if used is None or not total:
+            return True
+        if (used / total) * 100 >= thresholds.gpu_idle_memory_pct:
             return True
     return False
 
@@ -925,17 +992,53 @@ def _safe_ssh_failure(stderr: str) -> str:
 
 
 def _is_retryable_ssh_transport_failure(stderr: str) -> bool:
-    """Recognize stale multiplexed sessions without retrying hard failures."""
+    """Recognize stale multiplexed sessions without retrying hard failures.
+
+    A healthy master can still emit ``mux_client_request_session`` or
+    ``control socket connect`` while refusing a session or denying access to
+    its socket; those are not dead transports, so an authentication, host-key
+    or refusal signal vetoes the retry even when a mux marker is present.
+    """
     normalized = stderr.lower()
-    return any(
-        marker in normalized
-        for marker in (
-            "mux_client_request_session",
-            "control socket connect",
-            "master is dead",
-            "broken pipe",
-        )
+    hard_failures = (
+        "permission denied",
+        "authentication failed",
+        "session open refused",
+        "administratively prohibited",
+        "host key verification failed",
+        "remote host identification has changed",
+        "open failed",
     )
+    if any(marker in normalized for marker in hard_failures):
+        return False
+    stale_markers = (
+        "mux_client_request_session",
+        "control socket connect",
+        "master is dead",
+        "broken pipe",
+        "read from master failed",
+    )
+    return any(marker in normalized for marker in stale_markers)
+
+
+def _force_fresh_transport(command: list[str]) -> list[str]:
+    """Return the command with any shared ControlMaster bypassed.
+
+    The reused mux socket may point at a dead master whose keepalive this
+    invocation cannot influence, so the recovery attempt opens its own
+    connection instead of re-binding to the same stale control path.
+    """
+    if "--" not in command:
+        return list(command)
+    separator = command.index("--")
+    return [
+        *command[:separator],
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
+        *command[separator:],
+    ]
 
 
 @register_probe("openssh-linux-v6")
@@ -947,6 +1050,7 @@ class OpenSshLinuxResourceProbe:
         self._baselines: dict[str, _Baseline] = {}
         self._process_samples: dict[str, _ProcessSample] = {}
         self._activity_hints: dict[str, bool] = {}
+        self._process_retry_forced: set[str] = set()
         self._processes = _ActiveProcessRegistry()
         self._environment = os.environ.copy()
         self._environment["LC_ALL"] = "C"
@@ -955,6 +1059,10 @@ class OpenSshLinuxResourceProbe:
         """Stop active child processes when the owning service is shutting down."""
         self._processes.cancel()
 
+    def close(self) -> None:
+        """Release the collector's cancellation pipe once it is retired."""
+        self._processes.close()
+
     def retain_hosts(self, hosts: set[str]) -> None:
         """Discard rate baselines for removed hosts and later clean re-additions."""
         with self._sample_lock:
@@ -962,6 +1070,7 @@ class OpenSshLinuxResourceProbe:
                 self._baselines.keys() <= hosts
                 and self._process_samples.keys() <= hosts
                 and self._activity_hints.keys() <= hosts
+                and self._process_retry_forced <= hosts
             ):
                 return
             self._baselines = {
@@ -979,6 +1088,7 @@ class OpenSshLinuxResourceProbe:
                 for host, hint in self._activity_hints.items()
                 if host in hosts
             }
+            self._process_retry_forced &= hosts
 
     def _system_metrics(
         self, host: str, raw: _RawSystemSample, observed_monotonic: float
@@ -1063,7 +1173,11 @@ class OpenSshLinuxResourceProbe:
         with self._sample_lock:
             sample = self._process_samples.get(host)
             active = self._activity_hints.get(host, False)
-        if sample is None or sample.workload_mode != workload_mode:
+            forced = host in self._process_retry_forced
+        # An unavailable process query is retried every core cycle until it
+        # succeeds, so a transient error never leaves the process view stale
+        # for the stretched interval.
+        if forced or sample is None or sample.workload_mode != workload_mode:
             return True
         # Idle devices stretch the process cadence up to fourfold; any
         # activity hint from the five-second core telemetry cancels the
@@ -1081,40 +1195,53 @@ class OpenSshLinuxResourceProbe:
         gpus: tuple[GpuMetrics, ...],
         *,
         process_sampled: bool,
+        processes_available: bool,
         sampled_at_monotonic: float,
         observed_at: str,
         workload_mode: str,
         thresholds: ThresholdConfig,
     ) -> tuple[GpuMetrics, ...]:
         activity = _gpu_activity(gpus, thresholds)
-        if process_sampled:
-            if not gpus or all(gpu.processes_available for gpu in gpus):
-                processes_by_gpu = {gpu.uuid: gpu.processes for gpu in gpus}
-                sampled_idle = not any(processes_by_gpu.values())
-                with self._sample_lock:
-                    previous = self._process_samples.get(host)
-                    idle_streak = (
-                        previous.idle_streak + 1
-                        if sampled_idle and previous is not None
-                        else int(sampled_idle)
-                    )
-                    self._process_samples[host] = _ProcessSample(
-                        sampled_at_monotonic=sampled_at_monotonic,
-                        observed_at=observed_at,
-                        workload_mode=workload_mode,
-                        processes_by_gpu=processes_by_gpu,
-                        idle_streak=idle_streak,
-                    )
-                    self._activity_hints[host] = activity
-                return tuple(
-                    replace(gpu, processes_observed_at=observed_at) for gpu in gpus
-                )
+        if process_sampled and processes_available:
+            processes_by_gpu = {gpu.uuid: gpu.processes for gpu in gpus}
+            sampled_idle = not any(processes_by_gpu.values())
             with self._sample_lock:
+                previous = self._process_samples.get(host)
+                idle_streak = (
+                    previous.idle_streak + 1
+                    if sampled_idle and previous is not None
+                    else int(sampled_idle)
+                )
+                self._process_samples[host] = _ProcessSample(
+                    sampled_at_monotonic=sampled_at_monotonic,
+                    observed_at=observed_at,
+                    workload_mode=workload_mode,
+                    processes_by_gpu=processes_by_gpu,
+                    idle_streak=idle_streak,
+                )
+                # A completed process query authoritatively resets both the
+                # activity latch and the forced-retry flag.
                 self._activity_hints[host] = activity
+                self._process_retry_forced.discard(host)
+            return tuple(
+                replace(gpu, processes_observed_at=observed_at) for gpu in gpus
+            )
+        if process_sampled:
+            # The query ran but returned no authoritative data: latch any
+            # activity seen so far and force a retry until it succeeds.
+            with self._sample_lock:
+                self._activity_hints[host] = (
+                    self._activity_hints.get(host, False) or activity
+                )
+                self._process_retry_forced.add(host)
             return tuple(replace(gpu, processes_observed_at=None) for gpu in gpus)
 
+        # The query was skipped this cycle: never lose an activity hint raised
+        # by an intervening core sample before the next process query runs.
         with self._sample_lock:
-            self._activity_hints[host] = activity
+            self._activity_hints[host] = (
+                self._activity_hints.get(host, False) or activity
+            )
             sample = self._process_samples.get(host)
         if sample is None:
             return tuple(
@@ -1225,7 +1352,7 @@ class OpenSshLinuxResourceProbe:
                 if remaining > 0:
                     transport_retries = 1
                     completed = _run_bounded_process(
-                        command,
+                        _force_fresh_transport(command),
                         input_text=script,
                         timeout_seconds=remaining,
                         max_output_bytes=config.max_output_bytes,
@@ -1242,15 +1369,22 @@ class OpenSshLinuxResourceProbe:
                 transport_retries=transport_retries,
             )
         except subprocess.TimeoutExpired as exc:
+            # Only a silent connection or transport timeout is "unreachable".
+            # Partial output proves the transport reached the host and the
+            # remote command started, so a stall there is a remote "error"
+            # that must not masquerade as a connectivity incident.
             if local:
+                status = "error"
                 message = "Local resource collection timed out"
             elif exc.output:
+                status = "error"
                 message = "Remote collection stalled after partial output"
             else:
+                status = "unreachable"
                 message = "SSH produced no output before the collection timeout"
             return ProbeResult(
                 host=host,
-                status="unreachable",
+                status=status,
                 latency_ms=round((time.monotonic() - started) * 1000),
                 message=message,
                 transport_retries=transport_retries,
@@ -1303,8 +1437,8 @@ class OpenSshLinuxResourceProbe:
                 transport_retries=transport_retries,
             )
         try:
-            raw, gpus, gpu_message = parse_linux_resource_payload(completed.stdout)
-            system = self._system_metrics(host, raw, observed_monotonic)
+            parsed = _parse_resource_payload(completed.stdout)
+            system = self._system_metrics(host, parsed.system, observed_monotonic)
         except ValueError:
             return ProbeResult(
                 host=host,
@@ -1317,11 +1451,14 @@ class OpenSshLinuxResourceProbe:
                 ),
                 transport_retries=transport_retries,
             )
+        gpus = parsed.gpus
+        gpu_message = parsed.gpu_message
         observed_at = utc_now()
         gpus = self._merge_process_sample(
             host,
             gpus,
             process_sampled=process_sampled,
+            processes_available=parsed.processes_available,
             sampled_at_monotonic=started,
             observed_at=observed_at,
             workload_mode=config.workloads.mode,

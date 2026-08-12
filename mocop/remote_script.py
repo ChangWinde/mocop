@@ -156,32 +156,44 @@ if [ "$workload_enabled" -eq 1 ] && [ "$process_status" -eq 0 ] && [ -n "$proces
       /^SLURM_JOB_ID=/ { slurm_id=substr($0, index($0, "=") + 1) }
       /^SLURM_JOB_NAME=/ { slurm_name=substr($0, index($0, "=") + 1) }
       /^SLURM_JOB_PARTITION=/ { slurm_queue=substr($0, index($0, "=") + 1) }
-      /^SLURM_JOB_USER=/ { owner=substr($0, index($0, "=") + 1) }
-      /^USER=/ { if (owner == "") owner=substr($0, index($0, "=") + 1) }
-      /^LOGNAME=/ { if (owner == "") owner=substr($0, index($0, "=") + 1) }
       /^POD_UID=/ { pod_id=substr($0, index($0, "=") + 1) }
       /^POD_NAME=/ { pod_name=substr($0, index($0, "=") + 1) }
       /^POD_NAMESPACE=/ { pod_namespace=substr($0, index($0, "=") + 1) }
       /^KUEUE_LOCAL_QUEUE_NAME=/ { pod_queue=substr($0, index($0, "=") + 1) }
       END {
-        if (slurm_id == "" && match(cgroup, /job_[0-9]+/)) {
+        # A scheduler identifier is only trusted from an anchored cgroup
+        # segment: systemd scopes like "job_1.scope" or "podcast.service" must
+        # not be mistaken for Slurm jobs or Kubernetes pods.
+        slurm_cgroup = (cgroup ~ /(\/|^)slurm/)
+        kube_cgroup = (cgroup ~ /(\/|^)kubepods/)
+        if (slurm_id == "" && slurm_cgroup && match(cgroup, /job_[0-9]+/)) {
           slurm_id=substr(cgroup, RSTART + 4, RLENGTH - 4)
         }
-        if (pod_id == "" && match(cgroup, /pod[0-9A-Fa-f_-]+/)) {
+        if (pod_id == "" && kube_cgroup && match(cgroup, /pod[0-9A-Fa-f_-]+/)) {
           pod_id=substr(cgroup, RSTART + 3, RLENGTH - 3)
         }
-        if (owner == "") owner=uid
+        # The owner is the real UID resolved through the root-owned passwd
+        # database; process environment values are attacker-controlled and
+        # never define ownership.
+        owner=uid
+        if (uid != "") {
+          while ((getline pwline < "/etc/passwd") > 0) {
+            np=split(pwline, pf, ":")
+            if (np >= 3 && pf[3] == uid) { owner=pf[1]; break }
+          }
+          close("/etc/passwd")
+        }
         kind="process"
         workload_id=""
         workload_name=""
         workload_queue=""
         workload_namespace=""
-        if (slurm_id != "" || cgroup ~ /slurm/) {
+        if (slurm_id != "" || slurm_cgroup) {
           kind="slurm"
           workload_id=slurm_id
           workload_name=slurm_name
           workload_queue=slurm_queue
-        } else if (pod_id != "" || cgroup ~ /kubepods/) {
+        } else if (pod_id != "" || kube_cgroup) {
           kind="kubernetes"
           workload_id=pod_id
           workload_name=pod_name
