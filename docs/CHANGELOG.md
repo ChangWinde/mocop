@@ -14,6 +14,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Added `mocop doctor --profile`, which decomposes each alias's collection latency into transport, fixed-script, and NVIDIA-query stages so slow hosts can be attributed to the network path or to remote execution.
 - Added a best-effort doctor check that warns when the installed package is newer than the running user service, so an upgrade is not silently left unapplied.
 - Added per-host stale-transport retry visibility (`transportRetried` in snapshots, `mocop_host_probe_transport_retried` in OpenMetrics) and a cumulative retry counter in `/healthz`.
+- Added an optional `trusted_web_hosts` list so the dashboard accepts browser `Host`/`Origin` headers beyond the loopback and non-wildcard `listen_host` defaults; writes and protected reads now require a trusted `Host`, closing a DNS-rebinding path when the service is bound to a non-loopback address or fronted by a proxy.
 
 - Added a centered per-GPU workload view with aggregate and per-process VRAM, PID and optional job context; parsing is bounded and the browser renders at most the 100 largest processes.
 - Added an explicit `local_host` target that uses the fixed resource probe without an SSH connection.
@@ -45,7 +46,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
-- Stretched the process-telemetry cadence on devices that keep sampling zero processes (doubling per idle sample, capped at four times the base interval); activity in the five-second core telemetry cancels the stretch, so job pickup latency never exceeds the base interval while idle hosts run one quarter fewer steady-state NVIDIA commands.
+- Stretched the process-telemetry cadence on devices that keep sampling zero processes (doubling per idle sample, capped at four times the base interval); activity in the five-second core telemetry cancels the stretch, so job pickup latency never exceeds the base interval while idle hosts run about one fifth fewer steady-state NVIDIA commands (13 instead of 16 per minute at the default 5-second core and 15-second process cadences).
 - Enforced a bounded SSH keepalive (`ServerAliveInterval max(2, connect_timeout / 2)`, `ServerAliveCountMax 2`) on every remote probe, so a transport that dies mid-session is detected in seconds instead of consuming the whole probe timeout; measured dead-transport detection fell from the 30-second production probe timeout to 8.9 seconds (70%).
 - Distinguished collection timeouts that produced no transport output from timeouts that stalled after partial output, and classified keepalive-detected dead transports with a dedicated redacted failure reason.
 - Merged the remote hostname read into the fixed system `awk` pass with a bounded in-process `getline`, reducing default remote helper invocations from six to five; measured controllable local overhead is 0.79 ms of a 31.43 ms sample, so remaining collection cost is NVIDIA query wall time.
@@ -78,6 +79,18 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Enforced the persistence size limit on the runtime writer connection (not only at startup), let retention pruning run during idle periods and after disk-full write failures, made schema creation and migration atomic and idempotent, and actually persisted the `transportRetried` history flag across restarts (schema v3).
+- Stopped an active recurring maintenance window from invalidating the dashboard inventory response, rejected full-week recurrences that would silence alerts permanently, and serialized maintenance state from one clock sample per snapshot so an instance boundary cannot mix the active decision with the next instance's end time.
+- Froze incident recovery while the corresponding telemetry domain is missing instead of counting blind samples toward resolution, emitted `opened` for immediate conditions on the first online sample, debounced warning/critical flapping, and delivered severity changes whose `opened` was suppressed instead of silently dropping them.
+- Bounded every webhook delivery attempt with one monotonic deadline covering DNS, connect, TLS, send, and body read; failed over across all validated addresses; and re-checked maintenance and silence state before each attempt, including retries.
+- Made the stale-multiplex retry open a fresh SSH connection (`ControlMaster=no`) instead of re-binding the dead control socket, stopped retrying hard authentication/host-key/refusal failures that mention mux markers, classified partial-output stalls as remote errors rather than connectivity loss, and survived EPIPE from fast-exiting SSH clients.
+- Kept new-job discovery within the base process cadence: unknown GPU utilization or memory now counts as activity, an activity hint latches until the next successful process sample instead of being erased by a later idle sample, and a failed process query forces a retry on every core cycle until it succeeds.
+- Hardened remote-payload parsing: Unicode line separators inside GPU or process names can no longer forge protocol records, a malformed process or workload row degrades only that view instead of discarding the whole host sample, and empty or duplicated GPU UUIDs can no longer misattribute processes across devices.
+- Exported GPU metrics for online hosts whose system section is missing, omitted MiB samples that overflow when scaled to bytes instead of failing the whole OpenMetrics render, and declared the cumulative dropped-write/delivery series as counters.
+- Rebuilt `doctor --profile` around one instrumented remote call with mutually exclusive transport/script/NVIDIA stages that sum to the total, stopped reporting non-255 remote exits as SSH failures, warmed up the control master before timing reuse latency, aligned doctor's SSH options and per-host timeouts with the production probe, and bounded per-host diagnosis time with concurrent execution.
+- Located the installed package through the service interpreter (`importlib.util.find_spec`) and preferred the systemd realtime start timestamp, so stale-service detection works for user installs, dist-packages, and editable layouts and survives NTP clock steps.
+- Backed off failed dashboard incident polling instead of re-requesting in a loop, kept existing trends when a history request fails, treated silenced or not-yet-loaded hardware alerts as blocking for capacity matching, deduplicated multi-GPU processes and reported unknown VRAM honestly in the owners view, broke trend lines at data gaps on a true time axis, and refreshed fleet rows when a display name changes.
+- Recorded unknown GPU memory in history as missing rather than 0%, bounded per-host GPU identity growth with reclamation of stale telemetry, closed a scheduler shutdown race that could delay stop by one wait cycle, and stopped submitting probes from a configuration snapshot that a live update had already replaced.
 - Isolated the commit-policy repository test from operator-level git configuration such as a global `core.hooksPath`, which made the suite fail on machines with global commit hooks.
 - Debounced transient EventSource failures and added snapshot fallback so a healthy dashboard no longer sticks on a reconnecting state.
 - Stabilized incident activation and recovery so transient SSH or resource samples do not repeatedly open and resolve the same condition.
@@ -87,6 +100,11 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Prevented SSH or unavailable GPU-process telemetry gaps from generating false task start/stop transitions.
 - Cleared removed-node manual-probe cooldowns, process/rate baselines, policy caches, and restored history so dynamic inventory changes do not retain stale state.
 - Registered a node as in flight before starting its worker so a concurrent manual probe cannot be accepted and then lost during task submission.
+
+### Security
+
+- Required a trusted `Host` header (loopback, the non-wildcard `listen_host`, or `trusted_web_hosts`) for dashboard writes and protected reads, closing a DNS-rebinding path; added connection and SSE concurrency caps with socket timeouts, rejected request bodies on bodyless methods, and answered `HEAD` without leaking handler tracebacks on malformed input.
+- Derived GPU workload ownership from the real process UID resolved through the root-owned passwd database instead of attacker-controlled environment variables, and anchored Slurm/Kubernetes classification to real scheduler cgroup segments so `job_1.scope` or `podcast.service` are no longer misidentified.
 
 ## [0.8.0] - 2026-08-09
 

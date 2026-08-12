@@ -11,7 +11,10 @@ This document defines reproducible measurement conditions and architecture thres
 - Core GPU and system data retain the host cadence. The independent process cadence defaults to 15 seconds, so three five-second core samples execute four NVIDIA commands instead of six. Skipped task cycles reuse a timestamped last-good sample without creating process transitions.
 - A device that keeps sampling zero processes stretches its own process cadence
   (doubling per idle sample, capped at four times the base interval), which removes
-  another quarter of steady-state NVIDIA commands on an idle host. Any activity in
+  about a fifth of steady-state NVIDIA commands on an idle host: at the default
+  5-second core and 15-second process cadences a fully stretched idle device runs 13
+  instead of 16 NVIDIA commands per minute (12 core plus 1 process versus 12 plus 4).
+  Any activity in
   the five-second core telemetry — a running process, utilization at or above the
   busy threshold, or VRAM above the idle-memory threshold — cancels the stretch, so
   a new job is picked up within one base interval, exactly as before the stretch.

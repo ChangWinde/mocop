@@ -169,7 +169,7 @@ See the [complete example](examples/mocop.example.json) for all fields and safe 
 
 Browser settings are lost only when that browser's site data is cleared or its display preferences are reset. Removing a custom background is a separate action.
 
-The dashboard allows a 2–60 second interval, a 2–300 second probe timeout, and 1–64 workers. Short intervals and high concurrency increase SSH and remote-host load.
+The dashboard allows a 2–60 second interval, a 2–300 second probe timeout that must exceed the connection timeout (default 5 seconds), and 1–64 workers. Short intervals and high concurrency increase SSH and remote-host load.
 
 ## Daily use
 
