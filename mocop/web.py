@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 import math
+import socket
 import sys
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import SplitResult, parse_qs, urlsplit
 
 from . import __version__
 from .config import (
@@ -18,6 +20,7 @@ from .config import (
     is_valid_incident_action_reason,
     is_valid_incident_condition_key,
     is_valid_maintenance_reason,
+    normalize_web_hostname,
 )
 from .inventory import (
     DASHBOARD_INCIDENT_ACTION_DURATIONS,
@@ -51,6 +54,18 @@ _COLLECTOR_SETTINGS_KEYS = {
     "probeTimeoutSeconds",
     "maxWorkers",
 }
+# Hostnames a browser can present when it genuinely reached this server over
+# the loopback interface. DNS rebinding presents the attacker's own domain in
+# Host/Origin instead, so pinning these names closes the rebinding bypass.
+_LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+_WILDCARD_BIND_HOSTS = frozenset({"", "0.0.0.0", "::"})
+_SSE_HEARTBEAT_SECONDS = 15.0
+# SSE loops wake at this cadence to notice the server shutdown event.
+_SSE_STOP_POLL_SECONDS = 1.0
+_SERVICE_UNAVAILABLE_RESPONSE = (
+    b"HTTP/1.1 503 Service Unavailable\r\n"
+    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+)
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -66,9 +81,30 @@ def _reject_json_constant(_value: str) -> object:
     raise ValueError("non-finite JSON number")
 
 
+def _trusted_hostnames(
+    bind_host: str, trusted_hosts: Iterable[str] | None
+) -> frozenset[str]:
+    """Hostnames accepted in Host/Origin for writes and protected reads."""
+    trusted = set(_LOOPBACK_HOSTNAMES)
+    if str(bind_host).strip().lower() not in _WILDCARD_BIND_HOSTS:
+        bind_hostname = normalize_web_hostname(bind_host)
+        if bind_hostname is not None:
+            trusted.add(bind_hostname)
+    for candidate in trusted_hosts or ():
+        hostname = normalize_web_hostname(candidate)
+        if hostname is None:
+            raise ValueError(f"invalid trusted web host: {candidate!r}")
+        trusted.add(hostname)
+    return frozenset(trusted)
+
+
 class MonitorHttpServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # Slow or hostile clients hold a worker thread and a file descriptor each,
+    # so refuse connections beyond these bounds instead of growing forever.
+    max_concurrent_connections = 64
+    max_sse_clients = 16
 
     def __init__(
         self,
@@ -77,15 +113,53 @@ class MonitorHttpServer(ThreadingHTTPServer):
         inventory: DashboardConfigController | None = None,
         restart: Callable[[], None] | None = None,
         probe_control: ProbeControl | None = None,
+        *,
+        trusted_hosts: Iterable[str] | None = None,
     ) -> None:
         self.state = state
         self.inventory = inventory
         self.restart = restart
         self.probe_control = probe_control
+        self.trusted_hostnames = _trusted_hostnames(address[0], trusted_hosts)
+        self.shutdown_event = threading.Event()
+        self._connection_slots = threading.BoundedSemaphore(
+            self.max_concurrent_connections
+        )
+        self._sse_slots = threading.BoundedSemaphore(self.max_sse_clients)
         self._snapshot_cache_lock = threading.Lock()
         self._snapshot_cache_key: tuple[object, ...] | None = None
         self._snapshot_cache_payload = b""
         super().__init__(address, MonitorRequestHandler)
+
+    def process_request(
+        self, request: socket.socket, client_address: tuple[str, int]
+    ) -> None:
+        if not self._connection_slots.acquire(blocking=False):
+            # Writing this short canned response cannot block the accept loop:
+            # a fresh socket always has send-buffer room for it.
+            with suppress(OSError):
+                request.sendall(_SERVICE_UNAVAILABLE_RESPONSE)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(
+        self, request: socket.socket, client_address: tuple[str, int]
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
+
+    def server_close(self) -> None:
+        # Wake live SSE loops so their worker threads exit promptly instead of
+        # surviving until the next heartbeat write fails.
+        self.shutdown_event.set()
+        super().server_close()
 
     def snapshot_payload(self, snapshot: dict[str, object]) -> bytes:
         persistence = snapshot.get("persistence", {})
@@ -122,6 +196,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # Headers and JSON are separate writes; avoid delayed ACK stalls on reused sockets.
     disable_nagle_algorithm = True
+    # Socket read/write deadline: stalled or half-open clients must release
+    # their worker thread instead of holding it forever.
+    timeout = 60.0
+    _head_only = False
 
     def version_string(self) -> str:
         return self.server_version
@@ -130,14 +208,63 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def monitor_server(self) -> MonitorHttpServer:
         return self.server  # type: ignore[return-value]
 
+    def _split_request_target(self) -> SplitResult | None:
+        """Parse the request target, mapping malformed URLs to a JSON 400."""
+        try:
+            return urlsplit(self.path)
+        except ValueError:
+            self.close_connection = True
+            self._send_json({"error": "invalid request target"}, HTTPStatus.BAD_REQUEST)
+            return None
+
+    def _refuse_request_body(self) -> bool:
+        """Reject GET/HEAD requests that declare a body.
+
+        The handler would never read such a body, so on a keep-alive
+        connection its bytes would be parsed as the next request and could
+        desynchronize request/response pairing behind a reverse proxy.
+        """
+        declared = self.headers.get_all("Content-Length") or []
+        ambiguous = (
+            self.headers.get("Transfer-Encoding") is not None or len(declared) > 1
+        )
+        if not ambiguous and declared:
+            length = declared[0].strip()
+            ambiguous = not (length.isascii() and length.isdigit()) or int(length) != 0
+        if ambiguous:
+            self.close_connection = True
+            self._send_json(
+                {"error": "request body is not allowed"}, HTTPStatus.BAD_REQUEST
+            )
+        return ambiguous
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-        request_url = urlsplit(self.path)
+        self._head_only = False
+        self._respond_to_read_request()
+
+    def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._head_only = True
+        self._respond_to_read_request()
+
+    def _respond_to_read_request(self) -> None:
+        if self._refuse_request_body():
+            return
+        request_url = self._split_request_target()
+        if request_url is None:
+            return
         path = request_url.path
         if path == "/api/snapshot":
             snapshot = self.monitor_server.state.snapshot()
             self._send_json_payload(self.monitor_server.snapshot_payload(snapshot))
             return
         if path == "/api/events":
+            if self._head_only:
+                self._send_json(
+                    {"error": "method not allowed"},
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    extra_headers=(("Allow", "GET"),),
+                )
+                return
             self._send_events()
             return
         if path == "/api/history":
@@ -176,10 +303,12 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             self._send_openmetrics()
             return
         if path == "/healthz":
+            health = self.monitor_server.state.health()
             self._send_json(
                 {
                     "status": "ok",
-                    "ready": self.monitor_server.state.health()["ready"],
+                    "ready": health["ready"],
+                    "transportRetries": health["transportRetries"],
                 }
             )
             return
@@ -204,14 +333,16 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self._common_headers(content_type, cache="no-cache")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(payload)
+        self._write_body(payload)
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         # Settings writes are rare, and invalid requests may intentionally leave an
         # unread body. Closing this HTTP/1.1 connection prevents those bytes from
         # being parsed as a second request on the same socket.
         self.close_connection = True
-        request_url = urlsplit(self.path)
+        request_url = self._split_request_target()
+        if request_url is None:
+            return
         write_limits = {
             "/api/settings/poll-interval": _MAX_SETTINGS_BODY_BYTES,
             "/api/settings/collector": _MAX_COLLECTOR_BODY_BYTES,
@@ -351,6 +482,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             not isinstance(host, str)
             or not is_safe_alias(host)
             or not is_valid_incident_condition_key(condition_key)
+            or not isinstance(action, str)
             or action not in {"acknowledged", "silenced", "clear"}
             or isinstance(duration, bool)
             or not isinstance(duration, int)
@@ -414,7 +546,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self._common_headers(OPENMETRICS_CONTENT_TYPE, cache="no-store")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(payload)
+        self._write_body(payload)
 
     def _change_host_group(self, payload: object) -> None:
         if not isinstance(payload, dict) or set(payload) != {"host", "group"}:
@@ -575,12 +707,14 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _valid_number(value: object, minimum: float, maximum: float) -> bool:
-        return (
-            not isinstance(value, bool)
-            and isinstance(value, int | float)
-            and math.isfinite(float(value))
-            and minimum <= value <= maximum
-        )
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return False
+        try:
+            numeric = float(value)
+        except OverflowError:
+            # JSON integers have unbounded precision; huge ones are invalid.
+            return False
+        return math.isfinite(numeric) and minimum <= value <= maximum
 
     def _persist_collector_settings(
         self, settings: dict[str, object]
@@ -610,6 +744,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         if (
             not isinstance(payload, dict)
             or set(payload) != {"action", "host"}
+            or not isinstance(payload["action"], str)
             or payload["action"] not in {"add", "remove"}
             or not isinstance(payload["host"], str)
             or not is_safe_alias(payload["host"])
@@ -651,21 +786,39 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             HTTPStatus.FORBIDDEN,
         )
 
+    def _has_trusted_host(self) -> bool:
+        """Require a Host header naming this server's own trusted hostnames.
+
+        A loopback bind alone does not stop DNS rebinding: an attacker domain
+        re-resolved to 127.0.0.1 makes the victim's browser send same-origin
+        requests here, but with the attacker's hostname in Host. Pinning Host
+        to the loopback/configured allowlist closes that path.
+        """
+        host_values = self.headers.get_all("Host") or []
+        if len(host_values) != 1:
+            return False
+        hostname = normalize_web_hostname(host_values[0], allow_port=True)
+        return (
+            hostname is not None and hostname in self.monitor_server.trusted_hostnames
+        )
+
     def _is_dashboard_request(self) -> bool:
+        if not self._has_trusted_host():
+            return False
         if self.headers.get("X-Monitor-Request") != "dashboard":
             return False
         origin = self.headers.get("Origin")
         if not origin:
             return False
-        parsed = urlsplit(origin)
         try:
+            parsed = urlsplit(origin)
             _ = parsed.port
         except ValueError:
             return False
         fetch_site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
         return (
             parsed.scheme in {"http", "https"}
-            and parsed.hostname is not None
+            and parsed.hostname in self.monitor_server.trusted_hostnames
             and parsed.username is None
             and parsed.password is None
             and parsed.path in {"", "/"}
@@ -676,11 +829,11 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
 
     def _is_dashboard_read_request(self) -> bool:
         fetch_site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
-        return self.headers.get("X-Monitor-Request") == "dashboard" and fetch_site in {
-            "",
-            "same-origin",
-            "none",
-        }
+        return (
+            self._has_trusted_host()
+            and self.headers.get("X-Monitor-Request") == "dashboard"
+            and fetch_site in {"", "same-origin", "none"}
+        )
 
     def _send_history(self, query: str) -> None:
         parameters = parse_qs(query, keep_blank_values=True)
@@ -865,41 +1018,71 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(topology)
 
-    def _send_json(self, value: object, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _send_json(
+        self,
+        value: object,
+        status: HTTPStatus = HTTPStatus.OK,
+        extra_headers: tuple[tuple[str, str], ...] = (),
+    ) -> None:
         payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
-        self._send_json_payload(payload, status)
+        self._send_json_payload(payload, status, extra_headers)
 
     def _send_json_payload(
-        self, payload: bytes, status: HTTPStatus = HTTPStatus.OK
+        self,
+        payload: bytes,
+        status: HTTPStatus = HTTPStatus.OK,
+        extra_headers: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self.send_response(status)
         self._common_headers("application/json; charset=utf-8", cache="no-store")
+        for name, value in extra_headers:
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(payload)
+        self._write_body(payload)
+
+    def _write_body(self, payload: bytes) -> None:
+        if not self._head_only:
+            self.wfile.write(payload)
 
     def _send_events(self) -> None:
-        self.send_response(HTTPStatus.OK)
-        self._common_headers("text/event-stream; charset=utf-8", cache="no-store")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self.end_headers()
-
-        version = -1
+        server = self.monitor_server
+        if not server._sse_slots.acquire(blocking=False):
+            self.close_connection = True
+            self._send_json(
+                {"error": "too many event stream clients"},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
         try:
-            while True:
-                snapshot = self.monitor_server.state.wait_for_update(version, 15)
+            self.send_response(HTTPStatus.OK)
+            self._common_headers("text/event-stream; charset=utf-8", cache="no-store")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+
+            version = -1
+            heartbeat_at = time.monotonic() + _SSE_HEARTBEAT_SECONDS
+            while not server.shutdown_event.is_set():
+                snapshot = server.state.wait_for_update(version, _SSE_STOP_POLL_SECONDS)
                 if snapshot is None:
+                    if time.monotonic() < heartbeat_at:
+                        continue
                     self.wfile.write(b": heartbeat\n\n")
                 else:
                     version = int(snapshot["version"])
-                    payload = self.monitor_server.snapshot_payload(snapshot)
+                    payload = server.snapshot_payload(snapshot)
                     self.wfile.write(b"event: snapshot\ndata: " + payload + b"\n\n")
                 self.wfile.flush()
+                heartbeat_at = time.monotonic() + _SSE_HEARTBEAT_SECONDS
         except OSError:
             return
+        finally:
+            # The stream is over either way; never reuse this connection.
+            self.close_connection = True
+            server._sse_slots.release()
 
     def _common_headers(self, content_type: str, cache: str) -> None:
         self.send_header("Content-Type", content_type)
@@ -929,8 +1112,16 @@ def serve_in_thread(
     *,
     restart: Callable[[], None] | None = None,
     probe_control: ProbeControl | None = None,
+    trusted_hosts: Iterable[str] | None = None,
 ) -> tuple[MonitorHttpServer, threading.Thread]:
-    server = MonitorHttpServer((host, port), state, inventory, restart, probe_control)
+    server = MonitorHttpServer(
+        (host, port),
+        state,
+        inventory,
+        restart,
+        probe_control,
+        trusted_hosts=trusted_hosts,
+    )
     thread = threading.Thread(
         target=server.serve_forever, name="mocop-http", daemon=True
     )

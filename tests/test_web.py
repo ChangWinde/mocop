@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import http.client
 import json
+import socket
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
@@ -11,7 +13,7 @@ from urllib.request import Request, urlopen
 from mocop.inventory import InventoryRequestError
 from mocop.models import GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
 from mocop.service import StateStore
-from mocop.web import serve_in_thread
+from mocop.web import MonitorHttpServer, MonitorRequestHandler, serve_in_thread
 
 
 class _Inventory:
@@ -152,6 +154,47 @@ class WebTests(unittest.TestCase):
             return raised.exception.headers
         finally:
             raised.exception.close()
+
+    def standalone_server(self, **kwargs) -> MonitorHttpServer:
+        server, thread = serve_in_thread("127.0.0.1", 0, StateStore(5), **kwargs)
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def open_connection(self, port: int) -> http.client.HTTPConnection:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        self.addCleanup(connection.close)
+        return connection
+
+    def open_event_stream(self, port: int) -> socket.socket:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        self.addCleanup(sock.close)
+        sock.sendall(
+            b"GET /api/events HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Accept: text/event-stream\r\n\r\n"
+        )
+        return sock
+
+    @staticmethod
+    def read_until(sock: socket.socket, marker: bytes) -> bytes:
+        data = b""
+        while marker not in data:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        return data
+
+    @staticmethod
+    def read_to_eof(sock: socket.socket) -> bytes:
+        data = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                return data
+            data += chunk
 
     def test_snapshot_and_security_headers(self) -> None:
         with urlopen(f"{self.base}/api/snapshot", timeout=2) as response:
@@ -777,9 +820,9 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(self.inventory.collector_settings, before)
 
-    def test_accepts_same_origin_browser_write_through_host_rewriting_proxy(
-        self,
-    ) -> None:
+    def test_rejects_external_origins_by_default_even_on_loopback(self) -> None:
+        # An untrusted Origin must never authorize a write, even when the TCP
+        # connection arrives on 127.0.0.1 (DNS rebinding delivers exactly that).
         for fetch_site in ("same-origin", None):
             with self.subTest(fetch_site=fetch_site):
                 request = self.poll_interval_request(
@@ -787,10 +830,61 @@ class WebTests(unittest.TestCase):
                     origin="https://workspace-preview.example",
                     fetch_site=fetch_site,
                 )
-                with urlopen(request, timeout=2) as response:
-                    payload = json.load(response)
-                self.assertEqual(payload["pollIntervalSeconds"], 2)
-        self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 2)
+                self.assert_http_error(request, 403)
+        self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 5)
+
+    def test_trusted_hosts_allow_writes_through_host_rewriting_proxy(self) -> None:
+        state = StateStore(5)
+        server, thread = serve_in_thread(
+            "127.0.0.1",
+            0,
+            state,
+            _Inventory(),
+            trusted_hosts=("workspace-preview.example",),
+        )
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.assertIn("workspace-preview.example", server.trusted_hostnames)
+
+        request = self.poll_interval_request(
+            b'{"pollIntervalSeconds":2}',
+            origin="https://workspace-preview.example",
+        )
+        request.full_url = (
+            f"http://127.0.0.1:{server.server_port}/api/settings/poll-interval"
+        )
+        with urlopen(request, timeout=2) as response:
+            payload = json.load(response)
+        self.assertEqual(payload["pollIntervalSeconds"], 2)
+        self.assertEqual(state.snapshot()["pollIntervalSeconds"], 2)
+
+    def test_rejects_dns_rebinding_hosts_despite_loopback_delivery(self) -> None:
+        port = self.server.server_port
+        rebound = {
+            "Host": f"monitor.attacker.example:{port}",
+            "Origin": f"http://monitor.attacker.example:{port}",
+            "X-Monitor-Request": "dashboard",
+            "Sec-Fetch-Site": "same-origin",
+        }
+
+        write = self.open_connection(port)
+        write.request(
+            "POST",
+            "/api/settings/poll-interval",
+            body=b'{"pollIntervalSeconds":2}',
+            headers={**rebound, "Content-Type": "application/json"},
+        )
+        response = write.getresponse()
+        self.assertEqual(response.status, 403)
+        response.read()
+        self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 5)
+
+        read = self.open_connection(port)
+        read.request("GET", "/api/inventory", headers=dict(rebound))
+        response = read.getresponse()
+        self.assertEqual(response.status, 403)
+        response.read()
 
     def test_rejects_cross_origin_preflight_without_cors_permission(self) -> None:
         request = Request(
@@ -918,6 +1012,207 @@ class WebTests(unittest.TestCase):
         self.assert_http_error(query, 400)
 
         self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 5)
+
+    def test_healthz_reports_cumulative_transport_retries(self) -> None:
+        with urlopen(f"{self.base}/healthz", timeout=2) as response:
+            initial = json.load(response)
+        self.assertEqual(
+            initial, {"status": "ok", "ready": False, "transportRetries": 0}
+        )
+
+        self.state.set_hosts(("gpu-1",))
+        self.state.apply(ProbeResult("gpu-1", "online", 1, transport_retries=3))
+        with urlopen(f"{self.base}/healthz", timeout=2) as response:
+            retried = json.load(response)
+        self.assertEqual(retried["transportRetries"], 3)
+
+    def test_sse_clients_beyond_the_limit_get_503(self) -> None:
+        with patch.object(MonitorHttpServer, "max_sse_clients", 1):
+            server = self.standalone_server()
+
+            first = self.open_event_stream(server.server_port)
+            stream = self.read_until(first, b"event: snapshot")
+            self.assertIn(b"200 OK", stream)
+
+            second = self.open_event_stream(server.server_port)
+            rejected = self.read_until(second, b"too many event stream clients")
+            self.assertIn(b"503", rejected.split(b"\r\n", 1)[0])
+
+    def test_connections_beyond_the_limit_get_503(self) -> None:
+        with patch.object(MonitorHttpServer, "max_concurrent_connections", 1):
+            server = self.standalone_server()
+
+            holder = self.open_event_stream(server.server_port)
+            self.read_until(holder, b"event: snapshot")
+
+            overflow = socket.create_connection(
+                ("127.0.0.1", server.server_port), timeout=5
+            )
+            self.addCleanup(overflow.close)
+            rejected = self.read_until(overflow, b"\r\n\r\n")
+            self.assertTrue(rejected.startswith(b"HTTP/1.1 503"), rejected)
+
+    def test_server_close_terminates_live_event_streams(self) -> None:
+        server, thread = serve_in_thread("127.0.0.1", 0, StateStore(5))
+        self.addCleanup(thread.join, 2)
+
+        sock = self.open_event_stream(server.server_port)
+        self.read_until(sock, b"event: snapshot")
+
+        server.shutdown()
+        server.server_close()
+
+        # The stream must end promptly; a hung worker would keep the socket
+        # open and this read would time out.
+        self.read_to_eof(sock)
+
+    def test_idle_keep_alive_connections_are_closed_by_timeout(self) -> None:
+        with patch.object(MonitorRequestHandler, "timeout", 1):
+            server = self.standalone_server()
+            sock = socket.create_connection(
+                ("127.0.0.1", server.server_port), timeout=5
+            )
+            self.addCleanup(sock.close)
+            sock.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            response = self.read_until(sock, b"}")
+            self.assertIn(b"200 OK", response)
+
+            # The idle keep-alive socket must be dropped by the read timeout.
+            self.read_to_eof(sock)
+
+    def test_rejects_request_bodies_on_bodyless_methods(self) -> None:
+        port = self.server.server_port
+
+        with_body = self.open_connection(port)
+        with_body.request("GET", "/healthz", body=b"12345")
+        response = with_body.getresponse()
+        self.assertEqual(response.status, 400)
+        self.assertEqual(response.getheader("Connection"), "close")
+        self.assertIn(b"request body is not allowed", response.read())
+
+        head_with_body = self.open_connection(port)
+        head_with_body.request("HEAD", "/healthz", body=b"12345")
+        response = head_with_body.getresponse()
+        self.assertEqual(response.status, 400)
+        response.read()
+
+        chunked = socket.create_connection(("127.0.0.1", port), timeout=5)
+        self.addCleanup(chunked.close)
+        chunked.sendall(
+            b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+        )
+        rejected = self.read_until(chunked, b"\r\n\r\n")
+        self.assertIn(b"400", rejected.split(b"\r\n", 1)[0])
+        self.read_to_eof(chunked)
+
+        harmless = self.open_connection(port)
+        harmless.request("GET", "/healthz", headers={"Content-Length": "0"})
+        response = harmless.getresponse()
+        self.assertEqual(response.status, 200)
+        response.read()
+
+    def test_malformed_inputs_return_json_errors_not_crashes(self) -> None:
+        port = self.server.server_port
+
+        # Unbalanced-bracket request targets (absolute form, as a proxy would
+        # send them) must not crash the handler thread.
+        get_target = socket.create_connection(("127.0.0.1", port), timeout=5)
+        self.addCleanup(get_target.close)
+        get_target.sendall(b"GET http://[ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        rejected = self.read_until(get_target, b"invalid request target")
+        self.assertIn(b"400", rejected.split(b"\r\n", 1)[0])
+
+        post_target = socket.create_connection(("127.0.0.1", port), timeout=5)
+        self.addCleanup(post_target.close)
+        post_target.sendall(
+            b"POST http://[ HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+        )
+        rejected = self.read_until(post_target, b"invalid request target")
+        self.assertIn(b"400", rejected.split(b"\r\n", 1)[0])
+
+        # An unbalanced-bracket Origin is a 403, not an unhandled ValueError.
+        bracket_origin = self.poll_interval_request(
+            b'{"pollIntervalSeconds":10}', origin="http://["
+        )
+        self.assert_http_error(bracket_origin, 403)
+
+        # Array-typed action fields are schema errors, not TypeErrors.
+        inventory_action = self.poll_interval_request(
+            b'{"action":["add"],"host":"gpu-02"}',
+            origin=self.base,
+            path="/api/settings/hosts",
+        )
+        self.assert_http_error(inventory_action, 400)
+
+        incident_action = self.poll_interval_request(
+            json.dumps(
+                {
+                    "host": "gpu-01",
+                    "conditionKey": "connectivity",
+                    "action": ["acknowledged"],
+                    "durationSeconds": 3600,
+                    "reason": "",
+                }
+            ).encode(),
+            origin=self.base,
+            path="/api/settings/incident-action",
+        )
+        self.assert_http_error(incident_action, 400)
+
+        # Integers too large for float conversion are 400s, not OverflowErrors.
+        huge_number = (
+            b'{"pollIntervalSeconds":'
+            + b"9" * 400
+            + b',"probeTimeoutSeconds":24,"maxWorkers":8}'
+        )
+        huge_case = self.poll_interval_request(
+            huge_number, origin=self.base, path="/api/settings/collector"
+        )
+        self.assert_http_error(huge_case, 400)
+
+    def test_head_mirrors_get_and_event_stream_rejects_head(self) -> None:
+        conn = self.open_connection(self.server.server_port)
+
+        conn.request("GET", "/healthz")
+        get_response = conn.getresponse()
+        body = get_response.read()
+        self.assertEqual(get_response.status, 200)
+
+        conn.request("HEAD", "/healthz")
+        head_response = conn.getresponse()
+        self.assertEqual(head_response.status, 200)
+        self.assertEqual(head_response.getheader("Content-Length"), str(len(body)))
+        self.assertEqual(head_response.read(), b"")
+
+        # The reused connection stays in sync: HEAD wrote no body bytes.
+        conn.request("GET", "/healthz")
+        reused = conn.getresponse()
+        self.assertEqual(reused.status, 200)
+        self.assertEqual(reused.read(), body)
+
+        conn.request("HEAD", "/app.js")
+        static = conn.getresponse()
+        self.assertEqual(static.status, 200)
+        self.assertGreater(int(static.getheader("Content-Length")), 0)
+        self.assertEqual(static.read(), b"")
+
+        conn.request("HEAD", "/metrics")
+        metrics = conn.getresponse()
+        self.assertEqual(metrics.status, 200)
+        self.assertEqual(metrics.read(), b"")
+
+        conn.request("HEAD", "/api/events")
+        events = conn.getresponse()
+        self.assertEqual(events.status, 405)
+        self.assertEqual(events.getheader("Allow"), "GET")
+        self.assertEqual(events.read(), b"")
+
+        conn.request("HEAD", "/missing")
+        missing = conn.getresponse()
+        self.assertEqual(missing.status, 404)
+        self.assertEqual(missing.read(), b"")
 
 
 if __name__ == "__main__":

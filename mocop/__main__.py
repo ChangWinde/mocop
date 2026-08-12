@@ -199,6 +199,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
             inventory,
             restart_event.set if args.managed_service else None,
             monitor,
+            trusted_hosts=config.trusted_web_hosts,
         )
     except OSError as exc:
         print(
@@ -236,6 +237,12 @@ def _run_monitor(args: argparse.Namespace) -> int:
         monitor.stop()
         server.server_close()
         collector.join(timeout=monitor.shutdown_timeout_seconds())
+        if collector.is_alive():
+            print(
+                "Collector thread did not stop within the shutdown budget; "
+                "flushing persistence and notifications regardless",
+                file=sys.stderr,
+            )
         persistence.close()
         notifications.close()
     if restart_event.is_set():
