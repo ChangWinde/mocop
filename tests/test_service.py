@@ -24,6 +24,7 @@ from mocop.models import (
     SystemMetrics,
     WorkloadMetadata,
 )
+from mocop.persistence import LoadedTelemetry
 from mocop.service import _MAX_GPU_IDENTITIES_PER_HOST, MonitorService, StateStore
 
 
@@ -2204,6 +2205,153 @@ class MonitorServiceTests(unittest.TestCase):
         service.poll_once()
 
         self.assertEqual(probe.calls, 2)
+
+
+class UsageRollupTests(unittest.TestCase):
+    """StateStore.usage(): occupancy pairing, idle classification, anchors."""
+
+    _NOW = datetime(2026, 8, 14, 2, 0, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _gpu(
+        processes: tuple[GpuProcess, ...],
+        utilization: float | None = 50,
+    ) -> GpuMetrics:
+        return GpuMetrics(
+            index=0,
+            uuid="GPU-1",
+            name="Test GPU",
+            driver_version="550",
+            pstate="P0",
+            temperature_c=60,
+            utilization_gpu_pct=utilization,
+            utilization_memory_pct=20,
+            memory_total_mib=1000,
+            memory_used_mib=250,
+            memory_free_mib=750,
+            power_draw_w=100,
+            power_limit_w=200,
+            processes=processes,
+        )
+
+    def _store(self, **kwargs: object) -> StateStore:
+        store = StateStore(5, utc_clock=lambda: self._NOW, **kwargs)
+        store.set_hosts(("gpu-1",))
+        return store
+
+    def _apply(
+        self,
+        store: StateStore,
+        observed_at: str,
+        processes: tuple[GpuProcess, ...],
+        utilization: float | None = 50,
+    ) -> None:
+        store.apply(
+            ProbeResult(
+                "gpu-1",
+                "online",
+                1,
+                (self._gpu(processes, utilization),),
+                observed_at=observed_at,
+            )
+        )
+
+    def test_usage_pairs_transitions_and_classifies_idle_occupancy(self) -> None:
+        store = self._store()
+        process = GpuProcess(
+            10, "train.py", 250, WorkloadMetadata(kind="process", owner="alice")
+        )
+        self._apply(store, "2026-08-14T01:00:00Z", (), utilization=50)
+        self._apply(store, "2026-08-14T01:00:30Z", (process,), utilization=50)
+        self._apply(store, "2026-08-14T01:01:00Z", (process,), utilization=0)
+        self._apply(store, "2026-08-14T01:01:30Z", (), utilization=0)
+
+        usage = store.usage(1, 50)
+
+        self.assertEqual(usage["windowHours"], 1)
+        self.assertEqual(usage["sinceAt"], "2026-08-14T01:00:00Z")
+        self.assertEqual(usage["earliestDataAt"], "2026-08-14T01:00:00Z")
+        self.assertEqual(usage["totalOwners"], 1)
+        self.assertEqual(usage["droppedRecords"], 0)
+        self.assertEqual(usage["totalGpuSeconds"], 60.0)
+        (owner,) = usage["owners"]
+        self.assertEqual(owner["owner"], "alice")
+        self.assertEqual(owner["gpuSeconds"], 60.0)
+        # One half of the interval was sampled busy, the other half idle.
+        self.assertEqual(owner["sampledSeconds"], 60.0)
+        self.assertEqual(owner["idleSeconds"], 30.0)
+        self.assertEqual(owner["idleShare"], 0.5)
+        self.assertEqual(owner["hosts"], ["gpu-1"])
+        self.assertEqual(owner["gpus"], 1)
+        self.assertEqual(owner["processes"], 1)
+        self.assertEqual(owner["kinds"], {"process": 1})
+
+    def test_usage_includes_open_intervals_up_to_now(self) -> None:
+        store = self._store()
+        process = GpuProcess(
+            11, "serve.py", 200, WorkloadMetadata(kind="process", owner="bob")
+        )
+        self._apply(store, "2026-08-14T01:59:00Z", ())
+        self._apply(store, "2026-08-14T01:59:45Z", (process,))
+
+        (owner,) = store.usage(1, 50)["owners"]
+        self.assertEqual(owner["owner"], "bob")
+        self.assertEqual(owner["gpuSeconds"], 15.0)
+
+    def test_usage_covers_processes_seeded_before_any_transition(self) -> None:
+        # The very first sample of a GPU seeds the live process table without
+        # emitting a started transition; the rollup must still count it.
+        store = self._store()
+        process = GpuProcess(
+            12, "notebook.py", 100, WorkloadMetadata(kind="process", owner="dora")
+        )
+        self._apply(store, "2026-08-14T01:59:00Z", (process,))
+
+        (owner,) = store.usage(1, 50)["owners"]
+        self.assertEqual(owner["owner"], "dora")
+        self.assertEqual(owner["gpuSeconds"], 60.0)
+
+    def test_usage_anchors_unmatched_stops_and_clips_to_the_window(self) -> None:
+        record = {
+            "observedAt": "2026-08-14T01:30:00Z",
+            "gpuId": "GPU-1",
+            "index": 0,
+            "event": "stopped",
+            "pid": 7,
+            "name": "old.py",
+            "usedMemoryMiB": 10.0,
+            "workload": {
+                "kind": "docker",
+                "workload_id": "abc123def456",
+                "owner": "carol",
+                "started_at": "2026-08-14T00:00:00Z",
+            },
+        }
+        anonymous = {
+            **record,
+            "observedAt": "2026-08-14T01:40:00Z",
+            "pid": 8,
+            "name": "anon.py",
+            "workload": None,
+        }
+        restored = LoadedTelemetry(
+            history={},
+            incident_events=(),
+            process_events={("gpu-1", "GPU-1"): (record, anonymous)},
+        )
+        store = self._store(restored=restored)
+
+        usage = store.usage(1, 50)
+
+        # The workload's own start time anchors the record; the interval is
+        # then clipped to the requested window (01:00 to 02:00).
+        (owner,) = usage["owners"]
+        self.assertEqual(owner["owner"], "carol")
+        self.assertEqual(owner["gpuSeconds"], 1800.0)
+        self.assertEqual(owner["kinds"], {"docker": 1})
+        self.assertIsNone(owner["idleShare"])
+        # The anchorless stop is dropped and reported, never guessed.
+        self.assertEqual(usage["droppedRecords"], 1)
 
 
 if __name__ == "__main__":

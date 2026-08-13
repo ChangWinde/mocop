@@ -6,11 +6,12 @@ import sys
 import threading
 import time
 import zlib
+from bisect import bisect_left
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from heapq import nsmallest
 from struct import Struct
 from typing import Protocol
@@ -264,6 +265,38 @@ def _optional_float(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     return float(value)
+
+
+def _epoch_seconds(value: object) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+@dataclass(slots=True)
+class _UsageInterval:
+    """One process's clipped occupancy window on a single GPU."""
+
+    start: float
+    end: float
+    owner: str | None
+    kind: str
+    sampled_seconds: float = 0.0
+    idle_seconds: float = 0.0
+
+
+@dataclass(slots=True)
+class _OwnerUsage:
+    gpu_seconds: float = 0.0
+    sampled_seconds: float = 0.0
+    idle_seconds: float = 0.0
+    processes: int = 0
+    hosts: set[str] = field(default_factory=set)
+    gpus: set[tuple[str, str]] = field(default_factory=set)
+    kinds: dict[str, int] = field(default_factory=dict)
 
 
 def _packed_optional_float(value: float | None) -> float:
@@ -763,6 +796,259 @@ class StateStore:
                 "points": [point.to_dict(gpu_id) for point in list(points)[-limit:]],
                 "processEvents": [event.to_dict() for event in list(events)[-limit:]],
             }
+
+    def usage(self, window_hours: int, owner_limit: int) -> dict[str, object]:
+        """Aggregate per-owner GPU occupancy over the requested window.
+
+        Occupancy pairs the in-memory process start/stop timeline with the
+        live process table; idle seconds reclassify occupancy segments whose
+        sampled GPU utilization stayed below the busy threshold. Coverage is
+        bounded by the in-memory timeline (and the restored persistence
+        window), so `earliestDataAt` reports how far back the data really
+        goes.
+        """
+        with self._condition:
+            now = self._utc_clock()
+            events_by_gpu = {
+                key: list(events) for key, events in self._process_events.items()
+            }
+            active_by_gpu = {
+                key: dict(processes)
+                for key, processes in self._active_gpu_processes.items()
+            }
+            history_by_gpu = {
+                key: list(points) for key, points in self._gpu_history.items()
+            }
+            busy_pct = self._thresholds.gpu_busy_pct
+            poll_interval = self._poll_interval_seconds
+
+        now_epoch = now.timestamp()
+        window_start = now_epoch - window_hours * 3600
+        dropped_records = 0
+        earliest_data: float | None = None
+        owners: dict[str | None, _OwnerUsage] = {}
+
+        for key in sorted(set(events_by_gpu) | set(active_by_gpu)):
+            intervals, dropped, earliest = self._usage_intervals(
+                events_by_gpu.get(key, ()),
+                active_by_gpu.get(key, {}),
+                window_start=window_start,
+                now_epoch=now_epoch,
+            )
+            dropped_records += dropped
+            if earliest is not None:
+                earliest_data = (
+                    earliest if earliest_data is None else min(earliest_data, earliest)
+                )
+            if not intervals:
+                continue
+            point_epochs: list[float] = []
+            point_idle: list[bool | None] = []
+            for point in history_by_gpu.get(key, ()):
+                epoch = _epoch_seconds(point.observed_at)
+                if epoch is None:
+                    continue
+                point_epochs.append(epoch)
+                utilization_value = _unpacked_optional_float(
+                    _GPU_HISTORY_VALUES.unpack(point.values)[1]
+                )
+                point_idle.append(
+                    None if utilization_value is None else utilization_value < busy_pct
+                )
+            if point_epochs and (
+                earliest_data is None or point_epochs[0] < earliest_data
+            ):
+                earliest_data = point_epochs[0]
+            self._classify_usage_intervals(
+                intervals, point_epochs, point_idle, poll_interval
+            )
+            host = key[0]
+            for interval in intervals:
+                usage = owners.get(interval.owner)
+                if usage is None:
+                    usage = _OwnerUsage()
+                    owners[interval.owner] = usage
+                usage.gpu_seconds += interval.end - interval.start
+                usage.sampled_seconds += interval.sampled_seconds
+                usage.idle_seconds += interval.idle_seconds
+                usage.processes += 1
+                usage.hosts.add(host)
+                usage.gpus.add(key)
+                usage.kinds[interval.kind] = usage.kinds.get(interval.kind, 0) + 1
+
+        ranked = sorted(
+            owners.items(),
+            key=lambda item: (-item[1].gpu_seconds, item[0] is None, item[0] or ""),
+        )
+        owner_entries = [
+            {
+                "owner": owner,
+                "gpuSeconds": round(usage.gpu_seconds, 1),
+                "sampledSeconds": round(usage.sampled_seconds, 1),
+                "idleSeconds": round(usage.idle_seconds, 1),
+                "idleShare": (
+                    round(usage.idle_seconds / usage.sampled_seconds, 4)
+                    if usage.sampled_seconds > 0
+                    else None
+                ),
+                "hosts": sorted(usage.hosts),
+                "gpus": len(usage.gpus),
+                "processes": usage.processes,
+                "kinds": dict(sorted(usage.kinds.items())),
+            }
+            for owner, usage in ranked[:owner_limit]
+        ]
+        return {
+            "generatedAt": utc_now(),
+            "sinceAt": (now - timedelta(hours=window_hours))
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
+            "windowHours": window_hours,
+            "gpuBusyPct": busy_pct,
+            "owners": owner_entries,
+            "totalOwners": len(owners),
+            "totalGpuSeconds": round(
+                sum(usage.gpu_seconds for usage in owners.values()), 1
+            ),
+            "earliestDataAt": (
+                datetime.fromtimestamp(earliest_data, tz=timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+                if earliest_data is not None
+                else None
+            ),
+            "droppedRecords": dropped_records,
+        }
+
+    @staticmethod
+    def _usage_intervals(
+        events: tuple[_GpuProcessTransition, ...] | list[_GpuProcessTransition],
+        active_processes: dict[tuple[int, str], GpuProcess],
+        *,
+        window_start: float,
+        now_epoch: float,
+    ) -> tuple[list[_UsageInterval], int, float | None]:
+        """Pair start/stop transitions into clipped occupancy intervals.
+
+        Returns the intervals, the count of dropped (unanchorable) records,
+        and the earliest event timestamp seen before clipping.
+        """
+
+        def attribution(workload: dict[str, object] | None) -> tuple[str | None, str]:
+            owner = workload.get("owner") if isinstance(workload, dict) else None
+            kind = workload.get("kind") if isinstance(workload, dict) else None
+            return (
+                owner if isinstance(owner, str) and owner else None,
+                kind if isinstance(kind, str) and kind else "process",
+            )
+
+        def workload_start(workload: dict[str, object] | None) -> float | None:
+            if not isinstance(workload, dict):
+                return None
+            return _epoch_seconds(workload.get("started_at"))
+
+        intervals: list[_UsageInterval] = []
+        dropped = 0
+        earliest: float | None = None
+        open_processes: dict[
+            tuple[int, str], tuple[float, dict[str, object] | None]
+        ] = {}
+
+        def close(start: float, end: float, workload: dict[str, object] | None) -> None:
+            clipped_start = max(start, window_start)
+            clipped_end = min(end, now_epoch)
+            if clipped_end <= clipped_start:
+                return
+            owner, kind = attribution(workload)
+            intervals.append(
+                _UsageInterval(
+                    start=clipped_start, end=clipped_end, owner=owner, kind=kind
+                )
+            )
+
+        for event in events:
+            observed = _epoch_seconds(event.observed_at)
+            if observed is None:
+                dropped += 1
+                continue
+            if earliest is None or observed < earliest:
+                earliest = observed
+            process_key = (event.pid, event.name)
+            if event.event == "started":
+                previous = open_processes.pop(process_key, None)
+                if previous is not None:
+                    # A missed stop: the replacement start bounds the old run.
+                    close(previous[0], observed, previous[1])
+                open_processes[process_key] = (observed, event.workload)
+                continue
+            opened = open_processes.pop(process_key, None)
+            if opened is not None:
+                close(opened[0], observed, opened[1] or event.workload)
+                continue
+            # A stop without a visible start: the workload's own start time is
+            # the only trustworthy anchor; without one the record is dropped
+            # rather than guessed.
+            anchored_start = workload_start(event.workload)
+            if anchored_start is None:
+                dropped += 1
+                continue
+            close(anchored_start, observed, event.workload)
+
+        for started, workload in open_processes.values():
+            close(started, now_epoch, workload)
+
+        # Processes seeded from the first sample of a GPU never emitted a
+        # started transition, so the live process table fills that gap.
+        for process_key, process in active_processes.items():
+            if process_key in open_processes:
+                continue
+            workload_dict = process.workload.to_dict() if process.workload else None
+            anchored_start = workload_start(workload_dict)
+            if anchored_start is None:
+                anchored_start = _epoch_seconds(process.first_seen_at)
+            if anchored_start is None:
+                dropped += 1
+                continue
+            close(anchored_start, now_epoch, workload_dict)
+
+        return intervals, dropped, earliest
+
+    @staticmethod
+    def _classify_usage_intervals(
+        intervals: list[_UsageInterval],
+        point_epochs: list[float],
+        point_idle: list[bool | None],
+        poll_interval: float,
+    ) -> None:
+        """Split each interval into sampled idle/active seconds.
+
+        Each consecutive utilization sample pair classifies the segment it
+        spans; gaps beyond four poll cycles (or one minute) stay unclassified
+        so an offline stretch cannot masquerade as measured activity.
+        """
+        if len(point_epochs) < 2 or not intervals:
+            return
+        max_segment = max(poll_interval * 4, 60.0)
+        for interval in intervals:
+            index = max(0, bisect_left(point_epochs, interval.start) - 1)
+            for position in range(index, len(point_epochs) - 1):
+                segment_start = point_epochs[position]
+                segment_end = point_epochs[position + 1]
+                if segment_start >= interval.end:
+                    break
+                if segment_end - segment_start > max_segment:
+                    continue
+                overlap_start = max(segment_start, interval.start)
+                overlap_end = min(segment_end, interval.end)
+                if overlap_end <= overlap_start:
+                    continue
+                classification = point_idle[position]
+                if classification is None:
+                    continue
+                duration = overlap_end - overlap_start
+                interval.sampled_seconds += duration
+                if classification:
+                    interval.idle_seconds += duration
 
     def incidents(self, limit: int) -> dict[str, object]:
         with self._condition:

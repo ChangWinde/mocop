@@ -169,6 +169,7 @@ responses carry the probe status body *plus* a `code` field instead of an
 | `UNKNOWN_QUERY_PARAMETER` | 400 | A query parameter outside the route's allowlist. |
 | `INVALID_QUERY` | 400 | A malformed `host`, `gpu`, or `limit` query value. |
 | `INVALID_LIMIT` | 400 | `limit` is not an integer within the route's bounds. |
+| `INVALID_HOURS` | 400 | `hours` is not an integer within the route's bounds. |
 | `INVALID_HOST` | 400 | The `host` query value is not a safe alias. |
 | `INVALID_JSON` | 400 | The body is not valid strict JSON (duplicate keys and non-finite numbers included). |
 | `INVALID_SCHEMA` | 400 | The JSON body does not match the route's exact schema. |
@@ -264,6 +265,7 @@ This table matches the server's route manifest exactly.
 | GET | `/api/snapshot` | L | Full current state: hosts, GPUs, processes, stats. |
 | GET | `/api/events` | L | SSE stream of snapshots with named heartbeats. |
 | GET | `/api/history` | L | Per-host resource trend points. |
+| GET | `/api/usage` | L | Per-owner GPU occupancy and idle-occupancy rollup. |
 | GET | `/api/incidents` | L | Active conditions, transition events, correlations. |
 | GET | `/api/meta` | L | API self-description: versions, capabilities, endpoints. |
 | GET | `/api/service` | L | **Deprecated** alias of the `/api/meta` capabilities block. |
@@ -307,7 +309,7 @@ Top-level fields:
 | `collectorError` | string \| null | Fleet-level collector failure (e.g. discovery failed), else `null`. |
 | `persistence` | object | `{enabled, backend, healthy, queuedWrites, droppedWrites, lastError}` (+ `writtenRecords` when SQLite). |
 | `notifications` | object | `{enabled, healthy, queuedDeliveries, droppedDeliveries, endpoints[]}`; each endpoint reports `{name, healthy, queuedDeliveries, deliveredEvents, droppedDeliveries, lastError, lastAttemptAt, lastSuccessAt}`. |
-| `thresholds` | object | The nine active incident thresholds (`cpu_warning_pct`, …, `disk_min_free_gib`). |
+| `thresholds` | object | The eleven active incident thresholds (`cpu_warning_pct`, …, `psi_io_some_pct`). |
 | `stats` | object | Fleet aggregates; see below. |
 | `servers` | array | Per-host state; see below. |
 
@@ -364,9 +366,13 @@ Timestamp disambiguation (frequently confused):
 `memory_total_mib`, `memory_used_mib`, `memory_available_mib`,
 `swap_total_mib`, `swap_used_mib`, `disk_total_mib`, `disk_used_mib`,
 `network_rx_bps`, `network_tx_bps`, `disk_read_bps`, `disk_write_bps`
-(rates null on first sample), and `disks[]` with `device`,
+(rates null on first sample), `disks[]` with `device`,
 `filesystem_type`, `mountpoint`, `total_mib`, `used_mib`, `available_mib`,
-`used_pct`.
+`used_pct`, and `pressure` (null on kernels without PSI) with per-resource
+`cpu`/`memory`/`io` objects of `some_avg10`, `some_avg60`, `full_avg10`,
+`full_avg60` — the percentage of the trailing 10/60 seconds during which at
+least one task (`some`) or every task (`full`, nullable) was stalled on
+that resource.
 
 `servers[].gpus[]` (snake_case):
 
@@ -392,7 +398,7 @@ Timestamp disambiguation (frequently confused):
 | `pid` | int | Remote PID. |
 | `name` | string | Process name from `nvidia-smi`. |
 | `used_memory_mib` | number \| null | VRAM used by this process. |
-| `workload` | object \| null | Present only with `workloads.mode` `identity`/`auto`: `{kind, workload_id, name, owner, queue, namespace, command, started_at}`; `kind` is `process`, `slurm`, or `kubernetes`, everything else nullable. `command` and `started_at` (true start time) are populated by both tiers. |
+| `workload` | object \| null | Present only with `workloads.mode` `identity`/`auto`: `{kind, workload_id, name, owner, queue, namespace, command, started_at}`; `kind` is `process`, `slurm`, `kubernetes`, `docker`, or `podman`, everything else nullable. `command` and `started_at` (true start time) are populated by both tiers; the container kinds and scheduler identifiers additionally require the `auto` tier's cgroup read. |
 | `first_seen_at` | timestamp \| null | **Monitor-relative lower bound**: when this monitor first observed the `(pid, name)` pair on this device. Resets on monitor restart. When a PID is reused and the workload `started_at` changes, the server treats it as a new instance: a stop/start event pair is emitted and `first_seen_at` restarts. |
 
 Errors: none specific (`400 REQUEST_BODY_NOT_ALLOWED` applies as everywhere).
@@ -432,6 +438,56 @@ Response: `{host, pollIntervalSeconds, maxPoints, points[]}`. Each point:
 Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_LIMIT`,
 `404 UNKNOWN_HOST`.
 
+### GET /api/usage
+
+Per-owner GPU occupancy rollup over a bounded window. Tier L. Aggregates
+the in-memory process timeline (started/stopped transitions plus the live
+process table), so coverage is limited to what the monitor observed — the
+response says so explicitly instead of extrapolating.
+
+Query parameters:
+
+| Parameter | Required | Bounds | Default |
+|---|---|---|---|
+| `hours` | no | integer 1–720 | 24 |
+| `limit` | no | integer 1–500 (owner rows) | 50 |
+
+Response fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `generatedAt` | timestamp | When this rollup was computed. |
+| `sinceAt` | timestamp | Start of the requested window (`now - hours`). |
+| `windowHours` | int | Echo of the effective `hours`. |
+| `gpuBusyPct` | number | Utilization threshold that classified idle occupancy. |
+| `owners` | array | Per-owner rollup, sorted by `gpuSeconds` descending, at most `limit` rows. |
+| `totalOwners` | int | Owner count before the `limit` cut. |
+| `totalGpuSeconds` | number | Sum of `gpuSeconds` across every owner (not just the returned rows). |
+| `earliestDataAt` | timestamp \| null | Oldest timeline record that informed this rollup. If it is later than `sinceAt`, the window is only partially covered. |
+| `droppedRecords` | int | Timeline records skipped because no trustworthy start anchor existed. |
+
+`owners[]` fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `owner` | string \| null | Process owner from workload identity; `null` when `workloads.mode` is `disabled` or the owner was unresolvable. |
+| `gpuSeconds` | number | Wall-clock seconds the owner's processes occupied a GPU (two GPUs in parallel count twice). |
+| `sampledSeconds` | number | Portion of `gpuSeconds` that overlapped utilization samples and could be classified. |
+| `idleSeconds` | number | Classified seconds during which the occupied GPU stayed below `gpuBusyPct` utilization. |
+| `idleShare` | number \| null | `idleSeconds / sampledSeconds`, rounded to 4 decimals; `null` without classified samples. |
+| `hosts` | array | Host aliases the owner occupied. |
+| `gpus` | int | Distinct GPUs the owner occupied. |
+| `processes` | int | Occupancy intervals in the window. |
+| `kinds` | object | Interval counts by workload kind (`process`, `slurm`, `kubernetes`, `docker`, `podman`). |
+
+Owner attribution requires `workloads.mode` `identity` or `auto`; with
+`disabled` everything aggregates under `owner: null`. Idle classification
+skips sample gaps longer than four poll cycles (offline stretches are never
+counted as measured activity).
+
+Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_HOURS`,
+`INVALID_LIMIT`.
+
 ### GET /api/incidents
 
 Active conditions, bounded transition history, and shared-path
@@ -460,7 +516,7 @@ Response fields:
 |---|---|---|
 | `host` | string | Affected host alias. |
 | `conditionKey` | string | Stable key, e.g. `cpu`, `disk:/dev/sda1:/`, `gpu_temperature:<uuid>`. |
-| `category` | string | `connectivity`, `cpu`, `memory`, `swap`, `disk`, `gpu_availability`, `gpu_count`, `gpu_processes`, `gpu_temperature`, `gpu_memory`, `gpu_idle_memory`, `gpu_ecc`, `gpu_memory_repair`, `gpu_slowdown`. |
+| `category` | string | `connectivity`, `cpu`, `memory`, `swap`, `disk`, `pressure`, `gpu_availability`, `gpu_count`, `gpu_processes`, `gpu_temperature`, `gpu_memory`, `gpu_idle_memory`, `gpu_ecc`, `gpu_memory_repair`, `gpu_slowdown`. |
 | `resource` | string | Human-readable subject, e.g. `GPU 3 VRAM`. |
 | `severity` | string | `warning` or `critical`. |
 | `value`, `threshold` | number \| null | Measured value and configured threshold, when numeric. |
@@ -878,7 +934,11 @@ only**): `mocop_host_cpu_utilization_ratio`, `mocop_host_load1`,
 `mocop_host_network_receive_bytes_per_second`,
 `mocop_host_network_transmit_bytes_per_second`,
 `mocop_host_disk_read_bytes_per_second`,
-`mocop_host_disk_write_bytes_per_second`.
+`mocop_host_disk_write_bytes_per_second`, and — on kernels exposing PSI,
+with an extra `resource` label of `cpu`/`memory`/`io` —
+`mocop_host_pressure_some_ratio` and `mocop_host_pressure_full_ratio`
+(share of the last 10 seconds with at least one task, respectively every
+task, stalled on the resource).
 
 Per-GPU (labels `host`, `index`, `uuid`; online, non-stale hosts only):
 `mocop_gpu_info` (extra labels `model`, `driver`, `mig_mode`),

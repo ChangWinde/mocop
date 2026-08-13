@@ -66,6 +66,7 @@ API_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/snapshot", "listener"),
     ("GET", "/api/events", "listener"),
     ("GET", "/api/history", "listener"),
+    ("GET", "/api/usage", "listener"),
     ("GET", "/api/incidents", "listener"),
     ("GET", "/api/meta", "listener"),
     ("GET", "/api/service", "listener"),
@@ -380,6 +381,9 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/history":
             self._send_history(request_url.query)
+            return
+        if path == "/api/usage":
+            self._send_usage(request_url.query)
             return
         if path == "/api/gpu-history":
             self._send_gpu_history(request_url.query)
@@ -1156,6 +1160,48 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(history)
+
+    def _send_usage(self, query: str) -> None:
+        parameters = parse_qs(query, keep_blank_values=True)
+        if set(parameters) - {"hours", "limit"}:
+            self._send_error(
+                "unknown query parameter",
+                HTTPStatus.BAD_REQUEST,
+                code="UNKNOWN_QUERY_PARAMETER",
+            )
+            return
+        hours_values = parameters.get("hours", ["24"])
+        limit_values = parameters.get("limit", ["50"])
+        if len(hours_values) != 1 or len(limit_values) != 1:
+            self._send_error(
+                "invalid hours or limit",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_QUERY",
+            )
+            return
+        try:
+            hours = int(hours_values[0])
+        except ValueError:
+            hours = 0
+        if not 1 <= hours <= 720:
+            self._send_error(
+                "hours must be between 1 and 720",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_HOURS",
+            )
+            return
+        try:
+            limit = int(limit_values[0])
+        except ValueError:
+            limit = 0
+        if not 1 <= limit <= 500:
+            self._send_error(
+                "limit must be between 1 and 500",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_LIMIT",
+            )
+            return
+        self._send_json(self.monitor_server.state.usage(hours, limit))
 
     def _send_gpu_history(self, query: str) -> None:
         if not self._is_dashboard_read_request():

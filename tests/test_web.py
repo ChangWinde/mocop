@@ -674,6 +674,23 @@ class WebTests(unittest.TestCase):
         headers = self.assert_http_error(f"{self.base}/missing", 404)
         self.assertIn("text/html", headers.get("Content-Type", ""))
 
+    def test_usage_endpoint_serves_the_rollup_and_validates_bounds(self) -> None:
+        with urlopen(f"{self.base}/api/usage", timeout=2) as response:
+            usage = json.load(response)
+        self.assertEqual(usage["windowHours"], 24)
+        self.assertEqual(usage["owners"], [])
+        self.assertEqual(usage["totalOwners"], 0)
+        self.assertEqual(usage["droppedRecords"], 0)
+        with urlopen(f"{self.base}/api/usage?hours=1&limit=5", timeout=2) as response:
+            self.assertEqual(json.load(response)["windowHours"], 1)
+
+        self.assert_json_error(f"{self.base}/api/usage?hours=0", 400, "INVALID_HOURS")
+        self.assert_json_error(f"{self.base}/api/usage?hours=abc", 400, "INVALID_HOURS")
+        self.assert_json_error(f"{self.base}/api/usage?limit=0", 400, "INVALID_LIMIT")
+        self.assert_json_error(
+            f"{self.base}/api/usage?scope=all", 400, "UNKNOWN_QUERY_PARAMETER"
+        )
+
     def test_api_errors_carry_stable_machine_readable_codes(self) -> None:
         self.assert_json_error(
             f"{self.base}/api/history?host=--proxy&limit=10", 400, "INVALID_QUERY"
