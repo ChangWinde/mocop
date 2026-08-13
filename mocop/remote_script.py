@@ -32,7 +32,7 @@ _HEALTH_QUERY_FIELDS = (
     "mig.mode.current",
 )
 _COMBINED_QUERY_FIELDS = _QUERY_FIELDS + _HEALTH_QUERY_FIELDS[1:]
-_PROTOCOL_VERSION = "MONITOR_V7"
+_PROTOCOL_VERSION = "MONITOR_V8"
 # The fixed script and its parser ship inside one process and are re-sent on
 # every probe, so no deployed emitter of an older protocol version can exist;
 # accepting only the current version keeps the parser honest and small.
@@ -48,6 +48,29 @@ printf '__PROTOCOL_VERSION__\n'
 workload_tier=__WORKLOAD_TIER__
 process_enabled=__PROCESS_ENABLED__
 awk '
+  # Pressure stall information (kernel 4.20+): report the some/full avg10 and
+  # avg60 windows per resource. A missing or unreadable file emits nothing, so
+  # kernels without CONFIG_PSI degrade silently instead of failing the pass.
+  function emit_psi(resource, file,    line, parts, count, i, sep, key, value, s10, s60, f10, f60) {
+    s10 = ""; s60 = ""; f10 = ""; f60 = ""
+    while ((getline line < file) > 0) {
+      count = split(line, parts, " ")
+      for (i = 2; i <= count; i++) {
+        sep = index(parts[i], "=")
+        if (sep <= 1) continue
+        key = substr(parts[i], 1, sep - 1)
+        value = substr(parts[i], sep + 1)
+        if (parts[1] == "some" && key == "avg10") s10 = value
+        else if (parts[1] == "some" && key == "avg60") s60 = value
+        else if (parts[1] == "full" && key == "avg10") f10 = value
+        else if (parts[1] == "full" && key == "avg60") f60 = value
+      }
+    }
+    close(file)
+    if (s10 != "" && s60 != "") {
+      printf "PSI\t%s\t%s\t%s\t%s\t%s\n", resource, s10, s60, f10, f60
+    }
+  }
   BEGIN {
     host = ""
     if ((getline host_line < "/proc/sys/kernel/hostname") > 0) {
@@ -57,6 +80,9 @@ awk '
     close("/proc/sys/kernel/hostname")
     if (host == "") host = "unknown"
     printf "HOST\t%s\n", host
+    emit_psi("cpu", "/proc/pressure/cpu")
+    emit_psi("memory", "/proc/pressure/memory")
+    emit_psi("io", "/proc/pressure/io")
   }
   FILENAME == "/proc/stat" {
     if ($1 == "cpu") {
@@ -206,6 +232,22 @@ if [ "$workload_tier" -ge 1 ] && [ "$process_status" -eq 0 ] && [ -n "$process_o
         if (pod_id == "" && kube_cgroup && match(cgroup, /pod[0-9A-Fa-f_-]+/)) {
           pod_id=substr(cgroup, RSTART + 3, RLENGTH - 3)
         }
+        # Standalone container runtimes: "docker-<hex>.scope" (cgroup v2),
+        # "/docker/<hex>" (cgroup v1) and "libpod-<hex>.scope" (Podman). The
+        # segment anchor plus the 12-to-64 hex-digit requirement keeps look-
+        # alike unit names out; the reported short identifier matches the
+        # container ID the runtime CLI displays.
+        container_kind = ""
+        container_id = ""
+        if (match(cgroup, /docker[-\/][0-9a-f]{12,64}/) &&
+            (RSTART == 1 || substr(cgroup, RSTART - 1, 1) == "/")) {
+          container_kind = "docker"
+          container_id = substr(cgroup, RSTART + 7, RLENGTH - 7)
+        } else if (match(cgroup, /libpod-[0-9a-f]{12,64}/) &&
+                   (RSTART == 1 || substr(cgroup, RSTART - 1, 1) == "/")) {
+          container_kind = "podman"
+          container_id = substr(cgroup, RSTART + 7, RLENGTH - 7)
+        }
         # The owner is the real UID resolved through the root-owned passwd
         # database; process environment values are attacker-controlled and
         # never define ownership.
@@ -233,6 +275,9 @@ if [ "$workload_tier" -ge 1 ] && [ "$process_status" -eq 0 ] && [ -n "$process_o
           workload_name=pod_name
           workload_queue=pod_queue
           workload_namespace=pod_namespace
+        } else if (container_kind != "") {
+          kind=container_kind
+          workload_id=substr(container_id, 1, 12)
         }
         started=""
         if (boot ~ /^[0-9]+$/ && ticks ~ /^[0-9]+$/ && clock ~ /^[0-9]+$/ && clock + 0 > 0) {

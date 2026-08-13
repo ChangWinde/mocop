@@ -22,6 +22,8 @@ from .models import (
     GpuHealthMetrics,
     GpuMetrics,
     GpuProcess,
+    PressureStallMetrics,
+    PressureStallSample,
     ProbeResult,
     SystemMetrics,
     WorkloadMetadata,
@@ -423,6 +425,47 @@ def parse_nvidia_processes_csv(payload: str) -> dict[str, tuple[GpuProcess, ...]
     return {gpu_uuid: tuple(items) for gpu_uuid, items in processes.items()}
 
 
+_PSI_RESOURCES = ("cpu", "memory", "io")
+
+
+def _psi_percentage(value: str, label: str, *, required: bool) -> float | None:
+    """Parse one pressure average: a percentage between 0 and 100."""
+    text = value.strip()
+    if not text:
+        if required:
+            raise ValueError(f"resource payload has an invalid {label}")
+        return None
+    number = _finite_number(text)
+    if number is None or not 0 <= number <= 100:
+        raise ValueError(f"resource payload has an invalid {label}")
+    return number
+
+
+def _parse_psi_records(rows: list[list[str]]) -> PressureStallMetrics | None:
+    """Build pressure metrics from PSI protocol rows; None when none arrived."""
+    if not rows:
+        return None
+    samples: dict[str, PressureStallSample] = {}
+    for row in rows:
+        resource = row[1].strip()
+        if resource not in _PSI_RESOURCES or resource in samples:
+            raise ValueError("resource payload has an invalid pressure record")
+        some_avg10 = _psi_percentage(row[2], "pressure average", required=True)
+        some_avg60 = _psi_percentage(row[3], "pressure average", required=True)
+        assert some_avg10 is not None and some_avg60 is not None
+        samples[resource] = PressureStallSample(
+            some_avg10=some_avg10,
+            some_avg60=some_avg60,
+            full_avg10=_psi_percentage(row[4], "pressure average", required=False),
+            full_avg60=_psi_percentage(row[5], "pressure average", required=False),
+        )
+    return PressureStallMetrics(
+        cpu=samples.get("cpu"),
+        memory=samples.get("memory"),
+        io=samples.get("io"),
+    )
+
+
 _MAX_WORKLOAD_START_EPOCH = 4_102_444_800  # 2100-01-01T00:00:00Z
 
 
@@ -472,7 +515,7 @@ def parse_workload_records(payload: str) -> dict[int, WorkloadMetadata]:
         if pid in workloads:
             raise ValueError("resource payload has duplicate workload PIDs")
         kind = fields[2].strip()
-        if kind not in {"process", "slurm", "kubernetes"}:
+        if kind not in {"process", "slurm", "kubernetes", "docker", "podman"}:
             raise ValueError("resource payload has an invalid workload kind")
 
         def optional_text(value: str, label: str) -> str | None:
@@ -604,6 +647,7 @@ class _RawSystemSample:
     disk_read_bytes: float
     disk_write_bytes: float
     disks: tuple[DiskMetrics, ...]
+    pressure: PressureStallMetrics | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -626,6 +670,7 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
 
     values: dict[str, list[str]] = {}
     disks: list[DiskMetrics] = []
+    psi_rows: list[list[str]] = []
     gpu_lines: list[str] = []
     process_lines: list[str] = []
     health_lines: list[str] = []
@@ -808,6 +853,12 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
             )
         elif in_disks:
             raise ValueError("resource payload has an invalid disk record")
+        elif parts[0] == "PSI":
+            # PSI repeats per resource, so it cannot ride the last-wins
+            # key/value map; rows are validated together after the scan.
+            if len(parts) != 6:
+                raise ValueError("resource payload has an invalid pressure record")
+            psi_rows.append(parts)
         elif len(parts) >= 2:
             values[parts[0]] = parts[1:]
 
@@ -870,6 +921,7 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
         disk_read_bytes=_required_number(values["IO"][0], "disk read bytes"),
         disk_write_bytes=_required_number(values["IO"][1], "disk write bytes"),
         disks=tuple(disks),
+        pressure=_parse_psi_records(psi_rows),
     )
     gpu_payload = "\n".join(gpu_lines)
     first_gpu_row = next(
@@ -1204,6 +1256,7 @@ class OpenSshLinuxResourceProbe:
             disk_read_bps=disk_read_bps,
             disk_write_bps=disk_write_bps,
             disks=raw.disks,
+            pressure=raw.pressure,
         )
 
     def _processes_due(

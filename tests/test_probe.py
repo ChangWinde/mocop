@@ -50,13 +50,14 @@ def config() -> MonitorConfig:
 
 def resource_payload(
     *,
-    protocol: str = "MONITOR_V7",
+    protocol: str = "MONITOR_V8",
     cpu_total: int = 1000,
     cpu_idle: int = 800,
     rx_bytes: int = 10000,
     tx_bytes: int = 20000,
     disk_read_bytes: int = 30000,
     disk_write_bytes: int = 40000,
+    psi_payload: str = "",
     gpu_payload: str = (
         "0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
         "81920, 40960, 40960, 287.5, 400"
@@ -65,9 +66,11 @@ def resource_payload(
     health_payload: str = "GPU-abc, 0, No, No, Not Active, Not Active, Disabled",
     workload_payload: str = "",
 ) -> str:
+    psi_lines = f"{psi_payload}\n" if psi_payload else ""
     return (
         f"{protocol}\n"
         "HOST\tnode-a\n"
+        f"{psi_lines}"
         f"CPU\t{cpu_total}\t{cpu_idle}\n"
         "CORES\t8\n"
         "MEM\t16384000\t8192000\t2097152\t1048576\n"
@@ -222,7 +225,7 @@ class ProbeTests(unittest.TestCase):
     def test_parses_an_explicitly_skipped_process_sample(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V7",
+                protocol="MONITOR_V8",
                 process_payload="PROCESS_SKIPPED",
             )
         )
@@ -234,13 +237,13 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflicting process telemetry"):
             parse_linux_resource_payload(
                 resource_payload(
-                    protocol="MONITOR_V7",
+                    protocol="MONITOR_V8",
                     process_payload=("PROCESS_SKIPPED\nGPU-abc, 4242, python, 2048"),
                 )
             )
         # The script and parser ship together, so retired protocol versions
         # are rejected outright instead of being half-supported.
-        for retired in ("MONITOR_V6", "MONITOR_V5", "MONITOR_V4"):
+        for retired in ("MONITOR_V7", "MONITOR_V6", "MONITOR_V5", "MONITOR_V4"):
             with self.assertRaisesRegex(ValueError, "protocol version"):
                 parse_linux_resource_payload(resource_payload(protocol=retired))
 
@@ -273,6 +276,61 @@ class ProbeTests(unittest.TestCase):
             parse_workload_records(
                 "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t"
             )
+
+    def test_maps_container_runtime_workload_kinds(self) -> None:
+        workloads = parse_workload_records(
+            "WORKLOAD\t4242\tdocker\tdeadbeef1234\t\talice\t\t\t1754000000\tpython\n"
+            "WORKLOAD\t4243\tpodman\tcafebabe5678\t\tbob\t\t\t\t"
+        )
+
+        self.assertEqual(workloads[4242].kind, "docker")
+        self.assertEqual(workloads[4242].workload_id, "deadbeef1234")
+        self.assertEqual(workloads[4242].owner, "alice")
+        self.assertEqual(workloads[4243].kind, "podman")
+        self.assertEqual(workloads[4243].workload_id, "cafebabe5678")
+
+    def test_parses_pressure_stall_records(self) -> None:
+        raw, _, _ = parse_linux_resource_payload(
+            resource_payload(
+                psi_payload=(
+                    "PSI\tcpu\t1.5\t0.8\t\t\n"
+                    "PSI\tmemory\t12.25\t8.5\t3.75\t2.1\n"
+                    "PSI\tio\t45\t30.5\t20\t15"
+                )
+            )
+        )
+        pressure = raw.pressure
+        self.assertIsNotNone(pressure)
+        self.assertEqual(pressure.cpu.some_avg10, 1.5)
+        self.assertEqual(pressure.cpu.some_avg60, 0.8)
+        # The kernel omits the CPU full line on older releases.
+        self.assertIsNone(pressure.cpu.full_avg10)
+        self.assertIsNone(pressure.cpu.full_avg60)
+        self.assertEqual(pressure.memory.some_avg60, 8.5)
+        self.assertEqual(pressure.memory.full_avg10, 3.75)
+        self.assertEqual(pressure.io.some_avg10, 45)
+        self.assertEqual(pressure.io.full_avg60, 15)
+
+        # Kernels without CONFIG_PSI emit nothing: pressure stays unknown.
+        raw, _, _ = parse_linux_resource_payload(resource_payload())
+        self.assertIsNone(raw.pressure)
+
+    def test_rejects_malformed_pressure_records(self) -> None:
+        malformed = (
+            "PSI\tmemory\t1.0\t2.0",  # missing full columns
+            "PSI\tswap\t1.0\t2.0\t\t",  # unknown resource
+            "PSI\tmemory\t\t2.0\t\t",  # missing required some average
+            "PSI\tmemory\t101\t2.0\t\t",  # out of the percentage range
+            "PSI\tmemory\t-1\t2.0\t\t",  # negative average
+            "PSI\tmemory\t1.0\t2.0\tabc\t",  # non-numeric full average
+            "PSI\tmemory\t1.0\t2.0\t\t\nPSI\tmemory\t1.0\t2.0\t\t",  # duplicate
+        )
+        for psi_payload in malformed:
+            with (
+                self.subTest(psi_payload=psi_payload),
+                self.assertRaisesRegex(ValueError, "pressure"),
+            ):
+                parse_linux_resource_payload(resource_payload(psi_payload=psi_payload))
 
     def test_rejects_unknown_resource_protocol(self) -> None:
         with self.assertRaisesRegex(ValueError, "protocol version"):
@@ -327,7 +385,7 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("ServerAliveCountMax=2", arguments)
         self.assertEqual(arguments[arguments.index("--") + 1], "gpu-1")
         self.assertEqual(arguments[-2:], ["sh", "-s"])
-        self.assertIn("MONITOR_V7", run.call_args.kwargs["input_text"])
+        self.assertIn("MONITOR_V8", run.call_args.kwargs["input_text"])
         self.assertIn("--query-compute-apps", run.call_args.kwargs["input_text"])
         self.assertIn(
             "ecc.errors.uncorrected.volatile.total",
@@ -342,6 +400,7 @@ class ProbeTests(unittest.TestCase):
             run.call_args.kwargs["input_text"],
         )
         self.assertIn("/proc/meminfo", run.call_args.kwargs["input_text"])
+        self.assertIn("/proc/pressure/memory", run.call_args.kwargs["input_text"])
         self.assertEqual(run.call_args.kwargs["max_output_bytes"], 2_097_152)
         self.assertNotIn("shell", run.call_args.kwargs)
 
@@ -357,6 +416,8 @@ class ProbeTests(unittest.TestCase):
         script = run.call_args.kwargs["input_text"]
         self.assertIn("workload_tier=2", script)
         self.assertIn("/proc/$process_pid/environ", script)
+        self.assertIn("docker[-\\/][0-9a-f]{12,64}", script)
+        self.assertIn("libpod-[0-9a-f]{12,64}", script)
         self.assertNotIn("scontrol", script)
         self.assertNotIn("kubectl", script)
 
@@ -474,12 +535,12 @@ class ProbeTests(unittest.TestCase):
             if "process_enabled=1" in script:
                 pid = next(due_processes)
                 payload = resource_payload(
-                    protocol="MONITOR_V7",
+                    protocol="MONITOR_V8",
                     process_payload=f"GPU-abc, {pid}, python, 2048",
                 )
             else:
                 payload = resource_payload(
-                    protocol="MONITOR_V7",
+                    protocol="MONITOR_V8",
                     process_payload="PROCESS_SKIPPED",
                 )
             return _BoundedProcessResult(0, payload, "")
@@ -542,13 +603,13 @@ class ProbeTests(unittest.TestCase):
         run.side_effect = (
             _BoundedProcessResult(
                 0,
-                resource_payload(protocol="MONITOR_V7"),
+                resource_payload(protocol="MONITOR_V8"),
                 "",
             ),
             _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V7",
+                    protocol="MONITOR_V8",
                     process_payload="PROCESS_ERROR\t1",
                 ),
                 "",
@@ -556,7 +617,7 @@ class ProbeTests(unittest.TestCase):
             _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V7",
+                    protocol="MONITOR_V8",
                     process_payload="GPU-abc, 4343, python, 1024",
                 ),
                 "",
@@ -695,7 +756,7 @@ class ProbeTests(unittest.TestCase):
             return _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V7",
+                    protocol="MONITOR_V8",
                     gpu_payload=idle_gpu,
                     process_payload="",
                 ),
@@ -734,7 +795,7 @@ class ProbeTests(unittest.TestCase):
             return _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V7",
+                    protocol="MONITOR_V8",
                     gpu_payload=next(payloads),
                     process_payload="",
                 ),
@@ -791,7 +852,7 @@ class ProbeTests(unittest.TestCase):
         )
 
         run.side_effect = subprocess.TimeoutExpired(
-            ["ssh"], 12, output=b"MONITOR_V7\nHOST\tnode-a\n"
+            ["ssh"], 12, output=b"MONITOR_V8\nHOST\tnode-a\n"
         )
         stalled = OpenSshLinuxResourceProbe().probe("gpu-1", config())
         # Partial output proves the transport reached the host, so a remote
@@ -1148,7 +1209,7 @@ class ProbeTests(unittest.TestCase):
             return _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V7",
+                    protocol="MONITOR_V8",
                     gpu_payload=next(payloads),
                     process_payload="",
                 ),
@@ -1224,7 +1285,7 @@ class ProbeTests(unittest.TestCase):
             )
             _, gpus, _ = parse_linux_resource_payload(
                 resource_payload(
-                    protocol="MONITOR_V7",
+                    protocol="MONITOR_V8",
                     gpu_payload=gpu,
                     process_payload="",
                 )
@@ -1244,7 +1305,7 @@ class ProbeTests(unittest.TestCase):
         # view while the core sample stays online.
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V7",
+                protocol="MONITOR_V8",
                 process_payload='GPU-abc, 4242, "' + "x" * 200_000 + '", 2048',
             )
         )
@@ -1264,7 +1325,7 @@ class ProbeTests(unittest.TestCase):
         # A container's overlay root is real capacity; the single-file mounts
         # a runtime injects report the host's filesystem and must not appear.
         payload = resource_payload(
-            protocol="MONITOR_V7",
+            protocol="MONITOR_V8",
             process_payload="",
         ).replace(
             "DISK\t/dev/sda1\text4\t104857600\t52428800\t52428800\t50\t/\n",
@@ -1339,7 +1400,7 @@ class ProbeTests(unittest.TestCase):
     def test_malformed_process_row_keeps_the_core_sample_online(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V7",
+                protocol="MONITOR_V8",
                 process_payload="GPU-abc, 0, python, 10",
             )
         )
@@ -1393,7 +1454,7 @@ class ProbeTests(unittest.TestCase):
     def test_malformed_workload_row_keeps_processes(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V7",
+                protocol="MONITOR_V8",
                 workload_payload="WORKLOAD\t4242\tbad-kind\t1\tx\troot\t\t",
             )
         )
@@ -1410,7 +1471,7 @@ class ProbeTests(unittest.TestCase):
         )
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V7",
+                protocol="MONITOR_V8",
                 gpu_payload=two,
                 process_payload="GPU-dup, 4242, python, 2048",
                 health_payload="",
@@ -1428,7 +1489,7 @@ class ProbeTests(unittest.TestCase):
         )
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V7",
+                protocol="MONITOR_V8",
                 gpu_payload=gpu,
                 process_payload="[N/A], 4242, python, 2048",
                 health_payload="",
