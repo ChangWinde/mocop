@@ -152,6 +152,63 @@ class LifecycleTests(unittest.TestCase):
 
         self.assertFalse(manager.unit_path.exists())
 
+    def build_manager(self, run) -> UserServiceManager:
+        config_path = self.root / "config.json"
+        initialize_config(config_path, ("gpu-01",))
+        return UserServiceManager(
+            config_path=config_path,
+            unit_path=self.root / "mocop.service",
+            python_executable=Path("/usr/bin/python3"),
+            run=run,
+        )
+
+    def test_wait_until_active_polls_is_active_through_the_runner(self) -> None:
+        calls: list[tuple[str, ...]] = []
+        responses = iter((3, 3, 0))
+
+        def run(arguments: tuple[str, ...]) -> int:
+            calls.append(arguments)
+            return next(responses)
+
+        sleeps: list[float] = []
+        manager = self.build_manager(run)
+
+        active = manager.wait_until_active(
+            timeout_seconds=5.0,
+            poll_interval_seconds=0.5,
+            sleep=sleeps.append,
+            clock=lambda: 0.5 * len(sleeps),
+        )
+
+        self.assertTrue(active)
+        # One settle delay precedes every check so an immediately crashing
+        # unit is never reported active.
+        self.assertEqual(sleeps, [0.5, 0.5, 0.5])
+        self.assertEqual(
+            calls,
+            [("systemctl", "--user", "is-active", "--quiet", "mocop.service")] * 3,
+        )
+
+    def test_wait_until_active_gives_up_at_the_deadline(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def run(arguments: tuple[str, ...]) -> int:
+            calls.append(arguments)
+            return 3
+
+        sleeps: list[float] = []
+        manager = self.build_manager(run)
+
+        active = manager.wait_until_active(
+            timeout_seconds=5.0,
+            poll_interval_seconds=0.5,
+            sleep=sleeps.append,
+            clock=lambda: 0.5 * len(sleeps),
+        )
+
+        self.assertFalse(active)
+        self.assertEqual(len(calls), 10)
+
     def test_status_is_read_only_and_uninstall_removes_only_its_unit(self) -> None:
         config_path = self.root / "config.json"
         initialize_config(config_path, ())

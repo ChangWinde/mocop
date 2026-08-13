@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import threading
@@ -72,18 +73,35 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="SSH host alias to monitor; repeat for multiple servers",
     )
 
+    config_parser = commands.add_parser(
+        "config", help="inspect the monitor configuration"
+    )
+    config_actions = config_parser.add_subparsers(dest="action", required=True)
+    check_parser = config_actions.add_parser(
+        "check",
+        help=(
+            "parse and validate the configuration without starting the web "
+            "server or opening SSH connections"
+        ),
+    )
+    check_parser.add_argument(
+        "--config", type=Path, default=None, help="configuration path to validate"
+    )
+
     service_parser = commands.add_parser(
         "service", help="manage the user-level systemd service"
     )
     service_actions = service_parser.add_subparsers(dest="action", required=True)
-    for action in ("install", "status", "uninstall"):
-        action_parser = service_actions.add_parser(action)
-        action_parser.add_argument(
-            "--config",
-            type=Path,
-            default=None,
-            help="configuration used by the service",
-        )
+    install_parser = service_actions.add_parser("install")
+    install_parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="configuration used by the service",
+    )
+    # status and uninstall operate on the fixed unit; they take no --config.
+    service_actions.add_parser("status")
+    service_actions.add_parser("uninstall")
 
     doctor_parser = commands.add_parser(
         "doctor",
@@ -111,6 +129,14 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "decompose collection latency per alias into transport, fixed "
             "script, and NVIDIA query stages"
+        ),
+    )
+    doctor_parser.add_argument(
+        "--probe",
+        action="store_true",
+        help=(
+            "run one production collection per alias and report status, "
+            "latency, GPU and process counts, and workload coverage"
         ),
     )
     doctor_parser.add_argument(
@@ -262,8 +288,48 @@ def _run_doctor(args: argparse.Namespace) -> int:
         host_filter=tuple(args.hosts),
         probe_connection=not args.no_connect,
         profile=args.profile,
+        collect=args.probe,
         as_json=args.json,
     )
+
+
+def _environment_state(name: str) -> str:
+    """Report whether a referenced environment variable is set, never its value."""
+    return "set" if os.environ.get(name) else "unset"
+
+
+def _run_config_check(args: argparse.Namespace) -> int:
+    """Parse and validate only: no web server, no SSH connections."""
+    config_path = resolve_config_path(args.config)
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
+    print(f"configuration OK: {config_path}")
+    local_note = f" (local: {config.local_host})" if config.local_host else ""
+    print(f"hosts: {len(config.hosts)}{local_note}")
+    print(f"persistence: {'enabled' if config.persistence.enabled else 'disabled'}")
+    print(f"workloads: {config.workloads.mode}")
+    if config.topology is None:
+        print("topology: none")
+    else:
+        print(f"topology: configured ({len(config.topology.links)} links)")
+    if not config.webhooks:
+        print("webhooks: none")
+        return 0
+    print(f"webhooks: {len(config.webhooks)}")
+    for webhook in config.webhooks:
+        references = [
+            f"url_env {webhook.url_env} ({_environment_state(webhook.url_env)})"
+        ]
+        if webhook.secret_env is not None:
+            references.append(
+                f"secret_env {webhook.secret_env} "
+                f"({_environment_state(webhook.secret_env)})"
+            )
+        print(f"  {webhook.name}: {', '.join(references)}")
+    return 0
 
 
 def _run_lifecycle(args: argparse.Namespace) -> int:
@@ -273,7 +339,8 @@ def _run_lifecycle(args: argparse.Namespace) -> int:
         print(f"Created configuration: {created}")
         if not args.hosts:
             print("Add SSH host aliases to the hosts list before starting mocop.")
-        print("Next: mocop service install")
+        print("Next: mocop doctor (verifies SSH reachability)")
+        print("Then: mocop service install")
         return 0
 
     config_path = (args.config or user_config_path()).expanduser().resolve()
@@ -284,7 +351,16 @@ def _run_lifecycle(args: argparse.Namespace) -> int:
     )
     if args.action == "install":
         manager.install()
-        print(f"Installed and started {manager.unit_path}")
+        # install() already validated this exact file, so a second load
+        # only recovers listen_host/listen_port for the dashboard URL.
+        config = load_config(config_path)
+        if manager.wait_until_active():
+            print(f"Installed and started {manager.unit_path}")
+            print(f"Dashboard: http://{config.listen_host}:{config.listen_port}")
+        else:
+            print(f"Installed {manager.unit_path}, but the service is not active yet")
+            print("Inspect it with: systemctl --user status mocop")
+        print("Logs: journalctl --user -u mocop -f")
         return 0
     if args.action == "status":
         return manager.status()
@@ -297,6 +373,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
     if args.command is None:
         return _run_monitor(args)
+    if args.command == "config":
+        return _run_config_check(args)
     if args.command == "doctor":
         return _run_doctor(args)
     try:

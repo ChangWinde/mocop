@@ -11,9 +11,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mocop import doctor
-from mocop.config import HostOverrideConfig, MonitorConfig
+from mocop.config import HostOverrideConfig, MonitorConfig, WorkloadConfig
 from mocop.diagnostics import diagnose_condition
 from mocop.doctor import run_doctor
+from mocop.models import GpuMetrics, GpuProcess, ProbeResult, WorkloadMetadata
 from mocop.probe import _BoundedProcessResult, _ProcessOutputLimitExceeded
 
 
@@ -24,6 +25,7 @@ def config(
     max_workers: int = 1,
     poll_interval_seconds: float = 5,
     host_overrides: tuple[tuple[str, HostOverrideConfig], ...] = (),
+    workloads: WorkloadConfig | None = None,
 ):
     return MonitorConfig(
         ssh_config=Path("/tmp/ssh-config"),
@@ -38,7 +40,45 @@ def config(
         listen_port=8787,
         local_host=local_host,
         host_overrides=host_overrides,
+        workloads=workloads or WorkloadConfig(),
     )
+
+
+def gpu(index: int = 0, processes: tuple[GpuProcess, ...] = ()) -> GpuMetrics:
+    return GpuMetrics(
+        index=index,
+        uuid=f"GPU-{index}",
+        name="Test GPU",
+        driver_version="550.00",
+        pstate=None,
+        temperature_c=None,
+        utilization_gpu_pct=None,
+        utilization_memory_pct=None,
+        memory_total_mib=None,
+        memory_used_mib=None,
+        memory_free_mib=None,
+        power_draw_w=None,
+        power_limit_w=None,
+        processes=processes,
+    )
+
+
+class FakeCollectionProbe:
+    """Stands in for the production probe; never spawns SSH."""
+
+    def __init__(self, results: dict[str, ProbeResult] | None = None) -> None:
+        self.results = results or {}
+        self.calls: list[str] = []
+        self.closed = False
+
+    def probe(self, host: str, _config: MonitorConfig) -> ProbeResult:
+        self.calls.append(host)
+        return self.results.get(
+            host, ProbeResult(host=host, status="online", latency_ms=100)
+        )
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def ssh_g_output(
@@ -56,9 +96,6 @@ def ssh_g_output(
         f"controlmaster {controlmaster}",
         f"controlpath {controlpath}",
         f"controlpersist {controlpersist}",
-        "serveraliveinterval 0",
-        "serveralivecountmax 3",
-        "stricthostkeychecking ask",
     ]
     if proxyjump:
         lines.append(f"proxyjump {proxyjump}")
@@ -597,6 +634,266 @@ class DoctorTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("remote profiling output was not recognized", output)
+
+    def patch_collection_probe(
+        self, results: dict[str, ProbeResult] | None = None
+    ) -> list[FakeCollectionProbe]:
+        """Replace the production probe class; return the created instances."""
+        created: list[FakeCollectionProbe] = []
+
+        def factory() -> FakeCollectionProbe:
+            probe = FakeCollectionProbe(results)
+            created.append(probe)
+            return probe
+
+        patcher = patch("mocop.doctor.OpenSshLinuxResourceProbe", factory)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return created
+
+    def test_collect_requires_connection_tests(self) -> None:
+        code, _ = self.run_doctor(config(), probe_connection=False, collect=True)
+        self.assertEqual(code, 2)
+
+    def test_collect_reserves_one_extra_budget_stage(self) -> None:
+        base = doctor._host_budget_seconds("gpu-1", config())
+        collecting = doctor._host_budget_seconds("gpu-1", config(), collect=True)
+        self.assertEqual(base, 10 + 3 * 12)
+        self.assertEqual(collecting, 10 + 4 * 12)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_collection_probe_reports_production_summary(self, run) -> None:
+        processes = (
+            GpuProcess(
+                pid=4242,
+                name="python",
+                used_memory_mib=2048.0,
+                workload=WorkloadMetadata(kind="process"),
+            ),
+            GpuProcess(pid=4243, name="python", used_memory_mib=1024.0),
+        )
+        created = self.patch_collection_probe(
+            {
+                "gpu-1": ProbeResult(
+                    host="gpu-1",
+                    status="online",
+                    latency_ms=321,
+                    gpus=(gpu(0, processes=processes), gpu(1)),
+                )
+            }
+        )
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+        )
+
+        code, output = self.run_doctor(
+            config(workloads=WorkloadConfig(mode="identity")),
+            collect=True,
+            as_json=True,
+        )
+
+        self.assertEqual(code, 0)
+        report = json.loads(output)
+        self.assertEqual(
+            report["hosts"][0]["probe"],
+            {
+                "status": "online",
+                "latencyMs": 321,
+                "gpuCount": 2,
+                "processCount": 2,
+                "workloadCoveragePct": 50.0,
+                "message": None,
+            },
+        )
+        self.assertEqual(created[0].calls, ["gpu-1"])
+        self.assertTrue(created[0].closed)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_collection_probe_text_report_and_disabled_workloads(self, run) -> None:
+        processes = (GpuProcess(pid=4242, name="python", used_memory_mib=2048.0),)
+        self.patch_collection_probe(
+            {
+                "gpu-1": ProbeResult(
+                    host="gpu-1",
+                    status="online",
+                    latency_ms=321,
+                    gpus=(gpu(0, processes=processes),),
+                )
+            }
+        )
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+        )
+
+        code, output = self.run_doctor(config(), collect=True)
+
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "probe: online (321 ms, 1 GPUs, 1 processes, workload coverage n/a)",
+            output,
+        )
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_collection_probe_failure_fails_doctor(self, run) -> None:
+        self.patch_collection_probe(
+            {
+                "gpu-1": ProbeResult(
+                    host="gpu-1",
+                    status="unreachable",
+                    latency_ms=12000,
+                    message="SSH produced no output before the collection timeout",
+                )
+            }
+        )
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+        )
+
+        code, output = self.run_doctor(config(), collect=True, as_json=True)
+
+        self.assertEqual(code, 1)
+        report = json.loads(output)
+        self.assertEqual(report["status"], "failed")
+        probe_report = report["hosts"][0]["probe"]
+        self.assertEqual(probe_report["status"], "unreachable")
+        self.assertIn("no output", probe_report["message"])
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_collection_probe_is_skipped_when_transport_failed(self, run) -> None:
+        created = self.patch_collection_probe()
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(255, stdout="", stderr="Permission denied"),
+            _BoundedProcessResult(255, stdout="", stderr="Permission denied"),
+        )
+
+        code, output = self.run_doctor(config(), collect=True, as_json=True)
+
+        self.assertEqual(code, 1)
+        self.assertNotIn("probe", json.loads(output)["hosts"][0])
+        self.assertEqual(created[0].calls, [])
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_collection_probe_is_shared_across_hosts(self, run) -> None:
+        created = self.patch_collection_probe()
+
+        def fake_run(command, **kwargs):
+            if "-G" in command:
+                return _BoundedProcessResult(0, stdout=ssh_g_output(), stderr="")
+            return _BoundedProcessResult(0, stdout="", stderr="")
+
+        run.side_effect = fake_run
+
+        code, _ = self.run_doctor(
+            config(hosts=("gpu-1", "gpu-2")), collect=True, as_json=True
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].calls, ["gpu-1", "gpu-2"])
+        self.assertTrue(created[0].closed)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_collection_stage_respects_the_host_budget(self, run) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+            _BoundedProcessResult(0, stdout="", stderr=""),
+        )
+        fake = FakeCollectionProbe()
+        real_stage = doctor._stage_timeout
+        stage_calls: list[float] = []
+
+        def stage(deadline: float, stage_timeout_seconds: float) -> float | None:
+            stage_calls.append(stage_timeout_seconds)
+            # Stage 4 is the collection run: resolve, cold, reuse came first.
+            if len(stage_calls) == 4:
+                return None
+            return real_stage(deadline, stage_timeout_seconds)
+
+        with patch("mocop.doctor._stage_timeout", side_effect=stage):
+            report = doctor._diagnose_host(
+                "gpu-1", config(), probe_connection=True, collection_probe=fake
+            )
+
+        self.assertEqual(
+            report["probe"], {"failure": "host diagnosis time budget exhausted"}
+        )
+        self.assertEqual(fake.calls, [])
+        self.assertTrue(doctor._report_failed(report))
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_shared_controlpath_across_aliases_warns_each_alias(self, run) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shared_path = str(Path(directory) / "fixed-socket")
+
+            def fake_run(command, **kwargs):
+                return _BoundedProcessResult(
+                    0,
+                    stdout=ssh_g_output(
+                        controlmaster="auto",
+                        controlpath=shared_path,
+                        controlpersist="600",
+                    ),
+                    stderr="",
+                )
+
+            run.side_effect = fake_run
+
+            code, output = self.run_doctor(
+                config(hosts=("gpu-1", "gpu-2")),
+                probe_connection=False,
+                as_json=True,
+            )
+
+        self.assertEqual(code, 0)
+        report = json.loads(output)
+        for alias, peer in (("gpu-1", "gpu-2"), ("gpu-2", "gpu-1")):
+            entry = next(host for host in report["hosts"] if host["alias"] == alias)
+            warning = next(
+                warning
+                for warning in entry["warnings"]
+                if "ControlPath" in warning and "wrong host" in warning
+            )
+            self.assertIn("2 aliases", warning)
+            self.assertIn(peer, warning)
+        # The expanded path may contain the remote user, host, and port; the
+        # warning names only the affected aliases.
+        self.assertNotIn("fixed-socket", output)
+        self.assertNotIn("_controlPath", output)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_distinct_controlpaths_do_not_warn(self, run) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            socket_dir = Path(directory) / "sockets"
+            socket_dir.mkdir(mode=0o700)
+
+            def fake_run(command, **kwargs):
+                alias = command[-1]
+                return _BoundedProcessResult(
+                    0,
+                    stdout=ssh_g_output(
+                        controlmaster="auto",
+                        controlpath=str(socket_dir / f"probe@{alias}:22"),
+                        controlpersist="600",
+                    ),
+                    stderr="",
+                )
+
+            run.side_effect = fake_run
+
+            code, output = self.run_doctor(
+                config(hosts=("gpu-1", "gpu-2")), probe_connection=False
+            )
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("wrong host", output)
 
 
 class ServiceStalenessTests(unittest.TestCase):
