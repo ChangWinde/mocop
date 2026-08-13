@@ -288,7 +288,9 @@ try {
   assert.equal(final.serverRatio, "2 / 3");
   assert.equal(final.totalGpus, "8");
   assert.match(final.persistenceStatus, /仅内存/);
-  assert.equal(final.notificationStatus, "未配置");
+  // "\u6295\u9012\u5f02\u5e38" = delivery unhealthy (one endpoint failing).
+  assert.match(final.notificationStatus, /\u6295\u9012\u5F02\u5E38/);
+  assert.match(final.notificationStatus, /3 \u6B21\u5931\u8D25/);
   assert.equal(final.gpuGroups, 2);
   assert.equal(final.expandedGroups, 0);
   assert.equal(final.heatmapVisible, true);
@@ -316,6 +318,21 @@ try {
   })()`, true);
   assert.notEqual(transientConnection.immediate, "正在重连");
   assert.match(transientConnection.className, /live/);
+
+  // Named SSE heartbeats (newer service) must refresh the liveness clock so
+  // the 15s staleness fallback stops issuing redundant snapshot polls.
+  const heartbeat = await cdp.evaluate(`(() => {
+    view.lastEventAt = 0;
+    window.__mocopEventSource.dispatchEvent(
+      new MessageEvent("heartbeat", { data: "{}" }),
+    );
+    return {
+      updated: view.lastEventAt > 0,
+      connectionClass: document.querySelector("#connection")?.className || "",
+    };
+  })()`);
+  assert.equal(heartbeat.updated, true, "named heartbeat refreshes lastEventAt");
+  assert.match(heartbeat.connectionClass, /live/);
 
   const topology = await cdp.evaluate(`(async () => {
     for (let attempt = 0; attempt < 40 && !document.querySelector("#topology-toggle"); attempt += 1) {
@@ -495,6 +512,7 @@ try {
       hostChips: [...row.querySelectorAll(".capacity-devices span")].map(
         (chip) => chip.textContent,
       ),
+      cardTitle: row.title || "",
     });
     const researcherRows = rows.filter(
       (row) => row.querySelector("strong")?.textContent === "researcher",
@@ -509,6 +527,7 @@ try {
       unattributed: rows.length > 1 ? rowInfo(rows[1]) : null,
       firstVram: rows[0]?.querySelector("em")?.textContent,
       summary: document.querySelector("#owners-summary")?.textContent,
+      offlineNote: document.querySelector("#owners-results .owners-footnote")?.textContent || "",
       centerDelta: Math.abs((rect.left + rect.right) / 2 - document.documentElement.clientWidth / 2),
     };
     dialog.close();
@@ -532,6 +551,14 @@ try {
   assert.match(owners.summary, /共占用至少 264\.8 GiB/);
   assert.match(owners.summary, /部分进程显存未知/);
   assert(owners.centerDelta < 2);
+  // The stale atlas-03 keeps last-success processes but is offline: it stays
+  // out of "current" owners, disclosed by the footnote. "\u53f0\u79bb\u7ebf
+  // \u8282\u70b9\u672a\u8ba1\u5165" = offline hosts excluded; "\u6570\u636e
+  // \u622a\u81f3" = data-cutoff wording from processes_observed_at.
+  assert.match(owners.offlineNote, /1 \u53F0\u79BB\u7EBF\u8282\u70B9\u672A\u8BA1\u5165/);
+  assert.match(owners.summary, /\u6570\u636E\u622A\u81F3/);
+  // Unattributed card hints at the opt-in identity layer (title only).
+  assert.match(owners.unattributed.cardTitle, /workloads\.mode=identity/);
 
   const grouping = await cdp.evaluate(`(() => {
     const sort = document.querySelector("#server-sort");
@@ -552,6 +579,54 @@ try {
   assert.deepEqual(grouping.headings, ["Lab", "Training"]);
   assert.deepEqual(grouping.groups, ["Lab", "Training", "Training"]);
   assert.deepEqual(grouping.order, ["atlas-03", "atlas-01", "atlas-02"]);
+
+  // Zero configured nodes must not read as "all servers healthy". The
+  // fixture always has nodes, so exercise the state on a synthetic snapshot.
+  const emptyFleet = await cdp.evaluate(`(() => {
+    const originalSnapshot = view.snapshot;
+    view.snapshot = {
+      ...originalSnapshot,
+      servers: [],
+      stats: {
+        ...originalSnapshot.stats,
+        servers: 0, onlineServers: 0, issueServers: 0,
+        actionableIssueServers: 0, incidentServers: 0,
+        actionableIncidentServers: 0, maintenanceServers: 0,
+        staleServers: 0, pollingServers: 0,
+        activeIncidents: 0, criticalIncidents: 0,
+        actionableIncidents: 0, actionableCriticalIncidents: 0,
+        gpus: 0, busyGpus: 0, memoryTotalMiB: 0, memoryUsedMiB: 0,
+        cpuAveragePct: null, cpuCores: 0,
+        systemMemoryTotalMiB: 0, systemMemoryUsedMiB: 0,
+      },
+    };
+    render();
+    const health = document.querySelector("#server-health")?.textContent || "";
+    const detail = document.querySelector("#server-detail")?.textContent || "";
+    const guide = document.querySelector("#server-detail .empty-fleet-action");
+    let settingsOpened = false;
+    if (guide) {
+      guide.click();
+      settingsOpened = document.querySelector("#settings-dialog").open;
+      document.querySelector("#settings-dialog").close();
+    }
+    view.snapshot = originalSnapshot;
+    render();
+    return {
+      health,
+      detail,
+      hasGuide: Boolean(guide),
+      settingsOpened,
+      restoredHealth: document.querySelector("#server-health")?.textContent || "",
+    };
+  })()`);
+  // "\u672a\u914d\u7f6e" = unconfigured badge; the detail line reads
+  // "\u5c1a\u672a\u914d\u7f6e\u76d1\u63a7\u8282\u70b9" with a guide button.
+  assert.equal(emptyFleet.health, "\u672A\u914D\u7F6E");
+  assert.match(emptyFleet.detail, /\u5C1A\u672A\u914D\u7F6E\u76D1\u63A7\u8282\u70B9/);
+  assert.equal(emptyFleet.hasGuide, true);
+  assert.equal(emptyFleet.settingsOpened, true, "guide button opens settings scan");
+  assert.notEqual(emptyFleet.restoredHealth, "\u672A\u914D\u7F6E");
 
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 1440,
@@ -868,6 +943,19 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     const maintenanceBadge = document.querySelector("#configured-host-list .maintenance-badge")?.textContent;
+    const planBadgeNode = document.querySelector("#configured-host-list .maintenance-plan-badge");
+    const planBadge = planBadgeNode?.textContent || "";
+    const planBadgeInactive = Boolean(planBadgeNode?.classList.contains("inactive"));
+    const planBadgeTitle = planBadgeNode?.title || "";
+    const endpointsHidden = document.querySelector("#notification-endpoints").hidden;
+    const endpointRows = [...document.querySelectorAll(
+      "#notification-endpoints .notification-endpoint",
+    )].map((row) => ({
+      name: row.querySelector("strong")?.textContent || "",
+      state: row.querySelector("em")?.textContent || "",
+      stateClass: row.querySelector("em")?.className || "",
+      meta: row.querySelector("small")?.textContent || "",
+    }));
     document.querySelector("#available-host-list .inventory-host-action").click();
     for (let attempt = 0; attempt < 20 && document.querySelector("#configured-host-count").textContent !== "4"; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -941,6 +1029,11 @@ try {
       maintenanceWindows: persistedCollector.maintenanceWindows,
       hostGroups: persistedCollector.hostGroups,
       maintenanceBadge,
+      planBadge,
+      planBadgeInactive,
+      planBadgeTitle,
+      endpointsHidden,
+      endpointRows,
       gpuSort: document.querySelector("#gpu-sort").value,
       powerHidden: document.body.classList.contains("hide-gpu-power"),
       taskDialogOpen: taskDialog.open,
@@ -952,6 +1045,7 @@ try {
       taskNames: document.querySelector("#gpu-task-list").textContent,
       taskProcessRows: document.querySelectorAll("#gpu-task-list .gpu-task").length,
       taskMemoryTotal: document.querySelector("#gpu-task-memory-total")?.textContent || "",
+      taskNoteTitle: document.querySelector("#gpu-task-note")?.title || "",
       taskFirstMemoryShare: document.querySelector("#gpu-task-list .gpu-task-memory small")?.textContent || "",
       taskContext: document.querySelector("#gpu-task-list .gpu-task-workload")?.textContent || "",
       healthMetrics: document.querySelector("#gpu-detail-metrics").textContent,
@@ -976,6 +1070,7 @@ try {
     result.boundedTaskCount = document.querySelector("#gpu-task-count").textContent;
     result.boundedTaskRows = document.querySelectorAll("#gpu-task-list .gpu-task").length;
     result.boundedTaskNote = document.querySelector("#gpu-task-note").textContent;
+    result.boundedTaskNoteTitle = document.querySelector("#gpu-task-note").title;
     selectedRecord.gpu.processes = originalProcesses;
     renderGpuDetail();
     taskDialog.close();
@@ -1056,12 +1151,42 @@ try {
   assert.equal(personalization.collectorSettings.probeTimeoutSeconds, 24);
   assert.equal(personalization.collectorSettings.maxWorkers, 6);
   assert.equal(personalization.maintenanceWindows["atlas-01"].reason, "Driver upgrade");
+  assert.equal(personalization.maintenanceWindows["atlas-01"].active, true);
   assert.equal(personalization.hostGroups["atlas-01"], "Priority");
+  // atlas-02 carries a planned recurring window (active: false): the badge
+  // "\u6bcf\u5468\u7ef4\u62a4\u8ba1\u5212" renders grayed with the next
+  // window in its title, while the live "\u7ef4\u62a4\u81f3" badge stays
+  // reserved for active windows.
+  assert.equal(personalization.planBadge, "\u6BCF\u5468\u7EF4\u62A4\u8BA1\u5212");
+  assert.equal(personalization.planBadgeInactive, true);
+  assert.match(personalization.planBadgeTitle, /Weekly firmware inspection/);
+  // "\u4e0b\u6b21\u7a97\u53e3\u81f3" = next-window-until prefix.
+  assert.match(personalization.planBadgeTitle, /\u4E0B\u6B21\u7A97\u53E3\u81F3/);
+  // Per-endpoint webhook state from snapshot.notifications.endpoints.
+  assert.equal(personalization.endpointsHidden, false);
+  assert.equal(personalization.endpointRows.length, 2);
+  assert.equal(personalization.endpointRows[0].name, "ops-webhook");
+  assert.match(personalization.endpointRows[0].stateClass, /success/);
+  // "\u5f85\u53d1" = queued deliveries; "\u7d2f\u8ba1\u5931\u8d25" = dropped.
+  assert.match(personalization.endpointRows[0].meta, /\u5F85\u53D1 2/);
+  assert.match(personalization.endpointRows[0].meta, /\u6700\u8FD1\u6210\u529F/);
+  assert.equal(personalization.endpointRows[1].name, "sms-bridge");
+  assert.match(personalization.endpointRows[1].stateClass, /error/);
+  assert.equal(personalization.endpointRows[1].state, "HTTP 503 from relay");
+  assert.match(personalization.endpointRows[1].meta, /\u7D2F\u8BA1\u5931\u8D25 3/);
   assert.match(personalization.maintenanceBadge, /维护至/);
   assert.equal(personalization.gpuSort, "memory");
   assert.equal(personalization.powerHidden, true);
   assert.equal(personalization.taskDialogOpen, true);
   assert(personalization.taskDialogCenterDelta < 2);
+  // Freshness title explains the attended sampling cadence
+  // ("\u65e0\u4eba\u67e5\u770b\u65f6\u91c7\u6837\u81ea\u52a8\u653e\u7f13");
+  // the identity hint only appears when no process carries workload metadata.
+  assert.match(
+    personalization.taskNoteTitle,
+    /\u65E0\u4EBA\u67E5\u770B\u65F6\u91C7\u6837\u81EA\u52A8\u653E\u7F13/,
+  );
+  assert(!personalization.taskNoteTitle.includes("workloads.mode=identity"));
   assert.equal(personalization.taskCount, "2");
   assert.equal(personalization.taskProcessRows, 2);
   assert.match(personalization.taskNames, /train\.py/);
@@ -1073,6 +1198,7 @@ try {
   assert.match(personalization.taskContext, /队列 gpu-long/);
   assert.equal(personalization.boundedTaskCount, "101");
   assert.equal(personalization.boundedTaskRows, 100);
+  assert.match(personalization.boundedTaskNoteTitle, /workloads\.mode=identity/);
   assert.match(personalization.boundedTaskNote, /101 个进程/);
   assert.match(personalization.boundedTaskNote, /最高的 100 个/);
   assert.match(personalization.healthMetrics, /硬件健康正常/);
@@ -1172,6 +1298,90 @@ try {
   assert.equal(gpuTasks.unavailableCount, "\u2014");
   // "\u4efb\u52a1\u6570\u636e\u6682\u4e0d\u53ef\u7528" = tasks unavailable notice.
   assert.match(gpuTasks.unavailableText, /\u4efb\u52a1\u6570\u636e\u6682\u4e0d\u53ef\u7528/);
+
+  const resilience = await cdp.evaluate(`(async () => {
+    // Dialog close events fire from queued tasks; flush any close pending
+    // from earlier steps before reopening, or it would wipe this test state.
+    document.querySelector("#gpu-detail-dialog").close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const server = view.snapshot.servers.find((item) => item.host === "atlas-01");
+    const gpu = server.gpus.find((item) => item.index === 0);
+    openGpuDetail(server, gpu);
+    // Supersede the in-flight load with a request the service rejects (404):
+    // the failure must render as a failure and schedule a bounded retry.
+    syncGpuHistory({
+      server: { host: "atlas-01", lastSuccessAt: "2031-01-01T00:00:00Z" },
+      gpu: { uuid: "GPU-DEMO-MISSING", index: 9 },
+    });
+    // Mark the real record as already loaded so the per-second snapshot
+    // renders cannot start a competing fetch that would supersede the
+    // failing request this test observes.
+    view.gpuHistoryKey = server.host + "|" + gpu.uuid + "|" + (server.lastSuccessAt || "");
+    for (
+      let attempt = 0;
+      attempt < 80 && (!view.gpuHistoryError || view.gpuHistoryLoading);
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const errorFlag = view.gpuHistoryError;
+    const retryScheduled = view.gpuHistoryRetryTimer != null;
+    const retryDelayMs = view.gpuHistoryRetryDelayMs;
+    // Re-render synchronously so the DOM reads cannot race the per-second
+    // snapshot renders that may refetch the real history.
+    renderGpuHistory();
+    const failureText = document.querySelector("#gpu-history-grid")?.textContent || "";
+    const timelineText = document.querySelector("#gpu-process-timeline")?.textContent || "";
+    document.querySelector("#gpu-detail-dialog").close();
+    // The dialog close event is dispatched from a queued task.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const cleanedUp = view.gpuHistoryRetryTimer == null
+      && view.gpuTaskRowCache.size === 0
+      && document.querySelector("#gpu-task-list").children.length === 0
+      && document.querySelector("#gpu-history-grid").children.length === 0;
+
+    view.incidentSyncFailed = true;
+    renderAttention();
+    const attentionError = document.querySelector(
+      "#attention-list .attention-sync-error",
+    )?.textContent || "";
+    const attentionVisible = !document.querySelector("#attention-panel").hidden;
+    view.incidentSyncFailed = false;
+    renderAttention();
+    const attentionErrorCleared = !document.querySelector(
+      "#attention-list .attention-sync-error",
+    );
+
+    selectHost("atlas-01");
+    const tile = document.querySelector("#resource-grid .resource-tile");
+    render();
+    const panelReused = tile != null
+      && tile === document.querySelector("#resource-grid .resource-tile");
+    selectHost("all");
+    return {
+      failureText, timelineText, errorFlag, retryScheduled, retryDelayMs,
+      cleanedUp, attentionError, attentionVisible, attentionErrorCleared,
+      panelReused,
+    };
+  })()`, true);
+  // "\u5386\u53f2\u8bfb\u53d6\u5931\u8d25\uff0c\u7a0d\u540e\u91cd\u8bd5"
+  // = history load failed, retrying soon (not the fake "no samples" copy).
+  assert.match(resilience.failureText, /\u5386\u53F2\u8BFB\u53D6\u5931\u8D25\uFF0C\u7A0D\u540E\u91CD\u8BD5/);
+  assert.match(resilience.timelineText, /\u5386\u53F2\u8BFB\u53D6\u5931\u8D25/);
+  assert.equal(resilience.errorFlag, true);
+  assert.equal(resilience.retryScheduled, true, "failed gpu history schedules a retry");
+  assert.equal(resilience.retryDelayMs, 4000);
+  assert.equal(resilience.cleanedUp, true, "closing the dialog clears caches and retry");
+  // "\u544a\u8b66\u8be6\u60c5\u52a0\u8f7d\u5931\u8d25\uff0c\u6b63\u5728\u91cd\u8bd5"
+  // = alert-details load failed, retrying (attention panel stays visible).
+  assert.match(resilience.attentionError, /\u544A\u8B66\u8BE6\u60C5\u52A0\u8F7D\u5931\u8D25\uFF0C\u6B63\u5728\u91CD\u8BD5/);
+  assert.equal(resilience.attentionVisible, true);
+  assert.equal(resilience.attentionErrorCleared, true);
+  assert.equal(
+    resilience.panelReused,
+    true,
+    "selected-host resource panel skips rebuild without a data change",
+  );
 
   const reloaded = cdp.waitFor("Page.loadEventFired");
   await cdp.send("Page.reload");
@@ -1366,28 +1576,30 @@ try {
     removeDisabled: true,
     status: "背景已从当前浏览器移除",
   });
-  await cdp.evaluate(`localStorage.setItem(
-    "mocop.preferences.v1",
-    JSON.stringify({ theme: "aurora" })
-  )`);
-  const legacyReload = cdp.waitFor("Page.loadEventFired");
-  await cdp.send("Page.reload");
-  await legacyReload;
-  const legacyAppearance = await cdp.evaluate(`(() => ({
-    visualStyle: document.documentElement.dataset.style,
-    accent: document.documentElement.dataset.accent,
-  }))()`);
-  assert.deepEqual(legacyAppearance, {
-    visualStyle: "blueprint",
-    accent: "cyan",
-  });
+  // Service metadata endpoint (new contract) plus the end-to-end viewer
+  // marker audit: every dashboard-initiated read of the level-triggered API
+  // paths must have carried X-Monitor-Request, or SSE-outage polling would
+  // drop the page back to the unattended sampling cadence.
+  const meta = await (
+    await fetch(`http://127.0.0.1:${monitorPort}/api/meta`)
+  ).json();
+  assert.equal(meta.apiVersion, 1);
+  assert.equal(typeof meta.appVersion, "string");
+  assert.equal(typeof meta.schemaVersion, "number");
+  assert.equal(meta.capabilities.restartSupported, false);
+  assert(Array.isArray(meta.endpoints) && meta.endpoints.includes("/api/snapshot"));
+  assert.equal(
+    meta.fixture.unmarkedDashboardReads,
+    0,
+    "all dashboard reads carry the X-Monitor-Request marker",
+  );
   assert.deepEqual(cdp.errors, []);
 
   console.log(JSON.stringify({
-    browser: "chrome", initial, final, transientConnection, topologyBenchmark,
-    capacity, grouping, personalization, gpuTasks,
-    persistedAppearance, persistedTaskSort, mobile, removedBackground,
-    legacyAppearance,
+    browser: "chrome", initial, final, transientConnection, heartbeat,
+    topologyBenchmark, capacity, owners, grouping, emptyFleet,
+    personalization, gpuTasks, resilience,
+    persistedAppearance, persistedTaskSort, mobile, removedBackground, meta,
   }));
 } catch (error) {
   console.error(error);

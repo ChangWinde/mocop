@@ -5,6 +5,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+from mocop import __version__
 from mocop.inventory import InventoryRequestError
 from mocop.models import (
     DiskMetrics,
@@ -16,7 +17,17 @@ from mocop.models import (
     WorkloadMetadata,
 )
 from mocop.service import StateStore
-from mocop.web import MonitorHttpServer
+from mocop.web import MonitorHttpServer, MonitorRequestHandler
+
+# The dashboard marks every read it initiates so the service keeps the
+# attended probe cadence; these level-triggered paths accept unmarked reads
+# (curl, scripts) but the dashboard itself must never send one.
+_TRACKED_DASHBOARD_PATHS = frozenset(
+    {"/api/snapshot", "/api/history", "/api/gpu-history", "/api/incidents"}
+)
+_COLLECTOR_SETTINGS_KEYS = frozenset(
+    {"pollIntervalSeconds", "probeTimeoutSeconds", "maxWorkers"}
+)
 
 
 class DemoInventory:
@@ -28,8 +39,20 @@ class DemoInventory:
             "pollIntervalSeconds": 5,
             "probeTimeoutSeconds": 15,
             "maxWorkers": 8,
+            # Read-only on the new contract: surfaced so the dashboard can
+            # explain the probe-timeout lower bound.
+            "connectTimeoutSeconds": 5,
         }
-        self.maintenance_windows: dict[str, dict[str, str]] = {}
+        # New contract: planned recurring windows are delivered even outside
+        # their live period, flagged by "active".
+        self.maintenance_windows: dict[str, dict[str, object]] = {
+            "atlas-02": {
+                "until": "2030-06-15T02:00:00Z",
+                "reason": "Weekly firmware inspection",
+                "recurring": True,
+                "active": False,
+            }
+        }
         self.host_groups = {
             "atlas-01": "Training",
             "atlas-02": "Training",
@@ -107,6 +130,7 @@ class DemoInventory:
             self.maintenance_windows[host] = {
                 "until": "2030-06-15T12:30:00Z",
                 "reason": reason.strip(),
+                "active": True,
             }
         else:
             self.maintenance_windows.pop(host, None)
@@ -148,6 +172,111 @@ class DemoInventory:
                 }
             )
         return self.snapshot()
+
+
+class DemoNotificationSink:
+    """Webhook status sample: one healthy endpoint plus one failing one."""
+
+    def __init__(self, now: datetime) -> None:
+        self._endpoints = (
+            {
+                "name": "ops-webhook",
+                "healthy": True,
+                "queuedDeliveries": 2,
+                "deliveredEvents": 18,
+                "droppedDeliveries": 0,
+                "lastError": None,
+                "lastAttemptAt": _iso(now - timedelta(minutes=5)),
+                "lastSuccessAt": _iso(now - timedelta(minutes=5)),
+            },
+            {
+                "name": "sms-bridge",
+                "healthy": False,
+                "queuedDeliveries": 0,
+                "deliveredEvents": 4,
+                "droppedDeliveries": 3,
+                "lastError": "HTTP 503 from relay",
+                "lastAttemptAt": _iso(now - timedelta(minutes=2)),
+                "lastSuccessAt": None,
+            },
+        )
+
+    def publish(self, events: object, correlations: object) -> None:
+        del events, correlations
+
+    def set_actionable_check(self, check: object) -> None:
+        del check
+
+    def status(self) -> dict[str, object]:
+        endpoints = [dict(endpoint) for endpoint in self._endpoints]
+        return {
+            "enabled": True,
+            "healthy": all(bool(endpoint["healthy"]) for endpoint in endpoints),
+            "queuedDeliveries": sum(
+                int(endpoint["queuedDeliveries"]) for endpoint in endpoints
+            ),
+            "droppedDeliveries": sum(
+                int(endpoint["droppedDeliveries"]) for endpoint in endpoints
+            ),
+            "endpoints": endpoints,
+        }
+
+    def test(self) -> bool:
+        return True
+
+    def close(self, timeout_seconds: float = 5.0) -> None:
+        del timeout_seconds
+
+
+class DemoRequestHandler(MonitorRequestHandler):
+    """Simulates the in-progress backend contract on top of the current web
+    module: /api/meta, subset bodies on /api/settings/collector, and a
+    counter for dashboard-path reads that arrive without the viewer marker.
+    """
+
+    def _respond_to_read_request(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if (
+            path in _TRACKED_DASHBOARD_PATHS
+            and self.headers.get("X-Monitor-Request") != "dashboard"
+        ):
+            self.monitor_server.unmarked_dashboard_reads += 1
+        if path == "/api/meta":
+            self._send_json(
+                {
+                    "apiVersion": 1,
+                    "appVersion": __version__,
+                    "schemaVersion": 1,
+                    "capabilities": {
+                        "restartSupported": self.monitor_server.restart is not None,
+                    },
+                    "endpoints": sorted(_TRACKED_DASHBOARD_PATHS)
+                    + ["/api/events", "/api/inventory", "/api/topology"],
+                    # Fixture-only diagnostics; extra keys are allowed by the
+                    # defensive client parser.
+                    "fixture": {
+                        "unmarkedDashboardReads": (
+                            self.monitor_server.unmarked_dashboard_reads
+                        ),
+                    },
+                }
+            )
+            return
+        super()._respond_to_read_request()
+
+    def _change_collector_settings(self, payload: object) -> None:
+        # New contract: a strict subset of the collector fields is accepted;
+        # missing fields keep their current values.
+        if (
+            isinstance(payload, dict)
+            and payload
+            and set(payload) < _COLLECTOR_SETTINGS_KEYS
+        ):
+            current = self.monitor_server.inventory.collector_settings
+            merged = {key: current[key] for key in _COLLECTOR_SETTINGS_KEYS}
+            merged.update(payload)
+            payload = merged
+        super()._change_collector_settings(payload)
 
 
 def gpu(
@@ -280,6 +409,7 @@ def demo_state() -> StateStore:
             ("atlas-02", "Training"),
             ("atlas-03", "Lab"),
         ),
+        notifications=DemoNotificationSink(now),
     )
     state.set_hosts(("atlas-01", "atlas-02", "atlas-03"))
     for round_observed_at in (first_observed_at, observed_at):
@@ -371,6 +501,29 @@ def demo_state() -> StateStore:
                 system=system("atlas-02", 53, 601_088),
             )
         )
+    # atlas-03 succeeded once (leaving last-success GPU processes behind) and
+    # then dropped offline: its server entry is stale, and the owners view
+    # must exclude those processes from "current" attribution.
+    state.apply(
+        ProbeResult(
+            host="atlas-03",
+            status="online",
+            latency_ms=41,
+            gpus=(
+                gpu(
+                    "atlas-03",
+                    0,
+                    97,
+                    70_656,
+                    73,
+                    train_started_at=train_started_at,
+                    processes_observed_at=first_observed_at,
+                ),
+            ),
+            observed_at=first_observed_at,
+            system=system("atlas-03", 44, 498_688),
+        )
+    )
     state.apply(
         ProbeResult(
             host="atlas-03",
@@ -402,6 +555,8 @@ def main() -> int:
     server = MonitorHttpServer(
         ("127.0.0.1", int(sys.argv[1])), state, DemoInventory(state)
     )
+    server.unmarked_dashboard_reads = 0
+    server.RequestHandlerClass = DemoRequestHandler
     try:
         server.serve_forever()
     finally:

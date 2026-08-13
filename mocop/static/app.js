@@ -35,13 +35,6 @@ const VISUAL_STYLE_VALUES = new Set([
   "precision", "glass", "terminal", "ledger", "blueprint", "studio",
 ]);
 const ACCENT_VALUES = new Set(["cobalt", "cyan", "violet", "emerald", "amber", "rose"]);
-const LEGACY_THEME_MIGRATIONS = Object.freeze({
-  midnight: { visualStyle: "precision", accent: "cobalt" },
-  graphite: { visualStyle: "ledger", accent: "amber" },
-  aurora: { visualStyle: "blueprint", accent: "cyan" },
-  glass: { visualStyle: "glass", accent: "cobalt" },
-  terminal: { visualStyle: "terminal", accent: "emerald" },
-});
 const DENSITY_VALUES = new Set(["comfortable", "compact"]);
 const SERVER_FILTER_VALUES = new Set(["all", "issues", "busy", "available", "stale"]);
 const CAPACITY_HOST_BLOCKERS = new Set(["connectivity", "gpu_availability", "gpu_count"]);
@@ -77,10 +70,6 @@ function loadPreferences() {
     if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
       return { ...DEFAULT_PREFERENCES };
     }
-    const legacyAppearance = (
-      typeof stored.theme === "string"
-      && Object.prototype.hasOwnProperty.call(LEGACY_THEME_MIGRATIONS, stored.theme)
-    ) ? LEGACY_THEME_MIGRATIONS[stored.theme] : {};
     return {
       serverSort: SERVER_SORT_VALUES.has(stored.serverSort)
         ? stored.serverSort : DEFAULT_PREFERENCES.serverSort,
@@ -92,11 +81,9 @@ function loadPreferences() {
       heatMetric: HEAT_METRIC_VALUES.has(stored.heatMetric)
         ? stored.heatMetric : DEFAULT_PREFERENCES.heatMetric,
       visualStyle: VISUAL_STYLE_VALUES.has(stored.visualStyle)
-        ? stored.visualStyle
-        : legacyAppearance.visualStyle || DEFAULT_PREFERENCES.visualStyle,
+        ? stored.visualStyle : DEFAULT_PREFERENCES.visualStyle,
       accent: ACCENT_VALUES.has(stored.accent)
-        ? stored.accent
-        : legacyAppearance.accent || DEFAULT_PREFERENCES.accent,
+        ? stored.accent : DEFAULT_PREFERENCES.accent,
       density: DENSITY_VALUES.has(stored.density)
         ? stored.density : DEFAULT_PREFERENCES.density,
       backgroundVisibility: safeBackgroundVisibility(stored.backgroundVisibility),
@@ -120,6 +107,18 @@ document.documentElement.style.setProperty(
   "--custom-background-opacity",
   String(preferences.backgroundVisibility / 100),
 );
+
+// Every dashboard-originated request must carry the viewer marker: the
+// service treats marked reads as "someone is watching" and keeps process
+// sampling on the attended cadence even when SSE falls back to polling.
+// Shadowing the script-scope fetch keeps that guarantee uniform for all
+// call sites (EventSource cannot attach headers and is marked server-side).
+const nativeFetch = window.fetch.bind(window);
+const fetch = (url, options = {}) => nativeFetch(url, {
+  cache: "no-store",
+  ...options,
+  headers: { "X-Monitor-Request": "dashboard", ...(options.headers || {}) },
+});
 
 const view = {
   snapshot: null,
@@ -161,6 +160,7 @@ const view = {
   heatmapCache: new Map(),
   heatmapAxisCache: null,
   singleTableCache: null,
+  selectedPanelKey: "",
   incidents: null,
   attentionRenderKey: "",
   incidentRenderKey: "",
@@ -170,6 +170,7 @@ const view = {
   incidentRetryTimer: null,
   incidentRetryVersion: null,
   incidentRetryDelayMs: 0,
+  incidentSyncFailed: false,
   incidentExpanded: false,
   transportKind: "connecting",
   transportLabel: "连接中",
@@ -182,8 +183,13 @@ const view = {
   selectedGpu: null,
   gpuHistory: null,
   gpuHistoryKey: "",
+  gpuHistoryFetchKey: null,
   gpuHistoryRequest: 0,
   gpuHistoryLoading: false,
+  gpuHistoryError: false,
+  gpuHistoryRetryTimer: null,
+  gpuHistoryRetryKey: "",
+  gpuHistoryRetryDelayMs: 0,
   gpuTaskRowCache: new Map(),
   selectedIncident: null,
   incidentActionPending: false,
@@ -277,6 +283,7 @@ const elements = {
   collectorSettingsStatus: $("#collector-settings-status"),
   persistenceStatus: $("#persistence-status"),
   notificationStatus: $("#notification-status"),
+  notificationEndpoints: $("#notification-endpoints"),
   notificationTest: $("#test-notifications"),
   notificationTestStatus: $("#notification-test-status"),
   exportDiagnostics: $("#export-diagnostics"),
@@ -958,9 +965,9 @@ function ratio(used, total) {
   return numeric(total) > 0 ? (numeric(used) / numeric(total)) * 100 : 0;
 }
 
-function age(timestamp) {
+function age(timestamp, now = Date.now()) {
   if (!timestamp) return "等待数据";
-  const seconds = Math.max(0, Math.round((Date.now() - Date.parse(timestamp)) / 1000));
+  const seconds = Math.max(0, Math.round((now - Date.parse(timestamp)) / 1000));
   if (seconds < 3) return "刚刚";
   if (seconds < 60) return `${seconds} 秒前`;
   return `${Math.floor(seconds / 60)} 分钟前`;
@@ -968,8 +975,8 @@ function age(timestamp) {
 
 // Elapsed-duration wording ("3 小时 12 分") for process runtimes, unlike the
 // "X 前" phrasing that age() produces for sample freshness.
-function durationSince(timestamp) {
-  const elapsed = Date.now() - Date.parse(timestamp);
+function durationSince(timestamp, now = Date.now()) {
+  const elapsed = now - Date.parse(timestamp);
   if (!Number.isFinite(elapsed)) return "时长未知";
   const seconds = Math.max(0, Math.floor(elapsed / 1000));
   const days = Math.floor(seconds / 86400);
@@ -993,9 +1000,9 @@ function shortTime(timestamp) {
   }).format(value);
 }
 
-function retryCountdown(timestamp) {
+function retryCountdown(timestamp, now = Date.now()) {
   if (!timestamp) return "";
-  const milliseconds = Date.parse(timestamp) - Date.now();
+  const milliseconds = Date.parse(timestamp) - now;
   if (!Number.isFinite(milliseconds) || milliseconds <= 0) return "等待重试";
   const seconds = Math.max(1, Math.ceil(milliseconds / 1000));
   if (seconds < 60) return `${seconds} 秒后重试`;
@@ -1003,15 +1010,23 @@ function retryCountdown(timestamp) {
 }
 
 function refreshRelativeTimes() {
+  // One clock read per tick, and unchanged text stays untouched so the
+  // every-second loop does not invalidate layout for stable rows.
+  const now = Date.now();
+  const setText = (element, text) => {
+    if (element.textContent !== text) element.textContent = text;
+  };
   document.querySelectorAll("[data-retry-at]").forEach((element) => {
-    element.textContent = retryCountdown(element.dataset.retryAt);
+    setText(element, retryCountdown(element.dataset.retryAt, now));
   });
   document.querySelectorAll("[data-age-at]").forEach((element) => {
-    element.textContent = age(element.dataset.ageAt);
+    setText(element, age(element.dataset.ageAt, now));
   });
+  // Duration rows only exist inside the GPU detail dialog.
+  if (!elements.gpuDetailDialog.open) return;
   document.querySelectorAll("[data-duration-since]").forEach((element) => {
-    element.textContent = `${element.dataset.durationPrefix || ""}${
-      durationSince(element.dataset.durationSince)}`;
+    setText(element, `${element.dataset.durationPrefix || ""}${
+      durationSince(element.dataset.durationSince, now)}`);
   });
 }
 
@@ -1132,37 +1147,45 @@ async function updatePollInterval() {
   elements.refreshInterval.disabled = true;
   showRefreshFeedback("pending", `正在调整为 ${format(requested)} 秒`);
   try {
-    const response = await fetch("/api/settings/poll-interval", {
+    // The collector endpoint accepts a field subset; the poll-interval
+    // endpoint is deprecated and only kept server-side for older pages.
+    const response = await fetch("/api/settings/collector", {
       method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pollIntervalSeconds: requested }),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const settings = await response.json();
+    const payload = await response.json();
+    // Newer services answer with the collector envelope; older ones with the
+    // flat poll-interval settings object. Both carry version/startedAt.
+    const settings = (
+      payload.collectorSettings
+      && typeof payload.collectorSettings === "object"
+      && !Array.isArray(payload.collectorSettings)
+    ) ? payload.collectorSettings : payload;
+    const pollIntervalSeconds = settings.pollIntervalSeconds;
     if (
-      !Number.isSafeInteger(settings.version)
-      || typeof settings.startedAt !== "string"
+      !Number.isSafeInteger(payload.version)
+      || typeof payload.startedAt !== "string"
+      || typeof pollIntervalSeconds !== "number"
+      || !Number.isFinite(pollIntervalSeconds)
     ) {
       throw new TypeError("Invalid settings response");
     }
     view.cadenceSnapshotFloor = {
-      version: settings.version,
-      startedAt: settings.startedAt,
+      version: payload.version,
+      startedAt: payload.startedAt,
     };
-    if (view.snapshot?.startedAt === settings.startedAt) {
-      view.snapshot.pollIntervalSeconds = settings.pollIntervalSeconds;
-      view.snapshot.collectionStaleAfterSeconds = settings.collectionStaleAfterSeconds;
+    if (view.snapshot?.startedAt === payload.startedAt) {
+      view.snapshot.pollIntervalSeconds = pollIntervalSeconds;
+      view.snapshot.collectionStaleAfterSeconds = payload.collectionStaleAfterSeconds;
     }
     if (view.inventory?.collectorSettings) {
-      view.inventory.collectorSettings.pollIntervalSeconds = settings.pollIntervalSeconds;
+      view.inventory.collectorSettings.pollIntervalSeconds = pollIntervalSeconds;
       syncCollectorSettings();
     }
-    elements.refreshInterval.value = String(settings.pollIntervalSeconds);
-    showRefreshFeedback("saved", `已保存为 ${format(settings.pollIntervalSeconds)} 秒`);
+    elements.refreshInterval.value = String(pollIntervalSeconds);
+    showRefreshFeedback("saved", `已保存为 ${format(pollIntervalSeconds)} 秒`);
     renderSummary();
   } catch (_error) {
     syncRefreshControl();
@@ -1194,7 +1217,18 @@ function normalizeCollectorSettings(payload) {
   ) {
     throw new TypeError("Invalid collector settings response");
   }
-  return { pollIntervalSeconds, probeTimeoutSeconds, maxWorkers };
+  const settings = { pollIntervalSeconds, probeTimeoutSeconds, maxWorkers };
+  // Read-only field on newer services; older ones simply omit it.
+  const connectTimeoutSeconds = payload.connectTimeoutSeconds;
+  if (
+    typeof connectTimeoutSeconds === "number"
+    && Number.isFinite(connectTimeoutSeconds)
+    && connectTimeoutSeconds > 0
+    && connectTimeoutSeconds <= 300
+  ) {
+    settings.connectTimeoutSeconds = connectTimeoutSeconds;
+  }
+  return settings;
 }
 
 function normalizeInventory(payload) {
@@ -1533,14 +1567,19 @@ function normalizeMaintenanceWindows(payload, configuredHosts) {
     throw new TypeError("Invalid maintenance windows response");
   }
   const configured = new Set(configuredHosts);
+  const allowedKeys = new Set(["until", "reason", "recurring", "active"]);
   const windows = {};
   Object.entries(payload).forEach(([host, window]) => {
     const keys = window && typeof window === "object" && !Array.isArray(window)
-      ? Object.keys(window).sort().join(",") : "";
+      ? Object.keys(window) : null;
     if (
       !configured.has(host)
-      || (keys !== "reason,until" && keys !== "reason,recurring,until")
+      || keys == null
+      || !keys.includes("until")
+      || !keys.includes("reason")
+      || keys.some((key) => !allowedKeys.has(key))
       || (keys.includes("recurring") && typeof window.recurring !== "boolean")
+      || (keys.includes("active") && typeof window.active !== "boolean")
       || typeof window.until !== "string"
       || !Number.isFinite(Date.parse(window.until))
       || typeof window.reason !== "string"
@@ -1553,6 +1592,8 @@ function normalizeMaintenanceWindows(payload, configuredHosts) {
       until: window.until,
       reason: window.reason,
       recurring: window.recurring === true,
+      // Older services only ever delivered live windows and omit the flag.
+      active: window.active !== false,
     };
   });
   return windows;
@@ -1628,11 +1669,17 @@ async function saveCollectorSettings(event) {
       body: JSON.stringify(settings),
     });
     if (response.status === 400) {
-      // The service enforces probeTimeoutSeconds > connect_timeout_seconds
-      // (config.json, default 5 秒)，该值不会下发给浏览器，只能在保存时校验。
+      // The service enforces probeTimeoutSeconds > connect_timeout_seconds.
+      // Newer services expose the value read-only via the inventory payload;
+      // older ones keep it server-side, so fall back to naming the config key.
+      const connectTimeout = view.inventory?.collectorSettings?.connectTimeoutSeconds;
       setCollectorSettingsStatus(
         "error",
-        "保存失败：单轮探测超时必须大于 SSH 连接超时（connect_timeout_seconds，默认 5 秒），且数值需在允许范围内",
+        `保存失败：单轮探测超时必须大于 SSH 连接超时（${
+          connectTimeout
+            ? `当前 ${format(connectTimeout, 1)} 秒`
+            : "connect_timeout_seconds，默认 5 秒"
+        }），且数值需在允许范围内`,
       );
       return;
     }
@@ -1681,11 +1728,23 @@ function inventoryHostRow(host, action) {
   const group = view.inventory.hostGroups[host];
   if (group) identity.append(create("small", "host-group-badge", group));
   const maintenance = view.inventory.maintenanceWindows[host];
-  if (maintenance) {
+  // The "维护至" badge stays reserved for live windows; planned recurring
+  // windows get their own badge so an off-period plan reads as schedule, not
+  // as an active silence.
+  if (maintenance?.active) {
     const badge = create("small", "maintenance-badge", `维护至 ${shortTime(maintenance.until)}`);
     badge.title = maintenance.recurring
       ? `${maintenance.reason}（每周重复）` : maintenance.reason;
     identity.append(badge);
+  }
+  if (maintenance?.recurring) {
+    const plan = create(
+      "small",
+      `maintenance-plan-badge${maintenance.active ? "" : " inactive"}`,
+      "每周维护计划",
+    );
+    plan.title = `下次窗口至 ${shortTime(maintenance.until)} · ${maintenance.reason}`;
+    identity.append(plan);
   }
   const actions = create("span", "inventory-host-actions");
   const button = create("button", "inventory-host-action");
@@ -2403,10 +2462,32 @@ function renderOwners() {
   }
   const owners = new Map();
   const hostLabels = new Map();
+  let excludedOfflineHosts = 0;
+  let oldestObservedAt = "";
   for (const server of view.snapshot.servers) {
     hostLabels.set(server.host, server.displayName || server.host);
+    if (server.status !== "online") {
+      // Last-success processes on unreachable nodes may already be gone;
+      // counting them as "current" owners would misattribute the fleet.
+      if (server.gpus.some((gpu) => (gpu.processes || []).length > 0)) {
+        excludedOfflineHosts += 1;
+      }
+      continue;
+    }
     for (const gpu of server.gpus) {
-      for (const process of gpu.processes || []) {
+      const processes = gpu.processes || [];
+      if (
+        processes.length
+        && gpu.processes_observed_at
+        && Number.isFinite(Date.parse(gpu.processes_observed_at))
+        && (
+          !oldestObservedAt
+          || Date.parse(gpu.processes_observed_at) < Date.parse(oldestObservedAt)
+        )
+      ) {
+        oldestObservedAt = gpu.processes_observed_at;
+      }
+      for (const process of processes) {
         const owner = process.workload?.owner;
         const key = owner || "\u0000unattributed";
         let entry = owners.get(key);
@@ -2443,9 +2524,20 @@ function renderOwners() {
       || second.gpus.size - first.gpus.size
       || first.label.localeCompare(second.label),
   );
+  const offlineNote = excludedOfflineHosts
+    ? create(
+      "div",
+      "owners-footnote",
+      `${excludedOfflineHosts} 台离线节点未计入`,
+    )
+    : null;
+  if (offlineNote) {
+    offlineNote.title = "离线节点仅保留最后一次成功采集的进程，不代表当前占用";
+  }
   elements.ownersResults.replaceChildren();
   if (!ranked.length) {
     elements.ownersSummary.textContent = "当前快照没有 GPU 进程";
+    if (offlineNote) elements.ownersResults.append(offlineNote);
     return;
   }
   const visible = ranked.slice(0, 50);
@@ -2456,7 +2548,8 @@ function renderOwners() {
     `${ranked.length} 个归属方 · 共占用${hasUnknownVram ? "至少 " : " "}${memory(totalVram)}`
     + (attributedCount < ranked.length ? " · 含未归属进程" : "")
     + (hasUnknownVram ? " · 部分进程显存未知" : "")
-    + (ranked.length > visible.length ? ` · 仅展示前 ${visible.length} 项` : "");
+    + (ranked.length > visible.length ? ` · 仅展示前 ${visible.length} 项` : "")
+    + (oldestObservedAt ? ` · 数据截至 ${age(oldestObservedAt)}` : "");
   for (const entry of visible) {
     const card = create(
       "article",
@@ -2469,6 +2562,9 @@ function renderOwners() {
     const kindText = entry.kinds.size ? [...entry.kinds].sort().join(" · ") : "进程";
     const kindLabel = create("small", "", kindText);
     kindLabel.title = kindText;
+    if (!entry.attributed) {
+      card.title = "启用 workloads.mode=identity 可显示属主与完整命令行";
+    }
     identity.append(ownerName, kindLabel);
     const vramLabel = create(
       "em",
@@ -2497,6 +2593,7 @@ function renderOwners() {
     card.append(heading, metrics, devices);
     elements.ownersResults.append(card);
   }
+  if (offlineNote) elements.ownersResults.append(offlineNote);
 }
 
 function renderCapacityMatcher() {
@@ -2667,7 +2764,8 @@ function renderAttention() {
     return;
   }
   const issues = attentionIssues();
-  if (!issues.length) {
+  const syncFailed = view.incidentSyncFailed;
+  if (!issues.length && !syncFailed) {
     view.attentionRenderKey = "empty";
     elements.attentionPanel.hidden = true;
     return;
@@ -2677,6 +2775,7 @@ function renderAttention() {
     : issues.filter((issue) => issue.categories.includes(view.attentionFilter));
   const renderKey = JSON.stringify({
     filter: view.attentionFilter,
+    syncFailed,
     issues: issues.map((issue) => ({
       shared: Boolean(issue.shared),
       sharedLabel: issue.sharedLabel || null,
@@ -2707,9 +2806,11 @@ function renderAttention() {
   });
   const critical = visibleIssues.filter((issue) => issue.severity === "critical").length;
   const affectedHosts = new Set(visibleIssues.flatMap((issue) => issue.hosts));
-  elements.attentionSummary.textContent = view.attentionFilter === "all"
-    ? `${affectedHosts.size} 台服务器 · ${issues.length} 个问题`
-    : `${affectedHosts.size} 台服务器 · ${visibleIssues.length}/${issues.length} 个问题`;
+  elements.attentionSummary.textContent = syncFailed && !issues.length
+    ? "告警数据暂不可用"
+    : view.attentionFilter === "all"
+      ? `${affectedHosts.size} 台服务器 · ${issues.length} 个问题`
+      : `${affectedHosts.size} 台服务器 · ${visibleIssues.length}/${issues.length} 个问题`;
   const fragment = document.createDocumentFragment();
   visibleIssues.forEach((issue) => {
     const item = create(issue.shared ? "article" : "button", `attention-item ${issue.severity}${issue.shared ? " shared" : ""}`);
@@ -2744,7 +2845,15 @@ function renderAttention() {
     }
     fragment.append(item);
   });
-  if (!visibleIssues.length) {
+  if (syncFailed) {
+    // A failed /api/incidents sync must not silently freeze or empty this
+    // panel; the existing backoff keeps retrying in the background.
+    fragment.append(create(
+      "div",
+      "attention-sync-error",
+      "告警详情加载失败，正在重试",
+    ));
+  } else if (!visibleIssues.length) {
     fragment.append(create("div", "attention-empty", "当前类型没有活动问题"));
   }
   elements.attentionList.replaceChildren(fragment);
@@ -3236,9 +3345,12 @@ function renderSummary() {
   elements.gpuMemoryCard.title = snapshot.stats.memoryTotalMiB > 0
     ? `已使用 ${memory(snapshot.stats.memoryUsedMiB)}，总计 ${memory(snapshot.stats.memoryTotalMiB)}`
     : "等待 GPU 显存样本";
+  const zeroNodes = numeric(snapshot.stats.servers) === 0;
   elements.serverRatio.textContent = `${snapshot.stats.onlineServers} / ${snapshot.stats.servers}`;
-  elements.serverHealth.textContent = actionableCritical
-    ? "严重" : actionableIssues ? "需关注" : maintenanceServers ? "维护中" : "健康";
+  elements.serverHealth.textContent = zeroNodes
+    ? "未配置"
+    : actionableCritical
+      ? "严重" : actionableIssues ? "需关注" : maintenanceServers ? "维护中" : "健康";
   elements.serverHealth.classList.toggle(
     "warning",
     actionableIssues > 0 && !serverCritical,
@@ -3247,13 +3359,26 @@ function renderSummary() {
   elements.serverCard.classList.toggle("is-warning", actionableIssues > 0 && !serverCritical);
   elements.serverCard.classList.toggle("is-critical", serverCritical);
   elements.serverBar.style.width = `${clamp(onlineRatio)}%`;
-  elements.serverDetail.textContent = actionableIssues
-    ? `${actionableIssues} 台需关注 · ${numeric(snapshot.stats.actionableIncidents, snapshot.stats.activeIncidents)} 个待处理问题`
-    : maintenanceServers && snapshot.stats.activeIncidents
-      ? `${maintenanceServers} 台维护中 · ${snapshot.stats.activeIncidents} 个活动问题已静默`
-      : maintenanceServers
-        ? `${maintenanceServers} 台处于计划维护窗口`
-        : "所有服务器运行正常";
+  if (zeroNodes) {
+    // "健康 / 所有服务器运行正常" would be misleading with nothing monitored;
+    // point straight at the settings inventory scan instead. The node is kept
+    // across renders so the guide button survives the per-second refresh.
+    if (!elements.serverDetail.querySelector(".empty-fleet-action")) {
+      const guide = create("button", "inline-action empty-fleet-action", "添加监控节点");
+      guide.type = "button";
+      guide.title = "打开设置并扫描 OpenSSH 配置中的候选节点";
+      guide.addEventListener("click", () => elements.settingsToggle.click());
+      elements.serverDetail.replaceChildren("尚未配置监控节点", guide);
+    }
+  } else {
+    elements.serverDetail.textContent = actionableIssues
+      ? `${actionableIssues} 台需关注 · ${numeric(snapshot.stats.actionableIncidents, snapshot.stats.activeIncidents)} 个待处理问题`
+      : maintenanceServers && snapshot.stats.activeIncidents
+        ? `${maintenanceServers} 台维护中 · ${snapshot.stats.activeIncidents} 个活动问题已静默`
+        : maintenanceServers
+          ? `${maintenanceServers} 台处于计划维护窗口`
+          : "所有服务器运行正常";
+  }
   elements.averageCpu.textContent = cpu == null ? "—" : format(cpu, 1);
   elements.cpuHealth.textContent = cpu == null
     ? "采样中"
@@ -3320,19 +3445,31 @@ function renderServiceRestartStatus(message = "", kind = "") {
   );
 }
 
+async function fetchRestartCapability() {
+  // Newer services describe themselves via /api/meta; the deprecated
+  // /api/service endpoint remains the fallback for older services.
+  const metaResponse = await fetch("/api/meta", { cache: "no-store" }).catch(() => null);
+  if (metaResponse?.ok) {
+    const meta = await metaResponse.json().catch(() => null);
+    const supported = meta?.capabilities?.restartSupported;
+    if (typeof supported === "boolean") return supported;
+  }
+  const response = await fetch("/api/service", { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const capability = await response.json();
+  if (typeof capability.restartSupported !== "boolean") {
+    throw new TypeError("Invalid service capability");
+  }
+  return capability.restartSupported;
+}
+
 async function fetchServiceCapability() {
   if (view.serviceRestartLoading || view.serviceRestarting) return;
   view.serviceRestartLoading = true;
   let errorMessage = "";
   renderServiceRestartStatus();
   try {
-    const response = await fetch("/api/service", { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const capability = await response.json();
-    if (typeof capability.restartSupported !== "boolean") {
-      throw new TypeError("Invalid service capability");
-    }
-    view.serviceRestartSupported = capability.restartSupported;
+    view.serviceRestartSupported = await fetchRestartCapability();
     renderServiceRestartStatus();
   } catch (_error) {
     view.serviceRestartSupported = false;
@@ -3444,6 +3581,48 @@ function renderRuntimeStatus(snapshot) {
       "error",
     );
   }
+  renderNotificationEndpoints(notifications);
+}
+
+function notificationEndpointRow(endpoint) {
+  const name = typeof endpoint.name === "string" && endpoint.name
+    ? endpoint.name : "未命名端点";
+  const healthy = endpoint.healthy === true;
+  const queued = numeric(endpoint.queuedDeliveries);
+  const dropped = numeric(endpoint.droppedDeliveries);
+  const row = create("div", "notification-endpoint");
+  const identity = create("span", "notification-endpoint-name");
+  identity.append(create("i", `status-dot ${healthy ? "online" : "issue"}`));
+  const label = create("strong", "", name);
+  label.title = name;
+  identity.append(label);
+  const metaParts = [`待发 ${format(queued)}`, `累计失败 ${format(dropped)}`];
+  if (endpoint.lastSuccessAt) metaParts.push(`最近成功 ${age(endpoint.lastSuccessAt)}`);
+  const state = create("em", healthy ? "success" : "error");
+  const lastError = typeof endpoint.lastError === "string" ? endpoint.lastError : "";
+  state.textContent = healthy ? "正常" : lastError || "投递异常";
+  if (!healthy && lastError) state.title = lastError;
+  row.append(identity, create("small", "", metaParts.join(" · ")), state);
+  return row;
+}
+
+function renderNotificationEndpoints(notifications) {
+  // Per-endpoint delivery state (snapshot.notifications.endpoints) so one
+  // failing webhook is distinguishable from a fleet-wide outage.
+  const endpoints = notifications.enabled && Array.isArray(notifications.endpoints)
+    ? notifications.endpoints.filter(
+      (endpoint) => endpoint && typeof endpoint === "object" && !Array.isArray(endpoint),
+    )
+    : [];
+  if (!endpoints.length) {
+    elements.notificationEndpoints.hidden = true;
+    elements.notificationEndpoints.replaceChildren();
+    return;
+  }
+  elements.notificationEndpoints.replaceChildren(
+    ...endpoints.slice(0, 12).map(notificationEndpointRow),
+  );
+  elements.notificationEndpoints.hidden = false;
 }
 
 function downloadJson(value, filename) {
@@ -3711,6 +3890,9 @@ function renderServers() {
   const knownHosts = new Set(view.snapshot.servers.map((server) => server.host));
   [...view.serverItemCache.keys()].forEach((host) => {
     if (!knownHosts.has(host)) view.serverItemCache.delete(host);
+  });
+  [...view.expandedHosts].forEach((host) => {
+    if (!knownHosts.has(host)) view.expandedHosts.delete(host);
   });
   [...view.fleetGroupCache.keys()].forEach((group) => {
     if (!visibleGroupKeys.has(group)) view.fleetGroupCache.delete(group);
@@ -4477,10 +4659,17 @@ function renderGpuHistory() {
     elements.gpuProcessTimeline.replaceChildren();
     return;
   }
-  elements.gpuHistoryRange.textContent = historyDuration(points);
+  elements.gpuHistoryRange.textContent = view.gpuHistoryError && !points.length
+    ? "读取失败" : historyDuration(points);
   if (!points.length) {
+    // A failed request must read as a failure, not as "no samples yet";
+    // existing samples stay on screen through transient failures.
     elements.gpuHistoryGrid.replaceChildren(
-      create("div", "gpu-history-empty", "完成两次成功采集后显示趋势"),
+      create(
+        "div",
+        "gpu-history-empty",
+        view.gpuHistoryError ? "历史读取失败，稍后重试" : "完成两次成功采集后显示趋势",
+      ),
     );
   } else {
     // Missing used or total memory renders as a gap instead of a fake 0%.
@@ -4498,7 +4687,12 @@ function renderGpuHistory() {
     ? view.gpuHistory.processEvents.slice().reverse() : [];
   if (!events.length) {
     elements.gpuProcessTimeline.replaceChildren(
-      create("div", "gpu-history-empty", "暂未记录到进程进入或退出"),
+      create(
+        "div",
+        "gpu-history-empty",
+        view.gpuHistoryError && !view.gpuHistory
+          ? "历史读取失败，稍后重试" : "暂未记录到进程进入或退出",
+      ),
     );
     return;
   }
@@ -4516,32 +4710,57 @@ function renderGpuHistory() {
   }));
 }
 
+function clearGpuHistoryRetry() {
+  if (view.gpuHistoryRetryTimer != null) clearTimeout(view.gpuHistoryRetryTimer);
+  view.gpuHistoryRetryTimer = null;
+  view.gpuHistoryRetryKey = "";
+}
+
 async function syncGpuHistory(record) {
   if (!record || !elements.gpuDetailDialog.open) return;
   const gpuId = String(record.gpu.uuid || `index:${record.gpu.index}`);
   // Keyed on lastSuccessAt: only a successful sample can add history points,
-  // so failed probe attempts no longer trigger refetches.
+  // so failed probe attempts no longer trigger refetches. The key is
+  // confirmed only after a successful load, keeping failures retryable
+  // through the single backoff timer (mirrors syncHistory).
   const key = `${record.server.host}|${gpuId}|${record.server.lastSuccessAt || ""}`;
-  if (view.gpuHistoryKey === key) return;
-  view.gpuHistoryKey = key;
+  if (key === view.gpuHistoryKey || key === view.gpuHistoryFetchKey) return;
+  if (view.gpuHistoryRetryTimer != null) {
+    if (key === view.gpuHistoryRetryKey) return;
+    clearGpuHistoryRetry();
+  }
+  view.gpuHistoryFetchKey = key;
   view.gpuHistoryLoading = true;
   const request = ++view.gpuHistoryRequest;
   renderGpuHistory();
   try {
     const response = await fetch(
       `/api/gpu-history?host=${encodeURIComponent(record.server.host)}&gpu=${encodeURIComponent(gpuId)}&limit=120`,
-      {
-        cache: "no-store",
-        headers: { "X-Monitor-Request": "dashboard" },
-      },
     );
     const history = await response.json();
     if (!response.ok) throw new Error(history.error || "GPU history unavailable");
     if (request !== view.gpuHistoryRequest) return;
     view.gpuHistory = history;
+    view.gpuHistoryKey = key;
+    view.gpuHistoryError = false;
+    view.gpuHistoryRetryDelayMs = 0;
   } catch (_error) {
-    if (request === view.gpuHistoryRequest) view.gpuHistory = { points: [], processEvents: [] };
+    if (request !== view.gpuHistoryRequest) return;
+    // Existing samples stay on screen; the bounded backoff owns retries for
+    // this same dialog and key.
+    view.gpuHistoryError = true;
+    view.gpuHistoryRetryDelayMs = Math.min(
+      30_000,
+      Math.max(4_000, view.gpuHistoryRetryDelayMs * 2),
+    );
+    view.gpuHistoryRetryKey = key;
+    view.gpuHistoryRetryTimer = setTimeout(() => {
+      view.gpuHistoryRetryTimer = null;
+      view.gpuHistoryRetryKey = "";
+      syncGpuHistory(selectedGpuRecord());
+    }, view.gpuHistoryRetryDelayMs);
   } finally {
+    if (view.gpuHistoryFetchKey === key) view.gpuHistoryFetchKey = null;
     if (request === view.gpuHistoryRequest) {
       view.gpuHistoryLoading = false;
       renderGpuHistory();
@@ -4624,6 +4843,14 @@ function renderGpuDetail() {
   elements.gpuTaskNote.classList.toggle(
     "gpu-task-freshness-stale", staleProcessFreshness,
   );
+  const freshnessHint = "无人查看时采样自动放缓，打开页面后数秒内自动追赶";
+  // Identity attribution is an opt-in collector layer; hint once (title only)
+  // when every listed process lacks workload metadata.
+  const identityOff = visibleProcesses.length > 0
+    && visibleProcesses.every((process) => !process.workload);
+  elements.gpuTaskNote.title = identityOff
+    ? `${freshnessHint}；启用 workloads.mode=identity 可显示属主与完整命令行`
+    : freshnessHint;
   if (processes.length > visibleProcesses.length) {
     const truncationLabel = sortByDuration ? "运行最久" : "显存占用最高";
     elements.gpuTaskNote.textContent = `共 ${processes.length} 个进程，仅展示${truncationLabel}的 ${visibleProcesses.length} 个 · ${processFreshness}`;
@@ -4634,9 +4861,13 @@ function renderGpuDetail() {
   }
   if (!processes.length) {
     view.gpuTaskRowCache.clear();
-    elements.gpuTaskList.replaceChildren(
-      create("div", emptyCardClass, `当前没有活跃的 CUDA 计算进程 · ${processFreshness}`),
+    const emptyCard = create(
+      "div",
+      emptyCardClass,
+      `当前没有活跃的 CUDA 计算进程 · ${processFreshness}`,
     );
+    emptyCard.title = freshnessHint;
+    elements.gpuTaskList.replaceChildren(emptyCard);
     return;
   }
   const seenKeys = new Set();
@@ -4665,6 +4896,10 @@ function openGpuDetail(server, gpu) {
   };
   view.gpuHistory = null;
   view.gpuHistoryKey = "";
+  view.gpuHistoryFetchKey = null;
+  view.gpuHistoryError = false;
+  view.gpuHistoryRetryDelayMs = 0;
+  clearGpuHistoryRetry();
   view.gpuHistoryRequest += 1;
   if (elements.settingsDialog.open) elements.settingsDialog.close();
   if (elements.capacityDialog.open) elements.capacityDialog.close();
@@ -5012,6 +5247,23 @@ function renderTable() {
   elements.emptyState.hidden = records.length !== 0;
 }
 
+// Stable scalar key for the selected host: the single-host resource panel
+// and node notice only need a rebuild when that host's data version moves,
+// not on every fleet snapshot (avoids JSON.stringify over the full record).
+function selectedHostPanelKey() {
+  if (view.selectedHost === "all") return "";
+  const server = view.snapshot.servers.find(
+    (candidate) => candidate.host === view.selectedHost,
+  );
+  if (!server) return `${view.selectedHost}\u0000missing`;
+  return [
+    server.host, server.status, server.stale, server.polling,
+    server.lastAttemptAt, server.lastSuccessAt, server.nextRetryAt,
+    server.consecutiveFailures, server.message,
+    view.incidentVersion,
+  ].join("\u0000");
+}
+
 function render() {
   if (view.renderFrame != null) {
     cancelAnimationFrame(view.renderFrame);
@@ -5022,8 +5274,12 @@ function render() {
   renderAttention();
   renderIncidents();
   renderServers();
-  renderNodeNotice();
-  renderResources();
+  const panelKey = selectedHostPanelKey();
+  if (!panelKey || panelKey !== view.selectedPanelKey) {
+    view.selectedPanelKey = panelKey;
+    renderNodeNotice();
+    renderResources();
+  }
   renderHeatmap();
   renderTrends();
   renderTable();
@@ -5095,6 +5351,7 @@ async function syncIncidents() {
     view.incidents = incidents;
     view.incidentVersion = numeric(incidents.version, 0);
     view.incidentRetryDelayMs = 0;
+    view.incidentSyncFailed = false;
     renderIncidents();
     renderAttention();
     renderServers();
@@ -5119,6 +5376,10 @@ async function syncIncidents() {
           view.incidentRetryVersion = null;
           syncIncidents();
         }, view.incidentRetryDelayMs);
+        // Surface the failure instead of silently freezing/emptying the
+        // attention panel while the backoff retries.
+        view.incidentSyncFailed = true;
+        renderAttention();
       } else if (view.snapshot) {
         // Refetch immediately only when the target version moved while this
         // request was in flight and the response does not already cover it.
@@ -5141,6 +5402,15 @@ function connect() {
     setConnection("live", "实时连接");
   };
   events.addEventListener("open", markLive);
+  // Newer services send named heartbeats between snapshots. Counting them as
+  // liveness keeps the 15s staleness fallback from issuing redundant
+  // /api/snapshot polls while the stream is healthy but idle. Older services
+  // only send SSE comments, which never reach this listener — the polling
+  // fallback then behaves exactly as before.
+  events.addEventListener("heartbeat", () => {
+    view.lastEventAt = Date.now();
+    markLive();
+  });
   events.addEventListener("snapshot", (event) => {
     try {
       if (!acceptSnapshot(JSON.parse(event.data))) return;
@@ -5319,6 +5589,18 @@ document.querySelectorAll("dialog.side-dialog").forEach((dialog) => {
 
 elements.gpuDetailDialog.addEventListener("close", () => {
   view.selectedGpu = null;
+  // Nothing polls a closed dialog, and the cached rows / history DOM would
+  // only keep stale nodes (and their per-second duration scans) alive.
+  clearGpuHistoryRetry();
+  view.gpuHistory = null;
+  view.gpuHistoryKey = "";
+  view.gpuHistoryFetchKey = null;
+  view.gpuHistoryError = false;
+  view.gpuHistoryRetryDelayMs = 0;
+  view.gpuTaskRowCache.clear();
+  elements.gpuTaskList.replaceChildren();
+  elements.gpuHistoryGrid.replaceChildren();
+  elements.gpuProcessTimeline.replaceChildren();
 });
 
 // The sort toggle lives next to the task count badge; both move into a
@@ -5514,7 +5796,10 @@ setInterval(() => {
   const elapsed = Date.now() - view.lastEventAt;
   const fallbackAfter = Math.max(2000, numeric(view.snapshot?.pollIntervalSeconds, 5) * 1000);
   if (view.transportKind !== "live" && elapsed > fallbackAfter) fetchSnapshot();
-  else if (elapsed > 15000) fetchSnapshot();
+  // 16s instead of 15s: named heartbeats arrive on a 15s cadence, so the
+  // grace second keeps jitter from triggering a pointless snapshot poll on a
+  // healthy stream. Services without named heartbeats still fall back here.
+  else if (elapsed > 16000) fetchSnapshot();
 }, 1000);
 
 syncPreferenceControls();
