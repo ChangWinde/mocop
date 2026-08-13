@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Callable
 from glob import glob
 from pathlib import Path
 from typing import Protocol
@@ -19,28 +18,6 @@ class HostSource(Protocol):
     def hosts(self, config: MonitorConfig) -> tuple[str, ...]: ...
 
 
-HostSourceFactory = Callable[[], HostSource]
-_HOST_SOURCES: dict[str, HostSourceFactory] = {}
-
-
-def register_host_source(name: str) -> Callable[[HostSourceFactory], HostSourceFactory]:
-    def decorator(factory: HostSourceFactory) -> HostSourceFactory:
-        _HOST_SOURCES[name] = factory
-        return factory
-
-    return decorator
-
-
-def create_host_source(name: str) -> HostSource:
-    try:
-        return _HOST_SOURCES[name]()
-    except KeyError as exc:
-        raise KeyError(
-            f"unknown host source {name!r}; available: {sorted(_HOST_SOURCES)}"
-        ) from exc
-
-
-@register_host_source("openssh-config")
 class OpenSshConfigHostSource:
     """Enumerate literal Host aliases from OpenSSH config and its Include files."""
 
