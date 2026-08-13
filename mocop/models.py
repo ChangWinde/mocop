@@ -30,6 +30,8 @@ class WorkloadMetadata:
     owner: str | None = None
     queue: str | None = None
     namespace: str | None = None
+    command: str | None = None
+    started_at: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -39,6 +41,8 @@ class WorkloadMetadata:
             "owner": self.owner,
             "queue": self.queue,
             "namespace": self.namespace,
+            "command": self.command,
+            "started_at": self.started_at,
         }
 
 
@@ -48,6 +52,9 @@ class GpuProcess:
     name: str
     used_memory_mib: float | None
     workload: WorkloadMetadata | None = None
+    # Monitor-relative visibility: when this (pid, name) was first observed on
+    # its device, so operators see a lower bound even without workload data.
+    first_seen_at: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -55,6 +62,7 @@ class GpuProcess:
             "name": self.name,
             "used_memory_mib": self.used_memory_mib,
             "workload": self.workload.to_dict() if self.workload else None,
+            "first_seen_at": self.first_seen_at,
         }
 
 

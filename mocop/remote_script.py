@@ -32,10 +32,13 @@ _HEALTH_QUERY_FIELDS = (
     "mig.mode.current",
 )
 _COMBINED_QUERY_FIELDS = _QUERY_FIELDS + _HEALTH_QUERY_FIELDS[1:]
-_PROTOCOL_VERSION = "MONITOR_V6"
+_PROTOCOL_VERSION = "MONITOR_V7"
 _SUPPORTED_PROTOCOL_VERSIONS = frozenset(
-    {_PROTOCOL_VERSION, "MONITOR_V5", "MONITOR_V4"}
+    {_PROTOCOL_VERSION, "MONITOR_V6", "MONITOR_V5", "MONITOR_V4"}
 )
+# PROCESS_SKIPPED markers exist since V6; workload records carry the optional
+# start-epoch and command-line columns since V7.
+_PROCESS_SKIP_CAPABLE_VERSIONS = frozenset({_PROTOCOL_VERSION, "MONITOR_V6"})
 
 # The hostname is read inside the system awk pass with a bounded getline, so
 # the default sample runs five external commands instead of six. A missing or
@@ -44,7 +47,7 @@ _REMOTE_SCRIPT_TEMPLATE = r"""
 LC_ALL=C
 export LC_ALL
 printf '__PROTOCOL_VERSION__\n'
-workload_enabled=__WORKLOAD_ENABLED__
+workload_tier=__WORKLOAD_TIER__
 process_enabled=__PROCESS_ENABLED__
 awk '
   BEGIN {
@@ -134,7 +137,10 @@ elif command -v nvidia-smi >/dev/null 2>&1; then
 fi
 printf 'PROCESSES_END\n'
 printf 'WORKLOADS_BEGIN\n'
-if [ "$workload_enabled" -eq 1 ] && [ "$process_status" -eq 0 ] && [ -n "$process_output" ]; then
+if [ "$workload_tier" -ge 1 ] && [ "$process_status" -eq 0 ] && [ -n "$process_output" ]; then
+  boot_epoch=$(awk '/^btime / { print $2; exit }' /proc/stat 2>/dev/null)
+  clock_ticks=$(getconf CLK_TCK 2>/dev/null)
+  case "$clock_ticks" in ''|*[!0-9]*) clock_ticks=100 ;; esac
   process_pids=$(printf '%s\n' "$process_output" | awk -F, '
     {
       pid=$2
@@ -145,10 +151,18 @@ if [ "$workload_enabled" -eq 1 ] && [ "$process_status" -eq 0 ] && [ -n "$proces
   for process_pid in $process_pids; do
     [ -r "/proc/$process_pid/status" ] || continue
     owner_uid=$(awk '/^Uid:/ { print $2; exit }' "/proc/$process_pid/status" 2>/dev/null)
-    cgroup_value=$(head -c 16384 "/proc/$process_pid/cgroup" 2>/dev/null)
-    if [ -r "/proc/$process_pid/environ" ]; then
-      head -c 65536 "/proc/$process_pid/environ" 2>/dev/null
-    fi | tr '\000' '\n' | awk -v pid="$process_pid" -v uid="$owner_uid" -v cgroup="$cgroup_value" '
+    started_ticks=$(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$process_pid/stat" 2>/dev/null)
+    command_line=$(head -c 255 "/proc/$process_pid/cmdline" 2>/dev/null | tr '\000' ' ')
+    if [ "$workload_tier" -ge 2 ]; then
+      cgroup_value=$(head -c 16384 "/proc/$process_pid/cgroup" 2>/dev/null)
+      environ_source="/proc/$process_pid/environ"
+    else
+      cgroup_value=""
+      environ_source="/dev/null"
+    fi
+    if [ -r "$environ_source" ]; then
+      head -c 65536 "$environ_source" 2>/dev/null
+    fi | tr '\000' '\n' | awk -v pid="$process_pid" -v uid="$owner_uid" -v cgroup="$cgroup_value" -v boot="$boot_epoch" -v ticks="$started_ticks" -v clock="$clock_ticks" -v command_line="$command_line" '
       function clean(value) {
         gsub(/[[:cntrl:]]/, " ", value)
         return substr(value, 1, 255)
@@ -200,9 +214,14 @@ if [ "$workload_enabled" -eq 1 ] && [ "$process_status" -eq 0 ] && [ -n "$proces
           workload_queue=pod_queue
           workload_namespace=pod_namespace
         }
-        printf "WORKLOAD\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+        started=""
+        if (boot ~ /^[0-9]+$/ && ticks ~ /^[0-9]+$/ && clock ~ /^[0-9]+$/ && clock + 0 > 0) {
+          started = boot + int(ticks / clock)
+        }
+        printf "WORKLOAD\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
           pid, kind, clean(workload_id), clean(workload_name), clean(owner),
-          clean(workload_queue), clean(workload_namespace)
+          clean(workload_queue), clean(workload_namespace), started,
+          clean(command_line)
       }
     '
   done
@@ -214,26 +233,29 @@ printf 'GPU_HEALTH_END\n'
 """
 
 
-def _render_remote_script(workload_enabled: bool, process_enabled: bool) -> str:
+_WORKLOAD_TIERS = {"disabled": 0, "identity": 1, "auto": 2}
+
+
+def _render_remote_script(workload_tier: int, process_enabled: bool) -> str:
     return (
         _REMOTE_SCRIPT_TEMPLATE.replace("__GPU_QUERY__", ",".join(_QUERY_FIELDS))
         .replace("__COMBINED_QUERY__", ",".join(_COMBINED_QUERY_FIELDS))
         .replace("__PROCESS_QUERY__", ",".join(_PROCESS_QUERY_FIELDS))
-        .replace("__WORKLOAD_ENABLED__", "1" if workload_enabled else "0")
+        .replace("__WORKLOAD_TIER__", str(workload_tier))
         .replace("__PROCESS_ENABLED__", "1" if process_enabled else "0")
         .replace("__PROTOCOL_VERSION__", _PROTOCOL_VERSION)
     )
 
 
 _REMOTE_SCRIPTS = {
-    (workload_enabled, process_enabled): _render_remote_script(
-        workload_enabled,
+    (workload_tier, process_enabled): _render_remote_script(
+        workload_tier,
         process_enabled,
     )
-    for workload_enabled in (False, True)
+    for workload_tier in (0, 1, 2)
     for process_enabled in (False, True)
 }
 
 
 def _remote_script(workload_mode: str, process_enabled: bool = True) -> str:
-    return _REMOTE_SCRIPTS[(workload_mode != "disabled", process_enabled)]
+    return _REMOTE_SCRIPTS[(_WORKLOAD_TIERS.get(workload_mode, 2), process_enabled)]

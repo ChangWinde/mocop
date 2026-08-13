@@ -269,10 +269,11 @@ class ConfigTests(unittest.TestCase):
                     load_config(self.write(candidate))
 
     def test_validates_read_only_workload_metadata_mode(self) -> None:
-        value = valid_config()
-        value["workloads"] = {"mode": "auto"}
-
-        self.assertEqual(load_config(self.write(value)).workloads.mode, "auto")
+        for mode in ("auto", "identity"):
+            value = valid_config()
+            value["workloads"] = {"mode": mode}
+            with self.subTest(mode=mode):
+                self.assertEqual(load_config(self.write(value)).workloads.mode, mode)
 
         for invalid in (None, {}, {"mode": "slurm-write"}, {"unknown": True}):
             with self.subTest(invalid=invalid):

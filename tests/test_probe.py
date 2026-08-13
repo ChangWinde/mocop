@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -320,7 +321,7 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("ServerAliveCountMax=2", arguments)
         self.assertEqual(arguments[arguments.index("--") + 1], "gpu-1")
         self.assertEqual(arguments[-2:], ["sh", "-s"])
-        self.assertIn("MONITOR_V6", run.call_args.kwargs["input_text"])
+        self.assertIn("MONITOR_V7", run.call_args.kwargs["input_text"])
         self.assertIn("--query-compute-apps", run.call_args.kwargs["input_text"])
         self.assertIn(
             "ecc.errors.uncorrected.volatile.total",
@@ -348,10 +349,26 @@ class ProbeTests(unittest.TestCase):
         OpenSshLinuxResourceProbe().probe("gpu-1", enabled)
 
         script = run.call_args.kwargs["input_text"]
-        self.assertIn("workload_enabled=1", script)
+        self.assertIn("workload_tier=2", script)
         self.assertIn("/proc/$process_pid/environ", script)
         self.assertNotIn("scontrol", script)
         self.assertNotIn("kubectl", script)
+
+    @patch("mocop.probe._run_bounded_process")
+    def test_identity_workload_mode_renders_the_light_tier(self, run) -> None:
+        run.return_value = _BoundedProcessResult(
+            0, stdout=resource_payload(), stderr=""
+        )
+        enabled = replace(
+            config(), workloads=replace(config().workloads, mode="identity")
+        )
+
+        OpenSshLinuxResourceProbe().probe("gpu-1", enabled)
+
+        script = run.call_args.kwargs["input_text"]
+        self.assertIn("workload_tier=1", script)
+        self.assertIn("/proc/$process_pid/cmdline", script)
+        self.assertIn("/proc/$process_pid/stat", script)
 
     @patch("mocop.probe._run_bounded_process")
     def test_uses_per_host_probe_timeout(self, run) -> None:
@@ -1221,6 +1238,48 @@ class ProbeTests(unittest.TestCase):
         self.assertFalse(gpus[0].processes_available)
         self.assertEqual(gpus[0].processes, ())
 
+    def test_parses_v7_workload_records_with_start_and_command(self) -> None:
+        workloads = parse_workload_records(
+            "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t\t"
+            "1767225600\tpython train.py --epochs 3\n"
+            "WORKLOAD\t4243\tprocess\t\t\tbob\t\t\t\t"
+        )
+
+        self.assertEqual(workloads[4242].started_at, "2026-01-01T00:00:00Z")
+        self.assertEqual(workloads[4242].command, "python train.py --epochs 3")
+        self.assertEqual(workloads[4242].kind, "slurm")
+        self.assertIsNone(workloads[4243].started_at)
+        self.assertIsNone(workloads[4243].command)
+
+        with self.assertRaisesRegex(ValueError, "workload start"):
+            parse_workload_records("WORKLOAD\t1\tprocess\t\t\tx\t\t\tnot-a-number\tcmd")
+
+    @patch(
+        "mocop.probe.time.monotonic",
+        side_effect=(0, 0.1, 15, 15.1, 16, 16.1),
+    )
+    @patch("mocop.probe._run_bounded_process")
+    def test_unattended_probe_stretches_and_catches_up_on_return(
+        self, run, _monotonic
+    ) -> None:
+        def execute(_command, **kwargs):
+            return _BoundedProcessResult(0, resource_payload(), "")
+
+        run.side_effect = execute
+        probe = OpenSshLinuxResourceProbe()
+        probe.set_attended(False)
+
+        probe.probe("gpu-1", config())  # first sample always collects
+        probe.probe("gpu-1", config())  # attended cadence would be due at 15s
+        probe.set_attended(True)
+        probe.probe("gpu-1", config())  # returning viewer forces a catch-up
+
+        scripts = [item.kwargs["input_text"] for item in run.call_args_list]
+        self.assertEqual(
+            [("process_enabled=1" in script) for script in scripts],
+            [True, False, True],
+        )
+
     def test_malformed_workload_row_keeps_processes(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
@@ -1337,6 +1396,67 @@ class ProbeTests(unittest.TestCase):
         self.assertNotEqual(workload.owner, "spoofed-owner")
         self.assertEqual(workload.kind, "slurm")
         self.assertEqual(workload.workload_id, "777")
+        # V7 identity columns ride along in the full tier.
+        self.assertIn("sys.stdin.read", workload.command or "")
+        self.assertIsNotNone(workload.started_at)
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and Path("/etc/passwd").exists(),
+        "identity attribution requires Linux /proc and /etc/passwd",
+    )
+    def test_identity_tier_collects_owner_command_and_start_time(self) -> None:
+        helper = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                executable = root / "nvidia-smi"
+                executable.write_text(
+                    "#!/bin/sh\n"
+                    'case "$1" in\n'
+                    "  --query-gpu=*) printf '%s\\n' "
+                    "'0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+                    "81920, 40960, 40960, 287.5, 400, 0, No, No, "
+                    "Not Active, Not Active, Disabled' ;;\n"
+                    "  --query-compute-apps=*) printf '%s\\n' "
+                    f"'GPU-abc, {helper.pid}, python, 1024' ;;\n"
+                    "esac\n",
+                    encoding="utf-8",
+                )
+                executable.chmod(0o700)
+                completed = _run_bounded_process(
+                    ["sh", "-s"],
+                    input_text=_remote_script("identity", True),
+                    timeout_seconds=5,
+                    max_output_bytes=2_097_152,
+                    environment={
+                        **os.environ,
+                        "LC_ALL": "C",
+                        "PATH": f"{root}:{os.environ['PATH']}",
+                    },
+                )
+        finally:
+            if helper.stdin is not None:
+                helper.stdin.close()
+            helper.wait()
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("workload_tier=1", _remote_script("identity", True))
+        _, gpus, _ = parse_linux_resource_payload(completed.stdout)
+        workload = gpus[0].processes[0].workload
+        self.assertIsNotNone(workload)
+        # The light tier never reads cgroup or environ, so the kind stays
+        # "process" while owner, command line and start time are populated.
+        self.assertEqual(workload.kind, "process")
+        self.assertIsNotNone(workload.owner)
+        self.assertIn("sys.stdin.read", workload.command or "")
+        self.assertIsNotNone(workload.started_at)
+        started = datetime.fromisoformat(workload.started_at.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        self.assertLessEqual(started, now)
+        self.assertGreater(started, now - timedelta(days=1))
 
 
 if __name__ == "__main__":

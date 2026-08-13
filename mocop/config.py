@@ -352,7 +352,7 @@ _TOPOLOGY_LINK_REQUIRED_KEYS = {"source", "target", "transport"}
 _TOPOLOGY_LINK_KEYS = _TOPOLOGY_LINK_REQUIRED_KEYS | {"label"}
 _PERSISTENCE_KEYS = {"enabled", "retention_hours", "max_bytes"}
 _WORKLOAD_KEYS = {"mode"}
-_WORKLOAD_MODES = frozenset({"disabled", "auto"})
+_WORKLOAD_MODES = frozenset({"disabled", "identity", "auto"})
 _WEBHOOK_KEYS = {
     "name",
     "url_env",
@@ -698,7 +698,7 @@ def _workload_config(data: dict[str, Any]) -> WorkloadConfig:
         raise ConfigError(f"unknown workloads keys: {', '.join(unknown)}")
     mode = raw.get("mode")
     if mode not in _WORKLOAD_MODES:
-        raise ConfigError("workloads.mode must be disabled or auto")
+        raise ConfigError("workloads.mode must be disabled, identity, or auto")
     return WorkloadConfig(mode=mode)
 
 

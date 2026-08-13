@@ -14,6 +14,7 @@ from collections import Counter
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from .config import MonitorConfig, ThresholdConfig, is_safe_alias
@@ -31,7 +32,7 @@ from .remote_script import (
     _COMBINED_QUERY_FIELDS,
     _HEALTH_QUERY_FIELDS,
     _PROCESS_QUERY_FIELDS,
-    _PROTOCOL_VERSION,
+    _PROCESS_SKIP_CAPABLE_VERSIONS,
     _QUERY_FIELDS,
     _SUPPORTED_PROTOCOL_VERSIONS,
     _remote_script,
@@ -60,6 +61,13 @@ class InventoryAwareResourceProbe(Protocol):
     """Optional extension for probes that retain per-host sampling state."""
 
     def retain_hosts(self, hosts: set[str]) -> None: ...
+
+
+@runtime_checkable
+class AttendedAwareResourceProbe(Protocol):
+    """Optional extension for probes that relax cadence without viewers."""
+
+    def set_attended(self, attended: bool) -> None: ...
 
 
 # Backward-compatible name for callers that used the first GPU-only interface.
@@ -424,13 +432,40 @@ def parse_nvidia_processes_csv(payload: str) -> dict[str, tuple[GpuProcess, ...]
     return {gpu_uuid: tuple(items) for gpu_uuid, items in processes.items()}
 
 
+_MAX_WORKLOAD_START_EPOCH = 4_102_444_800  # 2100-01-01T00:00:00Z
+
+
+def _workload_start_iso(value: str) -> str | None:
+    text = value.strip()
+    if not text:
+        return None
+    if not text.isdigit() or not 0 < int(text) <= _MAX_WORKLOAD_START_EPOCH:
+        raise ValueError("resource payload has an invalid workload start time")
+    return (
+        datetime.fromtimestamp(int(text), tz=timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _sanitized_workload_command(value: str) -> str | None:
+    """Bound the display-only command line without discarding the record."""
+    cleaned = "".join(
+        " " if ord(character) < 32 or 127 <= ord(character) <= 159 else character
+        for character in value.replace("\u2028", " ").replace("\u2029", " ")
+    ).strip()
+    return cleaned[:255] or None
+
+
 def parse_workload_records(payload: str) -> dict[int, WorkloadMetadata]:
     workloads: dict[int, WorkloadMetadata] = {}
     for row_number, line in enumerate(payload.splitlines(), start=1):
         if not line.strip():
             continue
         fields = line.split("\t")
-        if len(fields) != 8 or fields[0] != "WORKLOAD":
+        # V7 records append a start epoch and a command line; V6 and earlier
+        # carry the original eight columns.
+        if len(fields) not in (8, 10) or fields[0] != "WORKLOAD":
             raise ValueError(
                 f"resource payload has an invalid workload record on row {row_number}"
             )
@@ -461,6 +496,10 @@ def parse_workload_records(payload: str) -> dict[int, WorkloadMetadata]:
             owner=optional_text(fields[5], "owner"),
             queue=optional_text(fields[6], "queue"),
             namespace=optional_text(fields[7], "namespace"),
+            started_at=_workload_start_iso(fields[8]) if len(fields) == 10 else None,
+            command=(
+                _sanitized_workload_command(fields[9]) if len(fields) == 10 else None
+            ),
         )
     if len(workloads) > _MAX_PROCESSES_PER_HOST:
         raise ValueError("resource payload has too many workload records")
@@ -721,7 +760,7 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
         if in_processes:
             if line == "PROCESS_SKIPPED":
                 if (
-                    protocol_version != _PROTOCOL_VERSION
+                    protocol_version not in _PROCESS_SKIP_CAPABLE_VERSIONS
                     or process_status_marker is not None
                     or process_lines
                 ):
@@ -942,6 +981,10 @@ class _ProcessSample:
 
 
 _MAX_PROCESS_INTERVAL_STRETCH = 4
+# Without a connected dashboard the process list serves only the event
+# timeline, so the cadence stretches much further; core telemetry, trends and
+# incidents keep their own cadence, and the first viewer forces a catch-up.
+_UNATTENDED_PROCESS_INTERVAL_STRETCH = 16
 
 
 def _gpu_activity(gpus: tuple[GpuMetrics, ...], thresholds: ThresholdConfig) -> bool:
@@ -1051,6 +1094,7 @@ class OpenSshLinuxResourceProbe:
         self._process_samples: dict[str, _ProcessSample] = {}
         self._activity_hints: dict[str, bool] = {}
         self._process_retry_forced: set[str] = set()
+        self._attended = True
         self._processes = _ActiveProcessRegistry()
         self._environment = os.environ.copy()
         self._environment["LC_ALL"] = "C"
@@ -1062,6 +1106,16 @@ class OpenSshLinuxResourceProbe:
     def close(self) -> None:
         """Release the collector's cancellation pipe once it is retired."""
         self._processes.close()
+
+    def set_attended(self, attended: bool) -> None:
+        """Track dashboard presence; a returning viewer forces fresh samples."""
+        with self._sample_lock:
+            catching_up = attended and not self._attended
+            self._attended = attended
+            if catching_up:
+                # Every cached host refreshes on the next core cycle so the
+                # first dialog a viewer opens shows current processes.
+                self._process_retry_forced.update(self._process_samples)
 
     def retain_hosts(self, hosts: set[str]) -> None:
         """Discard rate baselines for removed hosts and later clean re-additions."""
@@ -1174,11 +1228,20 @@ class OpenSshLinuxResourceProbe:
             sample = self._process_samples.get(host)
             active = self._activity_hints.get(host, False)
             forced = host in self._process_retry_forced
+            attended = self._attended
         # An unavailable process query is retried every core cycle until it
         # succeeds, so a transient error never leaves the process view stale
         # for the stretched interval.
         if forced or sample is None or sample.workload_mode != workload_mode:
             return True
+        # Without a connected dashboard the process list has no reader, so
+        # busy and idle devices alike stretch to the unattended ceiling; the
+        # attended transition forces an immediate catch-up sample.
+        if not attended:
+            return (
+                now - sample.sampled_at_monotonic
+                >= interval_seconds * _UNATTENDED_PROCESS_INTERVAL_STRETCH
+            )
         # Idle devices stretch the process cadence up to fourfold; any
         # activity hint from the five-second core telemetry cancels the
         # stretch, so detection latency never exceeds the base interval.
