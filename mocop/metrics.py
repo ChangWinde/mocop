@@ -346,6 +346,8 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         "network_tx": [],
         "disk_read": [],
         "disk_write": [],
+        "pressure_some": [],
+        "pressure_full": [],
     }
     gpu_samples: dict[str, list[Sample]] = {
         "info": [],
@@ -443,6 +445,25 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
                 _append_optional(
                     host_samples[sample_key], host_labels, system.get(field)
                 )
+            pressure = system.get("pressure")
+            if isinstance(pressure, Mapping):
+                # The 10-second averages are the freshest windows the kernel
+                # publishes and behave well under typical scrape intervals.
+                for psi_resource in ("cpu", "memory", "io"):
+                    sample = pressure.get(psi_resource)
+                    if not isinstance(sample, Mapping):
+                        continue
+                    psi_labels = (("host", host), ("resource", psi_resource))
+                    _append_ratio(
+                        host_samples["pressure_some"],
+                        psi_labels,
+                        sample.get("some_avg10"),
+                    )
+                    _append_ratio(
+                        host_samples["pressure_full"],
+                        psi_labels,
+                        sample.get("full_avg10"),
+                    )
 
         raw_gpus = raw_server.get("gpus")
         if not isinstance(raw_gpus, list):
@@ -628,6 +649,20 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
             "mocop_host_disk_write_bytes_per_second",
             "Current aggregate disk write rate.",
             "bytes_per_second",
+        ),
+        (
+            "pressure_some",
+            "mocop_host_pressure_some_ratio",
+            "Share of the last 10 seconds with at least one task stalled"
+            " on the resource (kernel PSI some avg10).",
+            None,
+        ),
+        (
+            "pressure_full",
+            "mocop_host_pressure_full_ratio",
+            "Share of the last 10 seconds with all tasks stalled"
+            " on the resource (kernel PSI full avg10).",
+            None,
         ),
     )
     for key, name, help_text, unit in host_definitions:

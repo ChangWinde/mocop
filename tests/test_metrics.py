@@ -196,6 +196,57 @@ class OpenMetricsTests(unittest.TestCase):
             body,
         )
 
+    def test_exports_pressure_stall_ratios_with_resource_labels(self) -> None:
+        payload = {
+            "appVersion": "test",
+            "stats": {},
+            "servers": [
+                {
+                    "host": "gpu-01",
+                    "status": "online",
+                    "stale": False,
+                    "system": {
+                        "pressure": {
+                            "cpu": {
+                                "some_avg10": 1.5,
+                                "some_avg60": 1.0,
+                                "full_avg10": None,
+                                "full_avg60": None,
+                            },
+                            "memory": {
+                                "some_avg10": 25.0,
+                                "some_avg60": 20.0,
+                                "full_avg10": 10.0,
+                                "full_avg60": 5.0,
+                            },
+                            "io": None,
+                        },
+                    },
+                    "gpus": [],
+                }
+            ],
+        }
+
+        body = render_openmetrics(payload).decode()
+
+        self.assertIn(
+            'mocop_host_pressure_some_ratio{host="gpu-01",resource="cpu"} 0.015\n',
+            body,
+        )
+        self.assertIn(
+            'mocop_host_pressure_some_ratio{host="gpu-01",resource="memory"} 0.25\n',
+            body,
+        )
+        self.assertIn(
+            'mocop_host_pressure_full_ratio{host="gpu-01",resource="memory"} 0.1\n',
+            body,
+        )
+        # Unreported resources and unavailable full averages are omitted, not zero.
+        self.assertNotIn('resource="io"', body)
+        self.assertNotIn(
+            'mocop_host_pressure_full_ratio{host="gpu-01",resource="cpu"}', body
+        )
+
     def test_omits_mib_samples_that_overflow_when_scaled_to_bytes(self) -> None:
         payload = {
             "appVersion": "test",
