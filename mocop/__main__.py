@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 
 from .config import ConfigError, load_config, resolve_config_path
-from .discovery import create_host_source
+from .discovery import OpenSshConfigHostSource
 from .doctor import run_doctor
 from .inventory import ConfigInventory
 from .lifecycle import (
@@ -28,7 +28,7 @@ from .persistence import (
     PersistenceError,
     create_persistence,
 )
-from .probe import create_probe
+from .probe import OpenSshLinuxResourceProbe
 from .service import MonitorService, StateStore
 from .web import MonitorHttpServer
 
@@ -50,6 +50,13 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "--once",
         action="store_true",
         help="collect one snapshot, write it as JSON, and exit",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "with --once, exit 1 unless every configured host produced an online sample"
+        ),
     )
     parser.add_argument(
         "--managed-service",
@@ -194,18 +201,30 @@ def _run_monitor(args: argparse.Namespace) -> int:
         topology=config.topology,
         notifications=notifications,
     )
-    host_source = create_host_source("openssh-config")
+    host_source = OpenSshConfigHostSource()
     monitor = MonitorService(
         config=config,
         host_source=host_source,
-        probe=create_probe("openssh-linux-v6"),
+        probe=OpenSshLinuxResourceProbe(),
         state=state,
     )
     if args.once:
         import json
 
         monitor.poll_once()
-        print(json.dumps(state.snapshot(), ensure_ascii=False, indent=2))
+        snapshot = state.snapshot()
+        print(json.dumps(snapshot, ensure_ascii=False, indent=2))
+        if args.strict:
+            servers = snapshot.get("servers", [])
+            failed = sorted(
+                str(server.get("host"))
+                for server in servers
+                if server.get("status") != "online"
+            )
+            if not servers or failed:
+                detail = ", ".join(failed) if failed else "no configured hosts"
+                print(f"strict: not fully online: {detail}", file=sys.stderr)
+                return 1
         return 0
 
     stop_event = threading.Event()
@@ -371,6 +390,9 @@ def _run_lifecycle(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
+    if args.strict and not args.once:
+        print("--strict requires --once", file=sys.stderr)
+        return 2
     if args.command is None:
         return _run_monitor(args)
     if args.command == "config":

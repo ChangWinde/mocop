@@ -207,6 +207,9 @@ const view = {
   maintenanceEditingHost: null,
   maintenancePendingHost: null,
   maintenanceDraft: null,
+  // Host whose settings row should be scrolled into view and focused once
+  // the inventory list finishes loading (incident detail -> maintenance).
+  maintenanceFocusHost: null,
   groupEditingHost: null,
   groupPendingHost: null,
   collectorSettingsDirty: false,
@@ -383,6 +386,7 @@ const elements = {
   acknowledgeIncident: $("#acknowledge-incident"),
   silenceIncident: $("#silence-incident"),
   clearIncidentAction: $("#clear-incident-action"),
+  incidentOpenMaintenance: $("#incident-open-maintenance"),
   incidentActionFeedback: $("#incident-action-feedback"),
 };
 const styleChoiceButtons = [...document.querySelectorAll("[data-style-choice]")];
@@ -1720,6 +1724,7 @@ function inventoryEmpty(message) {
 
 function inventoryHostRow(host, action) {
   const row = create("div", "inventory-host");
+  row.dataset.host = host;
   const identity = create("span", "inventory-host-name");
   identity.append(create("i", "status-dot online"), create("strong", "", host));
   if (action === "remove" && host === view.inventory.localHost) {
@@ -1945,6 +1950,25 @@ function renderInventory() {
   elements.inventoryStatus.className = `inventory-status ${view.inventoryMessageKind}`.trim();
   elements.inventoryStatus.textContent = view.inventoryMessage || message;
   restoreMaintenanceEditorFocus();
+  focusPendingMaintenanceHost();
+}
+
+function focusPendingMaintenanceHost() {
+  // Deferred deep link (incident detail -> maintenance window): act only on
+  // the render that follows a completed inventory load, so the row and its
+  // expanded maintenance editor actually exist.
+  const host = view.maintenanceFocusHost;
+  if (!host || view.inventoryLoading) return;
+  view.maintenanceFocusHost = null;
+  const row = [...elements.configuredHostList.querySelectorAll(".inventory-host")]
+    .find((item) => item.dataset.host === host);
+  if (!row) return;
+  if (typeof row.scrollIntoView === "function") {
+    row.scrollIntoView({ block: "center" });
+  }
+  const target = row.querySelector('.maintenance-editor input[type="text"]')
+    || row.querySelector(".maintenance-action");
+  target?.focus();
 }
 
 function restoreMaintenanceEditorFocus() {
@@ -2180,10 +2204,26 @@ function failureText(message) {
     "Local resource output exceeded the configured limit": "本机资源输出超过安全上限",
     "Remote resource output was not recognized": "远端资源数据格式异常",
     "Remote resource output exceeded the configured limit": "远端资源输出超过安全上限",
+    "SSH transport stopped responding": "SSH 传输失去响应（keepalive 超时）",
+    "SSH produced no output before the collection timeout": "SSH 在采集超时前无任何输出",
+    "Remote collection stalled after partial output": "远端采集在部分输出后停滞",
+    "Resource collection cancelled": "资源采集已取消",
+    "Unexpected collector error": "采集器发生未预期错误",
     "nvidia-smi is unavailable": "系统在线，但未安装 nvidia-smi",
     "nvidia-smi query failed": "系统在线，但 GPU 查询失败",
   };
-  return messages[message] || message || "采集失败";
+  if (messages[message]) return messages[message];
+  // Messages carrying a dynamic exit code only match by prefix; the original
+  // parenthesised detail is preserved verbatim.
+  const prefixes = [
+    ["Remote resource query failed", "远端资源查询失败"],
+    ["Local resource query failed", "本机资源查询失败"],
+  ];
+  if (typeof message === "string") {
+    const prefixed = prefixes.find(([prefix]) => message.startsWith(prefix));
+    if (prefixed) return prefixed[1] + message.slice(prefixed[0].length);
+  }
+  return message || "采集失败";
 }
 
 function allGpuRecords() {
@@ -2583,8 +2623,15 @@ function renderOwners() {
     );
     const devices = create("div", "capacity-devices");
     [...entry.hosts].sort().slice(0, 8).forEach((host) => {
-      const chip = create("span", "", hostLabels.get(host) || host);
-      chip.title = host;
+      // Drill-down: the chip jumps to the host in the fleet view, reusing the
+      // regular selection path (URL hash included) via selectHost().
+      const chip = create("button", "owner-host-chip", hostLabels.get(host) || host);
+      chip.type = "button";
+      chip.title = `${host} · 点击查看该节点`;
+      chip.addEventListener("click", () => {
+        elements.ownersDialog.close();
+        selectHost(host);
+      });
       devices.append(chip);
     });
     if (entry.hosts.size > 8) {
@@ -2604,7 +2651,7 @@ function renderCapacityMatcher() {
   if (!incidentsSyncedWithSnapshot()) {
     // Without current alert data a "no hardware alerts" promise would be a
     // guess, so hold the verdict until the matching incident version loads.
-    elements.capacityRule.textContent = `空闲 = GPU 负载低于 ${format(limits().gpu_busy_pct)}% · 单卡可用显存至少 ${format(request.minVramGiB)} GiB · GPU 硬件告警状态同步中`;
+    elements.capacityRule.textContent = `空闲 = GPU 负载低于 ${format(limits().gpu_busy_pct)}% · 单卡可用显存至少 ${format(request.minVramGiB)} GiB · 温度低于 ${format(limits().gpu_temperature_warning_c)}°C 警戒线 · GPU 硬件告警状态同步中`;
     elements.capacitySummary.textContent = "GPU 告警数据加载中或暂不可用，暂缓给出匹配结论";
     elements.capacityResults.replaceChildren(
       create("div", "capacity-empty", "等待 GPU 告警数据同步后自动更新匹配结果"),
@@ -2613,7 +2660,7 @@ function renderCapacityMatcher() {
   }
   const result = capacityMatches();
   const exact = result.candidates.filter((candidate) => candidate.satisfies).length;
-  elements.capacityRule.textContent = `空闲 = GPU 负载低于 ${format(limits().gpu_busy_pct)}% · 单卡可用显存至少 ${format(request.minVramGiB)} GiB · 无 GPU 硬件告警`;
+  elements.capacityRule.textContent = `空闲 = GPU 负载低于 ${format(limits().gpu_busy_pct)}% · 单卡可用显存至少 ${format(request.minVramGiB)} GiB · 温度低于 ${format(limits().gpu_temperature_warning_c)}°C 警戒线 · 无 GPU 硬件告警`;
   elements.capacitySummary.textContent = exact
     ? `${exact} 个节点 / 型号组合满足 ${request.gpuCount} 张 GPU`
     : `暂无组合满足 ${request.gpuCount} 张 GPU，显示最接近结果`;
@@ -3002,6 +3049,7 @@ function renderIncidentDetail() {
     elements.acknowledgeIncident,
     elements.silenceIncident,
     elements.clearIncidentAction,
+    elements.incidentOpenMaintenance,
     elements.incidentActionDuration,
     elements.incidentActionReason,
   ].forEach((element) => { element.disabled = view.incidentActionPending; });
@@ -5759,6 +5807,17 @@ elements.incidentOpenGpu.addEventListener("click", () => {
   const index = Number.parseInt(elements.incidentOpenGpu.dataset.gpuIndex, 10);
   const gpu = server?.gpus.find((item) => item.index === index);
   if (server && gpu) openGpuDetail(server, gpu);
+});
+elements.incidentOpenMaintenance.addEventListener("click", () => {
+  const host = view.selectedIncident?.host;
+  if (!host) return;
+  // Pre-expand the maintenance editor for this host, then reuse the regular
+  // settings entry point (it closes the incident dialog and rescans nodes).
+  view.maintenanceEditingHost = host;
+  view.maintenanceDraft = null;
+  view.groupEditingHost = null;
+  view.maintenanceFocusHost = host;
+  elements.settingsToggle.click();
 });
 elements.inventoryRefresh.addEventListener("click", refreshInventory);
 elements.collectorSettingsForm.addEventListener("submit", saveCollectorSettings);

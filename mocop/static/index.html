@@ -632,7 +632,9 @@
             <button id="acknowledge-incident" class="primary-action" type="button">确认问题</button>
             <button id="silence-incident" class="inline-action" type="button">临时静默</button>
             <button id="clear-incident-action" class="inline-action danger-action" type="button" hidden>恢复待处理</button>
+            <button id="incident-open-maintenance" class="inline-action" type="button" title="打开设置并定位到该主机的维护窗口编辑区">设置维护窗口</button>
           </div>
+          <small class="incident-action-hint">确认＝保留告警计数但标记已知晓；静默＝在期限内不再计入待处理与通知</small>
           <span id="incident-action-feedback" class="incident-action-feedback" role="status"></span>
         </section>
       </div>

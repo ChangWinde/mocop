@@ -818,6 +818,9 @@ body.hide-gpu-power .gpu-col-power { display: none !important; }
 .capacity-candidate-metrics { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 12px; color: var(--muted); font-size: 8px; }
 .capacity-devices { min-width: 0; display: flex; flex-wrap: wrap; gap: 5px; }
 .capacity-devices span { padding: 4px 6px; border: 1px solid color-mix(in srgb, var(--accent-2) 18%, transparent); border-radius: 6px; color: var(--accent-2); background: var(--accent-2-soft); font-family: var(--font-mono); font-size: 7px; }
+.capacity-devices .owner-host-chip { padding: 4px 6px; border: 1px solid color-mix(in srgb, var(--accent-2) 18%, transparent); border-radius: 6px; color: var(--accent-2); background: var(--accent-2-soft); cursor: pointer; font-family: var(--font-mono); font-size: 7px; }
+.capacity-devices .owner-host-chip:hover { border-color: color-mix(in srgb, var(--accent-2) 48%, transparent); color: var(--text); }
+.capacity-devices .owner-host-chip:focus-visible { outline: none; border-color: color-mix(in srgb, var(--blue) 50%, var(--line)); box-shadow: var(--focus); }
 .capacity-candidate > .inline-action { align-self: end; }
 .capacity-empty { grid-column: 1 / -1; min-height: 120px; display: grid; place-items: center; padding: 20px; border: 1px dashed var(--line); border-radius: 12px; color: var(--muted-2); font-size: 10px; text-align: center; }
 .capacity-footnote { margin: 0; padding: 0 20px 20px; color: var(--muted-2); font-size: 8px; line-height: 1.6; }
@@ -1236,6 +1239,7 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
 .incident-actions select:focus, .incident-actions input:focus { border-color: color-mix(in srgb, var(--blue) 50%, var(--line)); box-shadow: var(--focus); }
 .incident-action-buttons { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
 .incident-action-buttons .primary-action, .incident-action-buttons .inline-action { flex: 1 1 88px; }
+.incident-action-hint { display: block; margin-top: 9px; color: var(--muted-2); font-size: 8px; line-height: 1.6; }
 .incident-action-feedback { min-height: 16px; display: block; margin-top: 10px; color: var(--muted-2); font-size: 8px; line-height: 1.5; }
 .incident-action-feedback.success { color: var(--green); }
 .incident-action-feedback.error { color: var(--red); }

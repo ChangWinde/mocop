@@ -11,7 +11,6 @@ import threading
 import time
 import weakref
 from collections import Counter
-from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -67,10 +66,6 @@ class AttendedAwareResourceProbe(Protocol):
     """Optional extension for probes that relax cadence without viewers."""
 
     def set_attended(self, attended: bool) -> None: ...
-
-
-ResourceProbeFactory = Callable[[], ResourceProbe]
-_PROBES: dict[str, ResourceProbeFactory] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,23 +270,6 @@ def _run_bounded_process(
             if stream is not None:
                 with suppress(OSError):
                     stream.close()
-
-
-def register_probe(name: str) -> Callable[[ResourceProbeFactory], ResourceProbeFactory]:
-    def decorator(factory: ResourceProbeFactory) -> ResourceProbeFactory:
-        _PROBES[name] = factory
-        return factory
-
-    return decorator
-
-
-def create_probe(name: str) -> ResourceProbe:
-    try:
-        return _PROBES[name]()
-    except KeyError as exc:
-        raise KeyError(
-            f"unknown resource probe {name!r}; available: {sorted(_PROBES)}"
-        ) from exc
 
 
 def _finite_number(normalized: str) -> float | None:
@@ -1087,7 +1065,6 @@ def _force_fresh_transport(command: list[str]) -> list[str]:
     ]
 
 
-@register_probe("openssh-linux-v6")
 class OpenSshLinuxResourceProbe:
     """Collect Linux and NVIDIA metrics locally or through one fixed SSH script."""
 

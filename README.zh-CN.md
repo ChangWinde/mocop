@@ -214,7 +214,7 @@ mocop service install
 - 在“设置 → 监控节点”中扫描 SSH 别名，添加或删除符合条件的计算节点。
 - 升级后可使用“设置 → 监控服务状态 → 重启服务”；该按钮只在用户级服务模式下可用，恢复后页面会自动刷新。
 - 可上传最大 32 MiB 的 PNG、JPEG、WebP 或 AVIF 背景；超过 8 MiB 时只在浏览器内压缩，不会上传。
-- 使用 `mocop --once > snapshot.json` 导出一次当前快照。
+- 使用 `mocop --once > snapshot.json` 导出一次当前快照。脚本与定时任务可加 `--strict`：只要有任意配置主机未产生在线采样即退出码 `1`，并在 stderr 列出失败主机。
 
 ## HTTP API
 

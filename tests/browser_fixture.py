@@ -85,6 +85,11 @@ class DemoInventory:
                     "target": "atlas-03",
                     "transport": "ssh",
                 },
+                {
+                    "source": "atlas-gateway",
+                    "target": "atlas-06",
+                    "transport": "ssh",
+                },
             ],
         }
 
@@ -408,10 +413,11 @@ def demo_state() -> StateStore:
             ("atlas-01", "Training"),
             ("atlas-02", "Training"),
             ("atlas-03", "Lab"),
+            ("atlas-06", "Lab"),
         ),
         notifications=DemoNotificationSink(now),
     )
-    state.set_hosts(("atlas-01", "atlas-02", "atlas-03"))
+    state.set_hosts(("atlas-01", "atlas-02", "atlas-03", "atlas-06"))
     for round_observed_at in (first_observed_at, observed_at):
         state.apply(
             ProbeResult(
@@ -530,6 +536,17 @@ def demo_state() -> StateStore:
             status="unreachable",
             latency_ms=5_000,
             message="SSH connection timed out",
+            observed_at=observed_at,
+        )
+    )
+    # atlas-06 never produced a sample: a collector-level failure whose exact
+    # message must reach the dashboard through the localized failureText map.
+    state.apply(
+        ProbeResult(
+            host="atlas-06",
+            status="error",
+            latency_ms=12_000,
+            message="SSH transport stopped responding",
             observed_at=observed_at,
         )
     )
