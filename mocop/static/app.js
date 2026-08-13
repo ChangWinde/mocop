@@ -11,11 +11,13 @@ const MAX_BACKGROUND_PIXELS = 32_000_000;
 const MAX_COMPRESSED_BACKGROUND_DIMENSION = 4096;
 const MAX_COMPRESSED_BACKGROUND_PIXELS = 12_000_000;
 const MAX_GPU_DETAIL_PROCESSES = 100;
+const GPU_PROCESS_FRESHNESS_WARNING_MS = 90_000;
 const BACKGROUND_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
 const DEFAULT_PREFERENCES = Object.freeze({
   serverSort: "custom",
   serverOrder: [],
   gpuSort: "host",
+  gpuTaskSort: "memory",
   heatMetric: "utilization",
   visualStyle: "precision",
   accent: "cobalt",
@@ -27,6 +29,7 @@ const DEFAULT_PREFERENCES = Object.freeze({
 });
 const SERVER_SORT_VALUES = new Set(["custom", "group", "host", "status", "gpu", "cpu"]);
 const GPU_SORT_VALUES = new Set(["host", "utilization", "memory", "temperature", "power"]);
+const GPU_TASK_SORT_VALUES = new Set(["memory", "duration"]);
 const HEAT_METRIC_VALUES = new Set(["utilization", "memory", "temperature"]);
 const VISUAL_STYLE_VALUES = new Set([
   "precision", "glass", "terminal", "ledger", "blueprint", "studio",
@@ -84,6 +87,8 @@ function loadPreferences() {
       serverOrder: safeStoredHosts(stored.serverOrder),
       gpuSort: GPU_SORT_VALUES.has(stored.gpuSort)
         ? stored.gpuSort : DEFAULT_PREFERENCES.gpuSort,
+      gpuTaskSort: GPU_TASK_SORT_VALUES.has(stored.gpuTaskSort)
+        ? stored.gpuTaskSort : DEFAULT_PREFERENCES.gpuTaskSort,
       heatMetric: HEAT_METRIC_VALUES.has(stored.heatMetric)
         ? stored.heatMetric : DEFAULT_PREFERENCES.heatMetric,
       visualStyle: VISUAL_STYLE_VALUES.has(stored.visualStyle)
@@ -140,6 +145,11 @@ const view = {
   historyKey: "",
   historyRequest: 0,
   historyLoading: false,
+  historyError: false,
+  historyFetchKey: null,
+  historyRetryTimer: null,
+  historyRetryKey: "",
+  historyRetryDelayMs: 0,
   trendRenderKey: "",
   renderFrame: null,
   expandedHosts: new Set(),
@@ -157,6 +167,9 @@ const view = {
   incidentVersion: -1,
   incidentRequest: 0,
   incidentLoadingVersion: null,
+  incidentRetryTimer: null,
+  incidentRetryVersion: null,
+  incidentRetryDelayMs: 0,
   incidentExpanded: false,
   transportKind: "connecting",
   transportLabel: "连接中",
@@ -171,6 +184,7 @@ const view = {
   gpuHistoryKey: "",
   gpuHistoryRequest: 0,
   gpuHistoryLoading: false,
+  gpuTaskRowCache: new Map(),
   selectedIncident: null,
   incidentActionPending: false,
   manualProbePending: false,
@@ -186,6 +200,7 @@ const view = {
   inventoryConfirmTimer: null,
   maintenanceEditingHost: null,
   maintenancePendingHost: null,
+  maintenanceDraft: null,
   groupEditingHost: null,
   groupPendingHost: null,
   collectorSettingsDirty: false,
@@ -236,6 +251,11 @@ const elements = {
   capacitySummary: $("#capacity-summary"),
   capacityUpdated: $("#capacity-updated"),
   capacityResults: $("#capacity-results"),
+  ownersToggle: $("#owners-toggle"),
+  ownersDialog: $("#owners-dialog"),
+  ownersSummary: $("#owners-summary"),
+  ownersUpdated: $("#owners-updated"),
+  ownersResults: $("#owners-results"),
   serverSort: $("#server-sort"),
   defaultServerFilter: $("#default-server-filter"),
   interfaceDensity: $("#interface-density"),
@@ -808,6 +828,7 @@ function savePreferences() {
     serverSort: view.serverSort,
     serverOrder: view.serverOrder,
     gpuSort: view.sort,
+    gpuTaskSort: preferences.gpuTaskSort,
     heatMetric: view.heatMetric,
     visualStyle: preferences.visualStyle,
     accent: preferences.accent,
@@ -865,6 +886,7 @@ function resetPreferences() {
   view.serverSort = DEFAULT_PREFERENCES.serverSort;
   view.serverOrder = [];
   view.sort = DEFAULT_PREFERENCES.gpuSort;
+  preferences.gpuTaskSort = DEFAULT_PREFERENCES.gpuTaskSort;
   view.heatMetric = DEFAULT_PREFERENCES.heatMetric;
   preferences.visualStyle = DEFAULT_PREFERENCES.visualStyle;
   preferences.accent = DEFAULT_PREFERENCES.accent;
@@ -944,6 +966,21 @@ function age(timestamp) {
   return `${Math.floor(seconds / 60)} 分钟前`;
 }
 
+// Elapsed-duration wording ("3 小时 12 分") for process runtimes, unlike the
+// "X 前" phrasing that age() produces for sample freshness.
+function durationSince(timestamp) {
+  const elapsed = Date.now() - Date.parse(timestamp);
+  if (!Number.isFinite(elapsed)) return "时长未知";
+  const seconds = Math.max(0, Math.floor(elapsed / 1000));
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days) return `${days} 天 ${hours} 小时`;
+  if (hours) return `${hours} 小时 ${minutes} 分`;
+  if (minutes) return `${minutes} 分钟`;
+  return `${seconds} 秒`;
+}
+
 function shortTime(timestamp) {
   const value = new Date(timestamp);
   if (!Number.isFinite(value.getTime())) return "未知时间";
@@ -971,6 +1008,10 @@ function refreshRelativeTimes() {
   });
   document.querySelectorAll("[data-age-at]").forEach((element) => {
     element.textContent = age(element.dataset.ageAt);
+  });
+  document.querySelectorAll("[data-duration-since]").forEach((element) => {
+    element.textContent = `${element.dataset.durationPrefix || ""}${
+      durationSince(element.dataset.durationSince)}`;
   });
 }
 
@@ -1494,12 +1535,12 @@ function normalizeMaintenanceWindows(payload, configuredHosts) {
   const configured = new Set(configuredHosts);
   const windows = {};
   Object.entries(payload).forEach(([host, window]) => {
+    const keys = window && typeof window === "object" && !Array.isArray(window)
+      ? Object.keys(window).sort().join(",") : "";
     if (
       !configured.has(host)
-      || !window
-      || typeof window !== "object"
-      || Array.isArray(window)
-      || Object.keys(window).sort().join(",") !== "reason,until"
+      || (keys !== "reason,until" && keys !== "reason,recurring,until")
+      || (keys.includes("recurring") && typeof window.recurring !== "boolean")
       || typeof window.until !== "string"
       || !Number.isFinite(Date.parse(window.until))
       || typeof window.reason !== "string"
@@ -1508,7 +1549,11 @@ function normalizeMaintenanceWindows(payload, configuredHosts) {
     ) {
       throw new TypeError("Invalid maintenance windows response");
     }
-    windows[host] = { until: window.until, reason: window.reason };
+    windows[host] = {
+      until: window.until,
+      reason: window.reason,
+      recurring: window.recurring === true,
+    };
   });
   return windows;
 }
@@ -1582,6 +1627,15 @@ async function saveCollectorSettings(event) {
       },
       body: JSON.stringify(settings),
     });
+    if (response.status === 400) {
+      // The service enforces probeTimeoutSeconds > connect_timeout_seconds
+      // (config.json, default 5 秒)，该值不会下发给浏览器，只能在保存时校验。
+      setCollectorSettingsStatus(
+        "error",
+        "保存失败：单轮探测超时必须大于 SSH 连接超时（connect_timeout_seconds，默认 5 秒），且数值需在允许范围内",
+      );
+      return;
+    }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
     const persisted = normalizeCollectorSettings(payload.collectorSettings);
@@ -1629,7 +1683,8 @@ function inventoryHostRow(host, action) {
   const maintenance = view.inventory.maintenanceWindows[host];
   if (maintenance) {
     const badge = create("small", "maintenance-badge", `维护至 ${shortTime(maintenance.until)}`);
-    badge.title = maintenance.reason;
+    badge.title = maintenance.recurring
+      ? `${maintenance.reason}（每周重复）` : maintenance.reason;
     identity.append(badge);
   }
   const actions = create("span", "inventory-host-actions");
@@ -1653,7 +1708,10 @@ function inventoryHostRow(host, action) {
       groupButton.textContent = group ? "调整分组" : "设置分组";
       groupButton.addEventListener("click", () => {
         view.groupEditingHost = view.groupEditingHost === host ? null : host;
-        if (view.groupEditingHost) view.maintenanceEditingHost = null;
+        if (view.groupEditingHost) {
+          view.maintenanceEditingHost = null;
+          view.maintenanceDraft = null;
+        }
         renderInventory();
       });
       actions.append(groupButton);
@@ -1664,6 +1722,7 @@ function inventoryHostRow(host, action) {
       maintenanceButton.textContent = maintenance ? "调整维护" : "设为维护";
       maintenanceButton.addEventListener("click", () => {
         view.maintenanceEditingHost = view.maintenanceEditingHost === host ? null : host;
+        view.maintenanceDraft = null;
         if (view.maintenanceEditingHost) view.groupEditingHost = null;
         renderInventory();
       });
@@ -1729,24 +1788,40 @@ function hostGroupEditor(host, currentGroup) {
 }
 
 function maintenanceEditor(host, maintenance) {
+  // A pending or failed save re-renders the list; the draft keeps the
+  // operator's unsaved input and focus target across those rebuilds.
+  const draft = view.maintenanceDraft?.host === host ? view.maintenanceDraft : null;
   const form = create("form", "maintenance-editor");
   const reason = document.createElement("input");
   reason.type = "text";
   reason.required = true;
   reason.maxLength = 120;
   reason.placeholder = "维护原因，例如：驱动升级";
-  reason.value = maintenance?.reason || "";
+  reason.value = draft ? draft.reason : (maintenance?.reason || "");
   reason.setAttribute("aria-label", `${host} 维护原因`);
   const duration = document.createElement("select");
   duration.setAttribute("aria-label", `${host} 维护时长`);
+  const selectedDuration = draft?.duration || "14400";
   [[3600, "1 小时"], [14400, "4 小时"], [86400, "24 小时"], [604800, "7 天"]]
     .forEach(([value, label]) => {
       const option = document.createElement("option");
       option.value = String(value);
       option.textContent = label;
-      if (value === 14400) option.selected = true;
+      if (String(value) === selectedDuration) option.selected = true;
       duration.append(option);
     });
+  const updateDraft = (focusField) => {
+    view.maintenanceDraft = {
+      host,
+      reason: reason.value,
+      duration: duration.value,
+      focusField: focusField || view.maintenanceDraft?.focusField || null,
+    };
+  };
+  reason.addEventListener("input", () => updateDraft("reason"));
+  reason.addEventListener("focus", () => updateDraft("reason"));
+  duration.addEventListener("change", () => updateDraft("duration"));
+  duration.addEventListener("focus", () => updateDraft("duration"));
   const save = create("button", "primary-action", maintenance ? "延长维护" : "开始维护");
   save.type = "submit";
   form.append(reason, duration, save);
@@ -1758,8 +1833,16 @@ function maintenanceEditor(host, maintenance) {
   }
   form.addEventListener("submit", (event) => {
     event.preventDefault();
+    const trimmedReason = reason.value.trim();
+    if (!trimmedReason) {
+      reason.setCustomValidity("请输入有效的维护原因");
+      form.reportValidity();
+      reason.setCustomValidity("");
+      return;
+    }
     if (!form.reportValidity()) return;
-    changeMaintenance(host, Number(duration.value), reason.value);
+    updateDraft();
+    changeMaintenance(host, Number(duration.value), trimmedReason);
   });
   return form;
 }
@@ -1802,6 +1885,27 @@ function renderInventory() {
   if (!inventory.writable) message = "当前配置不可由网页修改，请先运行 mocop init 创建用户配置";
   elements.inventoryStatus.className = `inventory-status ${view.inventoryMessageKind}`.trim();
   elements.inventoryStatus.textContent = view.inventoryMessage || message;
+  restoreMaintenanceEditorFocus();
+}
+
+function restoreMaintenanceEditorFocus() {
+  const draft = view.maintenanceDraft;
+  if (
+    !draft
+    || !draft.focusField
+    || view.maintenanceEditingHost !== draft.host
+  ) return;
+  const active = document.activeElement;
+  if (active && active !== document.body) return;
+  const editor = elements.configuredHostList.querySelector(".maintenance-editor");
+  const target = draft.focusField === "duration"
+    ? editor?.querySelector("select")
+    : editor?.querySelector('input[type="text"]');
+  if (!target) return;
+  target.focus();
+  if (target instanceof HTMLInputElement) {
+    target.setSelectionRange(target.value.length, target.value.length);
+  }
 }
 
 async function refreshInventory() {
@@ -1893,6 +1997,7 @@ async function changeMaintenance(host, durationSeconds, reason) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     view.inventory = normalizeInventory(await response.json());
     view.maintenanceEditingHost = null;
+    view.maintenanceDraft = null;
     view.inventoryMessage = durationSeconds
       ? `${host} 已进入维护；采集继续，活动问题暂不计入待处理`
       : `${host} 已结束维护，活动问题重新进入待处理`;
@@ -2064,6 +2169,7 @@ function selectHost(host) {
   view.historyKey = "";
   view.historyRequest += 1;
   view.historyLoading = host !== "all";
+  view.historyError = false;
   view.trendRenderKey = "";
   render();
   syncHistory();
@@ -2111,10 +2217,17 @@ function serverConditions(server) {
 }
 
 function capacityConditions(host) {
+  // Silenced alerts stay in scope: an operator acknowledging noise must not
+  // turn a faulty GPU back into a capacity candidate. Maintenance hosts are
+  // excluded separately in capacityMatches().
   if (!Array.isArray(view.incidents?.active)) return [];
-  return view.incidents.active.filter(
-    (condition) => condition.host === host && !condition.silenced,
-  );
+  return view.incidents.active.filter((condition) => condition.host === host);
+}
+
+function incidentsSyncedWithSnapshot() {
+  return Array.isArray(view.incidents?.active)
+    && view.snapshot != null
+    && view.incidentVersion === numeric(view.snapshot.incidentVersion, 0);
 }
 
 function gpuHasCapacityBlocker(gpu, conditions) {
@@ -2225,12 +2338,14 @@ function capacityCandidateCard(candidate) {
     "article",
     `capacity-candidate ${candidate.satisfies ? "match" : "near"}`,
   );
+  card.dataset.candidateKey = `${candidate.host}\u0000${candidate.model}`;
   const heading = create("div", "capacity-candidate-heading");
   const identity = create("span", "capacity-candidate-identity");
-  identity.append(
-    create("strong", "", candidate.host),
-    create("small", "", candidate.model),
-  );
+  const hostName = create("strong", "", candidate.host);
+  hostName.title = candidate.host;
+  const modelName = create("small", "", candidate.model);
+  modelName.title = candidate.model;
+  identity.append(hostName, modelName);
   heading.append(
     identity,
     create(
@@ -2280,14 +2395,128 @@ function capacityCandidateCard(candidate) {
   return card;
 }
 
+function renderOwners() {
+  if (!elements.ownersDialog?.open) return;
+  if (!view.snapshot) {
+    elements.ownersSummary.textContent = "等待 GPU 快照";
+    return;
+  }
+  const owners = new Map();
+  const hostLabels = new Map();
+  for (const server of view.snapshot.servers) {
+    hostLabels.set(server.host, server.displayName || server.host);
+    for (const gpu of server.gpus) {
+      for (const process of gpu.processes || []) {
+        const owner = process.workload?.owner;
+        const key = owner || "\u0000unattributed";
+        let entry = owners.get(key);
+        if (!entry) {
+          entry = {
+            label: owner || "未归属",
+            attributed: Boolean(owner),
+            vramMiB: 0,
+            unknownVramKeys: new Set(),
+            processKeys: new Set(),
+            gpus: new Set(),
+            hosts: new Set(),
+            kinds: new Set(),
+          };
+          owners.set(key, entry);
+        }
+        // VRAM stays a per-card sum; the process count dedupes one PID
+        // spanning several GPUs of the same host.
+        const processKey = `${server.host}\u0000${process.pid}`;
+        const usedMemory = process.used_memory_mib == null
+          ? NaN : numeric(process.used_memory_mib, NaN);
+        if (Number.isFinite(usedMemory)) entry.vramMiB += usedMemory;
+        else entry.unknownVramKeys.add(processKey);
+        entry.processKeys.add(processKey);
+        entry.gpus.add(`${server.host}\u0000${gpu.uuid || gpu.index}`);
+        entry.hosts.add(server.host);
+        const kind = process.workload?.kind;
+        if (kind && kind !== "process") entry.kinds.add(kind);
+      }
+    }
+  }
+  const ranked = [...owners.values()].sort(
+    (first, second) => second.vramMiB - first.vramMiB
+      || second.gpus.size - first.gpus.size
+      || first.label.localeCompare(second.label),
+  );
+  elements.ownersResults.replaceChildren();
+  if (!ranked.length) {
+    elements.ownersSummary.textContent = "当前快照没有 GPU 进程";
+    return;
+  }
+  const visible = ranked.slice(0, 50);
+  const totalVram = ranked.reduce((sum, entry) => sum + entry.vramMiB, 0);
+  const hasUnknownVram = ranked.some((entry) => entry.unknownVramKeys.size > 0);
+  const attributedCount = ranked.filter((entry) => entry.attributed).length;
+  elements.ownersSummary.textContent =
+    `${ranked.length} 个归属方 · 共占用${hasUnknownVram ? "至少 " : " "}${memory(totalVram)}`
+    + (attributedCount < ranked.length ? " · 含未归属进程" : "")
+    + (hasUnknownVram ? " · 部分进程显存未知" : "")
+    + (ranked.length > visible.length ? ` · 仅展示前 ${visible.length} 项` : "");
+  for (const entry of visible) {
+    const card = create(
+      "article",
+      `capacity-candidate ${entry.attributed ? "match" : "near"}`,
+    );
+    const heading = create("div", "capacity-candidate-heading");
+    const identity = create("span", "capacity-candidate-identity");
+    const ownerName = create("strong", "", entry.label);
+    ownerName.title = entry.label;
+    const kindText = entry.kinds.size ? [...entry.kinds].sort().join(" · ") : "进程";
+    const kindLabel = create("small", "", kindText);
+    kindLabel.title = kindText;
+    identity.append(ownerName, kindLabel);
+    const vramLabel = create(
+      "em",
+      "",
+      `${entry.unknownVramKeys.size ? "至少 " : ""}${memory(entry.vramMiB)}`,
+    );
+    if (entry.unknownVramKeys.size) {
+      vramLabel.title = `${entry.unknownVramKeys.size} 个进程未返回显存占用`;
+    }
+    heading.append(identity, vramLabel);
+    const metrics = create("div", "capacity-candidate-metrics");
+    metrics.append(
+      create("span", "", `${entry.gpus.size} 张 GPU`),
+      create("span", "", `${entry.hosts.size} 个节点`),
+      create("span", "", `${entry.processKeys.size} 个进程`),
+    );
+    const devices = create("div", "capacity-devices");
+    [...entry.hosts].sort().slice(0, 8).forEach((host) => {
+      const chip = create("span", "", hostLabels.get(host) || host);
+      chip.title = host;
+      devices.append(chip);
+    });
+    if (entry.hosts.size > 8) {
+      devices.append(create("span", "", `+${entry.hosts.size - 8}`));
+    }
+    card.append(heading, metrics, devices);
+    elements.ownersResults.append(card);
+  }
+}
+
 function renderCapacityMatcher() {
   if (!elements.capacityDialog.open || !view.snapshot) return;
   syncCapacityModels();
   const request = view.capacityRequest;
+  elements.capacityUpdated.textContent = age(view.snapshot.lastPollCompletedAt);
+  if (!incidentsSyncedWithSnapshot()) {
+    // Without current alert data a "no hardware alerts" promise would be a
+    // guess, so hold the verdict until the matching incident version loads.
+    elements.capacityRule.textContent = `空闲 = GPU 负载低于 ${format(limits().gpu_busy_pct)}% · 单卡可用显存至少 ${format(request.minVramGiB)} GiB · GPU 硬件告警状态同步中`;
+    elements.capacitySummary.textContent = "GPU 告警数据加载中或暂不可用，暂缓给出匹配结论";
+    elements.capacityResults.replaceChildren(
+      create("div", "capacity-empty", "等待 GPU 告警数据同步后自动更新匹配结果"),
+    );
+    return;
+  }
   const result = capacityMatches();
   const exact = result.candidates.filter((candidate) => candidate.satisfies).length;
   elements.capacityRule.textContent = `空闲 = GPU 负载低于 ${format(limits().gpu_busy_pct)}% · 单卡可用显存至少 ${format(request.minVramGiB)} GiB · 无 GPU 硬件告警`;
-  elements.capacityUpdated.textContent = age(view.snapshot.lastPollCompletedAt);
   elements.capacitySummary.textContent = exact
     ? `${exact} 个节点 / 型号组合满足 ${request.gpuCount} 张 GPU`
     : `暂无组合满足 ${request.gpuCount} 张 GPU，显示最接近结果`;
@@ -2304,7 +2533,16 @@ function renderCapacityMatcher() {
     );
     return;
   }
+  const activeElement = document.activeElement;
+  const focusedKey = elements.capacityResults.contains(activeElement)
+    ? activeElement.closest(".capacity-candidate")?.dataset.candidateKey || null
+    : null;
   elements.capacityResults.replaceChildren(...visible.map(capacityCandidateCard));
+  if (focusedKey) {
+    const restored = [...elements.capacityResults.querySelectorAll(".capacity-candidate")]
+      .find((card) => card.dataset.candidateKey === focusedKey);
+    restored?.querySelector("button.inline-action")?.focus();
+  }
 }
 
 function conditionCategory(condition) {
@@ -3318,7 +3556,7 @@ function serverItem(server, selectedHost) {
 
   const main = create("div", "server-main");
   const identity = create("div", "server-main");
-  identity.append(create("i", `status-dot ${stateClass}`), create("span", "server-name", server.host));
+  identity.append(create("i", `status-dot ${stateClass}`), create("span", "server-name", server.displayName || server.host));
   const group = hostGroupName(server);
   if (group) identity.append(create("span", "server-group-badge", group));
   const gpuLabel = `${server.gpus.length} GPU${server.stale ? " · 历史" : ""}`;
@@ -3378,6 +3616,7 @@ function serverItemSignature(server) {
     server.polling,
     server.latencyMs,
     server.message,
+    server.displayName,
     server.lastSuccessAt,
     server.nextRetryAt,
     server.consecutiveFailures,
@@ -3791,6 +4030,30 @@ function historyDuration(points) {
   return `${points.length} 个样本 · 最近 ${minutes} 分钟`;
 }
 
+// X positions follow observedAt so uneven sampling keeps its real spacing;
+// gapBefore marks pauses clearly longer than the observed cadence, which
+// split the drawn path instead of bridging the outage.
+function chartPositions(points) {
+  const fallback = {
+    xs: points.map((_, index) =>
+      points.length > 1 ? (index / (points.length - 1)) * 220 : 220),
+    gapBefore: points.map(() => false),
+  };
+  if (points.length < 2) return fallback;
+  const times = points.map((point) => Date.parse(point.observedAt));
+  if (!times.every(Number.isFinite)) return fallback;
+  const span = times.at(-1) - times[0];
+  if (!(span > 0)) return fallback;
+  const deltas = times.slice(1).map((time, index) => time - times[index]);
+  const positive = deltas.filter((delta) => delta > 0).sort((a, b) => a - b);
+  const median = positive.length ? positive[Math.floor(positive.length / 2)] : 0;
+  const gapThreshold = median > 0 ? median * 3 : Infinity;
+  return {
+    xs: times.map((time) => ((time - times[0]) / span) * 220),
+    gapBefore: times.map((_, index) => index > 0 && deltas[index - 1] > gapThreshold),
+  };
+}
+
 function sparkline(points, accessor, color, maximum = null) {
   const namespace = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(namespace, "svg");
@@ -3800,40 +4063,108 @@ function sparkline(points, accessor, color, maximum = null) {
   const values = points.map(accessor);
   const finite = values.filter((value) => Number.isFinite(value));
   const ceiling = maximum ?? Math.max(1, ...finite);
-  const coordinates = values.flatMap((value, index) => {
-    if (!Number.isFinite(value)) return [];
-    const x = values.length > 1 ? (index / (values.length - 1)) * 220 : 220;
-    const y = 50 - Math.min(1, Math.max(0, value / ceiling)) * 44;
-    return [`${x.toFixed(1)},${y.toFixed(1)}`];
-  });
+  const { xs, gapBefore } = chartPositions(points);
   const baseline = document.createElementNS(namespace, "line");
   baseline.setAttribute("x1", "0");
   baseline.setAttribute("x2", "220");
   baseline.setAttribute("y1", "50");
   baseline.setAttribute("y2", "50");
   baseline.setAttribute("class", "chart-baseline");
-  const line = document.createElementNS(namespace, "polyline");
-  line.setAttribute("points", coordinates.join(" "));
-  line.setAttribute("fill", "none");
-  line.setAttribute("stroke", color);
-  line.setAttribute("stroke-width", "2");
-  line.setAttribute("vector-effect", "non-scaling-stroke");
-  svg.append(baseline, line);
+  svg.append(baseline);
+  const segments = [];
+  let current = [];
+  values.forEach((value, index) => {
+    if (!Number.isFinite(value)) {
+      if (current.length) segments.push(current);
+      current = [];
+      return;
+    }
+    if (gapBefore[index] && current.length) {
+      segments.push(current);
+      current = [];
+    }
+    const y = 50 - Math.min(1, Math.max(0, value / ceiling)) * 44;
+    current.push([xs[index], y]);
+  });
+  if (current.length) segments.push(current);
+  segments.forEach((segment) => {
+    if (segment.length === 1) {
+      const dot = document.createElementNS(namespace, "circle");
+      dot.setAttribute("cx", segment[0][0].toFixed(1));
+      dot.setAttribute("cy", segment[0][1].toFixed(1));
+      dot.setAttribute("r", "1.6");
+      dot.setAttribute("fill", color);
+      svg.append(dot);
+      return;
+    }
+    const line = document.createElementNS(namespace, "polyline");
+    line.setAttribute(
+      "points",
+      segment.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "),
+    );
+    line.setAttribute("fill", "none");
+    line.setAttribute("stroke", color);
+    line.setAttribute("stroke-width", "2");
+    line.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.append(line);
+  });
   return svg;
 }
 
 function trendCard(label, points, accessor, formatter, color, maximum = null) {
   const card = create("article", "trend-card");
   const values = points.map(accessor).filter((value) => Number.isFinite(value));
-  const current = values.at(-1);
+  // The current reading comes from the latest sample only; a missing latest
+  // metric shows a gap instead of silently holding the previous value.
+  const latest = points.length ? accessor(points.at(-1)) : NaN;
   const top = create("div", "trend-card-top");
   top.append(
     create("span", "", label),
-    create("strong", "", current == null ? "—" : formatter(current)),
+    create("strong", "", Number.isFinite(latest) ? formatter(latest) : "—"),
   );
   card.append(top, sparkline(points, accessor, color, maximum));
   const peak = values.length ? Math.max(...values) : null;
   card.append(create("span", "trend-card-foot", peak == null ? "等待有效速率" : `峰值 ${formatter(peak)}`));
+  return card;
+}
+
+function transportRetryCard(points) {
+  const { xs } = chartPositions(points);
+  const retriedXs = xs.filter((_, index) => Boolean(points[index].transportRetried));
+  const card = create("article", "trend-card");
+  const top = create("div", "trend-card-top");
+  top.append(
+    create("span", "", "链路重试"),
+    create("strong", "", `${format(retriedXs.length)} 次`),
+  );
+  const namespace = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(namespace, "svg");
+  svg.setAttribute("viewBox", "0 0 220 54");
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("aria-hidden", "true");
+  const baseline = document.createElementNS(namespace, "line");
+  baseline.setAttribute("x1", "0");
+  baseline.setAttribute("x2", "220");
+  baseline.setAttribute("y1", "50");
+  baseline.setAttribute("y2", "50");
+  baseline.setAttribute("class", "chart-baseline");
+  svg.append(baseline);
+  retriedXs.forEach((x) => {
+    const marker = document.createElementNS(namespace, "line");
+    marker.setAttribute("x1", x.toFixed(1));
+    marker.setAttribute("x2", x.toFixed(1));
+    marker.setAttribute("y1", "18");
+    marker.setAttribute("y2", "50");
+    marker.setAttribute("stroke", "#f5b95f");
+    marker.setAttribute("stroke-width", "2");
+    marker.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.append(marker);
+  });
+  card.append(
+    top,
+    svg,
+    create("span", "trend-card-foot", "样本期间 SSH 传输层重连标记"),
+  );
   return card;
 }
 
@@ -3846,7 +4177,7 @@ function renderTrends() {
   elements.trendPanel.hidden = false;
   const points = view.history?.points || [];
   const latestPoint = points.at(-1)?.observedAt || "none";
-  const renderKey = `${view.selectedHost}:${view.historyLoading}:${points.length}:${latestPoint}`;
+  const renderKey = `${view.selectedHost}:${view.historyLoading}:${view.historyError}:${points.length}:${latestPoint}`;
   if (renderKey === view.trendRenderKey) return;
   view.trendRenderKey = renderKey;
   if (view.historyLoading && !view.history) {
@@ -3856,16 +4187,24 @@ function renderTrends() {
   }
   elements.trendRange.textContent = historyDuration(points);
   if (!points.length) {
-    elements.trendGrid.replaceChildren(create("div", "trend-empty", "首次成功采集后将显示趋势"));
+    elements.trendGrid.replaceChildren(create(
+      "div",
+      "trend-empty",
+      view.historyError ? "历史读取失败，稍后自动重试" : "首次成功采集后将显示趋势",
+    ));
     return;
   }
-  elements.trendGrid.replaceChildren(
+  const cards = [
     trendCard("CPU", points, (point) => optionalMetric(point, "cpuUsagePct"), (value) => `${format(value, 1)}%`, "#6d8cff", 100),
     trendCard("内存", points, (point) => optionalMetric(point, "memoryUsagePct"), (value) => `${format(value, 1)}%`, "#5de0a0", 100),
     trendCard("GPU 平均负载", points, (point) => optionalMetric(point, "gpuUsagePct"), (value) => `${format(value, 1)}%`, "#b68cff", 100),
     trendCard("网络总速率", points, (point) => combinedMetric(point, "networkRxBps", "networkTxBps"), rate, "#53b8dc"),
     trendCard("磁盘总 I/O", points, (point) => combinedMetric(point, "diskReadBps", "diskWriteBps"), rate, "#f5b95f"),
-  );
+  ];
+  if (points.some((point) => point.transportRetried)) {
+    cards.push(transportRetryCard(points));
+  }
+  elements.trendGrid.replaceChildren(...cards);
 }
 
 async function syncHistory() {
@@ -3873,8 +4212,17 @@ async function syncHistory() {
   const server = view.snapshot.servers.find((item) => item.host === view.selectedHost);
   if (!server) return;
   const key = `${server.host}:${server.lastSuccessAt || "pending"}`;
-  if (key === view.historyKey) return;
-  view.historyKey = key;
+  // The key is confirmed only after a successful load, so a failed request
+  // stays retryable; the single backoff timer owns retries for a failed key
+  // even when lastSuccessAt never advances (offline node).
+  if (key === view.historyKey || key === view.historyFetchKey) return;
+  if (view.historyRetryTimer != null) {
+    if (key === view.historyRetryKey) return;
+    clearTimeout(view.historyRetryTimer);
+    view.historyRetryTimer = null;
+    view.historyRetryKey = "";
+  }
+  view.historyFetchKey = key;
   view.historyLoading = true;
   renderTrends();
   const request = ++view.historyRequest;
@@ -3884,9 +4232,25 @@ async function syncHistory() {
     const history = await response.json();
     if (request !== view.historyRequest || view.selectedHost !== history.host) return;
     view.history = history;
+    view.historyKey = key;
+    view.historyError = false;
+    view.historyRetryDelayMs = 0;
   } catch (_error) {
-    if (request === view.historyRequest) view.history = { points: [] };
+    if (request !== view.historyRequest) return;
+    // Existing trend samples stay on screen through transient fetch failures.
+    view.historyError = true;
+    view.historyRetryDelayMs = Math.min(
+      30_000,
+      Math.max(4_000, view.historyRetryDelayMs * 2),
+    );
+    view.historyRetryKey = key;
+    view.historyRetryTimer = setTimeout(() => {
+      view.historyRetryTimer = null;
+      view.historyRetryKey = "";
+      syncHistory();
+    }, view.historyRetryDelayMs);
   } finally {
+    if (view.historyFetchKey === key) view.historyFetchKey = null;
     if (request === view.historyRequest) {
       view.historyLoading = false;
       renderTrends();
@@ -3977,6 +4341,108 @@ function gpuProcessName(process) {
   return fullName.replaceAll("\\", "/").split("/").at(-1) || fullName;
 }
 
+function gpuProcessStartMs(process) {
+  const timestamp = process.workload?.started_at || process.first_seen_at;
+  const parsed = timestamp ? Date.parse(timestamp) : NaN;
+  // Processes without any start signal sort behind every dated process.
+  return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+}
+
+function gpuProcessMemoryRank(a, b) {
+  return numeric(b.used_memory_mib, -1) - numeric(a.used_memory_mib, -1)
+    || numeric(a.pid) - numeric(b.pid);
+}
+
+// Rows are keyed by pid|name so snapshot refreshes update fields in place
+// instead of rebuilding the list, keeping scroll position and bar widths.
+function gpuTaskRow() {
+  const item = create("article", "gpu-task");
+  item.setAttribute("role", "listitem");
+  const identity = create("div", "gpu-task-identity");
+  const name = create("strong", "gpu-task-name");
+  const command = create("small", "gpu-task-command");
+  command.hidden = true;
+  identity.append(name, command);
+  const memorySummary = create("div", "gpu-task-memory");
+  const memoryValue = create("strong");
+  const memoryShare = create("small");
+  memorySummary.append(memoryValue, memoryShare);
+  const workload = create("div", "gpu-task-workload");
+  workload.hidden = true;
+  const meta = create("div", "gpu-task-meta");
+  const metaInfo = create("span", "gpu-task-meta-info");
+  const pid = create("span");
+  const runtime = create("span", "gpu-task-duration");
+  runtime.hidden = true;
+  metaInfo.append(pid, runtime);
+  const track = create("div", "mini-track");
+  const bar = create("i");
+  track.append(bar);
+  meta.append(metaInfo, track);
+  item.append(identity, memorySummary, workload, meta);
+  return { item, name, command, memoryValue, memoryShare, workload, pid, runtime, bar };
+}
+
+function updateGpuTaskRow(row, process, gpu) {
+  const shortName = gpuProcessName(process);
+  row.name.textContent = shortName;
+  row.name.title = process.name || "unknown process";
+  const fullName = String(process.name || "");
+  const command = process.workload?.command
+    || (fullName && fullName !== shortName ? fullName : "");
+  row.command.hidden = !command;
+  row.command.textContent = command;
+  if (command) row.command.title = command;
+  else row.command.removeAttribute("title");
+  const usage = ratio(process.used_memory_mib, gpu.memory_total_mib);
+  row.memoryValue.textContent = process.used_memory_mib == null
+    ? "显存未知" : memory(process.used_memory_mib);
+  row.memoryShare.textContent = process.used_memory_mib == null
+    ? "占比未知" : `${format(usage, 1)}% GPU 显存`;
+  row.bar.style.width = `${clamp(usage)}%`;
+  row.pid.textContent = `PID ${process.pid}`;
+  const startedAt = process.workload?.started_at || "";
+  const observedAt = process.first_seen_at || "";
+  const runtimeSince = startedAt || observedAt;
+  if (runtimeSince && Number.isFinite(Date.parse(runtimeSince))) {
+    const prefix = startedAt ? "运行 " : "已观测 ";
+    row.runtime.hidden = false;
+    row.runtime.dataset.durationSince = runtimeSince;
+    row.runtime.dataset.durationPrefix = prefix;
+    if (startedAt) row.runtime.removeAttribute("title");
+    else row.runtime.title = "自监控首次观测起，服务重启后重新计算";
+    row.runtime.textContent = `${prefix}${durationSince(runtimeSince)}`;
+  } else {
+    row.runtime.hidden = true;
+    row.runtime.textContent = "";
+    delete row.runtime.dataset.durationSince;
+    delete row.runtime.dataset.durationPrefix;
+    row.runtime.removeAttribute("title");
+  }
+  const workload = process.workload;
+  if (workload && ["process", "slurm", "kubernetes"].includes(workload.kind)) {
+    const kind = workload.kind === "slurm"
+      ? "Slurm" : workload.kind === "kubernetes" ? "Kubernetes" : "进程";
+    const workloadIdentity = workload.name || workload.workload_id;
+    const chips = [create(
+      "span",
+      "primary",
+      workloadIdentity ? `${kind} · ${workloadIdentity}` : kind,
+    )];
+    if (workload.name && workload.workload_id) {
+      chips.push(create("span", "", `ID ${workload.workload_id}`));
+    }
+    if (workload.owner) chips.push(create("span", "", `用户 ${workload.owner}`));
+    if (workload.queue) chips.push(create("span", "", `队列 ${workload.queue}`));
+    if (workload.namespace) chips.push(create("span", "", `命名空间 ${workload.namespace}`));
+    row.workload.replaceChildren(...chips);
+    row.workload.hidden = false;
+  } else {
+    row.workload.hidden = true;
+    row.workload.replaceChildren();
+  }
+}
+
 function gpuHealthSummary(health) {
   if (!health) return ["数据不可用", "本轮附加健康查询未返回数据"];
   const issues = [];
@@ -4017,9 +4483,13 @@ function renderGpuHistory() {
       create("div", "gpu-history-empty", "完成两次成功采集后显示趋势"),
     );
   } else {
+    // Missing used or total memory renders as a gap instead of a fake 0%.
+    const memoryRatioMetric = (point) =>
+      point.memoryUsedMiB == null || !(numeric(point.memoryTotalMiB) > 0)
+        ? NaN : ratio(point.memoryUsedMiB, point.memoryTotalMiB);
     elements.gpuHistoryGrid.replaceChildren(
       trendCard("GPU 负载", points, (point) => optionalMetric(point, "utilizationGpuPct"), (value) => `${format(value, 1)}%`, "#6d8cff", 100),
-      trendCard("显存", points, (point) => ratio(point.memoryUsedMiB, point.memoryTotalMiB), (value) => `${format(value, 1)}%`, "#b68cff", 100),
+      trendCard("显存", points, memoryRatioMetric, (value) => `${format(value, 1)}%`, "#b68cff", 100),
       trendCard("温度", points, (point) => optionalMetric(point, "temperatureC"), (value) => `${format(value, 1)}°C`, "#f5b95f"),
       trendCard("功耗", points, (point) => optionalMetric(point, "powerDrawW"), (value) => `${format(value, 1)} W`, "#5de0a0"),
     );
@@ -4049,7 +4519,9 @@ function renderGpuHistory() {
 async function syncGpuHistory(record) {
   if (!record || !elements.gpuDetailDialog.open) return;
   const gpuId = String(record.gpu.uuid || `index:${record.gpu.index}`);
-  const key = `${record.server.host}|${gpuId}|${record.server.lastAttemptAt || ""}`;
+  // Keyed on lastSuccessAt: only a successful sample can add history points,
+  // so failed probe attempts no longer trigger refetches.
+  const key = `${record.server.host}|${gpuId}|${record.server.lastSuccessAt || ""}`;
   if (view.gpuHistoryKey === key) return;
   view.gpuHistoryKey = key;
   view.gpuHistoryLoading = true;
@@ -4089,8 +4561,13 @@ function renderGpuDetail() {
   const memoryPct = ratio(gpu.memory_used_mib, gpu.memory_total_mib);
   const [healthState, healthDetail] = gpuHealthSummary(gpu.health);
   const processes = Array.isArray(gpu.processes) ? gpu.processes.slice() : [];
-  processes.sort((a, b) => numeric(b.used_memory_mib, -1) - numeric(a.used_memory_mib, -1)
-    || numeric(a.pid) - numeric(b.pid));
+  const sortByDuration = preferences.gpuTaskSort === "duration";
+  if (sortByDuration) {
+    processes.sort((a, b) => gpuProcessStartMs(a) - gpuProcessStartMs(b)
+      || gpuProcessMemoryRank(a, b));
+  } else {
+    processes.sort(gpuProcessMemoryRank);
+  }
   const visibleProcesses = processes.slice(0, MAX_GPU_DETAIL_PROCESSES);
   const knownProcessMemory = processes.filter(
     (process) => process.used_memory_mib != null
@@ -4104,6 +4581,11 @@ function renderGpuDetail() {
   const processFreshness = gpu.processes_observed_at
     ? `任务数据 ${age(gpu.processes_observed_at)}`
     : "等待任务数据";
+  const staleProcessFreshness = Boolean(gpu.processes_observed_at)
+    && Date.now() - Date.parse(gpu.processes_observed_at)
+      > GPU_PROCESS_FRESHNESS_WARNING_MS;
+  const emptyCardClass = staleProcessFreshness
+    ? "gpu-task-empty gpu-task-freshness-stale" : "gpu-task-empty";
 
   elements.gpuDetailHost.textContent = `${server.host} · GPU ${gpu.index}`;
   elements.gpuDetailTitle.textContent = gpu.name || "Unknown NVIDIA GPU";
@@ -4125,9 +4607,12 @@ function renderGpuDetail() {
   );
   renderGpuHistory();
   syncGpuHistory(record);
-  elements.gpuTaskCount.textContent = String(processes.length);
+  syncGpuTaskSortButtons();
+  elements.gpuTaskCount.textContent = gpu.processes_available === false
+    ? "—" : String(processes.length);
   if (gpu.processes_available === false) {
     elements.gpuTaskOverview.hidden = true;
+    view.gpuTaskRowCache.clear();
     elements.gpuTaskList.replaceChildren(
       create("div", "gpu-task-empty", "任务数据暂不可用；GPU 指标仍会继续刷新。"),
     );
@@ -4136,68 +4621,41 @@ function renderGpuDetail() {
   elements.gpuTaskOverview.hidden = false;
   elements.gpuTaskMemoryTotal.textContent = `${memory(processMemoryTotal)} / ${memory(gpu.memory_total_mib)}`;
   elements.gpuTaskMemoryBar.style.width = `${clamp(processMemoryPct)}%`;
+  elements.gpuTaskNote.classList.toggle(
+    "gpu-task-freshness-stale", staleProcessFreshness,
+  );
   if (processes.length > visibleProcesses.length) {
-    elements.gpuTaskNote.textContent = `共 ${processes.length} 个进程，仅展示显存占用最高的 ${visibleProcesses.length} 个 · ${processFreshness}`;
+    const truncationLabel = sortByDuration ? "运行最久" : "显存占用最高";
+    elements.gpuTaskNote.textContent = `共 ${processes.length} 个进程，仅展示${truncationLabel}的 ${visibleProcesses.length} 个 · ${processFreshness}`;
   } else if (knownProcessMemory.length < processes.length) {
     elements.gpuTaskNote.textContent = `${processes.length - knownProcessMemory.length} 个进程未返回显存占用 · ${processFreshness}`;
   } else {
-    elements.gpuTaskNote.textContent = `按显存占用从高到低排列 · ${processFreshness}`;
+    elements.gpuTaskNote.textContent = `${sortByDuration ? "按运行时长从长到短排列" : "按显存占用从高到低排列"} · ${processFreshness}`;
   }
   if (!processes.length) {
+    view.gpuTaskRowCache.clear();
     elements.gpuTaskList.replaceChildren(
-      create("div", "gpu-task-empty", `当前没有活跃的 CUDA 计算进程 · ${processFreshness}`),
+      create("div", emptyCardClass, `当前没有活跃的 CUDA 计算进程 · ${processFreshness}`),
     );
     return;
   }
-  elements.gpuTaskList.replaceChildren(...visibleProcesses.map((process) => {
-    const item = create("article", "gpu-task");
-    item.setAttribute("role", "listitem");
-    const identity = create("div", "gpu-task-identity");
-    const name = create("strong", "gpu-task-name", gpuProcessName(process));
-    name.title = process.name || "unknown process";
-    identity.append(name);
-    const fullName = String(process.name || "");
-    if (fullName && fullName !== name.textContent) {
-      const command = create("small", "gpu-task-command", fullName);
-      command.title = fullName;
-      identity.append(command);
+  const seenKeys = new Set();
+  const desiredRows = visibleProcesses.map((process) => {
+    const key = `${process.pid}|${process.name || ""}`;
+    seenKeys.add(key);
+    let row = view.gpuTaskRowCache.get(key);
+    if (!row) {
+      row = gpuTaskRow();
+      row.item.dataset.processKey = key;
+      view.gpuTaskRowCache.set(key, row);
     }
-    const used = process.used_memory_mib == null ? "显存未知" : memory(process.used_memory_mib);
-    const usage = ratio(process.used_memory_mib, gpu.memory_total_mib);
-    const memorySummary = create("div", "gpu-task-memory");
-    memorySummary.append(
-      create("strong", "", used),
-      create("small", "", process.used_memory_mib == null ? "占比未知" : `${format(usage, 1)}% GPU 显存`),
-    );
-    const track = create("div", "mini-track");
-    const bar = create("i");
-    bar.style.width = `${clamp(usage)}%`;
-    track.append(bar);
-    const meta = create("div", "gpu-task-meta");
-    meta.append(create("span", "", `PID ${process.pid}`), track);
-    item.append(identity, memorySummary);
-    const workload = process.workload;
-    if (workload && ["process", "slurm", "kubernetes"].includes(workload.kind)) {
-      const context = create("div", "gpu-task-workload");
-      const kind = workload.kind === "slurm"
-        ? "Slurm" : workload.kind === "kubernetes" ? "Kubernetes" : "进程";
-      const workloadIdentity = workload.name || workload.workload_id;
-      context.append(create(
-        "span",
-        "primary",
-        workloadIdentity ? `${kind} · ${workloadIdentity}` : kind,
-      ));
-      if (workload.name && workload.workload_id) {
-        context.append(create("span", "", `ID ${workload.workload_id}`));
-      }
-      if (workload.owner) context.append(create("span", "", `用户 ${workload.owner}`));
-      if (workload.queue) context.append(create("span", "", `队列 ${workload.queue}`));
-      if (workload.namespace) context.append(create("span", "", `命名空间 ${workload.namespace}`));
-      item.append(context);
-    }
-    item.append(meta);
-    return item;
-  }));
+    updateGpuTaskRow(row, process, gpu);
+    return row.item;
+  });
+  [...view.gpuTaskRowCache.keys()].forEach((key) => {
+    if (!seenKeys.has(key)) view.gpuTaskRowCache.delete(key);
+  });
+  reconcileChildren(elements.gpuTaskList, desiredRows);
 }
 
 function openGpuDetail(server, gpu) {
@@ -4210,6 +4668,7 @@ function openGpuDetail(server, gpu) {
   view.gpuHistoryRequest += 1;
   if (elements.settingsDialog.open) elements.settingsDialog.close();
   if (elements.capacityDialog.open) elements.capacityDialog.close();
+  if (elements.ownersDialog.open) elements.ownersDialog.close();
   if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   if (!elements.gpuDetailDialog.open) elements.gpuDetailDialog.showModal();
   renderGpuDetail();
@@ -4571,6 +5030,7 @@ function render() {
   renderGpuDetail();
   renderIncidentDetail();
   renderCapacityMatcher();
+  renderOwners();
   renderTopology();
   refreshRelativeTimes();
 }
@@ -4616,8 +5076,17 @@ async function syncIncidents() {
   const targetVersion = numeric(view.snapshot.incidentVersion, 0);
   if (view.incidents && view.incidentVersion === targetVersion) return;
   if (view.incidentLoadingVersion === targetVersion) return;
+  if (view.incidentRetryTimer != null) {
+    // A failed version waits for its single backoff timer; only a newer
+    // target version justifies an immediate replacement fetch.
+    if (targetVersion === view.incidentRetryVersion) return;
+    clearTimeout(view.incidentRetryTimer);
+    view.incidentRetryTimer = null;
+    view.incidentRetryVersion = null;
+  }
   view.incidentLoadingVersion = targetVersion;
   const request = ++view.incidentRequest;
+  let failed = false;
   try {
     const response = await fetch("/api/incidents?limit=50", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -4625,6 +5094,7 @@ async function syncIncidents() {
     if (request !== view.incidentRequest) return;
     view.incidents = incidents;
     view.incidentVersion = numeric(incidents.version, 0);
+    view.incidentRetryDelayMs = 0;
     renderIncidents();
     renderAttention();
     renderServers();
@@ -4634,13 +5104,30 @@ async function syncIncidents() {
     renderCapacityMatcher();
   } catch (_error) {
     // Current telemetry remains usable if the optional transition feed is unavailable.
+    failed = request === view.incidentRequest;
   } finally {
-    if (request === view.incidentRequest) view.incidentLoadingVersion = null;
-    if (
-      request === view.incidentRequest
-      && view.snapshot
-      && view.incidentVersion !== numeric(view.snapshot.incidentVersion, 0)
-    ) syncIncidents();
+    if (request === view.incidentRequest) {
+      view.incidentLoadingVersion = null;
+      if (failed) {
+        view.incidentRetryDelayMs = Math.min(
+          30_000,
+          Math.max(4_000, view.incidentRetryDelayMs * 2),
+        );
+        view.incidentRetryVersion = targetVersion;
+        view.incidentRetryTimer = setTimeout(() => {
+          view.incidentRetryTimer = null;
+          view.incidentRetryVersion = null;
+          syncIncidents();
+        }, view.incidentRetryDelayMs);
+      } else if (view.snapshot) {
+        // Refetch immediately only when the target version moved while this
+        // request was in flight and the response does not already cover it.
+        const currentTarget = numeric(view.snapshot.incidentVersion, 0);
+        if (currentTarget !== targetVersion && view.incidentVersion !== currentTarget) {
+          syncIncidents();
+        }
+      }
+    }
   }
 }
 
@@ -4753,6 +5240,7 @@ elements.settingsToggle.addEventListener("click", () => {
   if (elements.topologyDialog.open) elements.topologyDialog.close();
   if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
   if (elements.capacityDialog.open) elements.capacityDialog.close();
+  if (elements.ownersDialog.open) elements.ownersDialog.close();
   if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   elements.settingsDialog.showModal();
   refreshInventory();
@@ -4763,6 +5251,7 @@ elements.topologyToggle.addEventListener("click", () => {
   if (elements.settingsDialog.open) elements.settingsDialog.close();
   if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
   if (elements.capacityDialog.open) elements.capacityDialog.close();
+  if (elements.ownersDialog.open) elements.ownersDialog.close();
   if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   elements.topologyDialog.showModal();
   renderTopology();
@@ -4775,12 +5264,24 @@ elements.capacityToggle.addEventListener("click", () => {
   if (elements.topologyDialog.open) elements.topologyDialog.close();
   if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
+  if (elements.ownersDialog.open) elements.ownersDialog.close();
   elements.capacityGpuCount.value = String(view.capacityRequest.gpuCount);
   elements.capacityVram.value = String(view.capacityRequest.minVramGiB);
   syncCapacityModels();
   elements.capacityModel.value = view.capacityRequest.model;
   elements.capacityDialog.showModal();
   renderCapacityMatcher();
+});
+
+elements.ownersToggle.addEventListener("click", () => {
+  if (!view.snapshot) return;
+  if (elements.settingsDialog.open) elements.settingsDialog.close();
+  if (elements.topologyDialog.open) elements.topologyDialog.close();
+  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
+  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
+  if (elements.capacityDialog.open) elements.capacityDialog.close();
+  elements.ownersDialog.showModal();
+  renderOwners();
 });
 
 elements.capacityForm.addEventListener("submit", (event) => {
@@ -4819,6 +5320,42 @@ document.querySelectorAll("dialog.side-dialog").forEach((dialog) => {
 elements.gpuDetailDialog.addEventListener("close", () => {
   view.selectedGpu = null;
 });
+
+// The sort toggle lives next to the task count badge; both move into a
+// shared wrapper so the heading keeps its two-side flex layout.
+const gpuTaskSortButtons = [["memory", "按显存"], ["duration", "按时长"]].map(
+  ([value, label]) => {
+    const button = create("button", "gpu-task-sort-choice", label);
+    button.type = "button";
+    button.dataset.taskSort = value;
+    button.addEventListener("click", () => {
+      if (preferences.gpuTaskSort === value) return;
+      preferences.gpuTaskSort = value;
+      savePreferences();
+      renderGpuDetail();
+    });
+    return button;
+  },
+);
+
+function syncGpuTaskSortButtons() {
+  gpuTaskSortButtons.forEach((button) => {
+    const active = button.dataset.taskSort === preferences.gpuTaskSort;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+{
+  const sortGroup = create("div", "gpu-task-sort");
+  sortGroup.setAttribute("role", "group");
+  sortGroup.setAttribute("aria-label", "任务排序方式");
+  sortGroup.append(...gpuTaskSortButtons);
+  const tools = create("div", "gpu-task-heading-tools");
+  elements.gpuTaskCount.before(tools);
+  tools.append(sortGroup, elements.gpuTaskCount);
+  syncGpuTaskSortButtons();
+}
 
 elements.serverSort.addEventListener("change", () => {
   view.serverSort = elements.serverSort.value;

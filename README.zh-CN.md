@@ -118,7 +118,8 @@ mocop service uninstall
 - `local_host` 指定 `hosts` 中唯一一台绕过 SSH、直接在本机采集的节点。
 - `expected_gpu_counts` 用于发现 GPU 缺失。
 - `host_groups` 用于共享节点分组。
-- `host_overrides` 只用于调整经过测量的慢节点的采集周期或超时。
+- `host_overrides` 只用于调整经过测量的慢节点的采集周期或超时；可选的 `display_name` 为别名提供可读的列表显示名，不改变采集身份。
+- `maintenance_windows` 每条要么给出一次性的 `until`，要么给出每周 `recurrence`（`{"weekday": 0-6, "start": "HH:MM", "duration_minutes": N}`，全部为 UTC，周一为 0）；周期窗口在每个实例期间静默可执行告警，采集持续进行。
 - `gpu_process_poll_interval_seconds` 单独控制带时间戳的 GPU 任务刷新；默认 15 秒，核心 GPU 数据仍保持正常采集周期。
 - `incident_overrides` 可按节点或分组覆盖有界阈值，并精确排除磁盘挂载点；节点配置优先。
 - `incident_actions` 保存网页中的告警确认与静默及其 UTC 失效时间，通常由网页维护。
@@ -126,7 +127,7 @@ mocop service uninstall
 - `retry_jitter_pct` 分散共享 SSH 路径故障后的重试；默认值为 15%。
 - `topology` 描述连接树；其中的安全别名只有同时进入有效 `hosts` 清单时才会被采集。
 - `persistence.enabled` 使用 SQLite 保留有界趋势和告警上下文；默认关闭。
-- `workloads.mode: "auto"` 通过有界 `/proc` 读取补充 Slurm/Kubernetes 身份；默认关闭。
+- `workloads.mode: "identity"` 通过有界 `/proc` 读取补充进程属主（真实 UID 经 passwd 解析）、完整命令行与真实启动时间，成本约为 `"auto"` 的三分之一；`"auto"` 在此之上再识别 Slurm/Kubernetes 身份（cgroup 与环境读取）。两者默认均关闭；即使关闭，GPU 弹窗仍会显示每个进程"自监控观测起"的运行时长下限。
 
 Webhook 地址和签名密钥不写入 JSON。配置中只保存环境变量名：
 
@@ -167,7 +168,7 @@ mocop service install
 
 只有清理当前浏览器的站点数据或恢复显示偏好时，浏览器设置才会丢失。移除自定义背景是单独操作。
 
-网页允许设置 2–60 秒采集周期、2–300 秒探测超时和 1–64 个并发 worker。周期越短、并发越高，SSH 和远端主机负载越大。
+网页允许设置 2–60 秒采集周期、2–300 秒探测超时（须大于连接超时，默认 5 秒）和 1–64 个并发 worker。周期越短、并发越高，SSH 和远端主机负载越大。
 
 ## 日常使用
 
@@ -203,12 +204,33 @@ Mocop 按节点独立调度，同一节点不会重叠采集。只要仍有 work
 采集周期是目标频率。worker 饱和或单次探测超过周期时，只会推迟对应节点，不会
 重新引入全局等待屏障。
 
-调整超时前，先在 Mocop 外测试同一条 SSH 路径：
+调整超时前，先用内置的只读诊断检查 SSH 路径：
+
+```bash
+mocop doctor
+```
+
+它会验证每个受监控别名的非交互可达性，测量冷连接与复用连接的延迟，指出未启用
+连接复用、控制套接字目录缺失或权限过宽、以及 `ControlPersist` 失效等问题，并在
+已安装版本新于运行中服务时给出重启提醒。加 `--profile` 可以把慢节点的采集延迟
+分解为传输、固定脚本与 NVIDIA 查询三段。也可以手动执行同样的检查：
 
 ```bash
 ssh -o BatchMode=yes gpu-node-01 true
-ssh -G gpu-node-01 | grep -E '^(hostname|port|user|proxyjump|controlmaster) '
+ssh -G gpu-node-01 | grep -E '^(controlmaster|controlpath|controlpersist) '
 ```
+
+启用 OpenSSH 连接复用可以消除远端路径上大部分的每次探测连接开销（经跳板机的
+实测降幅为 76.6%，见 [docs/PERFORMANCE.md](docs/PERFORMANCE.md)）：
+
+```sshconfig
+Host gpu-node-01
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 600
+```
+
+`~/.ssh/sockets` 目录需要操作员自行以 `0700` 权限创建；Mocop 不会修改 SSH 配置。
 
 如果多台节点共同依赖一个 `ProxyJump`、VPN 或 FRP 路径并同时离线，应先检查这条共享路径。重启 Mocop 无法修复不可用的隧道或远端 SSH 服务。
 

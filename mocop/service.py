@@ -9,7 +9,7 @@ import zlib
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from heapq import nsmallest
 from struct import Struct
@@ -37,6 +37,7 @@ from .persistence import (
     TelemetryPersistence,
 )
 from .probe import (
+    AttendedAwareResourceProbe,
     CancellableResourceProbe,
     InventoryAwareResourceProbe,
     ResourceProbe,
@@ -44,9 +45,16 @@ from .probe import (
 
 _MAX_FAILURE_BACKOFF_SECONDS = 60.0
 _MAX_PROBE_WORKERS = 64
+# SSE heartbeats arrive every ~15 seconds and poll fallback every ~5, so half
+# a minute of silence reliably means no dashboard is open.
+_DASHBOARD_ATTENDED_WINDOW_SECONDS = 30.0
 _MIN_RUNTIME_POLL_INTERVAL_SECONDS = 1.0
 _MAX_RUNTIME_POLL_INTERVAL_SECONDS = 3600.0
-_HOST_HISTORY_VALUES = Struct("<11d")
+# Mirrors the probe-side GPU cap so a host that keeps reporting fresh GPU
+# identities (UUID churn) cannot grow per-identity telemetry without bound,
+# while briefly absent GPUs keep their displayable history.
+_MAX_GPU_IDENTITIES_PER_HOST = 256
+_HOST_HISTORY_VALUES = Struct("<12d")
 _GPU_HISTORY_VALUES = Struct("<i5d")
 
 
@@ -81,8 +89,9 @@ class _HostHistoryPoint:
         disk_read_bps: float | None,
         disk_write_bps: float | None,
         gpu_usage_pct: float | None,
-        gpu_memory_usage_pct: float,
+        gpu_memory_usage_pct: float | None,
         gpu_temperature_c: float | None,
+        transport_retried: bool = False,
     ) -> _HostHistoryPoint:
         return cls(
             observed_at,
@@ -96,8 +105,9 @@ class _HostHistoryPoint:
                 _packed_optional_float(disk_read_bps),
                 _packed_optional_float(disk_write_bps),
                 _packed_optional_float(gpu_usage_pct),
-                gpu_memory_usage_pct,
+                _packed_optional_float(gpu_memory_usage_pct),
                 _packed_optional_float(gpu_temperature_c),
+                float(transport_retried),
             ),
         )
 
@@ -114,8 +124,9 @@ class _HostHistoryPoint:
             disk_read_bps=_optional_float(point.get("diskReadBps")),
             disk_write_bps=_optional_float(point.get("diskWriteBps")),
             gpu_usage_pct=_optional_float(point.get("gpuUsagePct")),
-            gpu_memory_usage_pct=float(point["gpuMemoryUsagePct"]),
+            gpu_memory_usage_pct=_optional_float(point.get("gpuMemoryUsagePct")),
             gpu_temperature_c=_optional_float(point.get("gpuTemperatureC")),
+            transport_retried=bool(point.get("transportRetried")),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -131,6 +142,7 @@ class _HostHistoryPoint:
             gpu_usage_pct,
             gpu_memory_usage_pct,
             gpu_temperature_c,
+            transport_retried,
         ) = _HOST_HISTORY_VALUES.unpack(self.values)
         return {
             "observedAt": self.observed_at,
@@ -143,8 +155,9 @@ class _HostHistoryPoint:
             "diskReadBps": _unpacked_optional_float(disk_read_bps),
             "diskWriteBps": _unpacked_optional_float(disk_write_bps),
             "gpuUsagePct": _unpacked_optional_float(gpu_usage_pct),
-            "gpuMemoryUsagePct": gpu_memory_usage_pct,
+            "gpuMemoryUsagePct": _unpacked_optional_float(gpu_memory_usage_pct),
             "gpuTemperatureC": _unpacked_optional_float(gpu_temperature_c),
+            "transportRetried": bool(transport_retried),
         }
 
 
@@ -287,6 +300,7 @@ class StateStore:
         ] = (),
         maintenance_windows: tuple[tuple[str, MaintenanceWindowConfig], ...] = (),
         host_groups: tuple[tuple[str, str], ...] = (),
+        host_display_names: tuple[tuple[str, str], ...] = (),
         utc_clock: Callable[[], datetime] | None = None,
         persistence: TelemetryPersistence | None = None,
         restored: LoadedTelemetry | None = None,
@@ -301,10 +315,18 @@ class StateStore:
         self._active_gpu_processes: dict[
             tuple[str, str], dict[tuple[int, str], GpuProcess]
         ] = {}
+        # Per-host insertion-ordered map of GPU identities, oldest observation
+        # first; bounds identity churn without dropping recent history.
+        self._gpu_identities: dict[str, dict[str, None]] = {}
         self._process_inventory_initialized: dict[str, set[str]] = {}
         self._inventory_initialized = False
         self._version = 0
         self._collector_error: str | None = None
+        self._transport_retries_total = 0
+        # Monotonic timestamp of the last dashboard reader; written and read
+        # without a lock because a float store is atomic and staleness by one
+        # poll cycle is harmless.
+        self._dashboard_last_seen: float | None = None
         self._poll_interval_seconds = poll_interval_seconds
         self._collection_stale_cycles = collection_stale_cycles
         self._collection_stale_after_seconds = (
@@ -352,11 +374,24 @@ class StateStore:
             (action.host, action.condition_key): action for action in incident_actions
         }
         self._host_groups = dict(host_groups)
+        self._display_names = dict(host_display_names)
         self._host_incident_overrides = host_incident_overrides
         self._group_incident_overrides = group_incident_overrides
         self._topology = topology
         self._incident_correlator = create_incident_correlator(topology)
         self._notifications = notifications or DisabledNotificationSink()
+
+        def _notification_event_actionable(event) -> bool:
+            with self._condition:
+                return event.host not in self._active_maintenance_locked() and not (
+                    self._condition_is_silenced_locked(event.host, event.condition.key)
+                )
+
+        set_actionable_check = getattr(
+            self._notifications, "set_actionable_check", None
+        )
+        if set_actionable_check is not None:
+            set_actionable_check(_notification_event_actionable)
         self._active_maintenance_signature = self._maintenance_signature_locked()
         self._active_action_signature = self._incident_action_signature_locked()
         self._incident_revision = self._incidents.version
@@ -394,6 +429,11 @@ class StateStore:
                     for key in tuple(records):
                         if stale(key[0]):
                             records.pop(key, None)
+                self._gpu_identities = {
+                    host: identities
+                    for host, identities in self._gpu_identities.items()
+                    if not stale(host)
+                }
                 self._process_inventory_initialized = {
                     host: gpu_ids
                     for host, gpu_ids in self._process_inventory_initialized.items()
@@ -497,6 +537,16 @@ class StateStore:
             self._incident_revision += 1
             self._publish_locked()
 
+    def set_host_display_names(
+        self, host_display_names: tuple[tuple[str, str], ...]
+    ) -> None:
+        with self._condition:
+            updated = dict(host_display_names)
+            if updated == self._display_names:
+                return
+            self._display_names = updated
+            self._publish_locked()
+
     def set_host_groups(self, host_groups: tuple[tuple[str, str], ...]) -> None:
         with self._condition:
             updated = dict(host_groups)
@@ -590,16 +640,18 @@ class StateStore:
                 if retry_after_seconds is not None
                 else None
             )
-            state.apply(result, next_retry_at=next_retry_at)
-            if result.status == "online" and result.system is not None:
-                history_point = self._history_point(result)
-                self._history[result.host].append(history_point)
+            self._transport_retries_total += result.transport_retries
             if result.status == "online":
                 gpu_history_points, process_events = self._track_gpu_telemetry_locked(
                     result
                 )
+                result = self._first_seen_annotated_locked(result)
             else:
                 self._invalidate_process_inventory_locked(result.host)
+            state.apply(result, next_retry_at=next_retry_at)
+            if result.status == "online" and result.system is not None:
+                history_point = self._history_point(result)
+                self._history[result.host].append(history_point)
             if incident_events:
                 active_windows = self._active_maintenance_locked()
                 notification_events = tuple(
@@ -640,6 +692,18 @@ class StateStore:
                 return
             state.next_retry_at = utc_after(retry_after_seconds)
             self._publish_locked()
+
+    def record_dashboard_activity(self) -> None:
+        """Mark a live dashboard reader so probes keep the attended cadence."""
+        self._dashboard_last_seen = time.monotonic()
+
+    def dashboard_attended(self) -> bool:
+        """Return whether a dashboard reader was seen within the window."""
+        last_seen = self._dashboard_last_seen
+        return (
+            last_seen is not None
+            and time.monotonic() - last_seen < _DASHBOARD_ATTENDED_WINDOW_SECONDS
+        )
 
     def record_poll_cycle(self, duration_seconds: float) -> None:
         """Record and publish the latest completed scheduler submission batch."""
@@ -686,13 +750,15 @@ class StateStore:
             self._refresh_incident_action_expiry_locked()
             snapshot = self._incidents.snapshot(limit)
             servers = {host: state.to_dict() for host, state in self._servers.items()}
-            active_maintenance = self._active_maintenance_locked()
-            active_actions = self._active_incident_actions_locked()
+            now = self._utc_clock()
+            active_maintenance = self._active_maintenance_locked(now)
+            active_actions = self._active_incident_actions_locked(now)
             for item in snapshot["active"]:
                 self._decorate_incident_locked(
                     item,
                     active_maintenance=active_maintenance,
                     active_actions=active_actions,
+                    at=now,
                 )
                 item["diagnosis"] = diagnose_condition(
                     item, servers.get(str(item["host"]))
@@ -722,13 +788,15 @@ class StateStore:
             self._refresh_incident_action_expiry_locked()
             snapshot = self._snapshot_locked()
             incidents = self._incidents.snapshot(self._process_event_points)
-            active_maintenance = self._active_maintenance_locked()
-            active_actions = self._active_incident_actions_locked()
+            now = self._utc_clock()
+            active_maintenance = self._active_maintenance_locked(now)
+            active_actions = self._active_incident_actions_locked(now)
             for item in incidents["active"]:
                 self._decorate_incident_locked(
                     item,
                     active_maintenance=active_maintenance,
                     active_actions=active_actions,
+                    at=now,
                 )
             return sanitized_bundle(snapshot, incidents, host)
 
@@ -756,6 +824,7 @@ class StateStore:
                 "reason": reason,
                 "targets": discovered,
                 "targetsWithSuccessfulSample": successful,
+                "transportRetries": self._transport_retries_total,
                 "version": self._version,
                 "startedAt": self._started_at,
             }
@@ -803,9 +872,10 @@ class StateStore:
         }
 
     def _maintenance_signature_locked(self) -> tuple[tuple[str, str, str], ...]:
+        now = self._utc_clock()
         return tuple(
-            (host, window.to_dict()["until"], window.reason)
-            for host, window in sorted(self._active_maintenance_locked().items())
+            (host, str(window.to_dict(now)["until"]), window.reason)
+            for host, window in sorted(self._active_maintenance_locked(now).items())
         )
 
     def _refresh_maintenance_expiry_locked(self) -> None:
@@ -863,18 +933,19 @@ class StateStore:
         *,
         active_maintenance: dict[str, MaintenanceWindowConfig] | None = None,
         active_actions: dict[tuple[str, str], IncidentActionConfig] | None = None,
+        at: datetime | None = None,
     ) -> None:
         host = str(item["host"])
         condition_key = str(item["conditionKey"])
         maintenance = (
             active_maintenance
             if active_maintenance is not None
-            else self._active_maintenance_locked()
+            else self._active_maintenance_locked(at)
         )
         actions = (
             active_actions
             if active_actions is not None
-            else self._active_incident_actions_locked()
+            else self._active_incident_actions_locked(at)
         )
         window = maintenance.get(host)
         action = actions.get((host, condition_key))
@@ -888,7 +959,9 @@ class StateStore:
         item["actionUntil"] = action.to_dict()["until"] if action is not None else None
         item["actionReason"] = action.reason if action is not None else None
         if window is not None:
-            item["maintenanceUntil"] = window.to_dict()["until"]
+            # Reuse the caller's clock sample so the serialized window bounds
+            # match the instance that made this incident silenced.
+            item["maintenanceUntil"] = window.to_dict(at or self._utc_clock())["until"]
             item["maintenanceReason"] = window.reason
 
     def _track_gpu_telemetry_locked(
@@ -908,10 +981,13 @@ class StateStore:
         if initialized_gpu_ids is None:
             initialized_gpu_ids = set()
             self._process_inventory_initialized[result.host] = initialized_gpu_ids
+        identities = self._gpu_identities.setdefault(result.host, {})
         for gpu in result.gpus:
             gpu_id = gpu.uuid or f"index:{gpu.index}"
             key = (result.host, gpu_id)
             observed_gpu_ids.add(gpu_id)
+            identities.pop(gpu_id, None)
+            identities[gpu_id] = None
             point = _GpuHistoryPoint.create(
                 result.observed_at,
                 gpu.index,
@@ -958,14 +1034,26 @@ class StateStore:
                 if captured_transitions is not None:
                     captured_transitions.extend(gpu_transitions)
                 continue
+            previous = self._active_gpu_processes.get(key, {})
+            # Carry the monitor-relative first-seen timestamp across samples
+            # and stamp newcomers, so operators get a runtime lower bound
+            # without any extra remote reads.
             current = {
-                (process.pid, process.name): process for process in gpu.processes
+                (process.pid, process.name): replace(
+                    process,
+                    first_seen_at=(
+                        previous[(process.pid, process.name)].first_seen_at
+                        or result.observed_at
+                        if (process.pid, process.name) in previous
+                        else result.observed_at
+                    ),
+                )
+                for process in gpu.processes
             }
             if gpu_id not in initialized_gpu_ids:
                 self._active_gpu_processes[key] = current
                 initialized_gpu_ids.add(gpu_id)
                 continue
-            previous = self._active_gpu_processes.get(key, {})
             if current.keys() == previous.keys():
                 self._active_gpu_processes[key] = current
                 continue
@@ -998,6 +1086,14 @@ class StateStore:
                 event_history.extend(gpu_transitions)
                 if captured_transitions is not None:
                     captured_transitions.extend(gpu_transitions)
+        while len(identities) > _MAX_GPU_IDENTITIES_PER_HOST:
+            evicted_gpu_id = next(iter(identities))
+            del identities[evicted_gpu_id]
+            evicted_key = (result.host, evicted_gpu_id)
+            self._gpu_history.pop(evicted_key, None)
+            self._process_events.pop(evicted_key, None)
+            self._active_gpu_processes.pop(evicted_key, None)
+            initialized_gpu_ids.discard(evicted_gpu_id)
         for gpu_id in initialized_gpu_ids - observed_gpu_ids:
             self._active_gpu_processes.pop((result.host, gpu_id), None)
         initialized_gpu_ids.intersection_update(observed_gpu_ids)
@@ -1010,6 +1106,29 @@ class StateStore:
     def _invalidate_process_inventory_locked(self, host: str) -> None:
         for gpu_id in self._process_inventory_initialized.pop(host, ()):
             self._active_gpu_processes.pop((host, gpu_id), None)
+
+    def _first_seen_annotated_locked(self, result: ProbeResult) -> ProbeResult:
+        """Return the result with processes carrying their first-seen stamp."""
+        if not any(gpu.processes for gpu in result.gpus):
+            return result
+        annotated_gpus = []
+        for gpu in result.gpus:
+            if not gpu.processes:
+                annotated_gpus.append(gpu)
+                continue
+            tracked = self._active_gpu_processes.get(
+                (result.host, gpu.uuid or f"index:{gpu.index}"), {}
+            )
+            annotated_gpus.append(
+                replace(
+                    gpu,
+                    processes=tuple(
+                        tracked.get((process.pid, process.name), process)
+                        for process in gpu.processes
+                    ),
+                )
+            )
+        return replace(result, gpus=tuple(annotated_gpus))
 
     @staticmethod
     def _process_transition(
@@ -1044,8 +1163,15 @@ class StateStore:
             for gpu in result.gpus
             if gpu.utilization_gpu_pct is not None
         ]
-        gpu_memory_used = sum(gpu.memory_used_mib or 0 for gpu in result.gpus)
-        gpu_memory_total = sum(gpu.memory_total_mib or 0 for gpu in result.gpus)
+        # Memory ratios only make sense for GPUs reporting both sides; without
+        # any valid denominator the usage is unknown rather than a real 0%.
+        gpu_memory = [
+            (gpu.memory_used_mib, gpu.memory_total_mib)
+            for gpu in result.gpus
+            if gpu.memory_used_mib is not None and gpu.memory_total_mib is not None
+        ]
+        gpu_memory_used = sum(used for used, _ in gpu_memory)
+        gpu_memory_total = sum(total for _, total in gpu_memory)
         temperatures = [
             gpu.temperature_c for gpu in result.gpus if gpu.temperature_c is not None
         ]
@@ -1060,8 +1186,11 @@ class StateStore:
             system.disk_read_bps,
             system.disk_write_bps,
             round(sum(gpu_usage) / len(gpu_usage), 2) if gpu_usage else None,
-            percentage(gpu_memory_used, gpu_memory_total),
+            percentage(gpu_memory_used, gpu_memory_total)
+            if gpu_memory_total > 0
+            else None,
             max(temperatures) if temperatures else None,
+            transport_retried=result.transport_retries > 0,
         )
 
     def _snapshot_locked(self) -> dict[str, object]:
@@ -1077,14 +1206,19 @@ class StateStore:
             return self._snapshot_cache
 
         servers = [state.to_dict() for state in self._servers.values()]
-        active_maintenance = self._active_maintenance_locked()
-        active_actions = self._active_incident_actions_locked()
+        # One clock sample rules the whole assembly so the active-window set,
+        # incident decoration, and serialized window bounds cannot straddle a
+        # recurring instance boundary within a single snapshot.
+        now = self._utc_clock()
+        active_maintenance = self._active_maintenance_locked(now)
+        active_actions = self._active_incident_actions_locked(now)
         active_conditions = self._incidents.snapshot(1)["active"]
         for condition in active_conditions:
             self._decorate_incident_locked(
                 condition,
                 active_maintenance=active_maintenance,
                 active_actions=active_actions,
+                at=now,
             )
         host_incidents: dict[str, list[dict[str, object]]] = {}
         for condition in active_conditions:
@@ -1097,8 +1231,9 @@ class StateStore:
         for server in servers:
             host = str(server["host"])
             window = active_maintenance.get(host)
-            server["maintenance"] = window.to_dict() if window else None
+            server["maintenance"] = window.to_dict(now) if window else None
             server["group"] = self._host_groups.get(host)
+            server["displayName"] = self._display_names.get(host)
             conditions = host_incidents.get(host, [])
             incident_count = len(conditions)
             critical_count = sum(
@@ -1304,6 +1439,7 @@ class MonitorService:
                 config.host_groups,
             )
             self._state.set_host_groups(config.host_groups)
+            self._state.set_host_display_names(config.host_display_names())
             self._state.set_topology(config.topology)
             try:
                 hosts = self._host_source.hosts(config)
@@ -1478,6 +1614,8 @@ class MonitorService:
                 self._scheduler_wakeup.clear()
                 now = time.monotonic()
                 config, generation = self._config_snapshot()
+                if isinstance(self._probe, AttendedAwareResourceProbe):
+                    self._probe.set_attended(self._state.dashboard_attended())
 
                 if now >= inventory_refresh_at or generation != inventory_generation:
                     try:
@@ -1613,6 +1751,13 @@ class MonitorService:
                                 last_completed_batch_id = scheduled.batch_id
                             del batches[scheduled.batch_id]
 
+                # A hot config replacement landed after this iteration took its
+                # snapshot; drop this round's submissions and restart the loop,
+                # where the update's wakeup re-snapshots the config and the
+                # inventory branch rebuilds the active host set before probing.
+                if not self._config_is_current(generation):
+                    continue
+
                 available_workers = max(0, config.max_workers - len(in_flight))
                 if available_workers:
                     due_hosts = tuple(
@@ -1667,6 +1812,10 @@ class MonitorService:
                         min(deadlines, default=wait_until),
                     )
                 wait_seconds = max(0.0, wait_until - time.monotonic())
+                # A stop() racing with the top-of-loop clear() may have had its
+                # wakeup consumed; recheck before committing to a long wait.
+                if stop_event.is_set():
+                    break
                 self._scheduler_wakeup.wait(wait_seconds)
         except Exception:
             print("Unexpected collector scheduler failure", file=sys.stderr)

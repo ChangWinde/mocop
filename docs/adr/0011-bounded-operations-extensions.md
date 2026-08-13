@@ -46,6 +46,13 @@ Choose Option C.
 - Workload mode is disabled by default. `auto` reads bounded cgroup, status, and selected
   environment metadata for PIDs already returned by `nvidia-smi`. It recognizes Slurm
   and Kubernetes identity but never invokes `scontrol`, `kubectl`, or a write API.
+  Ownership is the real process UID resolved through the root-owned passwd database;
+  environment variables only contribute job identifiers, and cgroup-derived scheduler
+  identity requires an anchored `slurm`/`kubepods` path segment. Attribution assumes the
+  PIDs that `nvidia-smi` reports are visible in the local `/proc` — verified on the
+  monitored IDE-container fleet, where every compute PID resolves in-namespace. A runtime
+  that reports foreign-namespace PIDs degrades to processes without workload metadata
+  instead of misattributing them.
 - Webhook URLs and optional HMAC secrets come from environment variables, not JSON.
   Targets require HTTPS, reject non-public addresses unless explicitly allowed, and
   are DNS-validated again before a request is pinned to that address. Each endpoint has

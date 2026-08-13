@@ -17,10 +17,11 @@ from typing import Protocol
 from .config import PersistenceConfig
 from .incidents import IncidentCondition, IncidentEvent
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _QUEUE_CAPACITY = 4096
 _WRITE_BATCH_SIZE = 128
 _PRUNE_INTERVAL_SECONDS = 60.0
+_SQLITE_FULL_ERRORCODE = 13  # sqlite3.SQLITE_FULL is unavailable on Python 3.10
 _HISTORY_FIELDS = (
     "cpuUsagePct",
     "memoryUsagePct",
@@ -37,6 +38,159 @@ _HISTORY_FIELDS = (
 _INCIDENT_STATES = frozenset({"opened", "resolved", "escalated", "deescalated"})
 _INCIDENT_SEVERITIES = frozenset({"warning", "critical"})
 
+# Rows whose stored types cannot round-trip are excluded in SQL before any
+# restore limit applies, so corrupt rows never displace older valid records.
+_NUMERIC_COLUMN_TYPES = "('integer', 'real', 'null')"
+_HISTORY_ROW_FILTER = " AND ".join(
+    (
+        "typeof(host) = 'text'",
+        "typeof(observed_at) = 'text'",
+        *(
+            f"typeof({column}) IN {_NUMERIC_COLUMN_TYPES}"
+            for column in (
+                "cpu_usage_pct",
+                "memory_usage_pct",
+                "swap_usage_pct",
+                "disk_usage_pct",
+                "network_rx_bps",
+                "network_tx_bps",
+                "disk_read_bps",
+                "disk_write_bps",
+                "gpu_usage_pct",
+                "gpu_memory_usage_pct",
+                "gpu_temperature_c",
+            )
+        ),
+        "transport_retried IN (0, 1)",
+    )
+)
+_INCIDENT_ROW_FILTER = " AND ".join(
+    (
+        "typeof(event_id) = 'integer'",
+        "event_id >= 1",
+        "typeof(host) = 'text'",
+        "typeof(condition_key) = 'text'",
+        "typeof(category) = 'text'",
+        "typeof(resource) = 'text'",
+        f"typeof(value) IN {_NUMERIC_COLUMN_TYPES}",
+        f"typeof(threshold) IN {_NUMERIC_COLUMN_TYPES}",
+        "typeof(condition_observed_at) = 'text'",
+        "typeof(detail) IN ('text', 'null')",
+        "typeof(group_key) IN ('text', 'null')",
+        "typeof(observed_at) = 'text'",
+    )
+)
+_GPU_ROW_FILTER = " AND ".join(
+    (
+        "typeof(host) = 'text'",
+        "typeof(gpu_id) = 'text'",
+        "typeof(gpu_index) = 'integer'",
+        "typeof(observed_at) = 'text'",
+        *(
+            f"typeof({column}) IN {_NUMERIC_COLUMN_TYPES}"
+            for column in (
+                "utilization_gpu_pct",
+                "memory_used_mib",
+                "memory_total_mib",
+                "temperature_c",
+                "power_draw_w",
+            )
+        ),
+    )
+)
+_PROCESS_ROW_FILTER = " AND ".join(
+    (
+        "typeof(host) = 'text'",
+        "typeof(gpu_id) = 'text'",
+        "typeof(gpu_index) = 'integer'",
+        "typeof(observed_at) = 'text'",
+        "event_type IN ('started', 'stopped')",
+        "typeof(pid) = 'integer'",
+        "typeof(name) = 'text'",
+        f"typeof(used_memory_mib) IN {_NUMERIC_COLUMN_TYPES}",
+        "typeof(workload_json) IN ('text', 'null')",
+    )
+)
+
+_GPU_TABLE_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS gpu_history (
+        host TEXT NOT NULL,
+        gpu_id TEXT NOT NULL,
+        gpu_index INTEGER NOT NULL,
+        observed_at TEXT NOT NULL,
+        utilization_gpu_pct REAL,
+        memory_used_mib REAL,
+        memory_total_mib REAL,
+        temperature_c REAL,
+        power_draw_w REAL,
+        PRIMARY KEY (host, gpu_id, observed_at)
+    ) WITHOUT ROWID
+    """,
+    "CREATE INDEX IF NOT EXISTS gpu_history_observed_at ON gpu_history(observed_at)",
+    """
+    CREATE TABLE IF NOT EXISTS process_events (
+        host TEXT NOT NULL,
+        gpu_id TEXT NOT NULL,
+        gpu_index INTEGER NOT NULL,
+        observed_at TEXT NOT NULL,
+        event_type TEXT NOT NULL CHECK (event_type IN ('started', 'stopped')),
+        pid INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        used_memory_mib REAL,
+        workload_json TEXT,
+        PRIMARY KEY (
+            host, gpu_id, observed_at, event_type, pid, name
+        )
+    ) WITHOUT ROWID
+    """,
+    "CREATE INDEX IF NOT EXISTS process_events_observed_at"
+    " ON process_events(observed_at)",
+)
+_CREATE_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS history (
+        host TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        cpu_usage_pct REAL,
+        memory_usage_pct REAL,
+        swap_usage_pct REAL,
+        disk_usage_pct REAL,
+        network_rx_bps REAL,
+        network_tx_bps REAL,
+        disk_read_bps REAL,
+        disk_write_bps REAL,
+        gpu_usage_pct REAL,
+        gpu_memory_usage_pct REAL,
+        gpu_temperature_c REAL,
+        transport_retried INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (host, observed_at)
+    ) WITHOUT ROWID
+    """,
+    "CREATE INDEX IF NOT EXISTS history_observed_at ON history(observed_at)",
+    """
+    CREATE TABLE IF NOT EXISTS incident_events (
+        event_id INTEGER PRIMARY KEY,
+        host TEXT NOT NULL,
+        condition_key TEXT NOT NULL,
+        category TEXT NOT NULL,
+        resource TEXT NOT NULL,
+        severity TEXT NOT NULL CHECK (severity IN ('warning', 'critical')),
+        value REAL,
+        threshold REAL,
+        condition_observed_at TEXT NOT NULL,
+        detail TEXT,
+        group_key TEXT,
+        state TEXT NOT NULL CHECK (
+            state IN ('opened', 'resolved', 'escalated', 'deescalated')
+        ),
+        observed_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS incident_events_observed_at"
+    " ON incident_events(observed_at)",
+) + _GPU_TABLE_STATEMENTS
+
 
 def _is_optional_finite_number(value: object) -> bool:
     return value is None or (
@@ -44,6 +198,12 @@ def _is_optional_finite_number(value: object) -> bool:
         and isinstance(value, int | float)
         and math.isfinite(float(value))
     )
+
+
+def _is_size_error(exc: sqlite3.Error) -> bool:
+    if getattr(exc, "sqlite_errorcode", None) == _SQLITE_FULL_ERRORCODE:
+        return True
+    return "full" in str(exc).lower()
 
 
 class PersistenceError(RuntimeError):
@@ -137,9 +297,12 @@ class _GpuTelemetryWrite:
     process_events: tuple[dict[str, object], ...]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _Flush:
+    """Write barrier that reports whether preceding writes were committed."""
+
     completed: threading.Event
+    committed: bool = True
 
 
 class _Stop:
@@ -183,16 +346,18 @@ class SqliteTelemetryPersistence:
         try:
             with closing(self._connect()) as connection:
                 history_rows = connection.execute(
-                    """
+                    f"""
                     SELECT host, observed_at, cpu_usage_pct, memory_usage_pct,
                            swap_usage_pct, disk_usage_pct, network_rx_bps,
                            network_tx_bps, disk_read_bps, disk_write_bps,
-                           gpu_usage_pct, gpu_memory_usage_pct, gpu_temperature_c
+                           gpu_usage_pct, gpu_memory_usage_pct, gpu_temperature_c,
+                           transport_retried
                     FROM (
                         SELECT *, ROW_NUMBER() OVER (
                             PARTITION BY host ORDER BY observed_at DESC
                         ) AS position
                         FROM history
+                        WHERE {_HISTORY_ROW_FILTER}
                     )
                     WHERE position <= ?
                     ORDER BY host, observed_at
@@ -200,12 +365,13 @@ class SqliteTelemetryPersistence:
                     (history_points,),
                 ).fetchall()
                 event_rows = connection.execute(
-                    """
+                    f"""
                     SELECT event_id, host, condition_key, category, resource,
                            severity, value, threshold, condition_observed_at,
                            detail, group_key, state, observed_at
                     FROM (
                         SELECT * FROM incident_events
+                        WHERE {_INCIDENT_ROW_FILTER}
                         ORDER BY event_id DESC LIMIT ?
                     )
                     ORDER BY event_id
@@ -213,7 +379,7 @@ class SqliteTelemetryPersistence:
                     (incident_points,),
                 ).fetchall()
                 gpu_rows = connection.execute(
-                    """
+                    f"""
                     SELECT host, gpu_id, gpu_index, observed_at,
                            utilization_gpu_pct, memory_used_mib,
                            memory_total_mib, temperature_c, power_draw_w
@@ -222,6 +388,7 @@ class SqliteTelemetryPersistence:
                             PARTITION BY host, gpu_id ORDER BY observed_at DESC
                         ) AS position
                         FROM gpu_history
+                        WHERE {_GPU_ROW_FILTER}
                     )
                     WHERE position <= ?
                     ORDER BY host, gpu_id, observed_at
@@ -229,11 +396,20 @@ class SqliteTelemetryPersistence:
                     (history_points,),
                 ).fetchall()
                 process_rows = connection.execute(
-                    """
+                    f"""
                     SELECT host, gpu_id, gpu_index, observed_at, event_type,
                            pid, name, used_memory_mib, workload_json
-                    FROM process_events
-                    ORDER BY observed_at DESC LIMIT ?
+                    FROM (
+                        SELECT *, ROW_NUMBER() OVER (
+                            PARTITION BY host, gpu_id
+                            ORDER BY observed_at DESC, event_type DESC,
+                                     pid DESC, name DESC
+                        ) AS position
+                        FROM process_events
+                        WHERE {_PROCESS_ROW_FILTER}
+                    )
+                    WHERE position <= ?
+                    ORDER BY host, gpu_id, observed_at, event_type, pid, name
                     """,
                     (incident_points,),
                 ).fetchall()
@@ -242,17 +418,19 @@ class SqliteTelemetryPersistence:
 
         history: dict[str, list[dict[str, object]]] = {}
         for row in history_rows:
-            host, observed_at, *values = row
+            host, observed_at, *values, transport_retried = row
             if (
                 not isinstance(host, str)
                 or not 0 < len(host) <= 253
                 or not isinstance(observed_at, str)
                 or not 0 < len(observed_at) <= 64
+                or transport_retried not in (0, 1)
                 or not all(_is_optional_finite_number(value) for value in values)
             ):
                 continue
-            point = {"observedAt": observed_at}
+            point: dict[str, object] = {"observedAt": observed_at}
             point.update(dict(zip(_HISTORY_FIELDS, values, strict=True)))
+            point["transportRetried"] = bool(transport_retried)
             history.setdefault(host, []).append(point)
 
         events = tuple(
@@ -285,7 +463,7 @@ class SqliteTelemetryPersistence:
             )
 
         process_events: dict[tuple[str, str], list[dict[str, object]]] = {}
-        for row in reversed(process_rows):
+        for row in process_rows:
             (
                 host,
                 gpu_id,
@@ -371,12 +549,14 @@ class SqliteTelemetryPersistence:
             }
 
     def flush(self, timeout_seconds: float = 5.0) -> bool:
-        completed = threading.Event()
+        barrier = _Flush(threading.Event())
         try:
-            self._queue.put(_Flush(completed), timeout=max(0.0, timeout_seconds))
+            self._queue.put(barrier, timeout=max(0.0, timeout_seconds))
         except queue.Full:
             return False
-        return completed.wait(max(0.0, timeout_seconds))
+        if not barrier.completed.wait(max(0.0, timeout_seconds)):
+            return False
+        return barrier.committed
 
     def close(self, timeout_seconds: float = 5.0) -> None:
         with self._status_lock:
@@ -419,7 +599,7 @@ class SqliteTelemetryPersistence:
                 connection.execute("PRAGMA synchronous = NORMAL")
                 connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
                 version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-                if version not in {0, 1, _SCHEMA_VERSION}:
+                if version not in {0, 1, 2, _SCHEMA_VERSION}:
                     raise PersistenceError(
                         f"unsupported history schema version: {version}"
                     )
@@ -427,15 +607,16 @@ class SqliteTelemetryPersistence:
                     self._create_schema(connection)
                 elif version == 1:
                     self._migrate_v1(connection)
+                elif version == 2:
+                    self._migrate_v2(connection)
                 self._prune(connection)
                 page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
                 page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
-                max_pages = max(1, self._config.max_bytes // page_size)
-                if page_count > max_pages:
+                if page_count > max(1, self._config.max_bytes // page_size):
                     raise PersistenceError(
                         "history database exceeds the configured size limit"
                     )
-                connection.execute(f"PRAGMA max_page_count = {max_pages}")
+                self._apply_size_limit(connection)
             self._path.chmod(0o600)
         except PersistenceError:
             raise
@@ -444,124 +625,67 @@ class SqliteTelemetryPersistence:
                 "cannot initialize SQLite history persistence"
             ) from exc
 
-    @staticmethod
-    def _create_schema(connection: sqlite3.Connection) -> None:
-        connection.executescript(
-            """
-            CREATE TABLE history (
-                host TEXT NOT NULL,
-                observed_at TEXT NOT NULL,
-                cpu_usage_pct REAL,
-                memory_usage_pct REAL,
-                swap_usage_pct REAL,
-                disk_usage_pct REAL,
-                network_rx_bps REAL,
-                network_tx_bps REAL,
-                disk_read_bps REAL,
-                disk_write_bps REAL,
-                gpu_usage_pct REAL,
-                gpu_memory_usage_pct REAL,
-                gpu_temperature_c REAL,
-                PRIMARY KEY (host, observed_at)
-            ) WITHOUT ROWID;
-            CREATE INDEX history_observed_at ON history(observed_at);
+    @classmethod
+    def _create_schema(cls, connection: sqlite3.Connection) -> None:
+        cls._apply_schema(connection, _CREATE_SCHEMA_STATEMENTS)
 
-            CREATE TABLE incident_events (
-                event_id INTEGER PRIMARY KEY,
-                host TEXT NOT NULL,
-                condition_key TEXT NOT NULL,
-                category TEXT NOT NULL,
-                resource TEXT NOT NULL,
-                severity TEXT NOT NULL CHECK (severity IN ('warning', 'critical')),
-                value REAL,
-                threshold REAL,
-                condition_observed_at TEXT NOT NULL,
-                detail TEXT,
-                group_key TEXT,
-                state TEXT NOT NULL CHECK (
-                    state IN ('opened', 'resolved', 'escalated', 'deescalated')
-                ),
-                observed_at TEXT NOT NULL
-            );
-            CREATE INDEX incident_events_observed_at
-                ON incident_events(observed_at);
+    @classmethod
+    def _migrate_v1(cls, connection: sqlite3.Connection) -> None:
+        cls._apply_schema(connection, _GPU_TABLE_STATEMENTS)
 
-            CREATE TABLE gpu_history (
-                host TEXT NOT NULL,
-                gpu_id TEXT NOT NULL,
-                gpu_index INTEGER NOT NULL,
-                observed_at TEXT NOT NULL,
-                utilization_gpu_pct REAL,
-                memory_used_mib REAL,
-                memory_total_mib REAL,
-                temperature_c REAL,
-                power_draw_w REAL,
-                PRIMARY KEY (host, gpu_id, observed_at)
-            ) WITHOUT ROWID;
-            CREATE INDEX gpu_history_observed_at ON gpu_history(observed_at);
-
-            CREATE TABLE process_events (
-                host TEXT NOT NULL,
-                gpu_id TEXT NOT NULL,
-                gpu_index INTEGER NOT NULL,
-                observed_at TEXT NOT NULL,
-                event_type TEXT NOT NULL CHECK (event_type IN ('started', 'stopped')),
-                pid INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                used_memory_mib REAL,
-                workload_json TEXT,
-                PRIMARY KEY (
-                    host, gpu_id, observed_at, event_type, pid, name
-                )
-            ) WITHOUT ROWID;
-            CREATE INDEX process_events_observed_at
-                ON process_events(observed_at);
-            PRAGMA user_version = 2;
-            """
-        )
+    @classmethod
+    def _migrate_v2(cls, connection: sqlite3.Connection) -> None:
+        cls._apply_schema(connection, ())
 
     @staticmethod
-    def _migrate_v1(connection: sqlite3.Connection) -> None:
-        connection.executescript(
-            """
-            CREATE TABLE gpu_history (
-                host TEXT NOT NULL,
-                gpu_id TEXT NOT NULL,
-                gpu_index INTEGER NOT NULL,
-                observed_at TEXT NOT NULL,
-                utilization_gpu_pct REAL,
-                memory_used_mib REAL,
-                memory_total_mib REAL,
-                temperature_c REAL,
-                power_draw_w REAL,
-                PRIMARY KEY (host, gpu_id, observed_at)
-            ) WITHOUT ROWID;
-            CREATE INDEX gpu_history_observed_at ON gpu_history(observed_at);
-            CREATE TABLE process_events (
-                host TEXT NOT NULL,
-                gpu_id TEXT NOT NULL,
-                gpu_index INTEGER NOT NULL,
-                observed_at TEXT NOT NULL,
-                event_type TEXT NOT NULL CHECK (event_type IN ('started', 'stopped')),
-                pid INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                used_memory_mib REAL,
-                workload_json TEXT,
-                PRIMARY KEY (
-                    host, gpu_id, observed_at, event_type, pid, name
+    def _apply_schema(
+        connection: sqlite3.Connection, statements: tuple[str, ...]
+    ) -> None:
+        """Apply schema DDL atomically so an interrupted upgrade can be retried.
+
+        Statements tolerate leftovers of a partially applied earlier run, and
+        the user_version stamp only commits together with the schema changes.
+        """
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            for statement in statements:
+                connection.execute(statement)
+            history_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(history)")
+            }
+            if "transport_retried" not in history_columns:
+                connection.execute(
+                    "ALTER TABLE history"
+                    " ADD COLUMN transport_retried INTEGER NOT NULL DEFAULT 0"
                 )
-            ) WITHOUT ROWID;
-            CREATE INDEX process_events_observed_at
-                ON process_events(observed_at);
-            PRAGMA user_version = 2;
-            """
-        )
+            connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        connection.execute("COMMIT")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path, timeout=5)
-        connection.execute("PRAGMA busy_timeout = 5000")
-        connection.execute("PRAGMA synchronous = NORMAL")
+        try:
+            connection.execute("PRAGMA busy_timeout = 5000")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            self._apply_size_limit(connection)
+        except sqlite3.Error:
+            connection.close()
+            raise
         return connection
+
+    def _apply_size_limit(self, connection: sqlite3.Connection) -> None:
+        """Cap the database size; max_page_count only binds its own connection."""
+        page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+        max_pages = max(1, self._config.max_bytes // page_size)
+        connection.execute(f"PRAGMA max_page_count = {max_pages}")
+        applied = int(connection.execute("PRAGMA max_page_count").fetchone()[0])
+        if applied != max_pages:
+            raise sqlite3.OperationalError(
+                "history database size limit could not be applied"
+            )
 
     def _write_loop(self) -> None:
         try:
@@ -573,7 +697,15 @@ class SqliteTelemetryPersistence:
         try:
             should_stop = False
             while not should_stop:
-                first = self._queue.get()
+                try:
+                    first = self._queue.get(
+                        timeout=max(0.0, next_prune_at - time.monotonic())
+                    )
+                except queue.Empty:
+                    # Retention must keep holding during idle periods too.
+                    self._prune_batch(connection)
+                    next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
+                    continue
                 items = [first]
                 if isinstance(
                     first, _HistoryWrite | _IncidentWrite | _GpuTelemetryWrite
@@ -594,28 +726,14 @@ class SqliteTelemetryPersistence:
                         item, _HistoryWrite | _IncidentWrite | _GpuTelemetryWrite
                     )
                 )
-                if writes:
-                    try:
-                        written_records = 0
-                        with connection:
-                            for item in writes:
-                                written_records += self._write(connection, item)
-                            if time.monotonic() >= next_prune_at:
-                                self._prune(connection)
-                                next_prune_at = (
-                                    time.monotonic() + _PRUNE_INTERVAL_SECONDS
-                                )
-                    except sqlite3.Error:
-                        with self._status_lock:
-                            self._dropped_writes += len(writes)
-                            self._last_error = "history database write failed"
-                    else:
-                        with self._status_lock:
-                            self._written_records += written_records
-                            self._last_error = None
+                committed = not writes or self._commit_batch(connection, writes)
+                if time.monotonic() >= next_prune_at:
+                    self._prune_batch(connection)
+                    next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
 
                 for item in items:
                     if isinstance(item, _Flush):
+                        item.committed = committed
                         item.completed.set()
                     elif isinstance(item, _Stop):
                         should_stop = True
@@ -626,6 +744,42 @@ class SqliteTelemetryPersistence:
         finally:
             connection.close()
 
+    def _commit_batch(
+        self, connection: sqlite3.Connection, writes: tuple[_Write, ...]
+    ) -> bool:
+        pruned = False
+        while True:
+            try:
+                written_records = 0
+                with connection:
+                    for item in writes:
+                        written_records += self._write(connection, item)
+            except sqlite3.Error as exc:
+                if not pruned and _is_size_error(exc):
+                    # Expired records may free enough space; retry this batch
+                    # once after pruning instead of dropping it outright.
+                    pruned = True
+                    if self._prune_batch(connection):
+                        continue
+                with self._status_lock:
+                    self._dropped_writes += len(writes)
+                    self._last_error = "history database write failed"
+                return False
+            with self._status_lock:
+                self._written_records += written_records
+                self._last_error = None
+            return True
+
+    def _prune_batch(self, connection: sqlite3.Connection) -> bool:
+        """Prune in a dedicated transaction so failures stay contained."""
+        try:
+            with connection:
+                self._prune(connection)
+        except sqlite3.Error:
+            self._set_error("history database prune failed")
+            return False
+        return True
+
     @staticmethod
     def _write(connection: sqlite3.Connection, item: _Write) -> int:
         if isinstance(item, _HistoryWrite):
@@ -633,13 +787,14 @@ class SqliteTelemetryPersistence:
             cursor = connection.execute(
                 """
                 INSERT OR REPLACE INTO history VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
                     item.host,
                     point.get("observedAt"),
                     *(point.get(field) for field in _HISTORY_FIELDS),
+                    1 if point.get("transportRetried") else 0,
                 ),
             )
             return max(0, cursor.rowcount)
@@ -650,9 +805,12 @@ class SqliteTelemetryPersistence:
         assert isinstance(item, _IncidentWrite)
         event = item.event
         condition = event.condition
+        # OR REPLACE lets a restarted tracker reclaim event ids still held by
+        # corrupt rows; valid rows are never hit because trackers restart from
+        # the highest restorable id.
         cursor = connection.execute(
             """
-            INSERT OR IGNORE INTO incident_events VALUES (
+            INSERT OR REPLACE INTO incident_events VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,

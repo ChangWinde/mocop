@@ -1,6 +1,20 @@
 from __future__ import annotations
 
+import re
 from typing import Any
+
+# Units by condition category: ratios are percentages, GPU temperature is
+# degrees Celsius, and counters (GPU inventory, ECC errors) carry no unit.
+_CATEGORY_UNITS = {
+    "cpu": "%",
+    "memory": "%",
+    "swap": "%",
+    "disk": "%",
+    "gpu_memory": "%",
+    "gpu_idle_memory": "%",
+    "gpu_temperature": "°C",
+}
+_GPU_INDEX_IN_RESOURCE = re.compile(r"\bGPU (\d+)\b")
 
 
 def _number(value: object) -> float | None:
@@ -9,14 +23,19 @@ def _number(value: object) -> float | None:
     return round(float(value), 2)
 
 
-def _percent_evidence(condition: dict[str, object]) -> list[dict[str, object]]:
+def _threshold_evidence(
+    condition: dict[str, object], category: str
+) -> list[dict[str, object]]:
     evidence: list[dict[str, object]] = []
-    value = _number(condition.get("value"))
-    threshold = _number(condition.get("threshold"))
-    if value is not None:
-        evidence.append({"label": "current", "value": value, "unit": "%"})
-    if threshold is not None:
-        evidence.append({"label": "threshold", "value": threshold, "unit": "%"})
+    unit = _CATEGORY_UNITS.get(category)
+    for label, key in (("current", "value"), ("threshold", "threshold")):
+        number = _number(condition.get(key))
+        if number is None:
+            continue
+        item: dict[str, object] = {"label": label, "value": number}
+        if unit is not None:
+            item["unit"] = unit
+        evidence.append(item)
     return evidence
 
 
@@ -27,7 +46,7 @@ def diagnose_condition(
     """Build bounded, deterministic diagnosis context from one active condition."""
     category = str(condition.get("category") or "unknown")
     resource = str(condition.get("resource") or "resource")
-    evidence = _percent_evidence(condition)
+    evidence = _threshold_evidence(condition, category)
     title = "Resource condition needs attention"
     summary = f"{resource} is outside the configured operating threshold."
     next_steps = ["Confirm whether the current workload makes this state expected."]
@@ -81,18 +100,29 @@ def diagnose_condition(
     elif category.startswith("gpu_"):
         gpus = server.get("gpus", []) if isinstance(server, dict) else []
         identity = str(condition.get("conditionKey") or "").rsplit(":", 1)[-1]
+        # Exact UUID match first; otherwise parse the complete index out of
+        # the resource label, so "GPU 10" can never resolve to GPU 1.
         gpu = next(
             (
                 item
                 for item in gpus
-                if isinstance(item, dict)
-                and (
-                    str(item.get("uuid")) == identity
-                    or f"GPU {item.get('index')}" in resource
-                )
+                if isinstance(item, dict) and str(item.get("uuid")) == identity
             ),
             None,
         )
+        if gpu is None:
+            index_match = _GPU_INDEX_IN_RESOURCE.search(resource)
+            if index_match is not None:
+                resource_index = int(index_match.group(1))
+                gpu = next(
+                    (
+                        item
+                        for item in gpus
+                        if isinstance(item, dict)
+                        and item.get("index") == resource_index
+                    ),
+                    None,
+                )
         if isinstance(gpu, dict):
             index = gpu.get("index")
             target_gpu_index = index if isinstance(index, int) else None

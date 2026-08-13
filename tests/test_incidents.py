@@ -184,9 +184,10 @@ class IncidentTrackerTests(unittest.TestCase):
         warning = ProbeResult("node-a", "online", 1, (gpu(82),), system=system(90, 90))
         self.tracker.update(warning)
         self.tracker.update(warning)
-        self.tracker.update(
-            ProbeResult("node-a", "online", 1, (gpu(86),), system=system(96, 91))
-        )
+        critical = ProbeResult("node-a", "online", 1, (gpu(86),), system=system(96, 91))
+        # Severity changes need the same sustained confirmation as opening.
+        self.tracker.update(critical)
+        self.tracker.update(critical)
         after_escalation = self.tracker.snapshot(20)
         self.assertEqual(after_escalation["version"], 5)
         self.assertEqual(
@@ -389,6 +390,192 @@ class IncidentTrackerTests(unittest.TestCase):
             ),
             1,
         )
+
+    def test_gpu_query_failure_does_not_advance_gpu_recovery(self) -> None:
+        hot = ProbeResult("node-a", "online", 1, (gpu(82),), system=system(20, 20))
+        self.tracker.update(hot)
+        self.tracker.update(hot)
+
+        blind = ProbeResult(
+            "node-a",
+            "online",
+            1,
+            message="nvidia-smi query failed",
+            system=system(20, 20),
+        )
+        first = self.tracker.update(blind)
+        second = self.tracker.update(blind)
+
+        self.assertEqual(
+            [(event.condition.key, event.state) for event in first],
+            [("gpu_availability", "opened")],
+        )
+        self.assertEqual(second, ())
+        snapshot = self.tracker.snapshot(20)
+        self.assertIn(
+            "gpu_temperature:GPU-1",
+            {item["conditionKey"] for item in snapshot["active"]},
+        )
+        self.assertNotIn(
+            ("gpu_temperature:GPU-1", "resolved"),
+            {(event["conditionKey"], event["state"]) for event in snapshot["events"]},
+        )
+
+        recovered = ProbeResult(
+            "node-a", "online", 1, (gpu(70),), system=system(20, 20)
+        )
+        self.tracker.update(recovered)
+        self.tracker.update(recovered)
+        final = self.tracker.snapshot(20)
+        self.assertEqual(final["active"], [])
+        self.assertLessEqual(
+            {
+                ("gpu_temperature:GPU-1", "resolved"),
+                ("gpu_availability", "resolved"),
+            },
+            {(event["conditionKey"], event["state"]) for event in final["events"]},
+        )
+
+    def test_missing_health_telemetry_freezes_health_recovery(self) -> None:
+        def health(errors: int) -> GpuHealthMetrics:
+            return GpuHealthMetrics(
+                ecc_uncorrected_volatile=errors,
+                retired_pages_pending=False,
+                remapped_rows_pending=False,
+                thermal_slowdown=False,
+                power_brake_slowdown=False,
+                mig_mode="Disabled",
+            )
+
+        sick = ProbeResult(
+            "node-a", "online", 1, (gpu(60, health=health(2)),), system=system(20, 20)
+        )
+        self.tracker.update(sick)
+        self.tracker.update(sick)
+
+        no_health = ProbeResult(
+            "node-a", "online", 1, (gpu(60),), system=system(20, 20)
+        )
+        self.tracker.update(no_health)
+        self.tracker.update(no_health)
+        self.assertIn(
+            "gpu_ecc:GPU-1",
+            {item["conditionKey"] for item in self.tracker.snapshot(20)["active"]},
+        )
+
+        healthy = ProbeResult(
+            "node-a", "online", 1, (gpu(60, health=health(0)),), system=system(20, 20)
+        )
+        self.tracker.update(healthy)
+        self.tracker.update(healthy)
+        self.assertNotIn(
+            "gpu_ecc:GPU-1",
+            {item["conditionKey"] for item in self.tracker.snapshot(20)["active"]},
+        )
+
+    def test_skipped_process_sampling_freezes_process_recovery(self) -> None:
+        unavailable = replace(gpu(60), processes=(), processes_available=False)
+        broken = ProbeResult(
+            "node-a", "online", 1, (unavailable,), system=system(20, 20)
+        )
+        self.tracker.update(broken)
+        self.tracker.update(broken)
+
+        skipped_gpu = replace(
+            gpu(60), processes=(), processes_available=False, processes_sampled=False
+        )
+        skipped = ProbeResult(
+            "node-a", "online", 1, (skipped_gpu,), system=system(20, 20)
+        )
+        self.tracker.update(skipped)
+        self.tracker.update(skipped)
+        self.assertIn(
+            "gpu_processes",
+            {item["conditionKey"] for item in self.tracker.snapshot(20)["active"]},
+        )
+
+        sampled = ProbeResult("node-a", "online", 1, (gpu(60),), system=system(20, 20))
+        self.tracker.update(sampled)
+        self.tracker.update(sampled)
+        self.assertNotIn(
+            "gpu_processes",
+            {item["conditionKey"] for item in self.tracker.snapshot(20)["active"]},
+        )
+
+    def test_online_sample_without_system_metrics_freezes_system_recovery(
+        self,
+    ) -> None:
+        warning = ProbeResult("node-a", "online", 1, system=system(90, 20))
+        self.tracker.update(warning)
+        self.tracker.update(warning)
+
+        headless = ProbeResult("node-a", "online", 1)
+        self.tracker.update(headless)
+        self.tracker.update(headless)
+        self.assertEqual(
+            [item["conditionKey"] for item in self.tracker.snapshot(20)["active"]],
+            ["cpu"],
+        )
+
+        recovered = ProbeResult("node-a", "online", 1, system=system(20, 20))
+        self.tracker.update(recovered)
+        self.tracker.update(recovered)
+        self.assertEqual(self.tracker.snapshot(20)["active"], [])
+
+    def test_first_online_sample_emits_opened_for_immediate_conditions(self) -> None:
+        tracker = IncidentTracker(
+            ThresholdIncidentPolicy(
+                ThresholdConfig(), expected_gpu_counts=(("node-a", 2),)
+            ),
+            history_points=20,
+        )
+
+        created = tracker.update(
+            ProbeResult(
+                "node-a",
+                "online",
+                1,
+                message="nvidia-smi query failed",
+                observed_at="2026-08-11T00:00:00Z",
+                system=system(20, 20),
+            )
+        )
+
+        self.assertEqual(
+            [(event.condition.key, event.state) for event in created],
+            [("gpu_availability", "opened")],
+        )
+        snapshot = tracker.snapshot(20)
+        self.assertGreater(snapshot["version"], 0)
+        self.assertEqual(
+            [(event["conditionKey"], event["state"]) for event in snapshot["events"]],
+            [("gpu_availability", "opened")],
+        )
+
+    def test_severity_flapping_requires_sustained_confirmation(self) -> None:
+        warning = ProbeResult("node-a", "online", 1, system=system(90, 20))
+        critical = ProbeResult("node-a", "online", 1, system=system(96, 20))
+        self.tracker.update(warning)
+        self.tracker.update(warning)
+
+        for sample in (critical, warning, critical, warning):
+            self.tracker.update(sample)
+
+        flapping = self.tracker.snapshot(20)
+        self.assertEqual([event["state"] for event in flapping["events"]], ["opened"])
+        self.assertEqual(flapping["active"][0]["severity"], "warning")
+
+        self.tracker.update(critical)
+        self.tracker.update(critical)
+        escalated = self.tracker.snapshot(20)
+        self.assertEqual(escalated["events"][0]["state"], "escalated")
+        self.assertEqual(escalated["active"][0]["severity"], "critical")
+
+        self.tracker.update(warning)
+        self.tracker.update(warning)
+        deescalated = self.tracker.snapshot(20)
+        self.assertEqual(deescalated["events"][0]["state"], "deescalated")
+        self.assertEqual(deescalated["active"][0]["severity"], "warning")
 
 
 if __name__ == "__main__":

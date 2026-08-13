@@ -599,6 +599,8 @@ html[data-style="glass"] .metric-card.primary {
 .group-toggle:hover, .tool-button:hover { border-color: color-mix(in srgb, var(--blue) 38%, transparent); color: var(--text); }
 .capacity-trigger { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 32%, transparent); background: var(--accent-2-soft); }
 .capacity-trigger:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent-2) 52%, transparent); background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
+.owners-trigger { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 32%, transparent); background: var(--blue-soft); }
+.owners-trigger:hover { color: var(--text); border-color: color-mix(in srgb, var(--blue) 52%, transparent); background: color-mix(in srgb, var(--blue) 16%, transparent); }
 .tool-button:disabled { opacity: .42; cursor: not-allowed; }
 
 .filter-row { gap: 5px; min-height: 50px; padding: 0 20px; border-bottom: 1px solid var(--line-soft); background: var(--panel-deep); }
@@ -1188,11 +1190,19 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
 .gpu-task-memory strong { font-size: 9px; font-weight: 620; }
 .gpu-task-memory small { color: var(--muted-2); font-size: 7px; }
 .gpu-task-workload { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 5px; }
+.gpu-task-workload[hidden] { display: none; }
 .gpu-task-workload span { padding: 3px 6px; border: 1px solid var(--line-soft); border-radius: 999px; color: var(--muted); font-size: 8px; }
 .gpu-task-workload .primary { border-color: color-mix(in srgb, var(--blue) 34%, var(--line-soft)); color: var(--blue); }
 .gpu-task-meta { grid-column: 1 / -1; display: flex; justify-content: space-between; color: var(--muted-2); font-size: 8px; }
 .gpu-task-meta .mini-track { width: min(68%, 240px); }
 .gpu-task-empty { padding: 22px 14px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); text-align: center; font-size: 9px; line-height: 1.6; }
+.gpu-task-heading-tools { display: flex; align-items: center; gap: 9px; }
+.gpu-task-sort { display: flex; gap: 3px; padding: 2px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--panel-deep); }
+.gpu-task-sort-choice { height: 20px; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; font-size: 8px; }
+.gpu-task-sort-choice:hover { color: var(--text); background: var(--surface-hover); }
+.gpu-task-sort-choice.active { border-color: var(--line); color: var(--text); background: var(--surface-raised); }
+.gpu-task-meta-info { min-width: 0; display: flex; gap: 7px; white-space: nowrap; }
+.gpu-task-overview small.gpu-task-freshness-stale, .gpu-task-empty.gpu-task-freshness-stale { color: color-mix(in srgb, var(--amber) 64%, var(--muted)); }
 .incident-detail-content { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(260px, .88fr); gap: 1px; background: var(--line-soft); }
 .incident-diagnosis, .incident-actions { min-width: 0; padding: 20px; background: var(--panel-background); }
 .incident-detail-status { padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--amber) 24%, var(--line)); border-radius: 10px; color: var(--amber); background: color-mix(in srgb, var(--amber) 6%, var(--panel-deep)); font-size: 9px; line-height: 1.55; }

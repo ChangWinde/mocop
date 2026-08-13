@@ -41,16 +41,20 @@ def _family(
     samples: Iterable[Sample],
     *,
     unit: str | None = None,
+    metric_type: str = "gauge",
 ) -> None:
     values = list(samples)
     if not values:
         return
-    lines.append(f"# TYPE {name} gauge")
+    lines.append(f"# TYPE {name} {metric_type}")
     if unit is not None:
         lines.append(f"# UNIT {name} {unit}")
     lines.append(f"# HELP {name} {help_text}")
+    # OpenMetrics counters carry the _total suffix on samples, not the family.
+    sample_name = f"{name}_total" if metric_type == "counter" else name
     lines.extend(
-        f"{name}{_label_set(labels)} {_number(value)}" for labels, value in values
+        f"{sample_name}{_label_set(labels)} {_number(value)}"
+        for labels, value in values
     )
 
 
@@ -63,7 +67,10 @@ def _metric(value: object) -> int | float | None:
 
 def _mib_as_bytes(value: object) -> int | float | None:
     number = _metric(value)
-    return number * 1024 * 1024 if number is not None else None
+    if number is None:
+        return None
+    scaled = number * 1024 * 1024
+    return scaled if math.isfinite(scaled) else None
 
 
 def _percentage_as_ratio(value: object) -> float | None:
@@ -194,30 +201,34 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
     notifications = (
         notifications_value if isinstance(notifications_value, Mapping) else {}
     )
-    for name, help_text, component, key in (
+    for name, help_text, component, key, metric_type in (
         (
             "mocop_persistence_queued_writes",
             "History records waiting for persistence.",
             persistence,
             "queuedWrites",
+            "gauge",
         ),
         (
-            "mocop_persistence_dropped_writes_total",
+            "mocop_persistence_dropped_writes",
             "History records dropped since process start.",
             persistence,
             "droppedWrites",
+            "counter",
         ),
         (
             "mocop_notifications_queued_deliveries",
             "Webhook events waiting for delivery.",
             notifications,
             "queuedDeliveries",
+            "gauge",
         ),
         (
-            "mocop_notifications_dropped_deliveries_total",
+            "mocop_notifications_dropped_deliveries",
             "Webhook events dropped since process start.",
             notifications,
             "droppedDeliveries",
+            "counter",
         ),
     ):
         _family(
@@ -225,6 +236,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
             name,
             help_text,
             [((), value)] if (value := _metric(component.get(key))) is not None else [],
+            metric_type=metric_type,
         )
 
     cluster_families = (
@@ -320,6 +332,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         "actionable_incidents": [],
         "actionable_critical_incidents": [],
         "latency": [],
+        "transport_retried": [],
         "cpu": [],
         "load": [],
         "uptime": [],
@@ -398,31 +411,38 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         latency = _seconds_from_milliseconds(raw_server.get("latencyMs"))
         if latency is not None:
             host_samples["latency"].append((host_labels, latency))
+        host_samples["transport_retried"].append(
+            (host_labels, int(bool(raw_server.get("transportRetried"))))
+        )
+
+        if not online or stale:
+            continue
 
         system = raw_server.get("system")
-        if not online or stale or not isinstance(system, Mapping):
-            continue
-        _append_ratio(host_samples["cpu"], host_labels, system.get("cpu_usage_pct"))
-        _append_optional(host_samples["load"], host_labels, system.get("load_1m"))
-        _append_optional(
-            host_samples["uptime"], host_labels, system.get("uptime_seconds")
-        )
-        for sample_key, field in (
-            ("memory_total", "memory_total_mib"),
-            ("memory_used", "memory_used_mib"),
-            ("swap_total", "swap_total_mib"),
-            ("swap_used", "swap_used_mib"),
-            ("disk_total", "disk_total_mib"),
-            ("disk_used", "disk_used_mib"),
-        ):
-            _append_bytes(host_samples[sample_key], host_labels, system.get(field))
-        for sample_key, field in (
-            ("network_rx", "network_rx_bps"),
-            ("network_tx", "network_tx_bps"),
-            ("disk_read", "disk_read_bps"),
-            ("disk_write", "disk_write_bps"),
-        ):
-            _append_optional(host_samples[sample_key], host_labels, system.get(field))
+        if isinstance(system, Mapping):
+            _append_ratio(host_samples["cpu"], host_labels, system.get("cpu_usage_pct"))
+            _append_optional(host_samples["load"], host_labels, system.get("load_1m"))
+            _append_optional(
+                host_samples["uptime"], host_labels, system.get("uptime_seconds")
+            )
+            for sample_key, field in (
+                ("memory_total", "memory_total_mib"),
+                ("memory_used", "memory_used_mib"),
+                ("swap_total", "swap_total_mib"),
+                ("swap_used", "swap_used_mib"),
+                ("disk_total", "disk_total_mib"),
+                ("disk_used", "disk_used_mib"),
+            ):
+                _append_bytes(host_samples[sample_key], host_labels, system.get(field))
+            for sample_key, field in (
+                ("network_rx", "network_rx_bps"),
+                ("network_tx", "network_tx_bps"),
+                ("disk_read", "disk_read_bps"),
+                ("disk_write", "disk_write_bps"),
+            ):
+                _append_optional(
+                    host_samples[sample_key], host_labels, system.get(field)
+                )
 
         raw_gpus = raw_server.get("gpus")
         if not isinstance(raw_gpus, list):
@@ -549,6 +569,12 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
             "mocop_host_probe_latency_seconds",
             "Duration of the most recent host probe attempt.",
             "seconds",
+        ),
+        (
+            "transport_retried",
+            "mocop_host_probe_transport_retried",
+            "Whether the most recent probe retried a stale SSH transport.",
+            None,
         ),
         (
             "cpu",

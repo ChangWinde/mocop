@@ -118,7 +118,8 @@ The generated file is complete. Edit it directly only when you need fields not e
 - `local_host` names one entry in `hosts` that should be probed without SSH.
 - `expected_gpu_counts` reports missing devices.
 - `host_groups` provides shared navigation groups.
-- `host_overrides` changes cadence or timeout for a measured slow node.
+- `host_overrides` changes cadence or timeout for a measured slow node, and its optional `display_name` gives an alias a human-readable fleet label without changing collection identity.
+- `maintenance_windows` entries define either a one-shot `until` or a weekly `recurrence` (`{"weekday": 0-6, "start": "HH:MM", "duration_minutes": N}`, all in UTC, Monday is 0); recurring windows silence actionable alerts during every instance while collection continues.
 - `gpu_process_poll_interval_seconds` controls timestamped GPU task refresh independently; the 15-second default reduces NVIDIA command overhead while core GPU data keeps the normal cadence.
 - `incident_overrides` applies bounded host/group thresholds and exact disk-mount exclusions; host settings take precedence.
 - `incident_actions` stores dashboard acknowledgements and silences with UTC expiry. It is maintained by the UI in normal use.
@@ -126,7 +127,7 @@ The generated file is complete. Edit it directly only when you need fields not e
 - `retry_jitter_pct` disperses retries after a shared SSH path fails; the default is 15%.
 - `topology` describes the connection tree. Its safe aliases are display-only unless they also appear in the active `hosts` inventory.
 - `persistence.enabled` retains bounded trends and incident context in SQLite; it is off by default.
-- `workloads.mode: "auto"` adds best-effort Slurm/Kubernetes identity from bounded `/proc` reads; it is off by default.
+- `workloads.mode: "identity"` adds the process owner (real UID via passwd), full command line, and true start time from bounded `/proc` reads at roughly a third of the cost of `"auto"`; `"auto"` additionally recognizes Slurm/Kubernetes identity from cgroup and environment reads. Both are off by default; without them the GPU dialog still shows a monitor-observed runtime lower bound per process.
 
 Webhook destinations and signing secrets stay out of JSON. A minimal endpoint uses
 environment-variable names:
@@ -168,7 +169,7 @@ See the [complete example](examples/mocop.example.json) for all fields and safe 
 
 Browser settings are lost only when that browser's site data is cleared or its display preferences are reset. Removing a custom background is a separate action.
 
-The dashboard allows a 2–60 second interval, a 2–300 second probe timeout, and 1–64 workers. Short intervals and high concurrency increase SSH and remote-host load.
+The dashboard allows a 2–60 second interval, a 2–300 second probe timeout that must exceed the connection timeout (default 5 seconds), and 1–64 workers. Short intervals and high concurrency increase SSH and remote-host load.
 
 ## Daily use
 
@@ -206,12 +207,36 @@ retries back off for up to 60 seconds with per-host jitter.
 The interval is a target cadence. Worker saturation or a probe longer than its interval
 can defer that host, but no fleet-wide barrier is introduced.
 
-Test the same SSH path outside Mocop before changing timeouts:
+Diagnose the SSH path with the bundled read-only check before changing timeouts:
+
+```bash
+mocop doctor
+```
+
+It verifies non-interactive reachability for every monitored alias, measures cold
+versus multiplexed connection latency, flags missing connection reuse, a missing
+or group-accessible control-socket directory, and an ineffective `ControlPersist`,
+and warns when the installed package is newer than the running service. Add
+`--profile` to decompose a slow host into transport, fixed-script, and NVIDIA-query
+stages. The same checks are possible manually:
 
 ```bash
 ssh -o BatchMode=yes gpu-node-01 true
-ssh -G gpu-node-01 | grep -E '^(hostname|port|user|proxyjump|controlmaster) '
+ssh -G gpu-node-01 | grep -E '^(controlmaster|controlpath|controlpersist) '
 ```
+
+Enabling OpenSSH connection reuse removes most per-probe connection cost on remote
+routes (measured 76.6% behind a jump host; see
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md)):
+
+```sshconfig
+Host gpu-node-01
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 600
+```
+
+Create `~/.ssh/sockets` yourself with mode `0700`; Mocop never edits SSH configuration.
 
 If several nodes that share one `ProxyJump`, VPN, or FRP route fail together, inspect that shared route first. Restarting Mocop does not repair an unavailable tunnel or remote SSH service.
 

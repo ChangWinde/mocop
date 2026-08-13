@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,13 @@ class CommitPolicyTests(unittest.TestCase):
     def test_range_accepts_real_merge_and_revert_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)
+            # Isolate the throwaway repository from operator-level git
+            # configuration such as a global core.hooksPath or signing.
+            environment = {
+                **os.environ,
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_SYSTEM": os.devnull,
+            }
 
             def git(*arguments: str) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
@@ -70,6 +78,7 @@ class CommitPolicyTests(unittest.TestCase):
                     check=True,
                     capture_output=True,
                     text=True,
+                    env=environment,
                 )
 
             git("init", "--quiet", "--initial-branch=main")

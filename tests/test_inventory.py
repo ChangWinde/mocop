@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
@@ -62,6 +63,44 @@ class InventoryTests(unittest.TestCase):
         )
         self.assertFalse(snapshot["autoDiscover"])
         self.assertTrue(snapshot["writable"])
+
+    def test_snapshot_serializes_recurring_maintenance_from_one_clock_sample(
+        self,
+    ) -> None:
+        data = json.loads(self.config_path.read_text(encoding="utf-8"))
+        data["maintenance_windows"] = {
+            "gpu-01": {
+                "reason": "Weekly patching",
+                "recurrence": {
+                    "weekday": 0,
+                    "start": "00:00",
+                    "duration_minutes": 60,
+                },
+            }
+        }
+        self.config_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.config_path.chmod(0o600)
+        # Monday 00:30 UTC sits inside the weekly instance that ends at 01:00.
+        sampled = datetime(2026, 1, 5, 0, 30, tzinfo=timezone.utc)
+
+        with patch("mocop.inventory.datetime") as clock:
+            clock.now.return_value = sampled
+            snapshot = self.inventory.snapshot()
+
+        # The activity decision and the serialized end share one clock sample,
+        # so a boundary crossing cannot mix two different instances.
+        clock.now.assert_called_once_with(timezone.utc)
+        self.assertEqual(
+            snapshot["maintenanceWindows"]["gpu-01"],
+            {
+                "until": "2026-01-05T01:00:00Z",
+                "reason": "Weekly patching",
+                "recurring": True,
+            },
+        )
 
     def test_updates_collector_settings_atomically_and_persists_them(self) -> None:
         settings = self.inventory.update_collector_settings(

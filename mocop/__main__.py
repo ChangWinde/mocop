@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import ConfigError, load_config, resolve_config_path
 from .discovery import create_host_source
+from .doctor import run_doctor
 from .inventory import ConfigInventory
 from .lifecycle import (
     LifecycleError,
@@ -83,6 +84,38 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
             default=None,
             help="configuration used by the service",
         )
+
+    doctor_parser = commands.add_parser(
+        "doctor",
+        help="diagnose SSH reachability and connection reuse for monitored aliases",
+    )
+    doctor_parser.add_argument(
+        "--config", type=Path, default=None, help="configuration path to diagnose"
+    )
+    doctor_parser.add_argument(
+        "--host",
+        dest="hosts",
+        action="append",
+        default=[],
+        metavar="SSH_ALIAS",
+        help="limit the diagnosis to this monitored alias; repeat for multiple",
+    )
+    doctor_parser.add_argument(
+        "--no-connect",
+        action="store_true",
+        help="inspect configuration only; skip live connection tests",
+    )
+    doctor_parser.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "decompose collection latency per alias into transport, fixed "
+            "script, and NVIDIA query stages"
+        ),
+    )
+    doctor_parser.add_argument(
+        "--json", action="store_true", help="write a machine-readable report"
+    )
     return parser.parse_args(argv)
 
 
@@ -129,6 +162,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
         group_incident_overrides=config.group_incident_overrides,
         maintenance_windows=config.maintenance_windows,
         host_groups=config.host_groups,
+        host_display_names=config.host_display_names(),
         persistence=persistence,
         restored=restored,
         topology=config.topology,
@@ -165,6 +199,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
             inventory,
             restart_event.set if args.managed_service else None,
             monitor,
+            trusted_hosts=config.trusted_web_hosts,
         )
     except OSError as exc:
         print(
@@ -202,11 +237,33 @@ def _run_monitor(args: argparse.Namespace) -> int:
         monitor.stop()
         server.server_close()
         collector.join(timeout=monitor.shutdown_timeout_seconds())
+        if collector.is_alive():
+            print(
+                "Collector thread did not stop within the shutdown budget; "
+                "flushing persistence and notifications regardless",
+                file=sys.stderr,
+            )
         persistence.close()
         notifications.close()
     if restart_event.is_set():
         return 75  # EX_TEMPFAIL: systemd Restart=on-failure starts the new process.
     return 1 if collector_failed else 0
+
+
+def _run_doctor(args: argparse.Namespace) -> int:
+    config_path = resolve_config_path(args.config)
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
+    return run_doctor(
+        config,
+        host_filter=tuple(args.hosts),
+        probe_connection=not args.no_connect,
+        profile=args.profile,
+        as_json=args.json,
+    )
 
 
 def _run_lifecycle(args: argparse.Namespace) -> int:
@@ -240,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
     if args.command is None:
         return _run_monitor(args)
+    if args.command == "doctor":
+        return _run_doctor(args)
     try:
         return _run_lifecycle(args)
     except LifecycleError as exc:

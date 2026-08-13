@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 from .config import IncidentConfig, IncidentScopeOverrideConfig, ThresholdConfig
@@ -9,6 +9,12 @@ from .models import ProbeResult
 
 IncidentSeverity = Literal["warning", "critical"]
 IncidentState = Literal["opened", "resolved", "escalated", "deescalated"]
+
+_GPU_QUERY_FAILURE_MESSAGES = frozenset(
+    {"nvidia-smi is unavailable", "nvidia-smi query failed"}
+)
+_SYSTEM_CATEGORIES = frozenset({"cpu", "memory", "swap", "disk"})
+_GPU_HEALTH_CATEGORIES = frozenset({"gpu_ecc", "gpu_memory_repair", "gpu_slowdown"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,10 +196,7 @@ class ThresholdIncidentPolicy:
             }
 
         conditions: dict[str, IncidentCondition] = {}
-        gpu_query_failed = result.message in {
-            "nvidia-smi is unavailable",
-            "nvidia-smi query failed",
-        }
+        gpu_query_failed = result.message in _GPU_QUERY_FAILURE_MESSAGES
         if gpu_query_failed:
             conditions["gpu_availability"] = IncidentCondition(
                 key="gpu_availability",
@@ -394,6 +397,28 @@ class ThresholdIncidentPolicy:
                 )
         return conditions
 
+    def observed_domains(self, result: ProbeResult) -> frozenset[str]:
+        """Telemetry domains for which this sample carries fresh, valid data.
+
+        The tracker only advances recovery for conditions whose domains were
+        all observed. Unknown domains freeze recovery instead of feigning
+        health: a failed GPU query still reports the host online, but says
+        nothing about GPU temperature, memory, health, or processes.
+        """
+        if result.status != "online":
+            return frozenset()
+        domains: set[str] = set()
+        if result.system is not None:
+            domains.add("system")
+        if result.message not in _GPU_QUERY_FAILURE_MESSAGES:
+            domains.add("gpu")
+            if all(gpu.processes_sampled for gpu in result.gpus):
+                domains.add("gpu_processes")
+            for gpu in result.gpus:
+                if gpu.health is not None:
+                    domains.add(f"gpu_health:{gpu.uuid or str(gpu.index)}")
+        return frozenset(domains)
+
     def _add_percentage(
         self,
         conditions: dict[str, IncidentCondition],
@@ -424,11 +449,39 @@ class ThresholdIncidentPolicy:
         )
 
 
+def _condition_domains(condition: IncidentCondition, key: str) -> tuple[str, ...]:
+    """Telemetry domains a condition needs before its recovery may advance."""
+    category = condition.category
+    if category in _SYSTEM_CATEGORIES:
+        return ("system",)
+    if category in _GPU_HEALTH_CATEGORIES:
+        return ("gpu", f"gpu_health:{key.partition(':')[2]}")
+    if category == "gpu_processes":
+        return ("gpu", "gpu_processes")
+    if category.startswith("gpu"):
+        return ("gpu",)
+    return ()
+
+
+def _telemetry_unknown(
+    condition: IncidentCondition,
+    key: str,
+    observed_domains: frozenset[str] | None,
+) -> bool:
+    """True when the sample carried no fresh telemetry for this condition."""
+    if observed_domains is None:
+        return False
+    return any(
+        domain not in observed_domains for domain in _condition_domains(condition, key)
+    )
+
+
 class IncidentTracker:
     """Tracks active conditions and a bounded transition log.
 
-    Callers provide synchronization. Resource conditions survive a failed probe so
-    missing telemetry cannot be mistaken for recovery.
+    Callers provide synchronization. Resource conditions survive a failed probe
+    and telemetry domains the policy reports as unobserved, so missing
+    telemetry cannot be mistaken for recovery.
     """
 
     def __init__(
@@ -441,6 +494,7 @@ class IncidentTracker:
         self._active: dict[str, dict[str, IncidentCondition]] = {}
         self._candidates: dict[str, dict[str, tuple[IncidentCondition, int]]] = {}
         self._recoveries: dict[str, dict[str, int]] = {}
+        self._severity_changes: dict[str, dict[str, tuple[IncidentSeverity, int]]] = {}
         self._opened_at: dict[str, dict[str, str]] = {}
         self._last_observed_at: dict[str, dict[str, str]] = {}
         self._initialized: set[str] = set()
@@ -462,6 +516,7 @@ class IncidentTracker:
             del self._active[host]
             self._candidates.pop(host, None)
             self._recoveries.pop(host, None)
+            self._severity_changes.pop(host, None)
             self._opened_at.pop(host, None)
             self._last_observed_at.pop(host, None)
             self._initialized.discard(host)
@@ -488,31 +543,34 @@ class IncidentTracker:
                 if condition.open_after_cycles > 1
             }
             self._recoveries[result.host] = {}
+            self._severity_changes[result.host] = {}
             self._opened_at[result.host] = {
                 key: condition.observed_at for key, condition in immediate.items()
             }
             self._last_observed_at[result.host] = {
                 key: condition.observed_at for key, condition in immediate.items()
             }
-            if result.status != "online":
-                for key in sorted(immediate):
-                    created.append(
-                        self._append(
-                            result.host, immediate[key], "opened", result.observed_at
-                        )
+            # First activations are real transitions even on an online sample;
+            # without an opened event they would never persist or notify.
+            for key in sorted(immediate):
+                created.append(
+                    self._append(
+                        result.host, immediate[key], "opened", result.observed_at
                     )
-            elif immediate:
-                # Initial conditions are visible without fabricating historical events.
-                self._version += 1
+                )
             return tuple(created)
 
         candidates = self._candidates[result.host]
         recoveries = self._recoveries[result.host]
+        severity_changes = self._severity_changes[result.host]
         opened_at = self._opened_at[result.host]
         last_observed_at = self._last_observed_at[result.host]
         current = dict(previous)
+        observed_domains = self._observed_domains(result)
         if result.status == "online":
             for key in set(candidates) - set(observed):
+                if _telemetry_unknown(candidates[key][0], key, observed_domains):
+                    continue
                 del candidates[key]
 
         for key, new in observed.items():
@@ -520,15 +578,29 @@ class IncidentTracker:
             old = previous.get(key)
             if old is not None:
                 candidates.pop(key, None)
-                current[key] = new
                 last_observed_at[key] = new.observed_at
-                if old.severity != new.severity:
-                    state: IncidentState = (
-                        "escalated" if new.severity == "critical" else "deescalated"
-                    )
-                    created.append(
-                        self._append(result.host, new, state, result.observed_at)
-                    )
+                if old.severity == new.severity:
+                    severity_changes.pop(key, None)
+                    current[key] = new
+                    continue
+                pending_severity, count = severity_changes.get(key, (new.severity, 0))
+                if pending_severity != new.severity:
+                    count = 0
+                count += 1
+                if count < new.open_after_cycles:
+                    # Debounce severity flapping: keep the confirmed severity
+                    # until the change is sustained, mirroring open cycles.
+                    severity_changes[key] = (new.severity, count)
+                    current[key] = replace(new, severity=old.severity)
+                    continue
+                severity_changes.pop(key, None)
+                current[key] = new
+                state: IncidentState = (
+                    "escalated" if new.severity == "critical" else "deescalated"
+                )
+                created.append(
+                    self._append(result.host, new, state, result.observed_at)
+                )
                 continue
 
             candidate, count = candidates.get(key, (new, 0))
@@ -549,6 +621,11 @@ class IncidentTracker:
         if result.status == "online":
             for key in set(previous) - set(observed):
                 old = previous[key]
+                if _telemetry_unknown(old, key, observed_domains):
+                    # The sample carried no fresh data for this domain, so it
+                    # can neither advance nor reset the recovery count.
+                    continue
+                severity_changes.pop(key, None)
                 recovery_count = recoveries.get(key, 0) + 1
                 if recovery_count >= old.recovery_cycles:
                     recoveries.pop(key, None)
@@ -563,6 +640,13 @@ class IncidentTracker:
 
         self._active[result.host] = current
         return tuple(created)
+
+    def _observed_domains(self, result: ProbeResult) -> frozenset[str] | None:
+        """None means the policy predates domain reporting: treat as observed."""
+        observed_domains = getattr(self._policy, "observed_domains", None)
+        if observed_domains is None:
+            return None
+        return frozenset(observed_domains(result))
 
     def snapshot(self, limit: int) -> dict[str, object]:
         active = []

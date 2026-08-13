@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
+from urllib.parse import urlsplit
 
 CONFIG_ENV_VAR = "MOCOP_CONFIG"
 LOCAL_CONFIG_PATH = Path("config/mocop.json")
@@ -24,6 +26,7 @@ HOST_GROUP_MAX_LENGTH = 48
 TOPOLOGY_LABEL_MAX_LENGTH = 64
 TOPOLOGY_MAX_LINKS = 512
 TOPOLOGY_TRANSPORTS = frozenset({"ssh", "frp-stcp", "frp-xtcp", "vpn"})
+TRUSTED_WEB_HOSTS_MAX_ENTRIES = 32
 
 
 class ConfigError(ValueError):
@@ -111,20 +114,69 @@ class WebhookConfig:
 class HostOverrideConfig:
     poll_interval_seconds: float | None = None
     probe_timeout_seconds: float | None = None
+    display_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class MaintenanceWindowConfig:
-    until: datetime
+    """One-shot (absolute `until`) or weekly recurring silence window.
+
+    Recurring windows are defined in UTC: `weekday` follows Python's Monday=0
+    convention, `start_minutes` counts from UTC midnight, and the duration is
+    bounded below one week so instances can never overlap themselves.
+    """
+
     reason: str
+    until: datetime | None = None
+    weekday: int | None = None
+    start_minutes: int | None = None
+    duration_minutes: int | None = None
+
+    @property
+    def recurring(self) -> bool:
+        return self.weekday is not None
+
+    def _instance_end(self, now: datetime) -> datetime:
+        """Return the end of the active instance, or of the next one."""
+        assert self.weekday is not None
+        assert self.start_minutes is not None
+        assert self.duration_minutes is not None
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        days_back = (now.weekday() - self.weekday) % 7
+        start = (
+            midnight - timedelta(days=days_back) + timedelta(minutes=self.start_minutes)
+        )
+        if start > now:
+            start -= timedelta(days=7)
+        end = start + timedelta(minutes=self.duration_minutes)
+        if end <= now:
+            end = start + timedelta(days=7, minutes=self.duration_minutes)
+        return end
 
     def is_active(self, at: datetime | None = None) -> bool:
-        return self.until > (at or datetime.now(timezone.utc))
+        now = at or datetime.now(timezone.utc)
+        if not self.recurring:
+            assert self.until is not None
+            return self.until > now
+        assert self.duration_minutes is not None
+        end = self._instance_end(now)
+        return end - timedelta(minutes=self.duration_minutes) <= now < end
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self, at: datetime | None = None) -> dict[str, object]:
+        if not self.recurring:
+            assert self.until is not None
+            return {
+                "until": self.until.isoformat(timespec="seconds").replace(
+                    "+00:00", "Z"
+                ),
+                "reason": self.reason,
+            }
+        now = at or datetime.now(timezone.utc)
+        end = self._instance_end(now)
         return {
-            "until": self.until.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "until": end.isoformat(timespec="seconds").replace("+00:00", "Z"),
             "reason": self.reason,
+            "recurring": True,
         }
 
 
@@ -170,6 +222,7 @@ class MonitorConfig:
     max_workers: int
     listen_host: str
     listen_port: int
+    trusted_web_hosts: tuple[str, ...] = ()
     gpu_process_poll_interval_seconds: float = 15
     retry_jitter_pct: float = 15
     manual_probe_cooldown_seconds: float = 5
@@ -221,6 +274,13 @@ class MonitorConfig:
     def host_override(self, host: str) -> HostOverrideConfig | None:
         return self._host_override_index.get(host)
 
+    def host_display_names(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (alias, override.display_name)
+            for alias, override in self.host_overrides
+            if override.display_name is not None
+        )
+
     def maintenance_window(self, host: str) -> MaintenanceWindowConfig | None:
         return self._maintenance_window_index.get(host)
 
@@ -242,6 +302,7 @@ _REQUIRED_KEYS = {
 }
 _OPTIONAL_KEYS = {
     "local_host",
+    "trusted_web_hosts",
     "history_points",
     "incident_history_points",
     "collection_stale_cycles",
@@ -277,8 +338,11 @@ _INCIDENT_KEYS = {
     "recovery_cycles",
     "gpu_idle_memory_cycles",
 }
-_HOST_OVERRIDE_KEYS = {"poll_interval_seconds", "probe_timeout_seconds"}
-_MAINTENANCE_WINDOW_KEYS = {"until", "reason"}
+_HOST_OVERRIDE_KEYS = {"poll_interval_seconds", "probe_timeout_seconds", "display_name"}
+_MAINTENANCE_WINDOW_KEYS = {"until", "reason", "recurrence"}
+_MAINTENANCE_RECURRENCE_KEYS = {"weekday", "start", "duration_minutes"}
+_RECURRENCE_START = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+DISPLAY_NAME_MAX_LENGTH = 64
 _INCIDENT_ACTION_KEYS = {"host", "condition_key", "action", "until", "reason"}
 _INCIDENT_ACTIONS = frozenset({"acknowledged", "silenced"})
 _INCIDENT_OVERRIDE_SCOPES = {"hosts", "groups"}
@@ -288,7 +352,7 @@ _TOPOLOGY_LINK_REQUIRED_KEYS = {"source", "target", "transport"}
 _TOPOLOGY_LINK_KEYS = _TOPOLOGY_LINK_REQUIRED_KEYS | {"label"}
 _PERSISTENCE_KEYS = {"enabled", "retention_hours", "max_bytes"}
 _WORKLOAD_KEYS = {"mode"}
-_WORKLOAD_MODES = frozenset({"disabled", "auto"})
+_WORKLOAD_MODES = frozenset({"disabled", "identity", "auto"})
 _WEBHOOK_KEYS = {
     "name",
     "url_env",
@@ -312,7 +376,8 @@ def _bounded_number(
     value = data.get(key)
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f"{key} must be a number")
-    if not minimum <= float(value) <= maximum:
+    # Compare before converting: float() overflows on huge JSON integers.
+    if not minimum <= value <= maximum:
         raise ConfigError(f"{key} must be between {minimum} and {maximum}")
     return float(value)
 
@@ -338,10 +403,9 @@ def _optional_bounded_number(
         return None
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f"{label} must be a number")
-    number = float(value)
-    if not minimum <= number <= maximum:
+    if not minimum <= value <= maximum:
         raise ConfigError(f"{label} must be between {minimum} and {maximum}")
-    return number
+    return float(value)
 
 
 def _string_list(data: dict[str, Any], key: str) -> tuple[str, ...]:
@@ -357,6 +421,56 @@ def is_safe_alias(value: str) -> bool:
     return bool(_SAFE_ALIAS.fullmatch(value))
 
 
+def normalize_web_hostname(value: object, *, allow_port: bool = False) -> str | None:
+    """Return the canonical lowercase hostname for a Host-style value.
+
+    Accepts DNS names, IPv4 literals, and IPv6 literals (bare or bracketed).
+    A port suffix is accepted only when ``allow_port`` is true; schemes,
+    credentials, paths, and queries are always rejected. Returns ``None``
+    when the value cannot be interpreted as a plain hostname.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > 260:
+        return None
+    if candidate.count(":") >= 2 and not candidate.startswith("["):
+        candidate = f"[{candidate}]"  # bare IPv6 literal
+    try:
+        parsed = urlsplit(f"//{candidate}")
+        port = parsed.port
+    except ValueError:
+        return None
+    hostname = parsed.hostname
+    if (
+        hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and not allow_port)
+    ):
+        return None
+    if "[" in parsed.netloc:
+        # Bracketed hosts must be IP literals even on Pythons whose urlsplit
+        # does not validate them.
+        try:
+            ipaddress.ip_address(hostname)
+        except ValueError:
+            return None
+    return hostname
+
+
+def _has_disallowed_text_characters(value: str) -> bool:
+    """Reject control/format characters plus line and paragraph separators."""
+    for character in value:
+        category = unicodedata.category(character)
+        if category.startswith("C") or category in ("Zl", "Zp"):
+            return True
+    return False
+
+
 def is_valid_maintenance_reason(value: object, *, required: bool) -> bool:
     if not isinstance(value, str):
         return False
@@ -364,9 +478,7 @@ def is_valid_maintenance_reason(value: object, *, required: bool) -> bool:
     return (
         (bool(normalized) or not required)
         and len(normalized) <= MAINTENANCE_REASON_MAX_LENGTH
-        and not any(
-            unicodedata.category(character).startswith("C") for character in value
-        )
+        and not _has_disallowed_text_characters(value)
     )
 
 
@@ -417,7 +529,7 @@ def _incident_scope_override(raw: object, label: str) -> IncidentScopeOverrideCo
         if (
             isinstance(value, bool)
             or not isinstance(value, int | float)
-            or not 0 <= float(value) <= maximum
+            or not 0 <= value <= maximum
         ):
             raise ConfigError(
                 f"{label}.thresholds.{name} must be between 0 and {maximum}"
@@ -586,7 +698,7 @@ def _workload_config(data: dict[str, Any]) -> WorkloadConfig:
         raise ConfigError(f"unknown workloads keys: {', '.join(unknown)}")
     mode = raw.get("mode")
     if mode not in _WORKLOAD_MODES:
-        raise ConfigError("workloads.mode must be disabled or auto")
+        raise ConfigError("workloads.mode must be disabled, identity, or auto")
     return WorkloadConfig(mode=mode)
 
 
@@ -608,10 +720,9 @@ def _webhook_configs(data: dict[str, Any]) -> tuple[WebhookConfig, ...]:
         value = raw.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise ConfigError(f"{label}.{key} must be a number")
-        parsed = float(value)
-        if not minimum <= parsed <= maximum:
+        if not minimum <= value <= maximum:
             raise ConfigError(f"{label}.{key} must be between {minimum} and {maximum}")
-        return parsed
+        return float(value)
 
     for index, raw in enumerate(raw_items):
         label = f"webhooks[{index}]"
@@ -703,17 +814,50 @@ def resolve_config_path(
     return BUNDLED_CONFIG_PATH.resolve()
 
 
+class _JsonObjectPairs:
+    """Raw key/value pairs of one JSON object, kept so duplicates survive."""
+
+    __slots__ = ("pairs",)
+
+    def __init__(self, pairs: list[tuple[str, Any]]) -> None:
+        self.pairs = pairs
+
+
+def _resolve_json_objects(node: Any, path: str, source: Path) -> Any:
+    """Convert parsed pairs into dicts, rejecting duplicate keys at any depth."""
+    if isinstance(node, _JsonObjectPairs):
+        result: dict[str, Any] = {}
+        for key, value in node.pairs:
+            child_path = f"{path}.{key}" if path else key
+            if key in result:
+                raise ConfigError(f"duplicate JSON key in {source}: {child_path}")
+            result[key] = _resolve_json_objects(value, child_path, source)
+        return result
+    if isinstance(node, list):
+        return [
+            _resolve_json_objects(item, f"{path}[{index}]", source)
+            for index, item in enumerate(node)
+        ]
+    return node
+
+
 def load_config(path: Path | str | None = None) -> MonitorConfig:
     config_path = resolve_config_path(path)
     try:
-        raw = config_path.read_text(encoding="utf-8")
+        raw = config_path.read_bytes().decode("utf-8")
     except OSError as exc:
         raise ConfigError(f"cannot read config: {config_path}") from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            f"config file {config_path} is not valid UTF-8 "
+            f"at byte {exc.start}: {exc.reason}"
+        ) from exc
 
     try:
-        data = json.loads(raw)
+        parsed = json.loads(raw, object_pairs_hook=_JsonObjectPairs)
     except json.JSONDecodeError as exc:
         raise ConfigError(f"invalid JSON in {config_path}: {exc.msg}") from exc
+    data = _resolve_json_objects(parsed, "", config_path)
 
     if not isinstance(data, dict):
         raise ConfigError("config root must be a JSON object")
@@ -776,6 +920,24 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
     )
     max_workers = _bounded_integer(data, "max_workers", 1, 64)
     listen_port = _bounded_integer(data, "listen_port", 1, 65535)
+    raw_trusted_hosts = data.get("trusted_web_hosts", [])
+    if (
+        not isinstance(raw_trusted_hosts, list)
+        or len(raw_trusted_hosts) > TRUSTED_WEB_HOSTS_MAX_ENTRIES
+    ):
+        raise ConfigError(
+            "trusted_web_hosts must be a list with at most "
+            f"{TRUSTED_WEB_HOSTS_MAX_ENTRIES} entries"
+        )
+    trusted_web_hosts: list[str] = []
+    for item in raw_trusted_hosts:
+        hostname = normalize_web_hostname(item)
+        if hostname is None:
+            raise ConfigError(
+                "trusted_web_hosts entries must be hostnames or IP literals "
+                "without scheme, port, credentials, or path"
+            )
+        trusted_web_hosts.append(hostname)
     history_value = data.get("history_points", 720)
     if isinstance(history_value, bool) or not isinstance(history_value, int):
         raise ConfigError("history_points must be an integer")
@@ -829,7 +991,7 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         value = threshold_data.get(name, getattr(defaults, name))
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise ConfigError(f"thresholds.{name} must be a number")
-        if not 0 <= float(value) <= maximum:
+        if not 0 <= value <= maximum:
             raise ConfigError(f"thresholds.{name} must be between 0 and {maximum}")
         return float(value)
 
@@ -885,6 +1047,20 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         if not raw_override:
             raise ConfigError(f"host_overrides.{alias} must not be empty")
 
+        display_name: str | None = None
+        if "display_name" in raw_override:
+            raw_display = raw_override["display_name"]
+            if (
+                not isinstance(raw_display, str)
+                or not raw_display.strip()
+                or len(raw_display.strip()) > DISPLAY_NAME_MAX_LENGTH
+                or _has_disallowed_text_characters(raw_display)
+            ):
+                raise ConfigError(
+                    f"host_overrides.{alias}.display_name must be 1 to "
+                    f"{DISPLAY_NAME_MAX_LENGTH} visible characters"
+                )
+            display_name = raw_display.strip()
         override = HostOverrideConfig(
             poll_interval_seconds=_optional_bounded_number(
                 raw_override,
@@ -900,6 +1076,7 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
                 2,
                 300,
             ),
+            display_name=display_name,
         )
         if (
             override.probe_timeout_seconds is not None
@@ -932,9 +1109,6 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
                 f"unknown maintenance_windows.{alias} keys: "
                 f"{', '.join(unknown_window_keys)}"
             )
-        until = _utc_timestamp(
-            raw_window.get("until"), f"maintenance_windows.{alias}.until"
-        )
         reason_value = raw_window.get("reason", "")
         if not is_valid_maintenance_reason(reason_value, required=False):
             raise ConfigError(
@@ -943,8 +1117,64 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
             )
         assert isinstance(reason_value, str)
         reason = reason_value.strip()
+        has_until = "until" in raw_window
+        has_recurrence = "recurrence" in raw_window
+        if has_until == has_recurrence:
+            raise ConfigError(
+                f"maintenance_windows.{alias} must define exactly one of "
+                "'until' or 'recurrence'"
+            )
+        if has_until:
+            until = _utc_timestamp(
+                raw_window.get("until"), f"maintenance_windows.{alias}.until"
+            )
+            maintenance_windows.append(
+                (alias, MaintenanceWindowConfig(until=until, reason=reason))
+            )
+            continue
+        recurrence = raw_window["recurrence"]
+        label = f"maintenance_windows.{alias}.recurrence"
+        if not isinstance(recurrence, dict):
+            raise ConfigError(f"{label} must be a JSON object")
+        unknown_recurrence = sorted(recurrence.keys() - _MAINTENANCE_RECURRENCE_KEYS)
+        if unknown_recurrence:
+            raise ConfigError(f"unknown {label} keys: {', '.join(unknown_recurrence)}")
+        weekday = recurrence.get("weekday")
+        if (
+            not isinstance(weekday, int)
+            or isinstance(weekday, bool)
+            or not (0 <= weekday <= 6)
+        ):
+            raise ConfigError(f"{label}.weekday must be 0 (Monday) to 6 (Sunday)")
+        start_value = recurrence.get("start")
+        start_match = (
+            _RECURRENCE_START.fullmatch(start_value)
+            if isinstance(start_value, str)
+            else None
+        )
+        if start_match is None:
+            raise ConfigError(f"{label}.start must be 'HH:MM' in UTC")
+        duration = recurrence.get("duration_minutes")
+        if (
+            not isinstance(duration, int)
+            or isinstance(duration, bool)
+            or not (1 <= duration <= 10_079)
+        ):
+            raise ConfigError(
+                f"{label}.duration_minutes must be 1 to 10079 (less than one week)"
+            )
         maintenance_windows.append(
-            (alias, MaintenanceWindowConfig(until=until, reason=reason))
+            (
+                alias,
+                MaintenanceWindowConfig(
+                    reason=reason,
+                    weekday=weekday,
+                    start_minutes=(
+                        int(start_match.group(1)) * 60 + int(start_match.group(2))
+                    ),
+                    duration_minutes=duration,
+                ),
+            )
         )
 
     host_group_data = data.get("host_groups", {})
@@ -1102,6 +1332,7 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         max_workers=max_workers,
         listen_host=data["listen_host"].strip(),
         listen_port=listen_port,
+        trusted_web_hosts=tuple(dict.fromkeys(trusted_web_hosts)),
         gpu_process_poll_interval_seconds=gpu_process_poll_interval,
         retry_jitter_pct=retry_jitter_pct,
         manual_probe_cooldown_seconds=manual_probe_cooldown_seconds,

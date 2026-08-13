@@ -9,18 +9,42 @@ This document defines reproducible measurement conditions and architecture thres
 - One bounded transport process collects system metrics, GPU metrics, compute tasks, and optional GPU health for one host per cycle; remote targets use one logical SSH session and the optional local target bypasses SSH.
 - Base GPU and hardware-health fields share one `nvidia-smi` query. Compute tasks use a second query. If combined health fields are unsupported, collection falls back to base GPU fields without retrying the SSH connection or hiding system telemetry.
 - Core GPU and system data retain the host cadence. The independent process cadence defaults to 15 seconds, so three five-second core samples execute four NVIDIA commands instead of six. Skipped task cycles reuse a timestamped last-good sample without creating process transitions.
+- A device that keeps sampling zero processes stretches its own process cadence
+  (doubling per idle sample, capped at four times the base interval), which removes
+  about a fifth of steady-state NVIDIA commands on an idle host: at the default
+  5-second core and 15-second process cadences a fully stretched idle device runs 13
+  instead of 16 NVIDIA commands per minute (12 core plus 1 process versus 12 plus 4).
+  Any activity in
+  the five-second core telemetry — a running process, utilization at or above the
+  busy threshold, or VRAM above the idle-memory threshold — cancels the stretch, so
+  a new job is picked up within one base interval, exactly as before the stretch.
+- Without a connected dashboard (no event stream and no marked read for 30 seconds),
+  every device stretches its process cadence to sixteen times the base interval —
+  busy hosts included, since the process list then serves only the event timeline.
+  At the defaults this cuts a watched-nobody busy host from 16 to about 12.25 NVIDIA
+  commands per minute; the first returning viewer forces a catch-up process sample
+  on the next core cycle, and core telemetry, trends, and incidents never change
+  cadence.
 - One persistent pool avoids per-cycle executor churn. `max_workers` bounds active
   probes, while a scheduler-owned deadline independently paces each host and prevents
   self-overlap. Oldest due deadlines run first, and an event wakes the scheduler only
   for an earlier deadline, completed probe, inventory change, or shutdown.
 - A validated per-host override can pace a measured slow target and extend only its complete-probe timeout; it should not be used without repeated timing evidence.
 - Repeated failures back off to at most 60 seconds; bounded per-host jitter prevents synchronized retries after a shared path recovers.
-- Stdout and stderr are drained incrementally under one byte limit; timeout and overflow terminate the process group.
-- The fixed Linux sample combines CPU, memory, load, uptime, network, and block-I/O
-  reads in one `awk` pass. On the default no-workload path this reduces external
-  utility invocations from 14 to 6 per host sample. Active process groups also accept
-  a lifecycle cancellation signal, so a service restart does not wait for the probe
-  timeout.
+- Every remote probe enforces `ServerAliveInterval max(2, connect_timeout / 2)` with
+  `ServerAliveCountMax 2`, so a transport that dies mid-session is detected near the
+  operator's connect tolerance instead of consuming the whole probe timeout. A stale
+  multiplex socket is retried once inside the same deadline, and the retry is visible
+  per host (`transportRetried`, `mocop_host_probe_transport_retried`) and cumulatively
+  in `/healthz`.
+- Stdout and stderr are drained incrementally under one byte limit; timeout and overflow terminate the process group. A collection timeout reports whether the transport produced no output at all or stalled after partial output, which separates dead connections from a wedged remote command.
+- The fixed Linux sample combines CPU, memory, load, uptime, network, block-I/O, and
+  hostname reads in one `awk` pass (the hostname arrives through a bounded in-process
+  `getline`, not a second `awk`). On the default no-workload path this reduces
+  external utility invocations from 14 to 5 per host sample. Active process groups
+  accept a lifecycle cancellation signal delivered through a wake-up descriptor
+  registered in the probe selector, so a service restart interrupts waits immediately
+  instead of polling four times per second.
 - Snapshots use explicit serializers that allocate each response container once; they
   do not recursively convert immutable models and then deep-copy the complete result.
   Trends and incidents use bounded memory structures. In-memory host/GPU trends use
@@ -57,7 +81,38 @@ Mocop always delegates connection behavior to the selected OpenSSH configuration
 ssh -G gpu-node-01 | grep -E '^(controlmaster|controlpath|controlpersist) '
 ```
 
+or run the bundled read-only diagnosis, which also verifies non-interactive
+reachability and the control-socket directory permissions:
+
+```bash
+mocop doctor
+```
+
 If `ControlMaster` is enabled, its control directory must be accessible only to the operator. Mocop does not change that policy.
+
+Connection reuse is the single largest controllable cost on remote paths. The
+recommended per-alias template (operator-managed, never written by Mocop) is:
+
+```sshconfig
+Host gpu-node-01
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 600
+```
+
+with `~/.ssh/sockets` created as mode `0700`. Reference measurement on 2026-08-11,
+from the monitoring host over production tunnels, ten interleaved samples per mode
+(`ssh <alias> true`, milliseconds):
+
+| route | cold median | reuse median | reduction |
+|---|---|---|---|
+| alias behind one `ProxyJump` bastion | 915.2 | 214.0 | 76.6% |
+| alias over one loopback FRP visitor | 414.0 | 63.6 | 84.6% |
+
+The cold path pays key exchange, authentication, and any jump-host or tunnel setup
+on every probe; the multiplexed path reuses the established transport. `ControlPersist`
+must exceed the collection interval or the master closes between cycles and reuse
+saves nothing. `mocop doctor` flags both conditions.
 
 ## Reproducible checks
 
@@ -117,6 +172,46 @@ duplicate recursive conversion and the redundant final deep copy reduced median
 snapshot time from 81.05 ms to 2.18 ms (97.3%), P95 from 83.91 ms to 3.90 ms, and peak
 transient allocation from 9,278,691 to 4,270,259 bytes (54.0%). The returned response
 remains deeply isolated from store state, as enforced by a mutation regression test.
+
+## Controllable-overhead ceiling
+
+On 2026-08-11, on the reference host with one RTX 4090, 30 samples after five warm-ups
+measured the complete fixed script at 31.43 ms median while the two `nvidia-smi`
+queries alone accounted for 30.64 ms. Everything Mocop controls in a local sample —
+`sh`, the combined `awk` pass, `df`, parsing hand-off — is 0.79 ms (2.5% of the
+sample).
+
+Merging the hostname read into the system `awk` pass (six external commands down to
+five) reduced the isolated helper path from 0.813 ms to 0.537 ms median over 50
+samples (33.9% of that slice, 0.28 ms absolute) while the complete-sample median
+stayed at 31.4 ms, inside run-to-run noise. Local collection overhead is therefore at
+its measured floor: further shell or interpreter tuning cannot produce a meaningful
+end-to-end change while NVIDIA query wall time dominates. Remaining leverage lives in
+the connection layer (reuse above) and in failure detection (below), not in the
+sample script.
+
+## Silent-death detection
+
+A transport that stops responding mid-session previously consumed the entire probe
+timeout before the host was marked unreachable. With the enforced keepalive
+discipline, detection is bounded by `ServerAliveInterval x (ServerAliveCountMax + 1)`.
+
+Reference measurement on 2026-08-11 against a loopback bench alias whose session-side
+`sshd` was suspended with `SIGSTOP` after the remote command started: without
+keepalives the client was still waiting when a 20-second observation cap expired;
+with `ServerAliveInterval=3` and `ServerAliveCountMax=2` the client exited 255 after
+8.9 seconds of silence. Against the 30-second probe timeout used in production
+configurations that is a 70% reduction in dead-transport recovery time; against the
+12-second default it is a 26% reduction, and the enforced default interval
+(`max(2, connect_timeout / 2)`, giving 2 seconds at the default connect timeout of 5)
+bounds detection near 6 seconds. Keepalives are answered by `sshd` itself, so a slow
+`nvidia-smi` or a busy node never triggers a false disconnect; only a dead or frozen
+transport does.
+
+The measurement procedure is intentionally reproducible with a disposable restricted
+key: create a loopback alias against the local `sshd`, run
+`ssh <probe options> bench-local 'echo "PID=$$"; sleep 300'`, `SIGSTOP` the reported
+session `sshd`, and time the client exit with and without the keepalive options.
 
 On 2026-08-11, Python 3.10.12 on the same x86-64 development host measured JSON
 delivery for a 200-host, 1,600-GPU snapshot (1,231,602 bytes). Five warm-ups preceded

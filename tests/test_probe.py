@@ -8,12 +8,14 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import suppress
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import call, patch
 
 from mocop.config import HostOverrideConfig, MonitorConfig
-from mocop.models import GpuHealthMetrics
+from mocop.models import GpuHealthMetrics, GpuMetrics
 from mocop.probe import (
     OpenSshLinuxResourceProbe,
     OpenSshNvidiaSmiProbe,
@@ -316,9 +318,11 @@ class ProbeTests(unittest.TestCase):
         arguments = run.call_args.args[0]
         self.assertIn("StrictHostKeyChecking=yes", arguments)
         self.assertIn("BatchMode=yes", arguments)
+        self.assertIn("ServerAliveInterval=2", arguments)
+        self.assertIn("ServerAliveCountMax=2", arguments)
         self.assertEqual(arguments[arguments.index("--") + 1], "gpu-1")
         self.assertEqual(arguments[-2:], ["sh", "-s"])
-        self.assertIn("MONITOR_V6", run.call_args.kwargs["input_text"])
+        self.assertIn("MONITOR_V7", run.call_args.kwargs["input_text"])
         self.assertIn("--query-compute-apps", run.call_args.kwargs["input_text"])
         self.assertIn(
             "ecc.errors.uncorrected.volatile.total",
@@ -346,10 +350,26 @@ class ProbeTests(unittest.TestCase):
         OpenSshLinuxResourceProbe().probe("gpu-1", enabled)
 
         script = run.call_args.kwargs["input_text"]
-        self.assertIn("workload_enabled=1", script)
+        self.assertIn("workload_tier=2", script)
         self.assertIn("/proc/$process_pid/environ", script)
         self.assertNotIn("scontrol", script)
         self.assertNotIn("kubectl", script)
+
+    @patch("mocop.probe._run_bounded_process")
+    def test_identity_workload_mode_renders_the_light_tier(self, run) -> None:
+        run.return_value = _BoundedProcessResult(
+            0, stdout=resource_payload(), stderr=""
+        )
+        enabled = replace(
+            config(), workloads=replace(config().workloads, mode="identity")
+        )
+
+        OpenSshLinuxResourceProbe().probe("gpu-1", enabled)
+
+        script = run.call_args.kwargs["input_text"]
+        self.assertIn("workload_tier=1", script)
+        self.assertIn("/proc/$process_pid/cmdline", script)
+        self.assertIn("/proc/$process_pid/stat", script)
 
     @patch("mocop.probe._run_bounded_process")
     def test_uses_per_host_probe_timeout(self, run) -> None:
@@ -636,6 +656,7 @@ class ProbeTests(unittest.TestCase):
         result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
 
         self.assertEqual(result.status, "online")
+        self.assertEqual(result.transport_retries, 1)
         self.assertEqual(run.call_count, 2)
         self.assertEqual(run.call_args_list[0].kwargs["timeout_seconds"], 12)
         self.assertEqual(run.call_args_list[1].kwargs["timeout_seconds"], 11)
@@ -654,7 +675,135 @@ class ProbeTests(unittest.TestCase):
         result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
 
         self.assertEqual(result.status, "unreachable")
+        self.assertEqual(result.transport_retries, 0)
         self.assertEqual(run.call_count, 1)
+
+    @patch("mocop.probe.time.monotonic", side_effect=(0.0, 0.5, 16.0, 16.5, 31.0, 31.5))
+    @patch("mocop.probe._run_bounded_process")
+    def test_idle_host_stretches_the_process_cadence(self, run, _monotonic) -> None:
+        idle_gpu = (
+            "0, GPU-abc, NVIDIA A100, 550.54, P0, 35, 0, 0, "
+            "81920, 2048, 79872, 60.0, 400"
+        )
+
+        def execute(_command, **kwargs):
+            return _BoundedProcessResult(
+                0,
+                resource_payload(
+                    protocol="MONITOR_V6",
+                    gpu_payload=idle_gpu,
+                    process_payload="",
+                ),
+                "",
+            )
+
+        run.side_effect = execute
+        probe = OpenSshLinuxResourceProbe()
+
+        for _ in range(3):
+            self.assertEqual(probe.probe("gpu-1", config()).status, "online")
+
+        scripts = [item.kwargs["input_text"] for item in run.call_args_list]
+        # First sample collects processes and observes an idle device; the
+        # base 12+ second point is stretched away; the doubled deadline
+        # passes at 31 seconds and processes are collected again.
+        self.assertEqual(
+            [("process_enabled=1" in script) for script in scripts],
+            [True, False, True],
+        )
+
+    @patch("mocop.probe.time.monotonic", side_effect=(0.0, 0.5, 5.0, 5.5, 16.0, 16.5))
+    @patch("mocop.probe._run_bounded_process")
+    def test_activity_hint_cancels_the_cadence_stretch(self, run, _monotonic) -> None:
+        idle_gpu = (
+            "0, GPU-abc, NVIDIA A100, 550.54, P0, 35, 0, 0, "
+            "81920, 2048, 79872, 60.0, 400"
+        )
+        busy_gpu = (
+            "0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 95, 34, "
+            "81920, 40960, 40960, 287.5, 400"
+        )
+        payloads = iter((idle_gpu, busy_gpu, busy_gpu))
+
+        def execute(_command, **kwargs):
+            return _BoundedProcessResult(
+                0,
+                resource_payload(
+                    protocol="MONITOR_V6",
+                    gpu_payload=next(payloads),
+                    process_payload="",
+                ),
+                "",
+            )
+
+        run.side_effect = execute
+        probe = OpenSshLinuxResourceProbe()
+
+        for _ in range(3):
+            self.assertEqual(probe.probe("gpu-1", config()).status, "online")
+
+        scripts = [item.kwargs["input_text"] for item in run.call_args_list]
+        # The idle first sample starts a stretch; the busy core sample at
+        # five seconds raises the activity hint, so the third probe returns
+        # to the base fifteen-second cadence instead of waiting thirty.
+        self.assertEqual(
+            [("process_enabled=1" in script) for script in scripts],
+            [True, False, True],
+        )
+
+    def test_process_cadence_stretch_is_bounded_and_pruned(self) -> None:
+        from mocop.probe import _ProcessSample
+
+        probe = OpenSshLinuxResourceProbe()
+        sample = _ProcessSample(
+            sampled_at_monotonic=0.0,
+            observed_at="2026-08-11T00:00:00Z",
+            workload_mode="disabled",
+            processes_by_gpu={"GPU-abc": ()},
+            idle_streak=5,
+        )
+        probe._process_samples["gpu-1"] = sample
+        probe._activity_hints["gpu-1"] = False
+
+        # Streak five is capped at a fourfold stretch: due at 60, not 480.
+        self.assertFalse(probe._processes_due("gpu-1", 59.9, 15, "disabled"))
+        self.assertTrue(probe._processes_due("gpu-1", 60.0, 15, "disabled"))
+
+        probe._activity_hints["gpu-1"] = True
+        self.assertTrue(probe._processes_due("gpu-1", 15.0, 15, "disabled"))
+
+        probe.retain_hosts(set())
+        self.assertEqual(probe._process_samples, {})
+        self.assertEqual(probe._activity_hints, {})
+
+    @patch("mocop.probe._run_bounded_process")
+    def test_distinguishes_transport_silence_from_partial_output(self, run) -> None:
+        run.side_effect = subprocess.TimeoutExpired(["ssh"], 12, output=b"")
+        silent = OpenSshLinuxResourceProbe().probe("gpu-1", config())
+        self.assertEqual(silent.status, "unreachable")
+        self.assertEqual(
+            silent.message, "SSH produced no output before the collection timeout"
+        )
+
+        run.side_effect = subprocess.TimeoutExpired(
+            ["ssh"], 12, output=b"MONITOR_V6\nHOST\tnode-a\n"
+        )
+        stalled = OpenSshLinuxResourceProbe().probe("gpu-1", config())
+        # Partial output proves the transport reached the host, so a remote
+        # stall is an error rather than a connectivity ("unreachable") event.
+        self.assertEqual(stalled.status, "error")
+        self.assertEqual(
+            stalled.message, "Remote collection stalled after partial output"
+        )
+
+    @patch("mocop.probe._run_bounded_process")
+    def test_classifies_dead_transport_keepalive_failure(self, run) -> None:
+        run.return_value = _BoundedProcessResult(
+            255, stdout="", stderr="Timeout, server gpu-1 not responding."
+        )
+        result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
+        self.assertEqual(result.status, "unreachable")
+        self.assertEqual(result.message, "SSH transport stopped responding")
 
     def test_bounded_process_captures_output_without_shell(self) -> None:
         result = _run_bounded_process(
@@ -779,6 +928,30 @@ class ProbeTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1)
 
     @patch("mocop.probe._kill_process_group")
+    def test_registry_cancellation_wakes_the_full_deadline_wait(self, _kill) -> None:
+        # With the child kill suppressed, only the registry wake-up pipe can
+        # interrupt the selector before the five-second deadline. The bounded
+        # one-second reap in the cleanup path is included in the budget.
+        registry = _ActiveProcessRegistry()
+        timer = threading.Timer(0.05, registry.cancel)
+        started = time.monotonic()
+        timer.start()
+        self.addCleanup(timer.cancel)
+
+        with self.assertRaises(_ProcessCancelled):
+            _run_bounded_process(
+                [sys.executable, "-c", "import time; time.sleep(5)"],
+                input_text="",
+                timeout_seconds=5,
+                max_output_bytes=65_536,
+                environment=os.environ.copy(),
+                cancel_event=registry.cancelled,
+                process_registry=registry,
+            )
+
+        self.assertLess(time.monotonic() - started, 2.5)
+
+    @patch("mocop.probe._kill_process_group")
     def test_active_process_registry_kills_every_child_synchronously(
         self, kill
     ) -> None:
@@ -838,6 +1011,481 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(
             result.message, "Remote resource output exceeded the configured limit"
         )
+
+    @patch("mocop.probe.time.monotonic", side_effect=(0.0, 1.0, 2.0))
+    @patch("mocop.probe._run_bounded_process")
+    def test_transport_retry_forces_a_fresh_connection(self, run, _monotonic) -> None:
+        run.side_effect = (
+            _BoundedProcessResult(
+                255, "", "mux_client_request_session: read from master failed: pipe"
+            ),
+            _BoundedProcessResult(0, resource_payload(), ""),
+        )
+
+        result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
+
+        self.assertEqual(result.status, "online")
+        self.assertEqual(result.transport_retries, 1)
+        first_command = run.call_args_list[0].args[0]
+        retry_command = run.call_args_list[1].args[0]
+        self.assertNotIn("ControlMaster=no", first_command)
+        self.assertIn("ControlMaster=no", retry_command)
+        self.assertIn("ControlPath=none", retry_command)
+        # The bypass options must precede the host/command separator.
+        self.assertLess(
+            retry_command.index("ControlPath=none"), retry_command.index("--")
+        )
+
+    @patch("mocop.probe.time.monotonic", side_effect=(0.0, 1.0))
+    @patch("mocop.probe._run_bounded_process")
+    def test_hard_ssh_failure_is_not_retried_despite_mux_marker(
+        self, run, _monotonic
+    ) -> None:
+        run.return_value = _BoundedProcessResult(
+            255,
+            "",
+            "mux_client_request_session: read from master: Permission denied",
+        )
+
+        result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(result.transport_retries, 0)
+        self.assertEqual(result.status, "unreachable")
+
+    def test_transport_retry_classification_excludes_hard_failures(self) -> None:
+        from mocop.probe import _is_retryable_ssh_transport_failure as retryable
+
+        self.assertTrue(
+            retryable("mux_client_request_session: read from master failed: pipe")
+        )
+        self.assertTrue(retryable("Control socket connect(/x): Connection refused"))
+        self.assertTrue(retryable("ssh_exchange_identification: broken pipe"))
+        self.assertFalse(
+            retryable("mux_client_request_session: session open refused by peer")
+        )
+        self.assertFalse(retryable("user@host: Permission denied (publickey)"))
+        self.assertFalse(retryable("Host key verification failed."))
+
+    def test_bounded_process_survives_epipe_on_stdin_close(self) -> None:
+        result = _run_bounded_process(
+            [sys.executable, "-c", "import os, sys; os.close(0); sys.exit(7)"],
+            input_text="x" * 2_000_000,
+            timeout_seconds=5,
+            max_output_bytes=65_536,
+            environment=os.environ.copy(),
+        )
+
+        self.assertEqual(result.returncode, 7)
+
+    def test_active_process_registry_closes_wakeup_pipe(self) -> None:
+        registry = _ActiveProcessRegistry()
+        read_fd = registry.cancel_wakeup
+        write_fd = registry._cancel_write_fd
+        self.assertTrue(registry._finalizer.alive)
+
+        registry.close()
+
+        self.assertFalse(registry._finalizer.alive)
+        for fd in (read_fd, write_fd):
+            with self.assertRaises(OSError):
+                os.close(fd)
+        registry.close()
+
+    def test_unknown_gpu_metrics_count_as_activity(self) -> None:
+        from mocop.probe import _gpu_activity
+
+        thresholds = config().thresholds
+
+        def gpu(**overrides: object) -> GpuMetrics:
+            base = dict(
+                index=0,
+                uuid="GPU-x",
+                name="NVIDIA A100",
+                driver_version="550.54",
+                pstate="P0",
+                temperature_c=35.0,
+                utilization_gpu_pct=0.0,
+                utilization_memory_pct=0.0,
+                memory_total_mib=81920.0,
+                memory_used_mib=100.0,
+                memory_free_mib=81820.0,
+                power_draw_w=60.0,
+                power_limit_w=400.0,
+            )
+            base.update(overrides)
+            return GpuMetrics(**base)
+
+        self.assertTrue(_gpu_activity((gpu(utilization_gpu_pct=None),), thresholds))
+        self.assertTrue(_gpu_activity((gpu(memory_used_mib=None),), thresholds))
+        self.assertTrue(_gpu_activity((gpu(memory_total_mib=None),), thresholds))
+        self.assertFalse(_gpu_activity((gpu(),), thresholds))
+
+    @patch(
+        "mocop.probe.time.monotonic",
+        side_effect=(0, 0.1, 5, 5.1, 10, 10.1, 15, 15.1),
+    )
+    @patch("mocop.probe._run_bounded_process")
+    def test_activity_hint_latches_across_an_idle_core_sample(
+        self, run, _monotonic
+    ) -> None:
+        idle_gpu = (
+            "0, GPU-abc, NVIDIA A100, 550.54, P0, 35, 0, 0, "
+            "81920, 2048, 79872, 60.0, 400"
+        )
+        busy_gpu = (
+            "0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 95, 34, "
+            "81920, 40960, 40960, 287.5, 400"
+        )
+        payloads = iter((idle_gpu, busy_gpu, idle_gpu, idle_gpu))
+
+        def execute(_command, **kwargs):
+            return _BoundedProcessResult(
+                0,
+                resource_payload(
+                    protocol="MONITOR_V6",
+                    gpu_payload=next(payloads),
+                    process_payload="",
+                ),
+                "",
+            )
+
+        run.side_effect = execute
+        probe = OpenSshLinuxResourceProbe()
+
+        for _ in range(4):
+            self.assertEqual(probe.probe("gpu-1", config()).status, "online")
+
+        scripts = [item.kwargs["input_text"] for item in run.call_args_list]
+        # The busy core sample at five seconds raises the hint; an idle sample
+        # at ten must not clear it, so the fourth probe returns to the base
+        # cadence at fifteen seconds instead of waiting for the stretch.
+        self.assertEqual(
+            [("process_enabled=1" in script) for script in scripts],
+            [True, False, False, True],
+        )
+
+    def test_failed_process_query_forces_retry_before_stretched_deadline(self) -> None:
+        probe = OpenSshLinuxResourceProbe()
+        thresholds = config().thresholds
+        idle_gpu = GpuMetrics(
+            index=0,
+            uuid="GPU-abc",
+            name="NVIDIA A100",
+            driver_version="550.54",
+            pstate="P0",
+            temperature_c=35.0,
+            utilization_gpu_pct=0.0,
+            utilization_memory_pct=0.0,
+            memory_total_mib=81920.0,
+            memory_used_mib=100.0,
+            memory_free_mib=81820.0,
+            power_draw_w=60.0,
+            power_limit_w=400.0,
+        )
+
+        probe._merge_process_sample(
+            "gpu-1",
+            (idle_gpu,),
+            process_sampled=True,
+            processes_available=True,
+            sampled_at_monotonic=0.0,
+            observed_at="2026-08-11T00:00:00Z",
+            workload_mode="disabled",
+            thresholds=thresholds,
+        )
+        # The idle sample stretches the cadence: not due at ten seconds.
+        self.assertFalse(probe._processes_due("gpu-1", 10.0, 15, "disabled"))
+
+        probe._merge_process_sample(
+            "gpu-1",
+            (idle_gpu,),
+            process_sampled=True,
+            processes_available=False,
+            sampled_at_monotonic=10.0,
+            observed_at="2026-08-11T00:00:10Z",
+            workload_mode="disabled",
+            thresholds=thresholds,
+        )
+        # A failed query forces a retry on the very next core cycle.
+        self.assertTrue(probe._processes_due("gpu-1", 11.0, 15, "disabled"))
+
+    def test_unicode_line_boundaries_stay_within_a_field(self) -> None:
+        for separator in ("\u2028", "\u2029", "\x85"):
+            name = f"NVIDIA{separator}A100"
+            gpu = (
+                f'0, GPU-abc, "{name}", 550.54, P0, 61, 93, 34, '
+                "81920, 40960, 40960, 287.5, 400"
+            )
+            _, gpus, _ = parse_linux_resource_payload(
+                resource_payload(
+                    protocol="MONITOR_V6",
+                    gpu_payload=gpu,
+                    process_payload="",
+                )
+            )
+            self.assertEqual(len(gpus), 1)
+            self.assertEqual(gpus[0].name, name)
+
+    def test_csv_module_errors_classify_as_protocol_value_errors(self) -> None:
+        # An oversized quoted field raises csv.Error on every interpreter and
+        # must surface as the protocol ValueError instead of escaping the
+        # collector's classification.
+        oversized = '0, "' + "x" * 200_000 + '", n, d, P0, 61, 93, 34, 1, 1, 1, 1, 1'
+        with self.assertRaisesRegex(ValueError, "unparseable CSV"):
+            parse_nvidia_smi_csv(oversized)
+
+        # An oversized field inside the process section degrades only that
+        # view while the core sample stays online.
+        _, gpus, _ = parse_linux_resource_payload(
+            resource_payload(
+                protocol="MONITOR_V7",
+                process_payload='GPU-abc, 4242, "' + "x" * 200_000 + '", 2048',
+            )
+        )
+        self.assertEqual(len(gpus), 1)
+        self.assertFalse(gpus[0].processes_available)
+
+        # NUL handling differs by interpreter (older csv modules raise, newer
+        # ones pass the byte through); both outcomes must stay within the
+        # protocol's ValueError contract.
+        with suppress(ValueError):
+            parse_nvidia_smi_csv(
+                "0, GPU-\x00abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+                "81920, 40960, 40960, 287.5, 400"
+            )
+
+    def test_malformed_process_row_keeps_the_core_sample_online(self) -> None:
+        _, gpus, _ = parse_linux_resource_payload(
+            resource_payload(
+                protocol="MONITOR_V6",
+                process_payload="GPU-abc, 0, python, 10",
+            )
+        )
+
+        self.assertEqual(len(gpus), 1)
+        self.assertFalse(gpus[0].processes_available)
+        self.assertEqual(gpus[0].processes, ())
+
+    def test_parses_v7_workload_records_with_start_and_command(self) -> None:
+        workloads = parse_workload_records(
+            "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t\t"
+            "1767225600\tpython train.py --epochs 3\n"
+            "WORKLOAD\t4243\tprocess\t\t\tbob\t\t\t\t"
+        )
+
+        self.assertEqual(workloads[4242].started_at, "2026-01-01T00:00:00Z")
+        self.assertEqual(workloads[4242].command, "python train.py --epochs 3")
+        self.assertEqual(workloads[4242].kind, "slurm")
+        self.assertIsNone(workloads[4243].started_at)
+        self.assertIsNone(workloads[4243].command)
+
+        with self.assertRaisesRegex(ValueError, "workload start"):
+            parse_workload_records("WORKLOAD\t1\tprocess\t\t\tx\t\t\tnot-a-number\tcmd")
+
+    @patch(
+        "mocop.probe.time.monotonic",
+        side_effect=(0, 0.1, 15, 15.1, 16, 16.1),
+    )
+    @patch("mocop.probe._run_bounded_process")
+    def test_unattended_probe_stretches_and_catches_up_on_return(
+        self, run, _monotonic
+    ) -> None:
+        def execute(_command, **kwargs):
+            return _BoundedProcessResult(0, resource_payload(), "")
+
+        run.side_effect = execute
+        probe = OpenSshLinuxResourceProbe()
+        probe.set_attended(False)
+
+        probe.probe("gpu-1", config())  # first sample always collects
+        probe.probe("gpu-1", config())  # attended cadence would be due at 15s
+        probe.set_attended(True)
+        probe.probe("gpu-1", config())  # returning viewer forces a catch-up
+
+        scripts = [item.kwargs["input_text"] for item in run.call_args_list]
+        self.assertEqual(
+            [("process_enabled=1" in script) for script in scripts],
+            [True, False, True],
+        )
+
+    def test_malformed_workload_row_keeps_processes(self) -> None:
+        _, gpus, _ = parse_linux_resource_payload(
+            resource_payload(
+                protocol="MONITOR_V6",
+                workload_payload="WORKLOAD\t4242\tbad-kind\t1\tx\troot\t\t",
+            )
+        )
+
+        self.assertEqual(gpus[0].processes[0].pid, 4242)
+        self.assertIsNone(gpus[0].processes[0].workload)
+
+    def test_duplicate_gpu_uuid_does_not_share_processes(self) -> None:
+        two = (
+            "0, GPU-dup, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+            "81920, 40960, 40960, 287.5, 400\n"
+            "1, GPU-dup, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+            "81920, 40960, 40960, 287.5, 400"
+        )
+        _, gpus, _ = parse_linux_resource_payload(
+            resource_payload(
+                protocol="MONITOR_V6",
+                gpu_payload=two,
+                process_payload="GPU-dup, 4242, python, 2048",
+                health_payload="",
+            )
+        )
+
+        self.assertEqual(len(gpus), 2)
+        self.assertEqual(gpus[0].processes, ())
+        self.assertEqual(gpus[1].processes, ())
+
+    def test_unavailable_gpu_uuid_does_not_receive_processes(self) -> None:
+        gpu = (
+            "0, [N/A], NVIDIA A100, 550.54, P0, 61, 93, 34, "
+            "81920, 40960, 40960, 287.5, 400"
+        )
+        _, gpus, _ = parse_linux_resource_payload(
+            resource_payload(
+                protocol="MONITOR_V6",
+                gpu_payload=gpu,
+                process_payload="[N/A], 4242, python, 2048",
+                health_payload="",
+            )
+        )
+
+        self.assertEqual(gpus[0].uuid, "[N/A]")
+        self.assertEqual(gpus[0].processes, ())
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and Path("/etc/passwd").exists(),
+        "workload attribution requires Linux /proc and /etc/passwd",
+    )
+    def test_workload_owner_comes_from_uid_not_process_environment(self) -> None:
+        uid = str(os.getuid())
+        expected_owner: str | None = None
+        for entry in Path("/etc/passwd").read_text(encoding="utf-8").splitlines():
+            fields = entry.split(":")
+            if len(fields) >= 3 and fields[2] == uid:
+                expected_owner = fields[0]
+                break
+        if expected_owner is None:
+            self.skipTest("current UID is absent from the /etc/passwd file")
+
+        helper = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE,
+            env={
+                **os.environ,
+                "SLURM_JOB_ID": "777",
+                "SLURM_JOB_NAME": "train-llm",
+                "SLURM_JOB_USER": "spoofed-owner",
+            },
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                executable = root / "nvidia-smi"
+                executable.write_text(
+                    "#!/bin/sh\n"
+                    'case "$1" in\n'
+                    "  --query-gpu=*) printf '%s\\n' "
+                    "'0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+                    "81920, 40960, 40960, 287.5, 400, 0, No, No, "
+                    "Not Active, Not Active, Disabled' ;;\n"
+                    "  --query-compute-apps=*) printf '%s\\n' "
+                    f"'GPU-abc, {helper.pid}, python, 1024' ;;\n"
+                    "esac\n",
+                    encoding="utf-8",
+                )
+                executable.chmod(0o700)
+                completed = _run_bounded_process(
+                    ["sh", "-s"],
+                    input_text=_remote_script("auto", True),
+                    timeout_seconds=5,
+                    max_output_bytes=2_097_152,
+                    environment={
+                        **os.environ,
+                        "LC_ALL": "C",
+                        "PATH": f"{root}:{os.environ['PATH']}",
+                    },
+                )
+        finally:
+            if helper.stdin is not None:
+                helper.stdin.close()
+            helper.wait()
+
+        self.assertEqual(completed.returncode, 0)
+        _, gpus, _ = parse_linux_resource_payload(completed.stdout)
+        workload = gpus[0].processes[0].workload
+        self.assertIsNotNone(workload)
+        # Ownership is the real UID resolved via passwd, never the spoofed
+        # SLURM_JOB_USER from the process environment.
+        self.assertEqual(workload.owner, expected_owner)
+        self.assertNotEqual(workload.owner, "spoofed-owner")
+        self.assertEqual(workload.kind, "slurm")
+        self.assertEqual(workload.workload_id, "777")
+        # V7 identity columns ride along in the full tier.
+        self.assertIn("sys.stdin.read", workload.command or "")
+        self.assertIsNotNone(workload.started_at)
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and Path("/etc/passwd").exists(),
+        "identity attribution requires Linux /proc and /etc/passwd",
+    )
+    def test_identity_tier_collects_owner_command_and_start_time(self) -> None:
+        helper = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                executable = root / "nvidia-smi"
+                executable.write_text(
+                    "#!/bin/sh\n"
+                    'case "$1" in\n'
+                    "  --query-gpu=*) printf '%s\\n' "
+                    "'0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+                    "81920, 40960, 40960, 287.5, 400, 0, No, No, "
+                    "Not Active, Not Active, Disabled' ;;\n"
+                    "  --query-compute-apps=*) printf '%s\\n' "
+                    f"'GPU-abc, {helper.pid}, python, 1024' ;;\n"
+                    "esac\n",
+                    encoding="utf-8",
+                )
+                executable.chmod(0o700)
+                completed = _run_bounded_process(
+                    ["sh", "-s"],
+                    input_text=_remote_script("identity", True),
+                    timeout_seconds=5,
+                    max_output_bytes=2_097_152,
+                    environment={
+                        **os.environ,
+                        "LC_ALL": "C",
+                        "PATH": f"{root}:{os.environ['PATH']}",
+                    },
+                )
+        finally:
+            if helper.stdin is not None:
+                helper.stdin.close()
+            helper.wait()
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("workload_tier=1", _remote_script("identity", True))
+        _, gpus, _ = parse_linux_resource_payload(completed.stdout)
+        workload = gpus[0].processes[0].workload
+        self.assertIsNotNone(workload)
+        # The light tier never reads cgroup or environ, so the kind stays
+        # "process" while owner, command line and start time are populated.
+        self.assertEqual(workload.kind, "process")
+        self.assertIsNotNone(workload.owner)
+        self.assertIn("sys.stdin.read", workload.command or "")
+        self.assertIsNotNone(workload.started_at)
+        started = datetime.fromisoformat(workload.started_at.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        self.assertLessEqual(started, now)
+        self.assertGreater(started, now - timedelta(days=1))
 
 
 if __name__ == "__main__":

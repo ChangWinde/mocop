@@ -481,6 +481,58 @@ try {
   assert.match(capacity.rule, /60 GiB/);
   assert(capacity.centerDelta < 2);
 
+  const owners = await cdp.evaluate(`(() => {
+    document.querySelector("#owners-toggle").click();
+    const dialog = document.querySelector("#owners-dialog");
+    const rows = [...document.querySelectorAll("#owners-results .capacity-candidate")];
+    const metricNumbers = (row) => [...row.querySelectorAll(".capacity-candidate-metrics span")]
+      .map((item) => Number.parseInt(item.textContent, 10));
+    const rowInfo = (row) => ({
+      name: row.querySelector("strong")?.textContent,
+      nameTitle: row.querySelector("strong")?.title,
+      vram: row.querySelector("em")?.textContent,
+      metrics: metricNumbers(row),
+      hostChips: [...row.querySelectorAll(".capacity-devices span")].map(
+        (chip) => chip.textContent,
+      ),
+    });
+    const researcherRows = rows.filter(
+      (row) => row.querySelector("strong")?.textContent === "researcher",
+    );
+    const rect = dialog.getBoundingClientRect();
+    const result = {
+      open: dialog.open,
+      rows: rows.length,
+      ownerNames: rows.map((row) => row.querySelector("strong")?.textContent),
+      researcherRowCount: researcherRows.length,
+      researcher: researcherRows.length ? rowInfo(researcherRows[0]) : null,
+      unattributed: rows.length > 1 ? rowInfo(rows[1]) : null,
+      firstVram: rows[0]?.querySelector("em")?.textContent,
+      summary: document.querySelector("#owners-summary")?.textContent,
+      centerDelta: Math.abs((rect.left + rect.right) / 2 - document.documentElement.clientWidth / 2),
+    };
+    dialog.close();
+    return result;
+  })()`);
+  assert.equal(owners.open, true);
+  assert.equal(owners.rows, 2);
+  assert(owners.ownerNames.includes("researcher"), "slurm owner is aggregated");
+  assert.equal(owners.researcherRowCount, 1, "researcher aggregates into one row");
+  assert.equal(owners.ownerNames[0], "researcher");
+  assert.equal(owners.researcher.nameTitle, "researcher");
+  // researcher: 4 GPUs on 2 nodes, 4 distinct host+pid processes.
+  assert.deepEqual(owners.researcher.metrics, [4, 2, 4]);
+  assert.equal(owners.researcher.vram, "262.8 GiB");
+  assert.deepEqual(owners.researcher.hostChips, ["atlas-01", "atlas-02"]);
+  assert.match(owners.firstVram, /GiB/);
+  // Unattributed: the shared data-worker PID counts once per host and the
+  // unknown-memory probe keeps the VRAM sum an explicit lower bound.
+  assert.deepEqual(owners.unattributed.metrics, [4, 2, 3]);
+  assert.equal(owners.unattributed.vram, "至少 2 GiB");
+  assert.match(owners.summary, /共占用至少 264\.8 GiB/);
+  assert.match(owners.summary, /部分进程显存未知/);
+  assert(owners.centerDelta < 2);
+
   const grouping = await cdp.evaluate(`(() => {
     const sort = document.querySelector("#server-sort");
     sort.value = "group";
@@ -1024,7 +1076,7 @@ try {
   assert.match(personalization.boundedTaskNote, /101 个进程/);
   assert.match(personalization.boundedTaskNote, /最高的 100 个/);
   assert.match(personalization.healthMetrics, /硬件健康正常/);
-  assert.match(personalization.gpuHistoryRange, /1 个样本/);
+  assert.match(personalization.gpuHistoryRange, /2 个样本/);
   assert.equal(personalization.gpuHistoryCards, 4);
   assert.match(personalization.gpuTimelineText, /暂未记录/);
   assert.equal(personalization.heatmapLegend, false);
@@ -1032,6 +1084,94 @@ try {
   assert.equal(personalization.accentChoiceCount, 6);
   assert.equal(personalization.restartDisabled, true);
   assert.match(personalization.restartStatus, /不支持网页重启/);
+
+  const gpuTasks = await cdp.evaluate(`(() => {
+    const server1 = view.snapshot.servers.find((item) => item.host === "atlas-01");
+    const gpu1 = server1.gpus.find((item) => item.index === 0);
+    openGpuDetail(server1, gpu1);
+    const taskDialog = document.querySelector("#gpu-detail-dialog");
+    const rowKeys = () => [...document.querySelectorAll("#gpu-task-list .gpu-task")].map(
+      (row) => row.dataset.processKey,
+    );
+    const rowDuration = (pid) => document.querySelector(
+      '#gpu-task-list .gpu-task[data-process-key^="' + pid + '|"] .gpu-task-duration',
+    );
+    const memoryOrder = rowKeys();
+    const trainDuration = rowDuration("10000")?.textContent || "";
+    const workerDuration = rowDuration("20000")?.textContent || "";
+    const workerDurationTitle = rowDuration("20000")?.title || "";
+    const commandNode = document.querySelector(
+      '#gpu-task-list .gpu-task[data-process-key^="10000|"] .gpu-task-command',
+    );
+    const command = commandNode?.textContent || "";
+    const commandTitle = commandNode?.title || "";
+    const commandHidden = commandNode ? commandNode.hidden : true;
+    const firstRowBefore = document.querySelector("#gpu-task-list .gpu-task");
+    const barBefore = firstRowBefore.querySelector(".mini-track i");
+    renderGpuDetail();
+    const firstRowAfter = document.querySelector("#gpu-task-list .gpu-task");
+    const rowReused = firstRowBefore === firstRowAfter
+      && barBefore === firstRowAfter.querySelector(".mini-track i");
+    // Only judge the fresh-note styling while the fixture data is still
+    // comfortably inside the 90-second freshness window.
+    const freshAgeMs = Date.now() - Date.parse(gpu1.processes_observed_at);
+    const freshNoteStale = freshAgeMs < 60_000
+      ? document.querySelector("#gpu-task-note").classList.contains("gpu-task-freshness-stale")
+      : null;
+    document.querySelector('.gpu-task-sort [data-task-sort="duration"]').click();
+    const durationOrder = rowKeys();
+    const durationButtonActive = document.querySelector(
+      '.gpu-task-sort [data-task-sort="duration"]',
+    ).classList.contains("active");
+    const savedTaskSort = JSON.parse(
+      localStorage.getItem("mocop.preferences.v1"),
+    ).gpuTaskSort;
+    const taskNote = document.querySelector("#gpu-task-note").textContent;
+    const server2 = view.snapshot.servers.find((item) => item.host === "atlas-02");
+    openGpuDetail(server2, server2.gpus.find((item) => item.index === 0));
+    const staleNote = document.querySelector("#gpu-task-note")
+      .classList.contains("gpu-task-freshness-stale");
+    openGpuDetail(server2, server2.gpus.find((item) => item.index === 2));
+    const unavailableCount = document.querySelector("#gpu-task-count").textContent;
+    const unavailableText = document.querySelector("#gpu-task-list").textContent;
+    taskDialog.close();
+    return {
+      memoryOrder, trainDuration, workerDuration, workerDurationTitle,
+      command, commandTitle, commandHidden, rowReused, freshNoteStale,
+      durationOrder, durationButtonActive, savedTaskSort, taskNote,
+      staleNote, unavailableCount, unavailableText,
+    };
+  })()`);
+  assert.equal(gpuTasks.memoryOrder[0], "10000|/workspace/train.py");
+  // "\u8fd0\u884c" = run-prefix, "\u5c0f\u65f6" = hours unit.
+  assert.match(gpuTasks.trainDuration, /^\u8fd0\u884c /);
+  assert.match(gpuTasks.trainDuration, /\u5c0f\u65f6/);
+  // "\u5df2\u89c2\u6d4b" = observed-prefix for first_seen_at-only processes.
+  assert.match(gpuTasks.workerDuration, /^\u5df2\u89c2\u6d4b /);
+  assert.match(gpuTasks.workerDuration, /\u5c0f\u65f6/);
+  assert.equal(
+    gpuTasks.workerDurationTitle,
+    "\u81ea\u76d1\u63a7\u9996\u6b21\u89c2\u6d4b\u8d77\uff0c\u670d\u52a1\u91cd\u542f\u540e\u91cd\u65b0\u8ba1\u7b97",
+  );
+  assert.equal(gpuTasks.commandHidden, false);
+  assert.match(gpuTasks.command, /--config configs\/llm-70b\.yaml/);
+  assert.equal(
+    gpuTasks.commandTitle,
+    "python train.py --config configs/llm-70b.yaml --stage sft",
+  );
+  assert.equal(gpuTasks.rowReused, true);
+  if (gpuTasks.freshNoteStale !== null) {
+    assert.equal(gpuTasks.freshNoteStale, false);
+  }
+  assert.equal(gpuTasks.durationOrder[0], "20000|python data_worker.py");
+  assert.equal(gpuTasks.durationButtonActive, true);
+  assert.equal(gpuTasks.savedTaskSort, "duration");
+  // "\u6309\u8fd0\u884c\u65f6\u957f" = sorted-by-runtime note wording.
+  assert.match(gpuTasks.taskNote, /\u6309\u8fd0\u884c\u65f6\u957f/);
+  assert.equal(gpuTasks.staleNote, true);
+  assert.equal(gpuTasks.unavailableCount, "\u2014");
+  // "\u4efb\u52a1\u6570\u636e\u6682\u4e0d\u53ef\u7528" = tasks unavailable notice.
+  assert.match(gpuTasks.unavailableText, /\u4efb\u52a1\u6570\u636e\u6682\u4e0d\u53ef\u7528/);
 
   const reloaded = cdp.waitFor("Page.loadEventFired");
   await cdp.send("Page.reload");
@@ -1058,6 +1198,24 @@ try {
     visibility: "52",
     removeEnabled: true,
   });
+
+  const persistedTaskSort = await cdp.evaluate(`(async () => {
+    for (let attempt = 0; attempt < 200 && !view.snapshot; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const server = view.snapshot.servers.find((item) => item.host === "atlas-01");
+    openGpuDetail(server, server.gpus.find((item) => item.index === 0));
+    const result = {
+      saved: JSON.parse(localStorage.getItem("mocop.preferences.v1")).gpuTaskSort,
+      activeChoice: document.querySelector(".gpu-task-sort .active")?.dataset.taskSort,
+      firstRowKey: document.querySelector("#gpu-task-list .gpu-task")?.dataset.processKey,
+    };
+    document.querySelector("#gpu-detail-dialog").close();
+    return result;
+  })()`, true);
+  assert.equal(persistedTaskSort.saved, "duration");
+  assert.equal(persistedTaskSort.activeChoice, "duration");
+  assert.equal(persistedTaskSort.firstRowKey, "20000|python data_worker.py");
 
   if (process.env.MOCOP_SCREENSHOT_PATH) {
     const screenshotStyle = process.env.MOCOP_SCREENSHOT_STYLE || "glass";
@@ -1138,7 +1296,12 @@ try {
         - document.documentElement.clientWidth / 2
     );
     result.topologyWidth = topologyRect.width;
-    result.topologyScrollContained = topologyScroll.scrollWidth >= topologyScroll.clientWidth;
+    result.topologyScrollOverflow = topologyScroll.scrollWidth > topologyScroll.clientWidth;
+    topologyScroll.scrollLeft = topologyScroll.scrollWidth;
+    result.topologyScrolledToEnd = topologyScroll.scrollLeft > 0
+      && topologyScroll.scrollLeft + topologyScroll.clientWidth
+        >= topologyScroll.scrollWidth - 1;
+    topologyScroll.scrollLeft = 0;
     result.topologyDocumentOverflow = document.documentElement.scrollWidth
       > document.documentElement.clientWidth;
     topologyDialog.close();
@@ -1172,7 +1335,8 @@ try {
   assert(mobile.settingsCenterDelta < 2);
   assert(mobile.topologyCenterDelta < 2);
   assert(mobile.topologyWidth <= 390);
-  assert.equal(mobile.topologyScrollContained, true);
+  assert.equal(mobile.topologyScrollOverflow, true, "fixture topology overflows on mobile");
+  assert.equal(mobile.topologyScrolledToEnd, true, "topology scroll area actually scrolls");
   assert.equal(mobile.topologyDocumentOverflow, false);
   assert(mobile.gpuDetailCenterDelta < 2);
   assert(mobile.gpuDetailWidth <= 390);
@@ -1221,8 +1385,9 @@ try {
 
   console.log(JSON.stringify({
     browser: "chrome", initial, final, transientConnection, topologyBenchmark,
-    capacity, grouping, personalization,
-    persistedAppearance, mobile, removedBackground, legacyAppearance,
+    capacity, grouping, personalization, gpuTasks,
+    persistedAppearance, persistedTaskSort, mobile, removedBackground,
+    legacyAppearance,
   }));
 } catch (error) {
   console.error(error);
