@@ -259,9 +259,15 @@ class ThresholdIncidentPolicy:
                     observed_at=result.observed_at,
                     critical_at=90,
                 )
+            minimum_free_mib = threshold("disk_min_free_gib") * 1024
             for disk in system.disks:
                 if disk.mountpoint in self._excluded_disk_mounts(result.host):
                     continue
+                # Percentage decides whether a filesystem alerts at all; the
+                # absolute headroom decides how urgent it is. Escalation is
+                # gated on already being over the percentage threshold so a
+                # small, mostly empty partition such as /boot/efi stays quiet.
+                starved = disk.available_mib < minimum_free_mib
                 self._add_percentage(
                     conditions,
                     key=f"disk:{disk.device}:{disk.mountpoint}",
@@ -270,6 +276,7 @@ class ThresholdIncidentPolicy:
                     value=disk.used_pct,
                     threshold=threshold("disk_warning_pct"),
                     observed_at=result.observed_at,
+                    critical_at=0 if starved else 95,
                     group_key=self._network_disk_group_key(
                         disk.device, disk.filesystem_type
                     ),

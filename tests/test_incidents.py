@@ -82,6 +82,50 @@ class IncidentTrackerTests(unittest.TestCase):
             history_points=20,
         )
 
+    def test_disk_severity_accounts_for_absolute_headroom(self) -> None:
+        policy = ThresholdIncidentPolicy(ThresholdConfig(), incidents=IncidentConfig())
+
+        def disk_condition(
+            total_gib: float, used_pct: float, mount: str = "/"
+        ) -> object:
+            total = total_gib * 1024
+            used = total * used_pct / 100
+            metrics = replace(
+                system(10, 10),
+                disks=(
+                    DiskMetrics(
+                        "/dev/a", "ext4", mount, total, used, total - used, used_pct
+                    ),
+                ),
+            )
+            found = policy.conditions(
+                ProbeResult(
+                    "node-a",
+                    "online",
+                    1,
+                    (),
+                    observed_at="2026-08-09T00:00:00Z",
+                    system=metrics,
+                )
+            )
+            return found.get(f"disk:/dev/a:{mount}")
+
+        # A large volume with room to spare keeps percentage-driven severity.
+        roomy = disk_condition(9800, 99)
+        self.assertEqual(roomy.severity, "critical")
+        # Below the critical percentage but nearly out of space: escalated,
+        # because 2 GiB of headroom is minutes of runway, not days.
+        starved = disk_condition(50, 96)
+        self.assertEqual(starved.severity, "critical")
+        tight = disk_condition(50, 92)
+        self.assertEqual(tight.severity, "critical")
+        # Same percentage band, but plenty of absolute room left.
+        spacious = disk_condition(9800, 92)
+        self.assertEqual(spacious.severity, "warning")
+        # A small partition well under the percentage threshold stays quiet
+        # even though its absolute headroom is tiny (for example /boot/efi).
+        self.assertIsNone(disk_condition(0.5, 2, mount="/boot/efi"))
+
     def test_initial_online_sample_honors_open_window_without_events(self) -> None:
         warning = ProbeResult(
             "node-a",
