@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from mocop.inventory import InventoryRequestError
 from mocop.models import (
@@ -157,6 +157,9 @@ def gpu(
     memory_used: float,
     temperature: float,
     unknown_memory_worker: bool = False,
+    train_started_at: str | None = None,
+    processes_observed_at: str | None = None,
+    processes_available: bool = True,
 ) -> GpuMetrics:
     processes = (
         (
@@ -170,10 +173,13 @@ def gpu(
                     name="llm-train",
                     owner="researcher",
                     queue="gpu-long",
+                    command="python train.py --config configs/llm-70b.yaml --stage sft",
+                    started_at=train_started_at,
                 ),
             ),
             # One host-wide PID visible on every busy GPU: the owners view must
-            # count it once per host, not once per GPU record.
+            # count it once per host, not once per GPU record. It has no
+            # workload, so its runtime comes from monitor-side first_seen_at.
             GpuProcess(
                 pid=20_000,
                 name="python data_worker.py",
@@ -206,6 +212,8 @@ def gpu(
         power_draw_w=round(75 + utilization * 4.5, 1),
         power_limit_w=700,
         processes=processes,
+        processes_available=processes_available,
+        processes_observed_at=processes_observed_at,
         health=GpuHealthMetrics(
             ecc_uncorrected_volatile=0,
             retired_pages_pending=False,
@@ -250,8 +258,21 @@ def system(hostname: str, cpu: float, memory_used: float) -> SystemMetrics:
     )
 
 
+def _iso(moment: datetime) -> str:
+    return moment.isoformat().replace("+00:00", "Z")
+
+
 def demo_state() -> StateStore:
-    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now = datetime.now(timezone.utc)
+    observed_at = _iso(now)
+    # Two probe rounds: the earlier one seeds monitor-side first_seen_at (the
+    # data worker has no workload, so its runtime must come from tracking and
+    # predate the Slurm job start below for the duration sort to reorder).
+    first_observed_at = _iso(now - timedelta(hours=5))
+    train_started_at = _iso(now - timedelta(hours=3))
+    # Older than the 90-second freshness warning threshold, by a wide margin
+    # so slow smoke runs stay deterministic.
+    stale_processes_at = _iso(now - timedelta(minutes=30))
     state = StateStore(
         5,
         host_groups=(
@@ -261,36 +282,95 @@ def demo_state() -> StateStore:
         ),
     )
     state.set_hosts(("atlas-01", "atlas-02", "atlas-03"))
-    state.apply(
-        ProbeResult(
-            host="atlas-01",
-            status="online",
-            latency_ms=38,
-            gpus=(
-                gpu("atlas-01", 0, 96, 72_704, 74),
-                gpu("atlas-01", 1, 91, 70_912, 72),
-                gpu("atlas-01", 2, 14, 38_400, 57),
-                gpu("atlas-01", 3, 2, 2_048, 35),
-            ),
-            observed_at=observed_at,
-            system=system("atlas-01", 68, 712_704),
+    for round_observed_at in (first_observed_at, observed_at):
+        state.apply(
+            ProbeResult(
+                host="atlas-01",
+                status="online",
+                latency_ms=38,
+                gpus=(
+                    gpu(
+                        "atlas-01",
+                        0,
+                        96,
+                        72_704,
+                        74,
+                        train_started_at=train_started_at,
+                        processes_observed_at=round_observed_at,
+                    ),
+                    gpu(
+                        "atlas-01",
+                        1,
+                        91,
+                        70_912,
+                        72,
+                        train_started_at=train_started_at,
+                        processes_observed_at=round_observed_at,
+                    ),
+                    gpu(
+                        "atlas-01",
+                        2,
+                        14,
+                        38_400,
+                        57,
+                        processes_observed_at=round_observed_at,
+                    ),
+                    gpu(
+                        "atlas-01",
+                        3,
+                        2,
+                        2_048,
+                        35,
+                        processes_observed_at=round_observed_at,
+                    ),
+                ),
+                observed_at=round_observed_at,
+                system=system("atlas-01", 68, 712_704),
+            )
         )
-    )
-    state.apply(
-        ProbeResult(
-            host="atlas-02",
-            status="online",
-            latency_ms=44,
-            gpus=(
-                gpu("atlas-02", 0, 88, 68_096, 70),
-                gpu("atlas-02", 1, 76, 61_440, 67, unknown_memory_worker=True),
-                gpu("atlas-02", 2, 8, 12_288, 42),
-                gpu("atlas-02", 3, 0, 1_024, 32),
-            ),
-            observed_at=observed_at,
-            system=system("atlas-02", 53, 601_088),
+        state.apply(
+            ProbeResult(
+                host="atlas-02",
+                status="online",
+                latency_ms=44,
+                gpus=(
+                    # Process telemetry deliberately lags the GPU sample so the
+                    # dashboard shows the stale-freshness warning treatment.
+                    gpu(
+                        "atlas-02",
+                        0,
+                        88,
+                        68_096,
+                        70,
+                        train_started_at=train_started_at,
+                        processes_observed_at=stale_processes_at,
+                    ),
+                    gpu(
+                        "atlas-02",
+                        1,
+                        76,
+                        61_440,
+                        67,
+                        unknown_memory_worker=True,
+                        train_started_at=train_started_at,
+                        processes_observed_at=round_observed_at,
+                    ),
+                    # Process telemetry unavailable: the dashboard renders "—"
+                    # instead of claiming zero tasks.
+                    gpu("atlas-02", 2, 8, 12_288, 42, processes_available=False),
+                    gpu(
+                        "atlas-02",
+                        3,
+                        0,
+                        1_024,
+                        32,
+                        processes_observed_at=round_observed_at,
+                    ),
+                ),
+                observed_at=round_observed_at,
+                system=system("atlas-02", 53, 601_088),
+            )
         )
-    )
     state.apply(
         ProbeResult(
             host="atlas-03",
