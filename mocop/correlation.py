@@ -45,6 +45,7 @@ class TopologyIncidentCorrelator:
             for item in active_incidents
             if item.get("category") == "connectivity"
             and not item.get("silenced", False)
+            and item.get("actionable", True)
             and item.get("host") in monitored_hosts
         }
         if len(affected) < 2:

@@ -612,6 +612,7 @@ class StateStore:
         self,
         result: ProbeResult,
         retry_after_seconds: float | None = None,
+        poll_cycle_duration_seconds: float | None = None,
     ) -> None:
         history_point: _HostHistoryPoint | None = None
         gpu_history_points: tuple[tuple[str, _GpuHistoryPoint], ...] = ()
@@ -620,8 +621,14 @@ class StateStore:
         notification_events = ()
         correlations: tuple[dict[str, object], ...] = ()
         with self._condition:
+            # Folding the batch completion into this apply publishes both in
+            # one revision instead of a separate record_poll_cycle publish.
+            if poll_cycle_duration_seconds is not None:
+                self._record_poll_cycle_locked(poll_cycle_duration_seconds)
             state = self._servers.get(result.host)
             if state is None:
+                if poll_cycle_duration_seconds is not None:
+                    self._publish_locked()
                 return
             previous_incident_signature = self._incidents.active_signature(result.host)
             incident_events = self._incidents.update(result)
@@ -653,7 +660,8 @@ class StateStore:
                 history_point = self._history_point(result)
                 self._history[result.host].append(history_point)
             if incident_events:
-                active_windows = self._active_maintenance_locked()
+                now = self._utc_clock()
+                active_windows = self._active_maintenance_locked(now)
                 notification_events = tuple(
                     event
                     for event in incident_events
@@ -663,9 +671,18 @@ class StateStore:
                     )
                 )
             if notification_events:
+                # The correlator consumes only actionable conditions, so this
+                # list carries the same maintenance/silence/acknowledge
+                # decoration as the incident views.
                 active = self._incidents.snapshot(1)["active"]
+                active_actions = self._active_incident_actions_locked(now)
                 for item in active:
-                    item["silenced"] = str(item["host"]) in active_windows
+                    self._decorate_incident_locked(
+                        item,
+                        active_maintenance=active_windows,
+                        active_actions=active_actions,
+                        at=now,
+                    )
                 correlations = self._incident_correlator.correlate(
                     active,
                     frozenset(self._servers),
@@ -708,9 +725,12 @@ class StateStore:
     def record_poll_cycle(self, duration_seconds: float) -> None:
         """Record and publish the latest completed scheduler submission batch."""
         with self._condition:
-            self._last_poll_completed_at = utc_now()
-            self._last_poll_duration_ms = max(0, round(duration_seconds * 1000))
+            self._record_poll_cycle_locked(duration_seconds)
             self._publish_locked()
+
+    def _record_poll_cycle_locked(self, duration_seconds: float) -> None:
+        self._last_poll_completed_at = utc_now()
+        self._last_poll_duration_ms = max(0, round(duration_seconds * 1000))
 
     def history(self, host: str, limit: int) -> dict[str, object] | None:
         with self._condition:
@@ -833,7 +853,24 @@ class StateStore:
         with self._condition:
             self._refresh_maintenance_expiry_locked()
             self._refresh_incident_action_expiry_locked()
-            return copy.deepcopy(self._snapshot_locked())
+            projection = self._snapshot_locked()
+        # The cached projection is never mutated in place after publication
+        # (rebuilds replace it wholesale), so the expensive deep copy can run
+        # outside the lock without observing a torn state.
+        return copy.deepcopy(projection)
+
+    def snapshot_view(self) -> dict[str, object]:
+        """Return the shared snapshot projection without a deep copy.
+
+        The returned dict has exactly the same structure and content as
+        ``snapshot()`` and may be the same object across calls until state
+        changes. Callers must treat it as strictly read-only; mutating it
+        would corrupt every concurrent reader of the cached projection.
+        """
+        with self._condition:
+            self._refresh_maintenance_expiry_locked()
+            self._refresh_incident_action_expiry_locked()
+            return self._snapshot_locked()
 
     def wait_for_update(
         self, after_version: int, timeout_seconds: float
@@ -1037,24 +1074,26 @@ class StateStore:
             previous = self._active_gpu_processes.get(key, {})
             # Carry the monitor-relative first-seen timestamp across samples
             # and stamp newcomers, so operators get a runtime lower bound
-            # without any extra remote reads.
-            current = {
-                (process.pid, process.name): replace(
-                    process,
-                    first_seen_at=(
-                        previous[(process.pid, process.name)].first_seen_at
-                        or result.observed_at
-                        if (process.pid, process.name) in previous
-                        else result.observed_at
-                    ),
-                )
-                for process in gpu.processes
-            }
+            # without any extra remote reads. A same-key process whose
+            # workload start time changed is a new instance behind a reused
+            # PID: it restarts the observation instead of inheriting it.
+            current: dict[tuple[int, str], GpuProcess] = {}
+            replaced_instances: set[tuple[int, str]] = set()
+            for process in gpu.processes:
+                process_key = (process.pid, process.name)
+                prior = previous.get(process_key)
+                if prior is not None and self._same_process_instance(prior, process):
+                    first_seen_at = prior.first_seen_at or result.observed_at
+                else:
+                    if prior is not None:
+                        replaced_instances.add(process_key)
+                    first_seen_at = result.observed_at
+                current[process_key] = replace(process, first_seen_at=first_seen_at)
             if gpu_id not in initialized_gpu_ids:
                 self._active_gpu_processes[key] = current
                 initialized_gpu_ids.add(gpu_id)
                 continue
-            if current.keys() == previous.keys():
+            if not replaced_instances and current.keys() == previous.keys():
                 self._active_gpu_processes[key] = current
                 continue
             gpu_transitions: list[_GpuProcessTransition] = []
@@ -1076,6 +1115,25 @@ class StateStore:
                         gpu.index,
                         "stopped",
                         previous[process_key],
+                    )
+                )
+            for process_key in sorted(replaced_instances):
+                gpu_transitions.append(
+                    self._process_transition(
+                        result.observed_at,
+                        gpu_id,
+                        gpu.index,
+                        "stopped",
+                        previous[process_key],
+                    )
+                )
+                gpu_transitions.append(
+                    self._process_transition(
+                        result.observed_at,
+                        gpu_id,
+                        gpu.index,
+                        "started",
+                        current[process_key],
                     )
                 )
             self._active_gpu_processes[key] = current
@@ -1129,6 +1187,22 @@ class StateStore:
                 )
             )
         return replace(result, gpus=tuple(annotated_gpus))
+
+    @staticmethod
+    def _same_process_instance(previous: GpuProcess, current: GpuProcess) -> bool:
+        """False only when both samples carry workload start times that differ.
+
+        The workload's real start time (V7 protocol) distinguishes a new
+        process behind a reused PID from a continuously running one. When
+        either side lacks it (workloads disabled), the (pid, name) key alone
+        keeps identifying the process and first-seen stays a documented
+        lower bound.
+        """
+        previous_started = previous.workload.started_at if previous.workload else None
+        current_started = current.workload.started_at if current.workload else None
+        if previous_started is None or current_started is None:
+            return True
+        return previous_started == current_started
 
     @staticmethod
     def _process_transition(
@@ -1696,6 +1770,16 @@ class MonitorService:
                             message="Unexpected collector error",
                         )
 
+                    batch = batches.get(scheduled.batch_id)
+                    batch_duration_seconds: float | None = None
+                    if batch is not None:
+                        batch.remaining -= 1
+                        if batch.remaining == 0:
+                            if scheduled.batch_id > last_completed_batch_id:
+                                batch_duration_seconds = completed_at - batch.started_at
+                                last_completed_batch_id = scheduled.batch_id
+                            del batches[scheduled.batch_id]
+
                     if scheduled.host in active_host_set:
                         current_config, _ = self._config_snapshot()
                         if result.status == "online":
@@ -1734,22 +1818,16 @@ class MonitorService:
                         self._state.apply(
                             result,
                             retry_after_seconds=retry_after_seconds,
+                            poll_cycle_duration_seconds=batch_duration_seconds,
                         )
-                    elif isinstance(self._probe, InventoryAwareResourceProbe):
-                        # The removed host may have refreshed its rate baseline while
-                        # its already-running probe was completing.
-                        self._probe.retain_hosts(active_host_set)
-
-                    batch = batches.get(scheduled.batch_id)
-                    if batch is not None:
-                        batch.remaining -= 1
-                        if batch.remaining == 0:
-                            if scheduled.batch_id > last_completed_batch_id:
-                                self._state.record_poll_cycle(
-                                    completed_at - batch.started_at
-                                )
-                                last_completed_batch_id = scheduled.batch_id
-                            del batches[scheduled.batch_id]
+                    else:
+                        if isinstance(self._probe, InventoryAwareResourceProbe):
+                            # The removed host may have refreshed its rate
+                            # baseline while its already-running probe was
+                            # completing.
+                            self._probe.retain_hosts(active_host_set)
+                        if batch_duration_seconds is not None:
+                            self._state.record_poll_cycle(batch_duration_seconds)
 
                 # A hot config replacement landed after this iteration took its
                 # snapshot; drop this round's submissions and restart the loop,
