@@ -9,7 +9,7 @@ import zlib
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from heapq import nsmallest
 from struct import Struct
@@ -37,6 +37,7 @@ from .persistence import (
     TelemetryPersistence,
 )
 from .probe import (
+    AttendedAwareResourceProbe,
     CancellableResourceProbe,
     InventoryAwareResourceProbe,
     ResourceProbe,
@@ -44,6 +45,9 @@ from .probe import (
 
 _MAX_FAILURE_BACKOFF_SECONDS = 60.0
 _MAX_PROBE_WORKERS = 64
+# SSE heartbeats arrive every ~15 seconds and poll fallback every ~5, so half
+# a minute of silence reliably means no dashboard is open.
+_DASHBOARD_ATTENDED_WINDOW_SECONDS = 30.0
 _MIN_RUNTIME_POLL_INTERVAL_SECONDS = 1.0
 _MAX_RUNTIME_POLL_INTERVAL_SECONDS = 3600.0
 # Mirrors the probe-side GPU cap so a host that keeps reporting fresh GPU
@@ -319,6 +323,10 @@ class StateStore:
         self._version = 0
         self._collector_error: str | None = None
         self._transport_retries_total = 0
+        # Monotonic timestamp of the last dashboard reader; written and read
+        # without a lock because a float store is atomic and staleness by one
+        # poll cycle is harmless.
+        self._dashboard_last_seen: float | None = None
         self._poll_interval_seconds = poll_interval_seconds
         self._collection_stale_cycles = collection_stale_cycles
         self._collection_stale_after_seconds = (
@@ -633,16 +641,17 @@ class StateStore:
                 else None
             )
             self._transport_retries_total += result.transport_retries
-            state.apply(result, next_retry_at=next_retry_at)
-            if result.status == "online" and result.system is not None:
-                history_point = self._history_point(result)
-                self._history[result.host].append(history_point)
             if result.status == "online":
                 gpu_history_points, process_events = self._track_gpu_telemetry_locked(
                     result
                 )
+                result = self._first_seen_annotated_locked(result)
             else:
                 self._invalidate_process_inventory_locked(result.host)
+            state.apply(result, next_retry_at=next_retry_at)
+            if result.status == "online" and result.system is not None:
+                history_point = self._history_point(result)
+                self._history[result.host].append(history_point)
             if incident_events:
                 active_windows = self._active_maintenance_locked()
                 notification_events = tuple(
@@ -683,6 +692,18 @@ class StateStore:
                 return
             state.next_retry_at = utc_after(retry_after_seconds)
             self._publish_locked()
+
+    def record_dashboard_activity(self) -> None:
+        """Mark a live dashboard reader so probes keep the attended cadence."""
+        self._dashboard_last_seen = time.monotonic()
+
+    def dashboard_attended(self) -> bool:
+        """Return whether a dashboard reader was seen within the window."""
+        last_seen = self._dashboard_last_seen
+        return (
+            last_seen is not None
+            and time.monotonic() - last_seen < _DASHBOARD_ATTENDED_WINDOW_SECONDS
+        )
 
     def record_poll_cycle(self, duration_seconds: float) -> None:
         """Record and publish the latest completed scheduler submission batch."""
@@ -1013,14 +1034,26 @@ class StateStore:
                 if captured_transitions is not None:
                     captured_transitions.extend(gpu_transitions)
                 continue
+            previous = self._active_gpu_processes.get(key, {})
+            # Carry the monitor-relative first-seen timestamp across samples
+            # and stamp newcomers, so operators get a runtime lower bound
+            # without any extra remote reads.
             current = {
-                (process.pid, process.name): process for process in gpu.processes
+                (process.pid, process.name): replace(
+                    process,
+                    first_seen_at=(
+                        previous[(process.pid, process.name)].first_seen_at
+                        or result.observed_at
+                        if (process.pid, process.name) in previous
+                        else result.observed_at
+                    ),
+                )
+                for process in gpu.processes
             }
             if gpu_id not in initialized_gpu_ids:
                 self._active_gpu_processes[key] = current
                 initialized_gpu_ids.add(gpu_id)
                 continue
-            previous = self._active_gpu_processes.get(key, {})
             if current.keys() == previous.keys():
                 self._active_gpu_processes[key] = current
                 continue
@@ -1073,6 +1106,29 @@ class StateStore:
     def _invalidate_process_inventory_locked(self, host: str) -> None:
         for gpu_id in self._process_inventory_initialized.pop(host, ()):
             self._active_gpu_processes.pop((host, gpu_id), None)
+
+    def _first_seen_annotated_locked(self, result: ProbeResult) -> ProbeResult:
+        """Return the result with processes carrying their first-seen stamp."""
+        if not any(gpu.processes for gpu in result.gpus):
+            return result
+        annotated_gpus = []
+        for gpu in result.gpus:
+            if not gpu.processes:
+                annotated_gpus.append(gpu)
+                continue
+            tracked = self._active_gpu_processes.get(
+                (result.host, gpu.uuid or f"index:{gpu.index}"), {}
+            )
+            annotated_gpus.append(
+                replace(
+                    gpu,
+                    processes=tuple(
+                        tracked.get((process.pid, process.name), process)
+                        for process in gpu.processes
+                    ),
+                )
+            )
+        return replace(result, gpus=tuple(annotated_gpus))
 
     @staticmethod
     def _process_transition(
@@ -1558,6 +1614,8 @@ class MonitorService:
                 self._scheduler_wakeup.clear()
                 now = time.monotonic()
                 config, generation = self._config_snapshot()
+                if isinstance(self._probe, AttendedAwareResourceProbe):
+                    self._probe.set_attended(self._state.dashboard_attended())
 
                 if now >= inventory_refresh_at or generation != inventory_generation:
                     try:

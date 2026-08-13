@@ -209,6 +209,93 @@ class StateStoreTests(unittest.TestCase):
             [("started", 10), ("stopped", 10)],
         )
 
+    def test_processes_carry_a_monitor_relative_first_seen_timestamp(self) -> None:
+        base = GpuMetrics(
+            index=0,
+            uuid="GPU-1",
+            name="Test GPU",
+            driver_version="550",
+            pstate="P0",
+            temperature_c=60,
+            utilization_gpu_pct=50,
+            utilization_memory_pct=20,
+            memory_total_mib=1000,
+            memory_used_mib=250,
+            memory_free_mib=750,
+            power_draw_w=100,
+            power_limit_w=200,
+            processes=(GpuProcess(10, "train.py", 250),),
+        )
+        store = StateStore(5)
+        store.set_hosts(("gpu-1",))
+
+        def snapshot_processes():
+            return {
+                process["pid"]: process
+                for process in store.snapshot()["servers"][0]["gpus"][0]["processes"]
+            }
+
+        store.apply(
+            ProbeResult(
+                "gpu-1", "online", 1, (base,), observed_at="2026-08-10T00:00:00Z"
+            )
+        )
+        both = replace(
+            base,
+            processes=(
+                GpuProcess(10, "train.py", 260),
+                GpuProcess(11, "eval.py", 200),
+            ),
+        )
+        store.apply(
+            ProbeResult(
+                "gpu-1", "online", 1, (both,), observed_at="2026-08-10T00:00:05Z"
+            )
+        )
+
+        by_pid = snapshot_processes()
+        # The retained process keeps its original stamp with live telemetry;
+        # the newcomer is stamped with the sample that first observed it.
+        self.assertEqual(by_pid[10]["first_seen_at"], "2026-08-10T00:00:00Z")
+        self.assertEqual(by_pid[10]["used_memory_mib"], 260)
+        self.assertEqual(by_pid[11]["first_seen_at"], "2026-08-10T00:00:05Z")
+
+        gone = replace(base, processes=(GpuProcess(11, "eval.py", 210),))
+        store.apply(
+            ProbeResult(
+                "gpu-1", "online", 1, (gone,), observed_at="2026-08-10T00:00:10Z"
+            )
+        )
+        returned = replace(
+            base,
+            processes=(
+                GpuProcess(11, "eval.py", 210),
+                GpuProcess(10, "train.py", 250),
+            ),
+        )
+        store.apply(
+            ProbeResult(
+                "gpu-1", "online", 1, (returned,), observed_at="2026-08-10T00:00:15Z"
+            )
+        )
+
+        by_pid = snapshot_processes()
+        # A stopped-and-restarted pid/name pair starts a fresh observation.
+        self.assertEqual(by_pid[10]["first_seen_at"], "2026-08-10T00:00:15Z")
+        self.assertEqual(by_pid[11]["first_seen_at"], "2026-08-10T00:00:05Z")
+
+    def test_dashboard_attendance_follows_recent_reader_activity(self) -> None:
+        store = StateStore(5)
+        self.assertFalse(store.dashboard_attended())
+
+        with patch(
+            "mocop.service.time.monotonic",
+            side_effect=(100.0, 101.0, 131.0),
+        ):
+            store.record_dashboard_activity()
+            self.assertTrue(store.dashboard_attended())
+            self.assertFalse(store.dashboard_attended())
+
     def test_history_preserves_missing_optional_metrics(self) -> None:
         gpu = GpuMetrics(
             index=0,
@@ -1234,6 +1321,15 @@ class _SignallingRecordingProbe(_RecordingProbe):
         return result
 
 
+class _AttendedRecordingProbe(_SignallingRecordingProbe):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attended_calls = []
+
+    def set_attended(self, attended):
+        self.attended_calls.append(attended)
+
+
 class _RecordingNotifications:
     def __init__(self) -> None:
         self.published = []
@@ -1530,6 +1626,39 @@ class MonitorServiceTests(unittest.TestCase):
             [(host, hosts) for host, hosts, _, _ in probe.calls],
             [("gpu-02", ("gpu-02",))],
         )
+
+    def test_run_relays_dashboard_attendance_to_the_probe(self) -> None:
+        config = MonitorConfig(
+            ssh_config=Path("/tmp/config"),
+            auto_discover=False,
+            hosts=("gpu-01",),
+            exclude_hosts=frozenset(),
+            poll_interval_seconds=60,
+            probe_timeout_seconds=12,
+            connect_timeout_seconds=5,
+            max_workers=1,
+            listen_host="127.0.0.1",
+            listen_port=8787,
+        )
+
+        for attended in (False, True):
+            probe = _AttendedRecordingProbe()
+            state = StateStore(60)
+            if attended:
+                state.record_dashboard_activity()
+            service = MonitorService(config, _ConfigHostSource(), probe, state)
+            stop_event = threading.Event()
+            scheduler = threading.Thread(target=service.run, args=(stop_event,))
+            scheduler.start()
+            try:
+                self.assertTrue(probe.probed.wait(2))
+            finally:
+                stop_event.set()
+                service.stop()
+                scheduler.join(2)
+            with self.subTest(attended=attended):
+                self.assertTrue(probe.attended_calls)
+                self.assertEqual(probe.attended_calls[0], attended)
 
     def test_run_schedules_each_host_without_waiting_for_a_slow_peer(self) -> None:
         config = MonitorConfig(
