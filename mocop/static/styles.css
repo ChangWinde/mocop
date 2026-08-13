@@ -825,6 +825,10 @@ body.hide-gpu-power .gpu-col-power { display: none !important; }
 .capacity-empty { grid-column: 1 / -1; min-height: 120px; display: grid; place-items: center; padding: 20px; border: 1px dashed var(--line); border-radius: 12px; color: var(--muted-2); font-size: 10px; text-align: center; }
 .capacity-footnote { margin: 0; padding: 0 20px 20px; color: var(--muted-2); font-size: 8px; line-height: 1.6; }
 .owners-footnote { grid-column: 1 / -1; display: grid; place-items: center; padding: 9px 12px; border: 1px dashed var(--line); border-radius: 9px; color: var(--muted-2); font-size: 8px; }
+.owners-usage-heading { border-top: 1px solid var(--line-soft); }
+.owners-usage-window { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; }
+.owners-usage-window select { padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--surface-raised); font-size: 10px; }
+.owner-idle-high { color: var(--amber); }
 .dialog-heading { position: sticky; z-index: 3; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 20px 16px; border-bottom: 1px solid var(--line-soft); background: var(--panel-background); backdrop-filter: blur(12px); }
 .dialog-close { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); background: var(--surface-raised); cursor: pointer; font-size: 20px; font-weight: 300; line-height: 1; }
 .dialog-close:hover { color: var(--text); border-color: color-mix(in srgb, var(--blue) 34%, var(--line)); }

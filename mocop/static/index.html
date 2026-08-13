@@ -555,7 +555,18 @@
         <span id="owners-updated">实时更新</span>
       </div>
       <div id="owners-results" class="capacity-results"></div>
-      <p class="capacity-footnote">未开启 workloads 采集时无法区分用户，进程会归入「未归属」。</p>
+      <div class="capacity-heading owners-usage-heading">
+        <div><span class="section-kicker">USAGE WINDOW</span><h3 id="owners-usage-summary">等待占用账单</h3></div>
+        <label class="owners-usage-window">窗口
+          <select id="owners-usage-hours">
+            <option value="24" selected>24 小时</option>
+            <option value="72">3 天</option>
+            <option value="168">7 天</option>
+          </select>
+        </label>
+      </div>
+      <div id="owners-usage-results" class="capacity-results"></div>
+      <p class="capacity-footnote">未开启 workloads 采集时无法区分用户，进程会归入「未归属」。占用账单按监控观测到的进程时间线统计，覆盖范围受采集与保留窗口限制。</p>
     </dialog>
 
     <dialog id="gpu-detail-dialog" class="side-dialog gpu-detail-dialog" aria-labelledby="gpu-detail-title">

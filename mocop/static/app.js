@@ -120,6 +120,14 @@ const fetch = (url, options = {}) => nativeFetch(url, {
   headers: { "X-Monitor-Request": "dashboard", ...(options.headers || {}) },
 });
 
+const WORKLOAD_KIND_LABELS = {
+  process: "进程",
+  slurm: "Slurm",
+  kubernetes: "Kubernetes",
+  docker: "Docker",
+  podman: "Podman",
+};
+
 const view = {
   snapshot: null,
   topology: null,
@@ -190,6 +198,11 @@ const view = {
   gpuHistoryRetryTimer: null,
   gpuHistoryRetryKey: "",
   gpuHistoryRetryDelayMs: 0,
+  ownersUsage: null,
+  ownersUsageHours: 24,
+  ownersUsageLoading: false,
+  ownersUsageError: "",
+  ownersUsageRequest: 0,
   gpuTaskRowCache: new Map(),
   selectedIncident: null,
   incidentActionPending: false,
@@ -265,6 +278,9 @@ const elements = {
   ownersSummary: $("#owners-summary"),
   ownersUpdated: $("#owners-updated"),
   ownersResults: $("#owners-results"),
+  ownersUsageSummary: $("#owners-usage-summary"),
+  ownersUsageHours: $("#owners-usage-hours"),
+  ownersUsageResults: $("#owners-usage-results"),
   serverSort: $("#server-sort"),
   defaultServerFilter: $("#default-server-filter"),
   interfaceDensity: $("#interface-density"),
@@ -2168,6 +2184,8 @@ function limits() {
     memory_warning_pct: 90,
     swap_warning_pct: 50,
     disk_warning_pct: 85,
+    psi_memory_some_pct: 20,
+    psi_io_some_pct: 30,
     gpu_temperature_warning_c: 80,
     gpu_busy_pct: 10,
   };
@@ -2641,6 +2659,103 @@ function renderOwners() {
     elements.ownersResults.append(card);
   }
   if (offlineNote) elements.ownersResults.append(offlineNote);
+}
+
+function gpuHoursLabel(seconds) {
+  const value = numeric(seconds);
+  if (value < 60) return `${Math.round(value)} 卡·秒`;
+  if (value < 5400) return `${Math.round(value / 60)} 卡·分`;
+  return `${format(value / 3600, 1)} 卡·时`;
+}
+
+async function fetchOwnersUsage() {
+  const request = ++view.ownersUsageRequest;
+  view.ownersUsageLoading = true;
+  view.ownersUsageError = "";
+  renderOwnersUsage();
+  try {
+    const response = await fetch(
+      `/api/usage?hours=${encodeURIComponent(view.ownersUsageHours)}&limit=50`,
+    );
+    const usage = await response.json();
+    if (!response.ok) throw new Error(usage.error || "占用账单不可用");
+    if (request !== view.ownersUsageRequest) return;
+    view.ownersUsage = usage;
+  } catch (_error) {
+    if (request !== view.ownersUsageRequest) return;
+    view.ownersUsage = null;
+    view.ownersUsageError = "占用账单加载失败，可重新打开本面板重试";
+  } finally {
+    if (request === view.ownersUsageRequest) {
+      view.ownersUsageLoading = false;
+      renderOwnersUsage();
+    }
+  }
+}
+
+function renderOwnersUsage() {
+  if (!elements.ownersDialog?.open) return;
+  elements.ownersUsageResults.replaceChildren();
+  if (view.ownersUsageLoading) {
+    elements.ownersUsageSummary.textContent = "正在统计占用账单…";
+    return;
+  }
+  if (view.ownersUsageError) {
+    elements.ownersUsageSummary.textContent = view.ownersUsageError;
+    return;
+  }
+  const usage = view.ownersUsage;
+  if (!usage) {
+    elements.ownersUsageSummary.textContent = "等待占用账单";
+    return;
+  }
+  const owners = Array.isArray(usage.owners) ? usage.owners : [];
+  if (!owners.length) {
+    elements.ownersUsageSummary.textContent = "窗口内没有观测到 GPU 进程";
+    return;
+  }
+  const coverageGap = usage.earliestDataAt && usage.sinceAt
+    && Date.parse(usage.earliestDataAt) > Date.parse(usage.sinceAt) + 60_000;
+  elements.ownersUsageSummary.textContent =
+    `${numeric(usage.totalOwners)} 个归属方 · 共 ${gpuHoursLabel(usage.totalGpuSeconds)}`
+    + (coverageGap ? ` · 数据自 ${age(usage.earliestDataAt)}起` : "");
+  for (const entry of owners.slice(0, 50)) {
+    const card = create(
+      "article",
+      `capacity-candidate ${entry.owner ? "match" : "near"}`,
+    );
+    const heading = create("div", "capacity-candidate-heading");
+    const identity = create("span", "capacity-candidate-identity");
+    const ownerName = create("strong", "", entry.owner || "未归属");
+    ownerName.title = entry.owner || "启用 workloads.mode=identity 可区分用户";
+    const kinds = entry.kinds && typeof entry.kinds === "object"
+      ? Object.keys(entry.kinds)
+        .filter((kind) => kind !== "process")
+        .map((kind) => WORKLOAD_KIND_LABELS[kind] || kind)
+      : [];
+    identity.append(ownerName, create("small", "", kinds.length ? kinds.join(" · ") : "进程"));
+    heading.append(identity, create("em", "", gpuHoursLabel(entry.gpuSeconds)));
+    const metrics = create("div", "capacity-candidate-metrics");
+    const idleShare = entry.idleShare == null ? NaN : numeric(entry.idleShare, NaN);
+    metrics.append(
+      create("span", "", `${numeric(entry.gpus)} 张 GPU`),
+      create(
+        "span",
+        "",
+        Array.isArray(entry.hosts) ? `${entry.hosts.length} 个节点` : "节点未知",
+      ),
+      create("span", "", `${numeric(entry.processes)} 段占用`),
+      create(
+        "span",
+        Number.isFinite(idleShare) && idleShare >= 0.5 ? "owner-idle-high" : "",
+        Number.isFinite(idleShare)
+          ? `闲置占比 ${format(idleShare * 100)}%`
+          : "闲置占比未知",
+      ),
+    );
+    card.append(heading, metrics);
+    elements.ownersUsageResults.append(card);
+  }
 }
 
 function renderCapacityMatcher() {
@@ -4005,6 +4120,20 @@ function renderResources() {
   const diskWrite = systems.reduce((sum, system) => sum + numeric(system.disk_write_bps), 0);
   const diskIoAvailable = systems.some((system) => system.disk_read_bps != null || system.disk_write_bps != null);
   const networkAvailable = systems.some((system) => system.network_rx_bps != null || system.network_tx_bps != null);
+  // Fleet view surfaces the worst node: pressure is a per-node stall signal,
+  // so averaging across hosts would hide the one node that is actually stuck.
+  const psiPeak = (resourceKey) => {
+    const values = systems
+      .map((system) => system.pressure?.[resourceKey]?.some_avg10)
+      .filter((value) => value != null)
+      .map((value) => numeric(value, NaN))
+      .filter((value) => Number.isFinite(value));
+    return values.length ? Math.max(...values) : NaN;
+  };
+  const psiMemory = psiPeak("memory");
+  const psiIo = psiPeak("io");
+  const psiCpu = psiPeak("cpu");
+  const psiAvailable = [psiMemory, psiIo, psiCpu].some((value) => Number.isFinite(value));
   const load = systems.reduce((sum, system) => sum + numeric(system.load_1m), 0);
   const memoryPct = ratio(memoryUsed, memoryTotal);
   const swapPct = ratio(swapUsed, swapTotal);
@@ -4050,6 +4179,17 @@ function renderResources() {
       "网络",
       networkAvailable ? `↓ ${rate(rx)}` : "采样中",
       networkAvailable ? `↑ ${rate(tx)}` : "等待相邻样本",
+    ),
+    resourceTile(
+      "压力 PSI",
+      psiAvailable
+        ? `内存 ${Number.isFinite(psiMemory) ? `${format(psiMemory, 1)}%` : "—"}`
+        : "内核未提供",
+      psiAvailable
+        ? `I/O ${Number.isFinite(psiIo) ? `${format(psiIo, 1)}%` : "—"} · CPU ${Number.isFinite(psiCpu) ? `${format(psiCpu, 1)}%` : "—"}${systems.length > 1 ? " · 节点峰值" : ""}`
+        : "需要内核 4.20+ 的 PSI 支持",
+      psiAvailable && Number.isFinite(psiMemory) ? psiMemory : null,
+      threshold.psi_memory_some_pct,
     ),
     resourceTile(
       "运行时间",
@@ -4650,9 +4790,8 @@ function updateGpuTaskRow(row, process, gpu) {
     row.runtime.removeAttribute("title");
   }
   const workload = process.workload;
-  if (workload && ["process", "slurm", "kubernetes"].includes(workload.kind)) {
-    const kind = workload.kind === "slurm"
-      ? "Slurm" : workload.kind === "kubernetes" ? "Kubernetes" : "进程";
+  if (workload && Object.hasOwn(WORKLOAD_KIND_LABELS, workload.kind)) {
+    const kind = WORKLOAD_KIND_LABELS[workload.kind];
     const workloadIdentity = workload.name || workload.workload_id;
     const chips = [create(
       "span",
@@ -5600,6 +5739,13 @@ elements.ownersToggle.addEventListener("click", () => {
   if (elements.capacityDialog.open) elements.capacityDialog.close();
   elements.ownersDialog.showModal();
   renderOwners();
+  fetchOwnersUsage();
+});
+
+elements.ownersUsageHours.addEventListener("change", () => {
+  const hours = Number.parseInt(elements.ownersUsageHours.value, 10);
+  view.ownersUsageHours = Number.isFinite(hours) && hours >= 1 ? hours : 24;
+  if (elements.ownersDialog.open) fetchOwnersUsage();
 });
 
 elements.capacityForm.addEventListener("submit", (event) => {
