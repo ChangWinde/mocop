@@ -43,6 +43,8 @@ class DashboardConfigController(Protocol):
 
     def topology(self) -> dict[str, object]: ...
 
+    def writable(self) -> bool: ...
+
     def change(self, action: str, host: str) -> dict[str, object]: ...
 
     def update_collector_settings(
@@ -96,6 +98,10 @@ class ConfigInventory:
                     "links": [],
                 }
             )
+
+    def writable(self) -> bool:
+        """Report dashboard writability from file metadata alone (no SSH scan)."""
+        return self._is_writable_target()
 
     def change(self, action: str, host: str) -> dict[str, object]:
         if action not in {"add", "remove"}:
@@ -452,10 +458,11 @@ class ConfigInventory:
                 for alias in scanned
             ),
             "collectorSettings": self._collector_settings(config),
+            # Every configured window stays visible; "active" tells the
+            # dashboard whether it is currently silencing the host.
             "maintenanceWindows": {
-                alias: window.to_dict(now)
+                alias: {**window.to_dict(now), "active": window.is_active(now)}
                 for alias, window in config.maintenance_windows
-                if window.is_active(now)
             },
             "incidentActions": [
                 action.to_dict()
@@ -468,9 +475,12 @@ class ConfigInventory:
 
     @staticmethod
     def _collector_settings(config: MonitorConfig) -> dict[str, object]:
+        # connectTimeoutSeconds is read-only context for the dashboard (the
+        # probe timeout must exceed it); the write path keeps rejecting it.
         return {
             "pollIntervalSeconds": config.poll_interval_seconds,
             "probeTimeoutSeconds": config.probe_timeout_seconds,
+            "connectTimeoutSeconds": config.connect_timeout_seconds,
             "maxWorkers": config.max_workers,
         }
 

@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
 
-from mocop.config import load_config
+from mocop.config import BUNDLED_CONFIG_PATH, load_config
 from mocop.discovery import OpenSshConfigHostSource
 from mocop.inventory import ConfigInventory, InventoryError
 from mocop.lifecycle import initialize_config
@@ -58,6 +58,7 @@ class InventoryTests(unittest.TestCase):
             {
                 "pollIntervalSeconds": 5,
                 "probeTimeoutSeconds": 12,
+                "connectTimeoutSeconds": 5,
                 "maxWorkers": 8,
             },
         )
@@ -99,6 +100,53 @@ class InventoryTests(unittest.TestCase):
                 "until": "2026-01-05T01:00:00Z",
                 "reason": "Weekly patching",
                 "recurring": True,
+                "active": True,
+            },
+        )
+
+    def test_snapshot_reports_inactive_maintenance_windows_with_active_flag(
+        self,
+    ) -> None:
+        data = json.loads(self.config_path.read_text(encoding="utf-8"))
+        data["hosts"] = ["gpu-01", "gpu-02"]
+        data["maintenance_windows"] = {
+            "gpu-01": {
+                "reason": "Weekly patching",
+                "recurrence": {
+                    "weekday": 0,
+                    "start": "00:00",
+                    "duration_minutes": 60,
+                },
+            },
+            "gpu-02": {"until": "2020-01-01T00:00:00Z", "reason": "Expired"},
+        }
+        self.config_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.config_path.chmod(0o600)
+        # Tuesday noon UTC: outside the weekly Monday instance and past the
+        # one-shot window, so both stay visible but inactive.
+        sampled = datetime(2026, 1, 6, 12, 0, tzinfo=timezone.utc)
+
+        with patch("mocop.inventory.datetime") as clock:
+            clock.now.return_value = sampled
+            snapshot = self.inventory.snapshot()
+
+        self.assertEqual(
+            snapshot["maintenanceWindows"],
+            {
+                "gpu-01": {
+                    "until": "2026-01-12T01:00:00Z",
+                    "reason": "Weekly patching",
+                    "recurring": True,
+                    "active": False,
+                },
+                "gpu-02": {
+                    "until": "2020-01-01T00:00:00Z",
+                    "reason": "Expired",
+                    "active": False,
+                },
             },
         )
 
@@ -117,6 +165,7 @@ class InventoryTests(unittest.TestCase):
             {
                 "pollIntervalSeconds": 2,
                 "probeTimeoutSeconds": 30,
+                "connectTimeoutSeconds": 5,
                 "maxWorkers": 7,
             },
         )
@@ -125,6 +174,23 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(reloaded.max_workers, 7)
         self.assertEqual(self.config_path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.updates[-1], reloaded)
+
+    def test_updates_a_collector_settings_subset_and_keeps_other_fields(self) -> None:
+        settings = self.inventory.update_collector_settings({"probeTimeoutSeconds": 30})
+
+        self.assertEqual(
+            settings,
+            {
+                "pollIntervalSeconds": 5,
+                "probeTimeoutSeconds": 30,
+                "connectTimeoutSeconds": 5,
+                "maxWorkers": 8,
+            },
+        )
+        reloaded = load_config(self.config_path)
+        self.assertEqual(reloaded.poll_interval_seconds, 5)
+        self.assertEqual(reloaded.probe_timeout_seconds, 30)
+        self.assertEqual(reloaded.max_workers, 8)
 
     def test_persists_and_clears_one_bounded_incident_action(self) -> None:
         snapshot = self.inventory.update_incident_action(
@@ -155,6 +221,8 @@ class InventoryTests(unittest.TestCase):
             {"maxWorkers": 2.5},
             {"maxWorkers": 65},
             {"unknown": 1},
+            # Down-linked read-only context; the write path must reject it.
+            {"connectTimeoutSeconds": 10},
         )
 
         for settings in cases:
@@ -404,6 +472,28 @@ class InventoryTests(unittest.TestCase):
             set(load_config(self.config_path).hosts),
             {"gpu-01", "gpu-02", "gpu-03"},
         )
+
+    def test_reports_dashboard_writability_without_scanning_openssh(self) -> None:
+        with (
+            patch.object(
+                self.inventory._host_source,
+                "aliases",
+                side_effect=AssertionError("writable() must not scan OpenSSH"),
+            ),
+            patch.object(
+                self.inventory._host_source,
+                "hosts",
+                side_effect=AssertionError("writable() must not resolve hosts"),
+            ),
+        ):
+            self.assertTrue(self.inventory.writable())
+
+        bundled = ConfigInventory(
+            BUNDLED_CONFIG_PATH,
+            OpenSshConfigHostSource(),
+            self.updates.append,
+        )
+        self.assertFalse(bundled.writable())
 
     def test_failed_atomic_replace_preserves_the_previous_configuration(self) -> None:
         before = self.config_path.read_bytes()

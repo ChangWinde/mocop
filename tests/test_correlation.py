@@ -6,14 +6,22 @@ from mocop.config import ConnectionTopologyConfig, TopologyLinkConfig
 from mocop.correlation import TopologyIncidentCorrelator
 
 
-def connectivity(host: str, *, silenced: bool = False) -> dict[str, object]:
-    return {
+def connectivity(
+    host: str,
+    *,
+    silenced: bool = False,
+    actionable: bool | None = None,
+) -> dict[str, object]:
+    item: dict[str, object] = {
         "host": host,
         "conditionKey": "connectivity",
         "category": "connectivity",
         "severity": "critical",
         "silenced": silenced,
     }
+    if actionable is not None:
+        item["actionable"] = actionable
+    return item
 
 
 class TopologyIncidentCorrelatorTests(unittest.TestCase):
@@ -46,6 +54,20 @@ class TopologyIncidentCorrelatorTests(unittest.TestCase):
             (
                 connectivity("gpu-01"),
                 connectivity("gpu-02", silenced=True),
+                connectivity("gpu-03"),
+            ),
+            frozenset({"gpu-01", "gpu-02", "gpu-03"}),
+        )
+
+        self.assertEqual(correlations, ())
+
+    def test_excludes_conditions_that_are_not_actionable(self) -> None:
+        # An acknowledged condition is not silenced but is not actionable
+        # either; items without the key stay included for compatibility.
+        correlations = self.correlator.correlate(
+            (
+                connectivity("gpu-01"),
+                connectivity("gpu-02", actionable=False),
                 connectivity("gpu-03"),
             ),
             frozenset({"gpu-01", "gpu-02", "gpu-03"}),

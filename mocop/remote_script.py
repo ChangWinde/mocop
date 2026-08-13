@@ -33,12 +33,10 @@ _HEALTH_QUERY_FIELDS = (
 )
 _COMBINED_QUERY_FIELDS = _QUERY_FIELDS + _HEALTH_QUERY_FIELDS[1:]
 _PROTOCOL_VERSION = "MONITOR_V7"
-_SUPPORTED_PROTOCOL_VERSIONS = frozenset(
-    {_PROTOCOL_VERSION, "MONITOR_V6", "MONITOR_V5", "MONITOR_V4"}
-)
-# PROCESS_SKIPPED markers exist since V6; workload records carry the optional
-# start-epoch and command-line columns since V7.
-_PROCESS_SKIP_CAPABLE_VERSIONS = frozenset({_PROTOCOL_VERSION, "MONITOR_V6"})
+# The fixed script and its parser ship inside one process and are re-sent on
+# every probe, so no deployed emitter of an older protocol version can exist;
+# accepting only the current version keeps the parser honest and small.
+_SUPPORTED_PROTOCOL_VERSIONS = frozenset({_PROTOCOL_VERSION})
 
 # The hostname is read inside the system awk pass with a bounded getline, so
 # the default sample runs five external commands instead of six. A missing or
@@ -141,28 +139,25 @@ if [ "$workload_tier" -ge 1 ] && [ "$process_status" -eq 0 ] && [ -n "$process_o
   boot_epoch=$(awk '/^btime / { print $2; exit }' /proc/stat 2>/dev/null)
   clock_ticks=$(getconf CLK_TCK 2>/dev/null)
   case "$clock_ticks" in ''|*[!0-9]*) clock_ticks=100 ;; esac
+  # Identity covers at most the first 512 distinct PIDs per sample so the
+  # workload payload stays far inside the collector's output budget.
   process_pids=$(printf '%s\n' "$process_output" | awk -F, '
     {
       pid=$2
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", pid)
-      if (pid ~ /^[0-9]+$/ && !seen[pid]++) print pid
+      if (pid ~ /^[0-9]+$/ && !seen[pid]++ && ++emitted <= 512) print pid
     }
   ')
   for process_pid in $process_pids; do
     [ -r "/proc/$process_pid/status" ] || continue
-    owner_uid=$(awk '/^Uid:/ { print $2; exit }' "/proc/$process_pid/status" 2>/dev/null)
-    started_ticks=$(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$process_pid/stat" 2>/dev/null)
     command_line=$(head -c 255 "/proc/$process_pid/cmdline" 2>/dev/null | tr '\000' ' ')
+    cgroup_value=""
     if [ "$workload_tier" -ge 2 ]; then
       cgroup_value=$(head -c 16384 "/proc/$process_pid/cgroup" 2>/dev/null)
-      environ_source="/proc/$process_pid/environ"
-    else
-      cgroup_value=""
-      environ_source="/dev/null"
     fi
-    if [ -r "$environ_source" ]; then
-      head -c 65536 "$environ_source" 2>/dev/null
-    fi | tr '\000' '\n' | awk -v pid="$process_pid" -v uid="$owner_uid" -v cgroup="$cgroup_value" -v boot="$boot_epoch" -v ticks="$started_ticks" -v clock="$clock_ticks" -v command_line="$command_line" '
+    if [ "$workload_tier" -ge 2 ] && [ -r "/proc/$process_pid/environ" ]; then
+      head -c 65536 "/proc/$process_pid/environ" 2>/dev/null | tr '\000' '\n'
+    fi | MOCOP_CGROUP="$cgroup_value" MOCOP_COMMAND="$command_line" awk -v pid="$process_pid" -v boot="$boot_epoch" -v clock="$clock_ticks" '
       function clean(value) {
         gsub(/[[:cntrl:]]/, " ", value)
         return substr(value, 1, 255)
@@ -175,6 +170,28 @@ if [ "$workload_tier" -ge 1 ] && [ "$process_status" -eq 0 ] && [ -n "$process_o
       /^POD_NAMESPACE=/ { pod_namespace=substr($0, index($0, "=") + 1) }
       /^KUEUE_LOCAL_QUEUE_NAME=/ { pod_queue=substr($0, index($0, "=") + 1) }
       END {
+        cgroup = ENVIRON["MOCOP_CGROUP"]
+        command_line = ENVIRON["MOCOP_COMMAND"]
+        # One awk owns every per-PID /proc read: the Uid line from status and
+        # the stat line joined into a single record, so a comm containing
+        # newlines cannot break the start-time field position.
+        uid=""
+        status_file = "/proc/" pid "/status"
+        while ((getline proc_line < status_file) > 0) {
+          if (proc_line ~ /^Uid:/) { split(proc_line, uid_fields); uid=uid_fields[2]; break }
+        }
+        close(status_file)
+        stat_buffer=""
+        stat_file = "/proc/" pid "/stat"
+        while ((getline proc_line < stat_file) > 0) {
+          stat_buffer = stat_buffer proc_line " "
+        }
+        close(stat_file)
+        ticks=""
+        if (sub(/^.*\) /, "", stat_buffer)) {
+          split(stat_buffer, stat_fields, " ")
+          ticks = stat_fields[20]
+        }
         # A scheduler identifier is only trusted from an anchored cgroup
         # segment: systemd scopes like "job_1.scope" or "podcast.service" must
         # not be mistaken for Slurm jobs or Kubernetes pods.

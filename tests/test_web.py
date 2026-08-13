@@ -14,7 +14,12 @@ from urllib.request import Request, urlopen
 from mocop.inventory import InventoryRequestError
 from mocop.models import GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
 from mocop.service import StateStore
-from mocop.web import MonitorHttpServer, MonitorRequestHandler, serve_in_thread
+from mocop.web import (
+    API_ROUTES,
+    MonitorHttpServer,
+    MonitorRequestHandler,
+    serve_in_thread,
+)
 
 
 class _Inventory:
@@ -24,6 +29,7 @@ class _Inventory:
         self.collector_settings = {
             "pollIntervalSeconds": 5,
             "probeTimeoutSeconds": 15,
+            "connectTimeoutSeconds": 10,
             "maxWorkers": 16,
         }
         self.maintenance_windows = {}
@@ -43,6 +49,9 @@ class _Inventory:
 
     def topology(self):
         return self.connection_topology
+
+    def writable(self):
+        return True
 
     def snapshot(self):
         return {
@@ -82,6 +91,7 @@ class _Inventory:
             self.maintenance_windows[host] = {
                 "until": "2030-06-15T12:30:00Z",
                 "reason": reason.strip(),
+                "active": True,
             }
         else:
             self.maintenance_windows.pop(host, None)
@@ -121,10 +131,38 @@ class _Inventory:
 class _ProbeControl:
     def __init__(self) -> None:
         self.hosts = []
+        self.responses = {}
 
     def request_probe(self, host):
         self.hosts.append(host)
+        if host in self.responses:
+            return dict(self.responses[host])
         return {"status": "queued", "accepted": True, "host": host}
+
+
+class _StubNotificationSink:
+    """Enabled notification sink whose queue acceptance is scripted."""
+
+    def __init__(self, queued: bool) -> None:
+        self.queued = queued
+
+    def status(self):
+        return {
+            "enabled": True,
+            "healthy": True,
+            "queuedDeliveries": 0,
+            "droppedDeliveries": 0,
+            "endpoints": [],
+        }
+
+    def test(self):
+        return self.queued
+
+    def publish(self, events, correlations):
+        return None
+
+    def close(self, timeout_seconds=5.0):
+        return None
 
 
 class WebTests(unittest.TestCase):
@@ -155,6 +193,30 @@ class WebTests(unittest.TestCase):
             return raised.exception.headers
         finally:
             raised.exception.close()
+
+    def assert_json_error(self, request: Request | str, status: int, code: str):
+        """Assert one JSON error envelope carrying the stable machine code."""
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request, timeout=2)
+        error = raised.exception
+        try:
+            self.assertEqual(error.code, status)
+            self.assertIn("application/json", error.headers.get("Content-Type", ""))
+            payload = json.load(error)
+            self.assertEqual(payload.get("code"), code)
+            self.assertIsInstance(payload.get("error"), str)
+            return error.headers, payload
+        finally:
+            error.close()
+
+    def request_status(self, request: Request | str) -> int:
+        try:
+            with urlopen(request, timeout=2) as response:
+                response.read()
+                return response.status
+        except HTTPError as error:
+            error.close()
+            return error.code
 
     def test_dashboard_reads_and_event_streams_mark_viewer_presence(self) -> None:
         self.assertFalse(self.state.dashboard_attended())
@@ -252,6 +314,54 @@ class WebTests(unittest.TestCase):
         changed = self.server.snapshot_payload(self.state.snapshot())
         self.assertIsNot(first, changed)
         self.assertNotEqual(first, changed)
+
+    def test_sse_frames_are_cached_per_state_revision(self) -> None:
+        frame = self.server.snapshot_frame(self.state.snapshot())
+        payload = self.server.snapshot_payload(self.state.snapshot())
+
+        self.assertEqual(frame, b"event: snapshot\ndata: " + payload + b"\n\n")
+        # Same revision, same bytes object: no per-client reassembly.
+        self.assertIs(frame, self.server.snapshot_frame(self.state.snapshot()))
+
+        self.state.set_hosts(("gpu-01",))
+        changed = self.server.snapshot_frame(self.state.snapshot())
+        self.assertIsNot(frame, changed)
+        self.assertNotEqual(frame, changed)
+
+    def test_pure_read_paths_prefer_the_state_snapshot_view(self) -> None:
+        # snapshot_view() is being introduced by the service layer in
+        # parallel; web must pick it up when present and fall back otherwise.
+        calls = []
+        baseline = self.state.snapshot
+
+        def snapshot_view():
+            calls.append(True)
+            return baseline()
+
+        self.state.snapshot_view = snapshot_view
+        self.addCleanup(delattr, self.state, "snapshot_view")
+
+        with urlopen(f"{self.base}/api/snapshot", timeout=2) as response:
+            self.assertEqual(response.status, 200)
+            response.read()
+        with urlopen(f"{self.base}/metrics", timeout=2) as response:
+            self.assertEqual(response.status, 200)
+            response.read()
+
+        self.assertEqual(len(calls), 2)
+
+    def test_sse_emits_named_heartbeat_events(self) -> None:
+        with (
+            patch("mocop.web._SSE_HEARTBEAT_SECONDS", 0.05),
+            patch("mocop.web._SSE_STOP_POLL_SECONDS", 0.02),
+        ):
+            server = self.standalone_server()
+            sock = self.open_event_stream(server.server_port)
+            data = self.read_until(sock, b"event: heartbeat\ndata: {}\n\n")
+
+        # The stream still opens with a snapshot before idling into
+        # browser-visible named heartbeats.
+        self.assertIn(b"event: snapshot", data)
 
     def test_expected_client_disconnects_do_not_hide_server_errors(self) -> None:
         with patch.object(ThreadingHTTPServer, "handle_error") as inherited:
@@ -361,11 +471,42 @@ class WebTests(unittest.TestCase):
         self.assertIn("age(snapshot.lastPollCompletedAt)", script)
         self.assertNotIn("age(snapshot.generatedAt)", script)
 
+    def test_static_assets_support_etag_revalidation(self) -> None:
+        conn = self.open_connection(self.server.server_port)
+
+        conn.request("GET", "/app.js")
+        first = conn.getresponse()
+        body = first.read()
+        etag = first.getheader("ETag")
+        self.assertEqual(first.status, 200)
+        self.assertTrue(etag and etag.startswith('"') and etag.endswith('"'))
+        # Negotiated caching: revalidate every time, then reuse on a match.
+        self.assertEqual(first.getheader("Cache-Control"), "no-cache")
+
+        conn.request("GET", "/app.js", headers={"If-None-Match": etag})
+        cached = conn.getresponse()
+        self.assertEqual(cached.status, 304)
+        self.assertEqual(cached.getheader("ETag"), etag)
+        self.assertEqual(cached.read(), b"")
+
+        conn.request("GET", "/app.js", headers={"If-None-Match": f'"stale", W/{etag}'})
+        listed = conn.getresponse()
+        self.assertEqual(listed.status, 304)
+        self.assertEqual(listed.read(), b"")
+
+        conn.request("GET", "/app.js", headers={"If-None-Match": '"stale"'})
+        refreshed = conn.getresponse()
+        self.assertEqual(refreshed.status, 200)
+        self.assertEqual(refreshed.read(), body)
+
     def test_service_restart_capability_is_explicit_and_disabled_by_default(
         self,
     ) -> None:
         with urlopen(f"{self.base}/api/service", timeout=2) as response:
             capability = json.load(response)
+            # The endpoint survives as a compatible alias of /api/meta but
+            # advertises its deprecation.
+            self.assertEqual(response.headers["Deprecation"], "true")
         self.assertEqual(capability, {"restartSupported": False})
 
         request = self.poll_interval_request(
@@ -424,6 +565,167 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status, 202)
         self.assertEqual(payload, {"status": "restarting"})
         self.assertTrue(requested.wait(1))
+
+    def test_meta_describes_versions_capabilities_and_endpoints(self) -> None:
+        with urlopen(f"{self.base}/api/meta", timeout=2) as response:
+            meta = json.load(response)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(meta["apiVersion"], "1")
+        self.assertEqual(meta["appVersion"], "0.8.0")
+        self.assertEqual(meta["schemaVersion"], 1)
+        self.assertEqual(
+            meta["capabilities"],
+            {
+                "restartSupported": False,
+                "manualProbeSupported": True,
+                "configurationWriteSupported": True,
+            },
+        )
+        # The endpoint list is the module-level manifest, verbatim.
+        self.assertEqual(
+            meta["endpoints"],
+            [
+                {"method": method, "path": path, "access": access}
+                for method, path, access in API_ROUTES
+            ],
+        )
+
+        self.assert_json_error(f"{self.base}/api/meta?x=1", 400, "QUERY_NOT_ALLOWED")
+
+        head = self.open_connection(self.server.server_port)
+        head.request("HEAD", "/api/meta")
+        mirrored = head.getresponse()
+        self.assertEqual(mirrored.status, 200)
+        self.assertGreater(int(mirrored.getheader("Content-Length")), 0)
+        self.assertEqual(mirrored.read(), b"")
+
+        # Wiring flips the capability flags: restart present, inventory and
+        # probe control absent.
+        bare = self.standalone_server(restart=lambda: None)
+        with urlopen(
+            f"http://127.0.0.1:{bare.server_port}/api/meta", timeout=2
+        ) as response:
+            capabilities = json.load(response)["capabilities"]
+        self.assertEqual(
+            capabilities,
+            {
+                "restartSupported": True,
+                "manualProbeSupported": False,
+                "configurationWriteSupported": False,
+            },
+        )
+
+    def test_meta_endpoint_manifest_matches_live_routes(self) -> None:
+        for method, path, access in API_ROUTES:
+            with self.subTest(method=method, path=path):
+                if path == "/api/events":
+                    sock = self.open_event_stream(self.server.server_port)
+                    self.assertIn(b"200 OK", self.read_until(sock, b"event: snapshot"))
+                    continue
+                if method == "GET":
+                    headers = (
+                        {"X-Monitor-Request": "dashboard"} if access == "reader" else {}
+                    )
+                    status = self.request_status(
+                        Request(f"{self.base}{path}", headers=headers)
+                    )
+                    # Routed paths may reject the bare probe (missing query,
+                    # not ready), but they must exist and accept GET.
+                    self.assertNotIn(status, {404, 405})
+                else:
+                    status = self.request_status(
+                        Request(f"{self.base}{path}", data=b"{}", method="POST")
+                    )
+                    # The same-origin gate proves the POST route exists.
+                    self.assertEqual(status, 403)
+
+    def test_unknown_api_paths_and_method_mismatches_return_json(self) -> None:
+        headers, _ = self.assert_json_error(
+            f"{self.base}/api/unknown", 404, "NOT_FOUND"
+        )
+        self.assertIsNone(headers.get("Allow"))
+        self.assert_json_error(f"{self.base}/healthz/extra", 404, "NOT_FOUND")
+        self.assert_json_error(f"{self.base}/readyz/extra", 404, "NOT_FOUND")
+        self.assert_json_error(f"{self.base}/metrics/extra", 404, "NOT_FOUND")
+        self.assert_json_error(
+            f"{self.base}/metrics?host=gpu-01", 400, "QUERY_NOT_ALLOWED"
+        )
+
+        post_to_read = Request(f"{self.base}/api/snapshot", data=b"{}", method="POST")
+        headers, _ = self.assert_json_error(post_to_read, 405, "METHOD_NOT_ALLOWED")
+        self.assertEqual(headers["Allow"], "GET, HEAD")
+
+        post_to_events = Request(f"{self.base}/api/events", data=b"{}", method="POST")
+        headers, _ = self.assert_json_error(post_to_events, 405, "METHOD_NOT_ALLOWED")
+        self.assertEqual(headers["Allow"], "GET")
+
+        headers, _ = self.assert_json_error(
+            f"{self.base}/api/settings/collector", 405, "METHOD_NOT_ALLOWED"
+        )
+        self.assertEqual(headers["Allow"], "POST")
+
+        post_to_unknown = Request(
+            f"{self.base}/api/settings/unknown", data=b"{}", method="POST"
+        )
+        self.assert_json_error(post_to_unknown, 404, "NOT_FOUND")
+
+        # Static page paths keep the HTML error page contract.
+        headers = self.assert_http_error(f"{self.base}/missing", 404)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+
+    def test_api_errors_carry_stable_machine_readable_codes(self) -> None:
+        self.assert_json_error(
+            f"{self.base}/api/history?host=--proxy&limit=10", 400, "INVALID_QUERY"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/history?host=gpu-01&limit=999", 400, "INVALID_LIMIT"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/history?host=missing&limit=10", 404, "UNKNOWN_HOST"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/history?debug=1", 400, "UNKNOWN_QUERY_PARAMETER"
+        )
+        self.assert_json_error(f"{self.base}/api/inventory", 403, "UNTRUSTED_ORIGIN")
+
+        cross_origin = self.poll_interval_request(
+            b'{"pollIntervalSeconds":10}',
+            origin="https://attacker.example",
+            fetch_site="cross-site",
+        )
+        self.assert_json_error(cross_origin, 403, "UNTRUSTED_ORIGIN")
+
+        wrong_type = self.poll_interval_request(
+            b'{"pollIntervalSeconds":10}',
+            origin=self.base,
+            content_type="text/plain",
+        )
+        self.assert_json_error(wrong_type, 415, "UNSUPPORTED_MEDIA_TYPE")
+
+        oversized = self.poll_interval_request(
+            b'{"pollIntervalSeconds":10,"padding":"' + b"x" * 129 + b'"}',
+            origin=self.base,
+        )
+        self.assert_json_error(oversized, 413, "PAYLOAD_TOO_LARGE")
+
+        invalid_json = self.poll_interval_request(b"{", origin=self.base)
+        self.assert_json_error(invalid_json, 400, "INVALID_JSON")
+
+        bad_schema = self.poll_interval_request(b'{"other":1}', origin=self.base)
+        self.assert_json_error(bad_schema, 400, "INVALID_SCHEMA")
+
+        out_of_bounds = self.poll_interval_request(
+            b'{"pollIntervalSeconds":1}', origin=self.base
+        )
+        self.assert_json_error(out_of_bounds, 400, "INVALID_SETTINGS")
+
+        stale_inventory = self.poll_interval_request(
+            b'{"action":"add","host":"unknown"}',
+            origin=self.base,
+            path="/api/settings/hosts",
+        )
+        self.assert_json_error(stale_inventory, 409, "INVENTORY_CHANGED")
 
     def test_readiness_and_history_contract(self) -> None:
         self.assert_http_error(f"{self.base}/readyz", 503)
@@ -541,6 +843,62 @@ class WebTests(unittest.TestCase):
             fetch_site="cross-site",
         )
         self.assert_http_error(cross_origin, 403)
+
+    def test_rate_limited_probe_reports_retry_after_and_code(self) -> None:
+        self.probe_control.responses["gpu-01"] = {
+            "status": "rate_limited",
+            "accepted": False,
+            "host": "gpu-01",
+            "retryAfterSeconds": 3.2,
+        }
+        request = self.poll_interval_request(
+            b'{"host":"gpu-01"}', origin=self.base, path="/api/probe"
+        )
+
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request, timeout=2)
+        error = raised.exception
+        try:
+            self.assertEqual(error.code, 429)
+            # The integral header rounds the cooldown up so clients never
+            # retry early.
+            self.assertEqual(error.headers["Retry-After"], "4")
+            payload = json.load(error)
+        finally:
+            error.close()
+        self.assertEqual(payload["status"], "rate_limited")
+        self.assertEqual(payload["code"], "RATE_LIMITED")
+
+    def test_notification_test_distinguishes_disabled_from_rate_limited(self) -> None:
+        # Without a configured sink the endpoint is unavailable, not limited.
+        disabled = self.poll_interval_request(
+            b"{}", origin=self.base, path="/api/notifications/test"
+        )
+        self.assert_json_error(disabled, 503, "NOTIFICATIONS_DISABLED")
+
+        sink = _StubNotificationSink(queued=False)
+        state = StateStore(5, notifications=sink)
+        server, thread = serve_in_thread("127.0.0.1", 0, state)
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_port}"
+
+        limited = self.poll_interval_request(
+            b"{}", origin=base, path="/api/notifications/test"
+        )
+        limited.full_url = f"{base}/api/notifications/test"
+        self.assert_json_error(limited, 429, "RATE_LIMITED")
+
+        sink.queued = True
+        accepted = self.poll_interval_request(
+            b"{}", origin=base, path="/api/notifications/test"
+        )
+        accepted.full_url = f"{base}/api/notifications/test"
+        with urlopen(accepted, timeout=2) as response:
+            payload = json.load(response)
+        self.assertEqual(response.status, 202)
+        self.assertEqual(payload, {"status": "queued"})
 
     def test_exposes_static_connection_topology_without_query_parameters(self) -> None:
         request = Request(
@@ -775,6 +1133,17 @@ class WebTests(unittest.TestCase):
         with urlopen(request, timeout=2) as response:
             payload = json.load(response)
 
+        # The alias keeps its legacy response shape but flags its deprecation.
+        self.assertEqual(
+            set(payload),
+            {
+                "version",
+                "startedAt",
+                "pollIntervalSeconds",
+                "collectionStaleAfterSeconds",
+            },
+        )
+        self.assertEqual(response.headers["Deprecation"], "true")
         self.assertEqual(payload["pollIntervalSeconds"], 10)
         self.assertEqual(payload["collectionStaleAfterSeconds"], 30)
         self.assertIsInstance(payload["version"], int)
@@ -804,14 +1173,38 @@ class WebTests(unittest.TestCase):
             {
                 "pollIntervalSeconds": 2,
                 "probeTimeoutSeconds": 24,
+                "connectTimeoutSeconds": 10,
                 "maxWorkers": 8,
             },
         )
         self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 2)
 
+    def test_updates_a_collector_settings_subset(self) -> None:
+        request = self.poll_interval_request(
+            b'{"probeTimeoutSeconds":30}',
+            origin=self.base,
+            path="/api/settings/collector",
+        )
+
+        with urlopen(request, timeout=2) as response:
+            payload = json.load(response)
+
+        self.assertEqual(
+            payload["collectorSettings"],
+            {
+                "pollIntervalSeconds": 5,
+                "probeTimeoutSeconds": 30,
+                "connectTimeoutSeconds": 10,
+                "maxWorkers": 16,
+            },
+        )
+        # Omitted fields stay untouched, including the runtime poll cadence.
+        self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 5)
+
     def test_rejects_invalid_collector_settings(self) -> None:
         cases = (
-            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24}',
+            b"{}",
+            b'{"connectTimeoutSeconds":9}',
             b'{"pollIntervalSeconds":1,"probeTimeoutSeconds":24,"maxWorkers":8}',
             b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":true,"maxWorkers":8}',
             b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":2.5}',

@@ -48,6 +48,18 @@ Here, **AI-native** means that the interface is built around GPU capacity, task 
 
 Mocop requires Linux, Python 3.10 or newer, OpenSSH, and non-interactive SSH access to each remote node. Verify host fingerprints manually before enabling unattended collection.
 
+The steps below install Mocop with [uv](https://docs.astral.sh/uv/). If uv is not installed yet:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Mocop runs as a user-level systemd service. Without lingering, user services stop as soon as you log out; enable lingering once so the monitor survives logouts:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
 ### 1. Configure SSH
 
 Add one explicit alias per compute node to `~/.ssh/config`:
@@ -78,7 +90,18 @@ mocop init --host gpu-node-01 --host gpu-node-02
 
 `mocop init` creates `~/.config/mocop/config.json` with mode `0600`. It monitors only the aliases passed with `--host`, disables automatic discovery, and uses a 5-second collection interval.
 
-### 3. Start the dashboard
+### 3. Validate the configuration and the SSH path
+
+```bash
+mocop config check
+mocop doctor
+```
+
+`mocop config check` parses and validates the configuration without starting the web server or opening any SSH connection. It reports the resolved config path, host count, persistence/workload/topology state, and each webhook's environment-variable names with their set/unset status — never their values. It exits `0` when the configuration is valid and `2` when it is not.
+
+`mocop doctor` then verifies non-interactive SSH reachability and connection reuse for every monitored alias (exit `0` when every alias is usable, `1` otherwise).
+
+### 4. Start the dashboard
 
 ```bash
 mocop service install
@@ -119,7 +142,18 @@ The generated file is complete. Edit it directly only when you need fields not e
 - `expected_gpu_counts` reports missing devices.
 - `host_groups` provides shared navigation groups.
 - `host_overrides` changes cadence or timeout for a measured slow node, and its optional `display_name` gives an alias a human-readable fleet label without changing collection identity.
-- `maintenance_windows` entries define either a one-shot `until` or a weekly `recurrence` (`{"weekday": 0-6, "start": "HH:MM", "duration_minutes": N}`, all in UTC, Monday is 0); recurring windows silence actionable alerts during every instance while collection continues.
+- `maintenance_windows` entries define either a one-shot `until` or a weekly `recurrence` (`{"weekday": 0-6, "start": "HH:MM", "duration_minutes": N}`, all in UTC, Monday is 0); recurring windows silence actionable alerts during every instance while collection continues. A complete weekly window that silences `gpu-node-02` every Sunday from 02:00 to 04:00 UTC:
+
+```json
+{
+  "maintenance_windows": {
+    "gpu-node-02": {
+      "reason": "weekly firmware maintenance",
+      "recurrence": {"weekday": 6, "start": "02:00", "duration_minutes": 120}
+    }
+  }
+}
+```
 - `gpu_process_poll_interval_seconds` controls timestamped GPU task refresh independently; the 15-second default reduces NVIDIA command overhead while core GPU data keeps the normal cadence.
 - `incident_overrides` applies bounded host/group thresholds and exact disk-mount exclusions; host settings take precedence.
 - `incident_actions` stores dashboard acknowledgements and silences with UTC expiry. It is maintained by the UI in normal use.
@@ -127,7 +161,7 @@ The generated file is complete. Edit it directly only when you need fields not e
 - `retry_jitter_pct` disperses retries after a shared SSH path fails; the default is 15%.
 - `topology` describes the connection tree. Its safe aliases are display-only unless they also appear in the active `hosts` inventory.
 - `persistence.enabled` retains bounded trends and incident context in SQLite; it is off by default.
-- `workloads.mode: "identity"` adds the process owner (real UID via passwd), full command line, and true start time from bounded `/proc` reads at roughly a third of the cost of `"auto"`; `"auto"` additionally recognizes Slurm/Kubernetes identity from cgroup and environment reads. Both are off by default; without them the GPU dialog still shows a monitor-observed runtime lower bound per process.
+- `workloads.mode: "identity"` adds the process owner (real UID via passwd), full command line, and true start time from bounded `/proc` reads at roughly a third of the cost of `"auto"`; `"auto"` additionally recognizes Slurm/Kubernetes identity from cgroup and environment reads. Both are off by default; without them the GPU dialog still shows a monitor-observed runtime lower bound per process. Workload identity covers at most the first 512 distinct GPU process PIDs per sample.
 
 Webhook destinations and signing secrets stay out of JSON. A minimal endpoint uses
 environment-variable names:
@@ -183,6 +217,10 @@ The dashboard allows a 2–60 second interval, a 2–300 second probe timeout th
   available only for the installed user service and reloads the page after recovery.
 - Upload a PNG, JPEG, WebP, or AVIF background up to 32 MiB. Sources above 8 MiB are compressed locally; no image is uploaded.
 - Export one current snapshot with `mocop --once > snapshot.json`.
+
+## HTTP API
+
+Everything the dashboard shows is also a small JSON API with stable machine-readable error codes, a self-describing `GET /api/meta` endpoint, and documented access tiers for automation. See the [API reference](docs/API.md) for every endpoint, field table, and agent playbook — including why non-viewer automation must not send the `X-Monitor-Request: dashboard` header.
 
 ## Prometheus
 
@@ -240,6 +278,27 @@ Create `~/.ssh/sockets` yourself with mode `0700`; Mocop never edits SSH configu
 
 If several nodes that share one `ProxyJump`, VPN, or FRP route fail together, inspect that shared route first. Restarting Mocop does not repair an unavailable tunnel or remote SSH service.
 
+### Troubleshooting
+
+Four commands cover most "why is nothing showing up" investigations:
+
+```bash
+journalctl --user -u mocop -f              # follow the service logs live
+curl -s http://127.0.0.1:8787/healthz      # liveness + cumulative SSH transport retries
+curl -s http://127.0.0.1:8787/readyz       # readiness; 503 with a reason until the first successful sample
+mocop doctor --probe                       # one real production collection per alias
+```
+
+`mocop doctor --probe` runs the exact production collection path end to end and reports, per alias, the probe status, latency, GPU count, process count, and workload coverage. It needs live connection tests, so it cannot be combined with `--no-connect`.
+
+### CLI exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success. |
+| `1` | Diagnosis or collection failure: `mocop doctor` found at least one unusable alias, or the running monitor's collector or listener failed. |
+| `2` | Configuration or usage error: invalid configuration, unknown alias filter, or conflicting flags such as `--probe` with `--no-connect`. |
+
 ## Security
 
 Mocop accepts only explicit SSH aliases and runs one fixed, read-only probe. It enforces host-key checking, batch mode, timeouts, output limits, bounded concurrency, private atomic configuration writes, and safe rendering of remote text.
@@ -257,7 +316,7 @@ uvx --from ruff==0.12.11 ruff format --check .
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-See [CONTRIBUTING.md](.github/CONTRIBUTING.md), [architecture](docs/ARCHITECTURE.md), [performance](docs/PERFORMANCE.md), and the [changelog](docs/CHANGELOG.md).
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md), [architecture](docs/ARCHITECTURE.md), [API reference](docs/API.md), [performance](docs/PERFORMANCE.md), and the [changelog](docs/CHANGELOG.md).
 
 ## License
 

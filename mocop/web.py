@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import socket
@@ -54,6 +55,59 @@ _COLLECTOR_SETTINGS_KEYS = {
     "probeTimeoutSeconds",
     "maxWorkers",
 }
+_API_VERSION = "1"
+_API_SCHEMA_VERSION = 1
+# Single source of truth for the HTTP API surface. `/api/meta` serializes this
+# manifest and the JSON 404/405 fallbacks consult it, so a route change must
+# land here to stay visible; tests compare it against live routing behavior.
+# Access levels: listener = open read, reader = dashboard-marked read,
+# writer = same-origin dashboard write.
+API_ROUTES: tuple[tuple[str, str, str], ...] = (
+    ("GET", "/api/snapshot", "listener"),
+    ("GET", "/api/events", "listener"),
+    ("GET", "/api/history", "listener"),
+    ("GET", "/api/incidents", "listener"),
+    ("GET", "/api/meta", "listener"),
+    ("GET", "/api/service", "listener"),
+    ("GET", "/healthz", "listener"),
+    ("GET", "/readyz", "listener"),
+    ("GET", "/metrics", "listener"),
+    ("GET", "/api/gpu-history", "reader"),
+    ("GET", "/api/diagnostics", "reader"),
+    ("GET", "/api/inventory", "reader"),
+    ("GET", "/api/topology", "reader"),
+    ("POST", "/api/settings/collector", "writer"),
+    ("POST", "/api/settings/poll-interval", "writer"),
+    ("POST", "/api/settings/hosts", "writer"),
+    ("POST", "/api/settings/maintenance", "writer"),
+    ("POST", "/api/settings/host-group", "writer"),
+    ("POST", "/api/settings/incident-action", "writer"),
+    ("POST", "/api/probe", "writer"),
+    ("POST", "/api/notifications/test", "writer"),
+    ("POST", "/api/service/restart", "writer"),
+)
+_API_ENDPOINTS: tuple[dict[str, str], ...] = tuple(
+    {"method": method, "path": path, "access": access}
+    for method, path, access in API_ROUTES
+)
+_ROUTE_METHODS: dict[str, frozenset[str]] = {
+    path: frozenset(
+        route_method for route_method, route_path, _ in API_ROUTES if route_path == path
+    )
+    for _, path, _ in API_ROUTES
+}
+_WRITE_BODY_LIMITS = {
+    "/api/settings/poll-interval": _MAX_SETTINGS_BODY_BYTES,
+    "/api/settings/collector": _MAX_COLLECTOR_BODY_BYTES,
+    "/api/settings/hosts": _MAX_INVENTORY_BODY_BYTES,
+    "/api/settings/maintenance": _MAX_MAINTENANCE_BODY_BYTES,
+    "/api/settings/host-group": _MAX_HOST_GROUP_BODY_BYTES,
+    "/api/service/restart": _MAX_RESTART_BODY_BYTES,
+    "/api/settings/incident-action": _MAX_INCIDENT_ACTION_BODY_BYTES,
+    "/api/probe": _MAX_PROBE_BODY_BYTES,
+    "/api/notifications/test": _MAX_NOTIFICATION_TEST_BODY_BYTES,
+}
+_DEPRECATED_ENDPOINT_HEADERS = (("Deprecation", "true"),)
 # Hostnames a browser can present when it genuinely reached this server over
 # the loopback interface. DNS rebinding presents the attacker's own domain in
 # Host/Origin instead, so pinning these names closes the rebinding bypass.
@@ -62,10 +116,34 @@ _WILDCARD_BIND_HOSTS = frozenset({"", "0.0.0.0", "::"})
 _SSE_HEARTBEAT_SECONDS = 15.0
 # SSE loops wake at this cadence to notice the server shutdown event.
 _SSE_STOP_POLL_SECONDS = 1.0
+_SSE_SNAPSHOT_PREFIX = b"event: snapshot\ndata: "
+_SSE_HEARTBEAT_FRAME = b"event: heartbeat\ndata: {}\n\n"
 _SERVICE_UNAVAILABLE_RESPONSE = (
     b"HTTP/1.1 503 Service Unavailable\r\n"
     b"Connection: close\r\nContent-Length: 0\r\n\r\n"
 )
+
+
+def _is_api_family_path(path: str) -> bool:
+    """Paths whose failures must stay JSON instead of the HTML error page."""
+    if path == "/api" or path.startswith("/api/"):
+        return True
+    return any(
+        path == prefix or path.startswith(prefix + "/")
+        for prefix in ("/healthz", "/readyz", "/metrics")
+    )
+
+
+def _allowed_methods_header(path: str) -> str:
+    methods = _ROUTE_METHODS[path]
+    allowed = []
+    if "GET" in methods:
+        allowed.append("GET")
+        if path != "/api/events":  # the event stream refuses HEAD
+            allowed.append("HEAD")
+    if "POST" in methods:
+        allowed.append("POST")
+    return ", ".join(allowed)
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -129,6 +207,7 @@ class MonitorHttpServer(ThreadingHTTPServer):
         self._snapshot_cache_lock = threading.Lock()
         self._snapshot_cache_key: tuple[object, ...] | None = None
         self._snapshot_cache_payload = b""
+        self._snapshot_cache_frame = b""
         super().__init__(address, MonitorRequestHandler)
 
     def process_request(
@@ -161,7 +240,7 @@ class MonitorHttpServer(ThreadingHTTPServer):
         self.shutdown_event.set()
         super().server_close()
 
-    def snapshot_payload(self, snapshot: dict[str, object]) -> bytes:
+    def _snapshot_cache(self, snapshot: dict[str, object]) -> tuple[bytes, bytes]:
         persistence = snapshot.get("persistence", {})
         notifications = snapshot.get("notifications", {})
         key = (
@@ -172,13 +251,23 @@ class MonitorHttpServer(ThreadingHTTPServer):
         )
         with self._snapshot_cache_lock:
             if key != self._snapshot_cache_key:
-                self._snapshot_cache_payload = json.dumps(
+                payload = json.dumps(
                     snapshot,
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ).encode("utf-8")
+                self._snapshot_cache_payload = payload
+                # The framed copy is cached too so each SSE client write
+                # reuses one bytes object instead of concatenating per send.
+                self._snapshot_cache_frame = _SSE_SNAPSHOT_PREFIX + payload + b"\n\n"
                 self._snapshot_cache_key = key
-            return self._snapshot_cache_payload
+            return self._snapshot_cache_payload, self._snapshot_cache_frame
+
+    def snapshot_payload(self, snapshot: dict[str, object]) -> bytes:
+        return self._snapshot_cache(snapshot)[0]
+
+    def snapshot_frame(self, snapshot: dict[str, object]) -> bytes:
+        return self._snapshot_cache(snapshot)[1]
 
     def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
         """Ignore expected client disconnects while preserving real server errors."""
@@ -208,13 +297,27 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def monitor_server(self) -> MonitorHttpServer:
         return self.server  # type: ignore[return-value]
 
+    def _read_only_snapshot(self) -> dict[str, object]:
+        """State projection for pure serialization; never mutated by callers.
+
+        The service layer is introducing StateStore.snapshot_view() (a
+        read-only reference to the internal cached projection) in parallel;
+        fall back to the deep-copying snapshot() until it exists.
+        """
+        state = self.monitor_server.state
+        return getattr(state, "snapshot_view", state.snapshot)()
+
     def _split_request_target(self) -> SplitResult | None:
         """Parse the request target, mapping malformed URLs to a JSON 400."""
         try:
             return urlsplit(self.path)
         except ValueError:
             self.close_connection = True
-            self._send_json({"error": "invalid request target"}, HTTPStatus.BAD_REQUEST)
+            self._send_error(
+                "invalid request target",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_REQUEST_TARGET",
+            )
             return None
 
     def _refuse_request_body(self) -> bool:
@@ -233,8 +336,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             ambiguous = not (length.isascii() and length.isdigit()) or int(length) != 0
         if ambiguous:
             self.close_connection = True
-            self._send_json(
-                {"error": "request body is not allowed"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "request body is not allowed",
+                HTTPStatus.BAD_REQUEST,
+                code="REQUEST_BODY_NOT_ALLOWED",
             )
         return ambiguous
 
@@ -259,14 +364,15 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             self.monitor_server.state.record_dashboard_activity()
         path = request_url.path
         if path == "/api/snapshot":
-            snapshot = self.monitor_server.state.snapshot()
+            snapshot = self._read_only_snapshot()
             self._send_json_payload(self.monitor_server.snapshot_payload(snapshot))
             return
         if path == "/api/events":
             if self._head_only:
-                self._send_json(
-                    {"error": "method not allowed"},
+                self._send_error(
+                    "method not allowed",
                     HTTPStatus.METHOD_NOT_ALLOWED,
+                    code="METHOD_NOT_ALLOWED",
                     extra_headers=(("Allow", "GET"),),
                 )
                 return
@@ -290,20 +396,30 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/diagnostics":
             self._send_diagnostics(request_url.query)
             return
+        if path == "/api/meta":
+            self._send_meta(request_url.query)
+            return
         if path == "/api/service":
             if request_url.query:
-                self._send_json(
-                    {"error": "query parameters are not allowed"},
+                self._send_error(
+                    "query parameters are not allowed",
                     HTTPStatus.BAD_REQUEST,
+                    code="QUERY_NOT_ALLOWED",
                 )
                 return
+            # Deprecated alias of the /api/meta capabilities block.
             self._send_json(
-                {"restartSupported": self.monitor_server.restart is not None}
+                {"restartSupported": self.monitor_server.restart is not None},
+                extra_headers=_DEPRECATED_ENDPOINT_HEADERS,
             )
             return
         if path == "/metrics":
             if request_url.query:
-                self.send_error(HTTPStatus.BAD_REQUEST)
+                self._send_error(
+                    "query parameters are not allowed",
+                    HTTPStatus.BAD_REQUEST,
+                    code="QUERY_NOT_ALLOWED",
+                )
                 return
             self._send_openmetrics()
             return
@@ -326,19 +442,94 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         static = _STATIC_ROUTES.get(path)
         if static is None:
-            self.send_error(HTTPStatus.NOT_FOUND)
+            # HEAD mirrors GET, so the method to match against stays GET.
+            self._send_route_fallback("GET", path)
             return
-        filename, content_type = static
+        self._send_static(*static)
+
+    def _send_static(self, filename: str, content_type: str) -> None:
         try:
             payload = (_STATIC_ROOT / filename).read_bytes()
         except OSError:
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
             return
+        # Strong content validator: revalidation stays correct across restarts
+        # and deployments because it depends only on the bytes served.
+        etag = f'"{hashlib.sha256(payload).hexdigest()}"'
+        if self._client_cache_is_current(etag):
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self._common_headers(content_type, cache="no-cache")
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
         self.send_response(HTTPStatus.OK)
         self._common_headers(content_type, cache="no-cache")
+        self.send_header("ETag", etag)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self._write_body(payload)
+
+    def _client_cache_is_current(self, etag: str) -> bool:
+        header = self.headers.get("If-None-Match")
+        if header is None:
+            return False
+        if header.strip() == "*":
+            return True
+        # If-None-Match uses the weak comparison: a W/ prefix still matches.
+        candidates = {value.strip().removeprefix("W/") for value in header.split(",")}
+        return etag in candidates
+
+    def _send_meta(self, query: str) -> None:
+        if query:
+            self._send_error(
+                "query parameters are not allowed",
+                HTTPStatus.BAD_REQUEST,
+                code="QUERY_NOT_ALLOWED",
+            )
+            return
+        server = self.monitor_server
+        self._send_json(
+            {
+                "apiVersion": _API_VERSION,
+                "appVersion": __version__,
+                "schemaVersion": _API_SCHEMA_VERSION,
+                "capabilities": {
+                    "restartSupported": server.restart is not None,
+                    "manualProbeSupported": server.probe_control is not None,
+                    "configurationWriteSupported": (
+                        self._configuration_write_supported()
+                    ),
+                },
+                "endpoints": list(_API_ENDPOINTS),
+            }
+        )
+
+    def _configuration_write_supported(self) -> bool:
+        """Writable-config capability without scanning or connecting over SSH."""
+        inventory = self.monitor_server.inventory
+        if inventory is None:
+            return False
+        writable = getattr(inventory, "writable", None)
+        if not callable(writable):
+            # Controllers predating the lightweight check degrade to existence.
+            return True
+        return bool(writable())
+
+    def _send_route_fallback(self, method: str, path: str) -> None:
+        """JSON 404/405 for API-family paths; static paths keep the HTML page."""
+        if not _is_api_family_path(path):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        methods = _ROUTE_METHODS.get(path)
+        if methods and method not in methods:
+            self._send_error(
+                "method not allowed",
+                HTTPStatus.METHOD_NOT_ALLOWED,
+                code="METHOD_NOT_ALLOWED",
+                extra_headers=(("Allow", _allowed_methods_header(path)),),
+            )
+            return
+        self._send_error("unknown API path", HTTPStatus.NOT_FOUND, code="NOT_FOUND")
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         # Settings writes are rare, and invalid requests may intentionally leave an
@@ -348,39 +539,32 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         request_url = self._split_request_target()
         if request_url is None:
             return
-        write_limits = {
-            "/api/settings/poll-interval": _MAX_SETTINGS_BODY_BYTES,
-            "/api/settings/collector": _MAX_COLLECTOR_BODY_BYTES,
-            "/api/settings/hosts": _MAX_INVENTORY_BODY_BYTES,
-            "/api/settings/maintenance": _MAX_MAINTENANCE_BODY_BYTES,
-            "/api/settings/host-group": _MAX_HOST_GROUP_BODY_BYTES,
-            "/api/service/restart": _MAX_RESTART_BODY_BYTES,
-            "/api/settings/incident-action": _MAX_INCIDENT_ACTION_BODY_BYTES,
-            "/api/probe": _MAX_PROBE_BODY_BYTES,
-            "/api/notifications/test": _MAX_NOTIFICATION_TEST_BODY_BYTES,
-        }
-        body_limit = write_limits.get(request_url.path)
+        body_limit = _WRITE_BODY_LIMITS.get(request_url.path)
         if body_limit is None:
-            self.send_error(HTTPStatus.NOT_FOUND)
+            self._send_route_fallback("POST", request_url.path)
             return
         if request_url.query:
-            self._send_json(
-                {"error": "query parameters are not allowed"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "query parameters are not allowed",
+                HTTPStatus.BAD_REQUEST,
+                code="QUERY_NOT_ALLOWED",
             )
             return
         if not self._is_dashboard_request():
-            self._send_json(
-                {"error": "same-origin dashboard request required"},
+            self._send_error(
+                "same-origin dashboard request required",
                 HTTPStatus.FORBIDDEN,
+                code="UNTRUSTED_ORIGIN",
             )
             return
         content_type = (
             self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         )
         if content_type != "application/json":
-            self._send_json(
-                {"error": "application/json required"},
+            self._send_error(
+                "application/json required",
                 HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                code="UNSUPPORTED_MEDIA_TYPE",
             )
             return
         try:
@@ -388,9 +572,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         except ValueError:
             content_length = 0
         if not 1 <= content_length <= body_limit:
-            self._send_json(
-                {"error": "invalid request body size"},
+            self._send_error(
+                "invalid request body size",
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                code="PAYLOAD_TOO_LARGE",
             )
             return
         try:
@@ -400,7 +585,9 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 parse_constant=_reject_json_constant,
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            self._send_json({"error": "invalid JSON body"}, HTTPStatus.BAD_REQUEST)
+            self._send_error(
+                "invalid JSON body", HTTPStatus.BAD_REQUEST, code="INVALID_JSON"
+            )
             return
         if request_url.path == "/api/settings/hosts":
             self._change_inventory(payload)
@@ -435,37 +622,61 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             or not isinstance(payload["host"], str)
             or not is_safe_alias(payload["host"])
         ):
-            self._send_json(
-                {"error": "invalid probe request schema"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "invalid probe request schema",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_SCHEMA",
             )
             return
         control = self.monitor_server.probe_control
         if control is None:
-            self._send_json(
-                {"error": "manual probing is unavailable"},
+            self._send_error(
+                "manual probing is unavailable",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         result = control.request_probe(payload["host"])
         status = str(result.get("status"))
-        response_status = {
-            "unknown_host": HTTPStatus.NOT_FOUND,
-            "rate_limited": HTTPStatus.TOO_MANY_REQUESTS,
-            "in_progress": HTTPStatus.CONFLICT,
-        }.get(status, HTTPStatus.ACCEPTED)
-        self._send_json(result, response_status)
+        response_status, code = {
+            "unknown_host": (HTTPStatus.NOT_FOUND, "UNKNOWN_HOST"),
+            "rate_limited": (HTTPStatus.TOO_MANY_REQUESTS, "RATE_LIMITED"),
+            "in_progress": (HTTPStatus.CONFLICT, "PROBE_IN_PROGRESS"),
+        }.get(status, (HTTPStatus.ACCEPTED, None))
+        extra_headers: tuple[tuple[str, str], ...] = ()
+        if code is not None:
+            result = {**result, "code": code}
+        if response_status is HTTPStatus.TOO_MANY_REQUESTS:
+            retry_after = result.get("retryAfterSeconds")
+            if (
+                not isinstance(retry_after, bool)
+                and isinstance(retry_after, int | float)
+                and math.isfinite(retry_after)
+            ):
+                extra_headers = (("Retry-After", str(max(0, math.ceil(retry_after)))),)
+        self._send_json(result, response_status, extra_headers)
 
     def _test_notifications(self, payload: object) -> None:
         if not isinstance(payload, dict) or payload:
-            self._send_json(
-                {"error": "invalid notification test schema"},
+            self._send_error(
+                "invalid notification test schema",
                 HTTPStatus.BAD_REQUEST,
+                code="INVALID_SCHEMA",
+            )
+            return
+        notifications = self._read_only_snapshot().get("notifications")
+        if not (isinstance(notifications, dict) and notifications.get("enabled")):
+            self._send_error(
+                "notifications are not configured",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                code="NOTIFICATIONS_DISABLED",
             )
             return
         if not self.monitor_server.state.test_notifications():
-            self._send_json(
-                {"error": "notification test is unavailable or rate limited"},
+            self._send_error(
+                "notification test is rate limited",
                 HTTPStatus.TOO_MANY_REQUESTS,
+                code="RATE_LIMITED",
             )
             return
         self._send_json({"status": "queued"}, HTTPStatus.ACCEPTED)
@@ -473,9 +684,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def _change_incident_action(self, payload: object) -> None:
         expected = {"host", "conditionKey", "action", "durationSeconds", "reason"}
         if not isinstance(payload, dict) or set(payload) != expected:
-            self._send_json(
-                {"error": "invalid incident action schema"},
+            self._send_error(
+                "invalid incident action schema",
                 HTTPStatus.BAD_REQUEST,
+                code="INVALID_SCHEMA",
             )
             return
         host = payload["host"]
@@ -495,16 +707,18 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             or (action == "clear") != (duration == 0)
             or not is_valid_incident_action_reason(reason)
         ):
-            self._send_json(
-                {"error": "invalid incident action settings"},
+            self._send_error(
+                "invalid incident action settings",
                 HTTPStatus.BAD_REQUEST,
+                code="INVALID_SETTINGS",
             )
             return
         inventory = self.monitor_server.inventory
         if inventory is None:
-            self._send_json(
-                {"error": "incident action management is unavailable"},
+            self._send_error(
+                "incident action management is unavailable",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         try:
@@ -512,30 +726,35 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 host, condition_key, action, duration, reason
             )
         except InventoryRequestError:
-            self._send_json(
-                {"error": "incident action is no longer valid"},
+            self._send_error(
+                "incident action is no longer valid",
                 HTTPStatus.CONFLICT,
+                code="INVENTORY_CHANGED",
             )
             return
         except InventoryError:
-            self._send_json(
-                {"error": "incident action could not be saved"},
+            self._send_error(
+                "incident action could not be saved",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         self._send_json(snapshot)
 
     def _restart_service(self, payload: object) -> None:
         if not isinstance(payload, dict) or payload:
-            self._send_json(
-                {"error": "invalid restart request schema"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "invalid restart request schema",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_SCHEMA",
             )
             return
         restart = self.monitor_server.restart
         if restart is None:
-            self._send_json(
-                {"error": "managed service restart is unavailable"},
+            self._send_error(
+                "managed service restart is unavailable",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
 
@@ -546,7 +765,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         restart()
 
     def _send_openmetrics(self) -> None:
-        payload = render_openmetrics(self.monitor_server.state.snapshot())
+        payload = render_openmetrics(self._read_only_snapshot())
         self.send_response(HTTPStatus.OK)
         self._common_headers(OPENMETRICS_CONTENT_TYPE, cache="no-store")
         self.send_header("Content-Length", str(len(payload)))
@@ -555,8 +774,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
 
     def _change_host_group(self, payload: object) -> None:
         if not isinstance(payload, dict) or set(payload) != {"host", "group"}:
-            self._send_json(
-                {"error": "invalid host group schema"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "invalid host group schema",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_SCHEMA",
             )
             return
         host = payload["host"]
@@ -566,29 +787,34 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             or not is_safe_alias(host)
             or not is_valid_host_group(group, required=False)
         ):
-            self._send_json(
-                {"error": "invalid host group settings"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "invalid host group settings",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_SETTINGS",
             )
             return
         inventory = self.monitor_server.inventory
         if inventory is None:
-            self._send_json(
-                {"error": "host group management is unavailable"},
+            self._send_error(
+                "host group management is unavailable",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         try:
             snapshot = inventory.update_host_group(host, group)
         except InventoryRequestError:
-            self._send_json(
-                {"error": "monitored inventory changed; scan again"},
+            self._send_error(
+                "monitored inventory changed; scan again",
                 HTTPStatus.CONFLICT,
+                code="INVENTORY_CHANGED",
             )
             return
         except InventoryError:
-            self._send_json(
-                {"error": "host group could not be updated"},
+            self._send_error(
+                "host group could not be updated",
                 HTTPStatus.INTERNAL_SERVER_ERROR,
+                code="INTERNAL_ERROR",
             )
             return
         self._send_json(snapshot)
@@ -599,9 +825,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             "durationSeconds",
             "reason",
         }:
-            self._send_json(
-                {"error": "invalid maintenance settings schema"},
+            self._send_error(
+                "invalid maintenance settings schema",
                 HTTPStatus.BAD_REQUEST,
+                code="INVALID_SCHEMA",
             )
             return
         host = payload["host"]
@@ -615,53 +842,59 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             or duration not in DASHBOARD_MAINTENANCE_DURATIONS
             or not is_valid_maintenance_reason(reason, required=duration != 0)
         ):
-            self._send_json(
-                {"error": "invalid maintenance settings"},
+            self._send_error(
+                "invalid maintenance settings",
                 HTTPStatus.BAD_REQUEST,
+                code="INVALID_SETTINGS",
             )
             return
         inventory = self.monitor_server.inventory
         if inventory is None:
-            self._send_json(
-                {"error": "maintenance management is unavailable"},
+            self._send_error(
+                "maintenance management is unavailable",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         try:
             snapshot = inventory.update_maintenance(host, duration, reason)
         except InventoryRequestError:
-            self._send_json(
-                {"error": "monitored inventory changed; scan again"},
+            self._send_error(
+                "monitored inventory changed; scan again",
                 HTTPStatus.CONFLICT,
+                code="INVENTORY_CHANGED",
             )
             return
         except InventoryError:
-            self._send_json(
-                {"error": "maintenance settings could not be updated"},
+            self._send_error(
+                "maintenance settings could not be updated",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         self._send_json(snapshot)
 
     def _change_poll_interval(self, payload: object) -> None:
+        """Deprecated single-field alias of the collector settings endpoint."""
         if not isinstance(payload, dict) or set(payload) != {"pollIntervalSeconds"}:
-            self._send_json(
-                {"error": "invalid settings schema"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "invalid settings schema",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_SCHEMA",
             )
             return
         value = payload["pollIntervalSeconds"]
         if not self._valid_number(value, 2, 60):
-            self._send_json(
-                {"error": "pollIntervalSeconds must be between 2 and 60"},
+            self._send_error(
+                "pollIntervalSeconds must be between 2 and 60",
                 HTTPStatus.BAD_REQUEST,
+                code="INVALID_SETTINGS",
             )
             return
-        settings = self._persist_collector_settings({"pollIntervalSeconds": value})
-        if settings is None:
+        applied = self._apply_collector_settings({"pollIntervalSeconds": value})
+        if applied is None:
             return
-        interval = self.monitor_server.state.set_poll_interval_seconds(
-            settings["pollIntervalSeconds"]
-        )
+        _, interval = applied
         snapshot = self.monitor_server.state.snapshot()
         self._send_json(
             {
@@ -669,37 +902,23 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "startedAt": snapshot["startedAt"],
                 "pollIntervalSeconds": interval,
                 "collectionStaleAfterSeconds": snapshot["collectionStaleAfterSeconds"],
-            }
+            },
+            extra_headers=_DEPRECATED_ENDPOINT_HEADERS,
         )
 
     def _change_collector_settings(self, payload: object) -> None:
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != _COLLECTOR_SETTINGS_KEYS
-            or not self._valid_number(payload["pollIntervalSeconds"], 2, 60)
-            or not self._valid_number(payload["probeTimeoutSeconds"], 2, 300)
-            or isinstance(payload["maxWorkers"], bool)
-            or not isinstance(payload["maxWorkers"], int)
-            or not 1 <= payload["maxWorkers"] <= 64
-        ):
-            self._send_json(
-                {"error": "invalid collector settings schema"},
+        if not self._valid_collector_subset(payload):
+            self._send_error(
+                "invalid collector settings schema",
                 HTTPStatus.BAD_REQUEST,
+                code="INVALID_SCHEMA",
             )
             return
-        settings = self._persist_collector_settings(payload)
-        if settings is None:
+        assert isinstance(payload, dict)
+        applied = self._apply_collector_settings(payload)
+        if applied is None:
             return
-        try:
-            self.monitor_server.state.set_poll_interval_seconds(
-                settings["pollIntervalSeconds"]
-            )
-        except (KeyError, ValueError):
-            self._send_json(
-                {"error": "collector settings synchronization failed"},
-                HTTPStatus.SERVICE_UNAVAILABLE,
-            )
-            return
+        settings, _ = applied
         snapshot = self.monitor_server.state.snapshot()
         self._send_json(
             {
@@ -709,6 +928,57 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "collectorSettings": settings,
             }
         )
+
+    def _valid_collector_subset(self, payload: object) -> bool:
+        """Accept any non-empty subset of the dashboard collector settings.
+
+        Per-field bounds match the full-payload rules; the cross-field
+        probe-timeout-vs-connect-timeout constraint is enforced by the
+        inventory against the merged effective configuration.
+        """
+        if (
+            not isinstance(payload, dict)
+            or not payload
+            or set(payload) - _COLLECTOR_SETTINGS_KEYS
+        ):
+            return False
+        if "pollIntervalSeconds" in payload and not self._valid_number(
+            payload["pollIntervalSeconds"], 2, 60
+        ):
+            return False
+        if "probeTimeoutSeconds" in payload and not self._valid_number(
+            payload["probeTimeoutSeconds"], 2, 300
+        ):
+            return False
+        if "maxWorkers" in payload:
+            workers = payload["maxWorkers"]
+            if (
+                isinstance(workers, bool)
+                or not isinstance(workers, int)
+                or not 1 <= workers <= 64
+            ):
+                return False
+        return True
+
+    def _apply_collector_settings(
+        self, payload: dict[str, object]
+    ) -> tuple[dict[str, object], float] | None:
+        """Persist settings and sync the runtime cadence; None means responded."""
+        settings = self._persist_collector_settings(payload)
+        if settings is None:
+            return None
+        try:
+            interval = self.monitor_server.state.set_poll_interval_seconds(
+                settings["pollIntervalSeconds"]
+            )
+        except (KeyError, ValueError):
+            self._send_error(
+                "collector settings synchronization failed",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
+            )
+            return None
+        return settings, interval
 
     @staticmethod
     def _valid_number(value: object, minimum: float, maximum: float) -> bool:
@@ -726,22 +996,25 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     ) -> dict[str, object] | None:
         inventory = self.monitor_server.inventory
         if inventory is None:
-            self._send_json(
-                {"error": "configuration management is unavailable"},
+            self._send_error(
+                "configuration management is unavailable",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return None
         try:
             return inventory.update_collector_settings(settings)
         except InventoryRequestError:
-            self._send_json(
-                {"error": "invalid collector settings"},
+            self._send_error(
+                "invalid collector settings",
                 HTTPStatus.BAD_REQUEST,
+                code="INVALID_SETTINGS",
             )
         except InventoryError:
-            self._send_json(
-                {"error": "collector settings could not be updated"},
+            self._send_error(
+                "collector settings could not be updated",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
         return None
 
@@ -754,30 +1027,34 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             or not isinstance(payload["host"], str)
             or not is_safe_alias(payload["host"])
         ):
-            self._send_json(
-                {"error": "invalid inventory settings schema"},
+            self._send_error(
+                "invalid inventory settings schema",
                 HTTPStatus.BAD_REQUEST,
+                code="INVALID_SCHEMA",
             )
             return
         inventory = self.monitor_server.inventory
         if inventory is None:
-            self._send_json(
-                {"error": "inventory management is unavailable"},
+            self._send_error(
+                "inventory management is unavailable",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         try:
             snapshot = inventory.change(payload["action"], payload["host"])
         except InventoryRequestError:
-            self._send_json(
-                {"error": "inventory changed; scan again and retry"},
+            self._send_error(
+                "inventory changed; scan again and retry",
                 HTTPStatus.CONFLICT,
+                code="INVENTORY_CHANGED",
             )
             return
         except InventoryError:
-            self._send_json(
-                {"error": "inventory could not be updated"},
+            self._send_error(
+                "inventory could not be updated",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         self._send_json(snapshot)
@@ -786,9 +1063,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         # The settings write intentionally has no cross-origin API contract. A
         # browser must not receive CORS permission to send its non-simple POST.
         self.close_connection = True
-        self._send_json(
-            {"error": "cross-origin requests are not allowed"},
+        self._send_error(
+            "cross-origin requests are not allowed",
             HTTPStatus.FORBIDDEN,
+            code="UNTRUSTED_ORIGIN",
         )
 
     def _has_trusted_host(self) -> bool:
@@ -843,43 +1121,56 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def _send_history(self, query: str) -> None:
         parameters = parse_qs(query, keep_blank_values=True)
         if set(parameters) - {"host", "limit"}:
-            self._send_json(
-                {"error": "unknown query parameter"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "unknown query parameter",
+                HTTPStatus.BAD_REQUEST,
+                code="UNKNOWN_QUERY_PARAMETER",
             )
             return
         hosts = parameters.get("host", [])
         limits = parameters.get("limit", ["120"])
         if len(hosts) != 1 or not is_safe_alias(hosts[0]) or len(limits) != 1:
-            self._send_json({"error": "invalid host or limit"}, HTTPStatus.BAD_REQUEST)
+            self._send_error(
+                "invalid host or limit",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_QUERY",
+            )
             return
         try:
             limit = int(limits[0])
         except ValueError:
             limit = 0
         if not 2 <= limit <= 300:
-            self._send_json(
-                {"error": "limit must be between 2 and 300"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "limit must be between 2 and 300",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_LIMIT",
             )
             return
         history = self.monitor_server.state.history(hosts[0], limit)
         if history is None:
-            self._send_json(
-                {"error": "unknown monitoring target"}, HTTPStatus.NOT_FOUND
+            self._send_error(
+                "unknown monitoring target",
+                HTTPStatus.NOT_FOUND,
+                code="UNKNOWN_HOST",
             )
             return
         self._send_json(history)
 
     def _send_gpu_history(self, query: str) -> None:
         if not self._is_dashboard_read_request():
-            self._send_json(
-                {"error": "same-origin dashboard request required"},
+            self._send_error(
+                "same-origin dashboard request required",
                 HTTPStatus.FORBIDDEN,
+                code="UNTRUSTED_ORIGIN",
             )
             return
         parameters = parse_qs(query, keep_blank_values=True)
         if set(parameters) - {"host", "gpu", "limit"}:
-            self._send_json(
-                {"error": "unknown query parameter"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "unknown query parameter",
+                HTTPStatus.BAD_REQUEST,
+                code="UNKNOWN_QUERY_PARAMETER",
             )
             return
         hosts = parameters.get("host", [])
@@ -893,8 +1184,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             or any(ord(character) < 32 for character in gpu_ids[0])
             or len(limits) != 1
         ):
-            self._send_json(
-                {"error": "invalid host, GPU, or limit"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "invalid host, GPU, or limit",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_QUERY",
             )
             return
         try:
@@ -902,42 +1195,52 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         except ValueError:
             limit = 0
         if not 2 <= limit <= 300:
-            self._send_json(
-                {"error": "limit must be between 2 and 300"},
+            self._send_error(
+                "limit must be between 2 and 300",
                 HTTPStatus.BAD_REQUEST,
+                code="INVALID_LIMIT",
             )
             return
         history = self.monitor_server.state.gpu_history(hosts[0], gpu_ids[0], limit)
         if history is None:
-            self._send_json(
-                {"error": "unknown GPU telemetry target"}, HTTPStatus.NOT_FOUND
+            self._send_error(
+                "unknown GPU telemetry target",
+                HTTPStatus.NOT_FOUND,
+                code="UNKNOWN_GPU",
             )
             return
         self._send_json(history)
 
     def _send_diagnostics(self, query: str) -> None:
         if not self._is_dashboard_read_request():
-            self._send_json(
-                {"error": "same-origin dashboard request required"},
+            self._send_error(
+                "same-origin dashboard request required",
                 HTTPStatus.FORBIDDEN,
+                code="UNTRUSTED_ORIGIN",
             )
             return
         parameters = parse_qs(query, keep_blank_values=True)
         if set(parameters) - {"host"}:
-            self._send_json(
-                {"error": "unknown query parameter"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "unknown query parameter",
+                HTTPStatus.BAD_REQUEST,
+                code="UNKNOWN_QUERY_PARAMETER",
             )
             return
         hosts = parameters.get("host", [])
         if len(hosts) > 1 or (hosts and not is_safe_alias(hosts[0])):
-            self._send_json({"error": "invalid host"}, HTTPStatus.BAD_REQUEST)
+            self._send_error(
+                "invalid host", HTTPStatus.BAD_REQUEST, code="INVALID_HOST"
+            )
             return
         bundle = self.monitor_server.state.diagnostic_bundle(
             hosts[0] if hosts else None
         )
         if bundle is None:
-            self._send_json(
-                {"error": "unknown monitoring target"}, HTTPStatus.NOT_FOUND
+            self._send_error(
+                "unknown monitoring target",
+                HTTPStatus.NOT_FOUND,
+                code="UNKNOWN_HOST",
             )
             return
         self._send_json(bundle)
@@ -945,83 +1248,115 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def _send_incidents(self, query: str) -> None:
         parameters = parse_qs(query, keep_blank_values=True)
         if set(parameters) - {"limit"}:
-            self._send_json(
-                {"error": "unknown query parameter"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "unknown query parameter",
+                HTTPStatus.BAD_REQUEST,
+                code="UNKNOWN_QUERY_PARAMETER",
             )
             return
         limits = parameters.get("limit", ["50"])
         if len(limits) != 1:
-            self._send_json({"error": "invalid limit"}, HTTPStatus.BAD_REQUEST)
+            self._send_error(
+                "invalid limit", HTTPStatus.BAD_REQUEST, code="INVALID_LIMIT"
+            )
             return
         try:
             limit = int(limits[0])
         except ValueError:
             limit = 0
         if not 1 <= limit <= 200:
-            self._send_json(
-                {"error": "limit must be between 1 and 200"},
+            self._send_error(
+                "limit must be between 1 and 200",
                 HTTPStatus.BAD_REQUEST,
+                code="INVALID_LIMIT",
             )
             return
         self._send_json(self.monitor_server.state.incidents(limit))
 
     def _send_inventory(self, query: str) -> None:
         if query:
-            self._send_json(
-                {"error": "query parameters are not allowed"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "query parameters are not allowed",
+                HTTPStatus.BAD_REQUEST,
+                code="QUERY_NOT_ALLOWED",
             )
             return
         if not self._is_dashboard_read_request():
-            self._send_json(
-                {"error": "same-origin dashboard request required"},
+            self._send_error(
+                "same-origin dashboard request required",
                 HTTPStatus.FORBIDDEN,
+                code="UNTRUSTED_ORIGIN",
             )
             return
         inventory = self.monitor_server.inventory
         if inventory is None:
-            self._send_json(
-                {"error": "inventory management is unavailable"},
+            self._send_error(
+                "inventory management is unavailable",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         try:
             snapshot = inventory.snapshot()
         except InventoryError:
-            self._send_json(
-                {"error": "inventory scan failed"},
+            self._send_error(
+                "inventory scan failed",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         self._send_json(snapshot)
 
     def _send_topology(self, query: str) -> None:
         if query:
-            self._send_json(
-                {"error": "query parameters are not allowed"}, HTTPStatus.BAD_REQUEST
+            self._send_error(
+                "query parameters are not allowed",
+                HTTPStatus.BAD_REQUEST,
+                code="QUERY_NOT_ALLOWED",
             )
             return
         if not self._is_dashboard_read_request():
-            self._send_json(
-                {"error": "same-origin dashboard request required"},
+            self._send_error(
+                "same-origin dashboard request required",
                 HTTPStatus.FORBIDDEN,
+                code="UNTRUSTED_ORIGIN",
             )
             return
         inventory = self.monitor_server.inventory
         if inventory is None:
-            self._send_json(
-                {"error": "connection topology is unavailable"},
+            self._send_error(
+                "connection topology is unavailable",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         try:
             topology = inventory.topology()
         except InventoryError:
-            self._send_json(
-                {"error": "connection topology could not be loaded"},
+            self._send_error(
+                "connection topology could not be loaded",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         self._send_json(topology)
+
+    def _send_error(
+        self,
+        message: str,
+        status: HTTPStatus,
+        code: str | None = None,
+        extra_headers: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        """Central JSON error envelope.
+
+        `error` stays the human-readable string existing clients rely on;
+        `code` is the stable machine-readable UPPER_SNAKE tag.
+        """
+        body: dict[str, object] = {"error": message}
+        if code is not None:
+            body["code"] = code
+        self._send_json(body, status, extra_headers)
 
     def _send_json(
         self,
@@ -1056,9 +1391,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         server = self.monitor_server
         if not server._sse_slots.acquire(blocking=False):
             self.close_connection = True
-            self._send_json(
-                {"error": "too many event stream clients"},
+            self._send_error(
+                "too many event stream clients",
                 HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
             return
         try:
@@ -1078,11 +1414,12 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 if snapshot is None:
                     if time.monotonic() < heartbeat_at:
                         continue
-                    self.wfile.write(b": heartbeat\n\n")
+                    # Named event (not a comment) so EventSource clients can
+                    # observe stream liveness and reconnect when it stalls.
+                    self.wfile.write(_SSE_HEARTBEAT_FRAME)
                 else:
                     version = int(snapshot["version"])
-                    payload = server.snapshot_payload(snapshot)
-                    self.wfile.write(b"event: snapshot\ndata: " + payload + b"\n\n")
+                    self.wfile.write(server.snapshot_frame(snapshot))
                 self.wfile.flush()
                 heartbeat_at = time.monotonic() + _SSE_HEARTBEAT_SECONDS
         except OSError:

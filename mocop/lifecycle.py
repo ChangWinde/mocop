@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import subprocess
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -224,6 +225,30 @@ class UserServiceManager:
 
     def status(self) -> int:
         return self._run(("systemctl", "--user", "status", "--no-pager", SERVICE_NAME))
+
+    def wait_until_active(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+        poll_interval_seconds: float = 0.5,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> bool:
+        """Poll the unit's active state through the injected command runner.
+
+        systemd reports a Type=simple unit active the moment it forks, so
+        each check is preceded by one poll interval: an immediately crashing
+        service is then seen in its failed or restart-pending state instead
+        of being reported as a false success.
+        """
+        deadline = clock() + timeout_seconds
+        while True:
+            sleep(poll_interval_seconds)
+            command = ("systemctl", "--user", "is-active", "--quiet", SERVICE_NAME)
+            if self._run(command) == 0:
+                return True
+            if clock() >= deadline:
+                return False
 
     def uninstall(self) -> None:
         self._checked("disable", "--now", SERVICE_NAME)

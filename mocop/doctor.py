@@ -24,6 +24,8 @@ from typing import TextIO
 from .config import MonitorConfig, is_safe_alias
 from .lifecycle import user_unit_path
 from .probe import (
+    OpenSshLinuxResourceProbe,
+    ResourceProbe,
     _BoundedProcessResult,
     _ProcessOutputLimitExceeded,
     _run_bounded_process,
@@ -47,9 +49,6 @@ _QUERY_KEYS = frozenset(
         "controlpersist",
         "proxycommand",
         "proxyjump",
-        "serveraliveinterval",
-        "serveralivecountmax",
-        "stricthostkeychecking",
     }
 )
 
@@ -105,13 +104,19 @@ def _keepalive_interval_seconds(config: MonitorConfig) -> int:
     return max(2, config.connect_timeout_seconds // 2)
 
 
-def _host_budget_seconds(alias: str, config: MonitorConfig) -> float:
+def _host_budget_seconds(
+    alias: str, config: MonitorConfig, *, collect: bool = False
+) -> float:
     """Bound one host's total diagnosis time.
 
     The budget covers alias resolution plus three connection-bound stages
-    (cold, reuse, profile) at the host's effective probe timeout.
+    (cold, reuse, profile) at the host's effective probe timeout, and one
+    more stage when a production collection run (--probe) is requested.
     """
-    return _SSH_G_TIMEOUT_SECONDS + 3 * _effective_probe_timeout_seconds(alias, config)
+    stages = 4 if collect else 3
+    return _SSH_G_TIMEOUT_SECONDS + stages * _effective_probe_timeout_seconds(
+        alias, config
+    )
 
 
 def _stage_timeout(deadline: float, stage_timeout_seconds: float) -> float | None:
@@ -313,6 +318,32 @@ def _profile_host(
     return profile
 
 
+def _collection_report(
+    alias: str, config: MonitorConfig, probe: ResourceProbe
+) -> dict[str, object]:
+    """Run one production collection and summarize its already-redacted result.
+
+    The probe is the exact production path: the same fixed remote script,
+    transport discipline, and per-host timeouts the monitor service uses.
+    ProbeResult.message is redacted by the probe itself, so it is safe to
+    report verbatim.
+    """
+    result = probe.probe(alias, config)
+    processes = tuple(process for gpu in result.gpus for process in gpu.processes)
+    coverage: float | None = None
+    if processes and config.workloads.mode != "disabled":
+        matched = sum(1 for process in processes if process.workload is not None)
+        coverage = round(100.0 * matched / len(processes), 1)
+    return {
+        "status": result.status,
+        "latencyMs": result.latency_ms,
+        "gpuCount": len(result.gpus),
+        "processCount": len(processes),
+        "workloadCoveragePct": coverage,
+        "message": result.message,
+    }
+
+
 def _parse_openssh_duration_seconds(value: str) -> float | None:
     """Parse an OpenSSH TIME FORMAT value ("600", "30s", "1h30m") to seconds.
 
@@ -414,10 +445,13 @@ def _diagnose_host(
     *,
     probe_connection: bool,
     profile: bool = False,
+    collection_probe: ResourceProbe | None = None,
     budget_seconds: float | None = None,
 ) -> dict[str, object]:
     if budget_seconds is None:
-        budget_seconds = _host_budget_seconds(alias, config)
+        budget_seconds = _host_budget_seconds(
+            alias, config, collect=collection_probe is not None
+        )
     deadline = time.monotonic() + budget_seconds
     report: dict[str, object] = {"alias": alias, "warnings": []}
     warnings: list[str] = report["warnings"]
@@ -444,6 +478,11 @@ def _diagnose_host(
     report["reuse"] = reuse
     warnings.extend(reuse_warnings)
     report["proxyJump"] = bool(options.get("proxyjump") or options.get("proxycommand"))
+    control_path = options.get("controlpath", "")
+    if control_path and control_path.lower() != "none":
+        # Internal only: run_doctor compares expanded paths across aliases
+        # and strips this key before any report is written.
+        report["_controlPath"] = control_path
 
     if probe_connection:
         probe_timeout = _effective_probe_timeout_seconds(alias, config)
@@ -478,6 +517,14 @@ def _diagnose_host(
                 report["profile"] = _profile_host(
                     alias, config, timeout_seconds=profile_timeout
                 )
+        if collection_probe is not None and report["reachable"]:
+            # The production probe bounds itself by the host's effective
+            # probe timeout, which is exactly the extra stage the budget
+            # reserves; only start it while budget remains.
+            if _stage_timeout(deadline, probe_timeout) is None:
+                report["probe"] = {"failure": _BUDGET_EXHAUSTED}
+            else:
+                report["probe"] = _collection_report(alias, config, collection_probe)
     return report
 
 
@@ -626,18 +673,49 @@ def _service_staleness() -> dict[str, object] | None:
     }
 
 
+def _warn_on_shared_control_paths(reports: list[dict[str, object]]) -> None:
+    """Warn every alias whose expanded ControlPath another alias also uses.
+
+    `ssh -G` has already expanded %h/%p/%r tokens into concrete values, so
+    two aliases resolving to the same string would share one multiplex
+    socket and could attach their sessions to the wrong host. The raw path
+    is stripped here and never written to a report.
+    """
+    by_path: dict[str, list[dict[str, object]]] = {}
+    for report in reports:
+        control_path = report.pop("_controlPath", None)
+        if isinstance(control_path, str) and control_path:
+            by_path.setdefault(control_path, []).append(report)
+    for sharers in by_path.values():
+        if len(sharers) < 2:
+            continue
+        aliases = [str(report["alias"]) for report in sharers]
+        for report in sharers:
+            others = ", ".join(alias for alias in aliases if alias != report["alias"])
+            warnings = report["warnings"]
+            assert isinstance(warnings, list)
+            warnings.append(
+                f"{len(aliases)} aliases share one expanded ControlPath; "
+                f"multiplexed sessions may reach the wrong host: {others}"
+            )
+
+
 def run_doctor(
     config: MonitorConfig,
     *,
     host_filter: tuple[str, ...] = (),
     probe_connection: bool = True,
     profile: bool = False,
+    collect: bool = False,
     as_json: bool = False,
     stdout: TextIO = sys.stdout,
 ) -> int:
     """Diagnose configured aliases; return 0 when every alias is usable."""
     if profile and not probe_connection:
         print("--profile requires live connection tests", file=sys.stderr)
+        return 2
+    if collect and not probe_connection:
+        print("--probe requires live connection tests", file=sys.stderr)
         return 2
     remote_hosts = tuple(host for host in config.hosts if host != config.local_host)
     if host_filter:
@@ -658,20 +736,29 @@ def run_doctor(
         "serverAliveCountMax": _SERVER_ALIVE_COUNT_MAX,
     }
     reports: list[dict[str, object]] = []
-    if remote_hosts:
-        workers = max(1, min(config.max_workers, len(remote_hosts)))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            reports = list(
-                executor.map(
-                    lambda alias: _diagnose_host(
-                        alias,
-                        config,
-                        probe_connection=probe_connection,
-                        profile=profile,
-                    ),
-                    remote_hosts,
+    # One shared probe instance is the production arrangement: the monitor
+    # service drives every host through a single probe as well.
+    collection_probe = OpenSshLinuxResourceProbe() if collect and remote_hosts else None
+    try:
+        if remote_hosts:
+            workers = max(1, min(config.max_workers, len(remote_hosts)))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                reports = list(
+                    executor.map(
+                        lambda alias: _diagnose_host(
+                            alias,
+                            config,
+                            probe_connection=probe_connection,
+                            profile=profile,
+                            collection_probe=collection_probe,
+                        ),
+                        remote_hosts,
+                    )
                 )
-            )
+    finally:
+        if collection_probe is not None:
+            collection_probe.close()
+    _warn_on_shared_control_paths(reports)
     failed = tuple(report["alias"] for report in reports if _report_failed(report))
     service = _service_staleness()
 
@@ -720,11 +807,21 @@ def run_doctor(
 
 
 def _report_failed(report: dict[str, object]) -> bool:
-    """A host fails on unreachability or a fatal profile stage failure."""
+    """A host fails on unreachability or a fatal profile/collection failure."""
     if report.get("reachable") is False:
         return True
     profile_data = report.get("profile")
-    return isinstance(profile_data, dict) and "failure" in profile_data
+    if isinstance(profile_data, dict) and "failure" in profile_data:
+        return True
+    probe_data = report.get("probe")
+    if isinstance(probe_data, dict):
+        if "failure" in probe_data:
+            return True
+        # no_nvidia_smi is a collected, reachable host without NVIDIA tools;
+        # only transport and collection errors fail the diagnosis.
+        if probe_data.get("status") in ("unreachable", "error"):
+            return True
+    return False
 
 
 def _write_text_report(report: dict[str, object], stdout: TextIO) -> None:
@@ -763,6 +860,21 @@ def _write_text_report(report: dict[str, object], stdout: TextIO) -> None:
             nvidia_failure = profile.get("nvidiaFailure")
             if nvidia_failure:
                 stdout.write(f"  profile warning: {nvidia_failure}\n")
+    collection = report.get("probe")
+    if isinstance(collection, dict):
+        failure = collection.get("failure")
+        if failure:
+            stdout.write(f"  probe failure: {failure}\n")
+        else:
+            coverage = collection.get("workloadCoveragePct")
+            coverage_text = f"{coverage:.0f}%" if isinstance(coverage, float) else "n/a"
+            stdout.write(
+                f"  probe: {collection['status']} ({collection['latencyMs']} ms, "
+                f"{collection['gpuCount']} GPUs, {collection['processCount']} "
+                f"processes, workload coverage {coverage_text})\n"
+            )
+            if collection.get("message"):
+                stdout.write(f"  probe message: {collection['message']}\n")
     for warning in report.get("warnings", ()):
         stdout.write(f"  warning: {warning}\n")
 

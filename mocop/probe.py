@@ -32,7 +32,6 @@ from .remote_script import (
     _COMBINED_QUERY_FIELDS,
     _HEALTH_QUERY_FIELDS,
     _PROCESS_QUERY_FIELDS,
-    _PROCESS_SKIP_CAPABLE_VERSIONS,
     _QUERY_FIELDS,
     _SUPPORTED_PROTOCOL_VERSIONS,
     _remote_script,
@@ -70,8 +69,6 @@ class AttendedAwareResourceProbe(Protocol):
     def set_attended(self, attended: bool) -> None: ...
 
 
-# Backward-compatible name for callers that used the first GPU-only interface.
-GpuProbe = ResourceProbe
 ResourceProbeFactory = Callable[[], ResourceProbe]
 _PROBES: dict[str, ResourceProbeFactory] = {}
 
@@ -471,13 +468,14 @@ def _sanitized_workload_command(value: str) -> str | None:
 
 def parse_workload_records(payload: str) -> dict[int, WorkloadMetadata]:
     workloads: dict[int, WorkloadMetadata] = {}
-    for row_number, line in enumerate(payload.splitlines(), start=1):
+    # ASCII newlines only: a Unicode line boundary inside a command line or
+    # environment-derived field must stay within its record instead of
+    # splitting it and discarding the whole workload overlay.
+    for row_number, line in enumerate(payload.split("\n"), start=1):
         if not line.strip():
             continue
         fields = line.split("\t")
-        # V7 records append a start epoch and a command line; V6 and earlier
-        # carry the original eight columns.
-        if len(fields) not in (8, 10) or fields[0] != "WORKLOAD":
+        if len(fields) != 10 or fields[0] != "WORKLOAD":
             raise ValueError(
                 f"resource payload has an invalid workload record on row {row_number}"
             )
@@ -508,10 +506,8 @@ def parse_workload_records(payload: str) -> dict[int, WorkloadMetadata]:
             owner=optional_text(fields[5], "owner"),
             queue=optional_text(fields[6], "queue"),
             namespace=optional_text(fields[7], "namespace"),
-            started_at=_workload_start_iso(fields[8]) if len(fields) == 10 else None,
-            command=(
-                _sanitized_workload_command(fields[9]) if len(fields) == 10 else None
-            ),
+            started_at=_workload_start_iso(fields[8]),
+            command=_sanitized_workload_command(fields[9]),
         )
     if len(workloads) > _MAX_PROCESSES_PER_HOST:
         raise ValueError("resource payload has too many workload records")
@@ -645,7 +641,6 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
     lines = payload.split("\n")
     if not lines or lines[0].strip() not in _SUPPORTED_PROTOCOL_VERSIONS:
         raise ValueError("resource payload has an unknown protocol version")
-    protocol_version = lines[0].strip()
 
     values: dict[str, list[str]] = {}
     disks: list[DiskMetrics] = []
@@ -771,11 +766,7 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
             continue
         if in_processes:
             if line == "PROCESS_SKIPPED":
-                if (
-                    protocol_version not in _PROCESS_SKIP_CAPABLE_VERSIONS
-                    or process_status_marker is not None
-                    or process_lines
-                ):
+                if process_status_marker is not None or process_lines:
                     raise ValueError(
                         "resource payload has conflicting process telemetry"
                     )
@@ -840,11 +831,11 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
         "GPUS_END",
         "PROCESSES_BEGIN",
         "PROCESSES_END",
+        "WORKLOADS_BEGIN",
+        "WORKLOADS_END",
         "GPU_HEALTH_BEGIN",
         "GPU_HEALTH_END",
     }
-    if protocol_version != "MONITOR_V4":
-        expected_markers.update({"WORKLOADS_BEGIN", "WORKLOADS_END"})
     if (
         section_markers != expected_markers
         or in_disks
@@ -1549,17 +1540,3 @@ class OpenSshLinuxResourceProbe:
             system=system,
             transport_retries=transport_retries,
         )
-
-
-# Legacy class and registry names remain import-compatible.
-OpenSshNvidiaSmiProbe = OpenSshLinuxResourceProbe
-_LEGACY_PROBE_NAMES = (
-    "openssh-nvidia-smi",
-    "openssh-linux-v1",
-    "openssh-linux-v2",
-    "openssh-linux-v3",
-    "openssh-linux-v4",
-    "openssh-linux-v5",
-)
-for _legacy_name in _LEGACY_PROBE_NAMES:
-    _PROBES[_legacy_name] = OpenSshLinuxResourceProbe

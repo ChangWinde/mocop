@@ -48,6 +48,18 @@ Mocop 是面向 NVIDIA GPU 集群的本地网页监控工具。它复用已有 O
 
 Mocop 需要 Linux、Python 3.10 或更高版本、OpenSSH，以及对每台远端节点的非交互式 SSH 访问。启用无人值守采集前，请人工核对主机指纹。
 
+下面的步骤使用 [uv](https://docs.astral.sh/uv/) 安装 Mocop。如果尚未安装 uv：
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Mocop 以用户级 systemd 服务运行。未启用 linger 时，用户服务会随登出立即停止；执行一次以下命令，让监控在登出后继续运行：
+
+```bash
+loginctl enable-linger "$USER"
+```
+
 ### 1. 配置 SSH
 
 在 `~/.ssh/config` 中为每个计算节点添加一个明确别名：
@@ -78,7 +90,18 @@ mocop init --host gpu-node-01 --host gpu-node-02
 
 `mocop init` 会创建权限为 `0600` 的 `~/.config/mocop/config.json`。它只监控通过 `--host` 指定的别名，关闭自动发现，并将采集周期设为 5 秒。
 
-### 3. 启动控制台
+### 3. 校验配置与 SSH 路径
+
+```bash
+mocop config check
+mocop doctor
+```
+
+`mocop config check` 只解析并校验配置，不启动网页服务，也不打开任何 SSH 连接。它报告解析到的配置路径、主机数量、持久化/工作负载/拓扑状态，以及每个 webhook 引用的环境变量名及其 set/unset 状态——绝不输出变量值。配置有效时退出码为 `0`，无效时为 `2`。
+
+随后 `mocop doctor` 验证每个受监控别名的非交互式 SSH 可达性与连接复用（全部别名可用时退出 `0`，否则为 `1`）。
+
+### 4. 启动控制台
 
 ```bash
 mocop service install
@@ -119,7 +142,18 @@ mocop service uninstall
 - `expected_gpu_counts` 用于发现 GPU 缺失。
 - `host_groups` 用于共享节点分组。
 - `host_overrides` 只用于调整经过测量的慢节点的采集周期或超时；可选的 `display_name` 为别名提供可读的列表显示名，不改变采集身份。
-- `maintenance_windows` 每条要么给出一次性的 `until`，要么给出每周 `recurrence`（`{"weekday": 0-6, "start": "HH:MM", "duration_minutes": N}`，全部为 UTC，周一为 0）；周期窗口在每个实例期间静默可执行告警，采集持续进行。
+- `maintenance_windows` 每条要么给出一次性的 `until`，要么给出每周 `recurrence`（`{"weekday": 0-6, "start": "HH:MM", "duration_minutes": N}`，全部为 UTC，周一为 0）；周期窗口在每个实例期间静默可执行告警，采集持续进行。下面是一个完整示例：每周日 02:00–04:00 UTC 静默 `gpu-node-02`：
+
+```json
+{
+  "maintenance_windows": {
+    "gpu-node-02": {
+      "reason": "weekly firmware maintenance",
+      "recurrence": {"weekday": 6, "start": "02:00", "duration_minutes": 120}
+    }
+  }
+}
+```
 - `gpu_process_poll_interval_seconds` 单独控制带时间戳的 GPU 任务刷新；默认 15 秒，核心 GPU 数据仍保持正常采集周期。
 - `incident_overrides` 可按节点或分组覆盖有界阈值，并精确排除磁盘挂载点；节点配置优先。
 - `incident_actions` 保存网页中的告警确认与静默及其 UTC 失效时间，通常由网页维护。
@@ -127,7 +161,7 @@ mocop service uninstall
 - `retry_jitter_pct` 分散共享 SSH 路径故障后的重试；默认值为 15%。
 - `topology` 描述连接树；其中的安全别名只有同时进入有效 `hosts` 清单时才会被采集。
 - `persistence.enabled` 使用 SQLite 保留有界趋势和告警上下文；默认关闭。
-- `workloads.mode: "identity"` 通过有界 `/proc` 读取补充进程属主（真实 UID 经 passwd 解析）、完整命令行与真实启动时间，成本约为 `"auto"` 的三分之一；`"auto"` 在此之上再识别 Slurm/Kubernetes 身份（cgroup 与环境读取）。两者默认均关闭；即使关闭，GPU 弹窗仍会显示每个进程"自监控观测起"的运行时长下限。
+- `workloads.mode: "identity"` 通过有界 `/proc` 读取补充进程属主（真实 UID 经 passwd 解析）、完整命令行与真实启动时间，成本约为 `"auto"` 的三分之一；`"auto"` 在此之上再识别 Slurm/Kubernetes 身份（cgroup 与环境读取）。两者默认均关闭；即使关闭，GPU 弹窗仍会显示每个进程"自监控观测起"的运行时长下限。工作负载身份采集每次样本最多覆盖前 512 个不同的 GPU 进程 PID。
 
 Webhook 地址和签名密钥不写入 JSON。配置中只保存环境变量名：
 
@@ -182,6 +216,10 @@ mocop service install
 - 可上传最大 32 MiB 的 PNG、JPEG、WebP 或 AVIF 背景；超过 8 MiB 时只在浏览器内压缩，不会上传。
 - 使用 `mocop --once > snapshot.json` 导出一次当前快照。
 
+## HTTP API
+
+网页展示的一切也都可以通过一套小型 JSON API 获取：稳定的机器可读错误 code、自描述的 `GET /api/meta` 端点，以及面向自动化的访问分级。全部端点、字段表和 agent 操作剧本见 [API 参考](docs/API.md)——其中也解释了为什么非观众型自动化不应发送 `X-Monitor-Request: dashboard` 标记头。
+
 ## Prometheus
 
 `GET /metrics` 使用 OpenMetrics 1.0 输出当前内存快照，不会触发新的采集：
@@ -234,6 +272,27 @@ Host gpu-node-01
 
 如果多台节点共同依赖一个 `ProxyJump`、VPN 或 FRP 路径并同时离线，应先检查这条共享路径。重启 Mocop 无法修复不可用的隧道或远端 SSH 服务。
 
+### 故障排查
+
+大多数"为什么没有数据"的排查用四条命令即可覆盖：
+
+```bash
+journalctl --user -u mocop -f              # 实时跟踪服务日志
+curl -s http://127.0.0.1:8787/healthz      # 存活状态 + 累计 SSH 传输重试次数
+curl -s http://127.0.0.1:8787/readyz       # 就绪状态；首次成功采集前返回 503 并带原因
+mocop doctor --probe                       # 对每个别名执行一次真实生产采集
+```
+
+`mocop doctor --probe` 端到端运行与生产完全一致的采集链路，并按别名报告探测状态、延迟、GPU 数、进程数与工作负载覆盖率。它依赖真实连接测试，因此不能与 `--no-connect` 同时使用。
+
+### CLI 退出码
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 成功。 |
+| `1` | 诊断或采集失败：`mocop doctor` 发现至少一个不可用别名，或运行中监控的采集器/监听器失败。 |
+| `2` | 配置或用法错误：配置无效、别名过滤器未知，或 `--probe` 与 `--no-connect` 之类的冲突参数。 |
+
 ## 安全
 
 Mocop 只接受明确列出的 SSH 别名，并执行固定的只读探针。它强制启用主机密钥校验、BatchMode、超时、输出上限、并发上限、私有原子配置写入和远端文本安全渲染。
@@ -251,7 +310,7 @@ uvx --from ruff==0.12.11 ruff format --check .
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-更多信息见[贡献指南](.github/CONTRIBUTING.md)、[架构](docs/ARCHITECTURE.md)、[性能说明](docs/PERFORMANCE.md)和[更新日志](docs/CHANGELOG.md)。
+更多信息见[贡献指南](.github/CONTRIBUTING.md)、[架构](docs/ARCHITECTURE.md)、[API 参考](docs/API.md)、[性能说明](docs/PERFORMANCE.md)和[更新日志](docs/CHANGELOG.md)。
 
 ## 许可证
 

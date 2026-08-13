@@ -284,6 +284,112 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(by_pid[10]["first_seen_at"], "2026-08-10T00:00:15Z")
         self.assertEqual(by_pid[11]["first_seen_at"], "2026-08-10T00:00:05Z")
 
+    @staticmethod
+    def _workload_gpu(started_at: str | None) -> GpuMetrics:
+        workload = WorkloadMetadata(kind="process", started_at=started_at)
+        return GpuMetrics(
+            index=0,
+            uuid="GPU-1",
+            name="Test GPU",
+            driver_version="550",
+            pstate="P0",
+            temperature_c=60,
+            utilization_gpu_pct=50,
+            utilization_memory_pct=20,
+            memory_total_mib=1000,
+            memory_used_mib=250,
+            memory_free_mib=750,
+            power_draw_w=100,
+            power_limit_w=200,
+            processes=(GpuProcess(10, "train.py", 250, workload),),
+        )
+
+    def test_pid_reuse_with_new_workload_start_is_a_fresh_instance(self) -> None:
+        store = StateStore(5)
+        store.set_hosts(("gpu-1",))
+        store.apply(
+            ProbeResult(
+                "gpu-1",
+                "online",
+                1,
+                (self._workload_gpu("2026-08-09T23:00:00Z"),),
+                observed_at="2026-08-10T00:00:00Z",
+            )
+        )
+        store.apply(
+            ProbeResult(
+                "gpu-1",
+                "online",
+                1,
+                (self._workload_gpu("2026-08-10T00:00:03Z"),),
+                observed_at="2026-08-10T00:00:05Z",
+            )
+        )
+
+        events = store.gpu_history("gpu-1", "GPU-1", 10)["processEvents"]
+        self.assertEqual(
+            [(event["event"], event["pid"]) for event in events],
+            [("stopped", 10), ("started", 10)],
+        )
+        self.assertEqual(
+            [event["workload"]["started_at"] for event in events],
+            ["2026-08-09T23:00:00Z", "2026-08-10T00:00:03Z"],
+        )
+        process = store.snapshot()["servers"][0]["gpus"][0]["processes"][0]
+        self.assertEqual(process["first_seen_at"], "2026-08-10T00:00:05Z")
+
+        # The same instance observed again keeps its stamp and stays silent.
+        store.apply(
+            ProbeResult(
+                "gpu-1",
+                "online",
+                1,
+                (self._workload_gpu("2026-08-10T00:00:03Z"),),
+                observed_at="2026-08-10T00:00:10Z",
+            )
+        )
+        self.assertEqual(
+            store.gpu_history("gpu-1", "GPU-1", 10)["processEvents"], events
+        )
+        process = store.snapshot()["servers"][0]["gpus"][0]["processes"][0]
+        self.assertEqual(process["first_seen_at"], "2026-08-10T00:00:05Z")
+
+    def test_missing_workload_start_keeps_lower_bound_identity(self) -> None:
+        store = StateStore(5)
+        store.set_hosts(("gpu-1",))
+        store.apply(
+            ProbeResult(
+                "gpu-1",
+                "online",
+                1,
+                (self._workload_gpu(None),),
+                observed_at="2026-08-10T00:00:00Z",
+            )
+        )
+        store.apply(
+            ProbeResult(
+                "gpu-1",
+                "online",
+                1,
+                (self._workload_gpu(None),),
+                observed_at="2026-08-10T00:00:05Z",
+            )
+        )
+        # One side missing a start time cannot prove PID reuse either.
+        store.apply(
+            ProbeResult(
+                "gpu-1",
+                "online",
+                1,
+                (self._workload_gpu("2026-08-10T00:00:03Z"),),
+                observed_at="2026-08-10T00:00:10Z",
+            )
+        )
+
+        self.assertEqual(store.gpu_history("gpu-1", "GPU-1", 10)["processEvents"], [])
+        process = store.snapshot()["servers"][0]["gpus"][0]["processes"][0]
+        self.assertEqual(process["first_seen_at"], "2026-08-10T00:00:00Z")
+
     def test_dashboard_attendance_follows_recent_reader_activity(self) -> None:
         store = StateStore(5)
         self.assertFalse(store.dashboard_attended())
@@ -751,6 +857,26 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(second_server["incidents"]["active"], 0)
         self.assertEqual(second["stats"]["gpus"], 1)
 
+    def test_snapshot_view_shares_a_read_only_projection(self) -> None:
+        store = StateStore(5)
+        store.set_hosts(("gpu-1",))
+        store.apply(ProbeResult("gpu-1", "online", 12))
+
+        view = store.snapshot_view()
+        self.assertEqual(view, store.snapshot())
+        self.assertIs(view, store.snapshot_view())
+
+        # Deep copies handed to general callers stay isolated from the view.
+        isolated = store.snapshot()
+        isolated["stats"]["servers"] = 99
+        isolated["servers"][0]["status"] = "changed"
+        self.assertEqual(store.snapshot_view()["stats"]["servers"], 1)
+        self.assertEqual(store.snapshot_view()["servers"][0]["status"], "online")
+
+        store.apply(ProbeResult("gpu-1", "unreachable", 1))
+        self.assertIsNot(view, store.snapshot_view())
+        self.assertEqual(store.snapshot_view()["servers"][0]["status"], "unreachable")
+
     def test_preserves_last_success_but_excludes_stale_data_from_totals(self) -> None:
         system = SystemMetrics(
             hostname="node-a",
@@ -928,6 +1054,23 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["lastPollDurationMs"], 1234)
         self.assertIsNotNone(snapshot["lastPollCompletedAt"])
         self.assertEqual(store.incidents(10)["events"][0]["state"], "opened")
+
+    def test_apply_folds_batch_completion_into_one_published_revision(self) -> None:
+        store = StateStore(5)
+        store.set_hosts(("gpu-1",))
+        version = store.snapshot()["version"]
+
+        store.apply(
+            ProbeResult("gpu-1", "online", 1),
+            poll_cycle_duration_seconds=1.234,
+        )
+
+        snapshot = store.snapshot()
+        # One revision covers both the probe result and the batch timing;
+        # the old separate record_poll_cycle publish added a second one.
+        self.assertEqual(snapshot["version"], version + 1)
+        self.assertEqual(snapshot["lastPollDurationMs"], 1234)
+        self.assertIsNotNone(snapshot["lastPollCompletedAt"])
 
     def test_snapshot_carries_display_name_and_history_transport_retry(self) -> None:
         system = SystemMetrics(
@@ -1208,6 +1351,42 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(notifications.published[-1][0][0].host, "gpu-2")
         self.assertEqual(notifications.published[-1][1][0]["anchor"], "gateway")
 
+    def test_acknowledged_conditions_do_not_feed_correlation(self) -> None:
+        topology = ConnectionTopologyConfig(
+            root="monitor",
+            links=(
+                TopologyLinkConfig("monitor", "gateway", "ssh"),
+                TopologyLinkConfig("gateway", "gpu-1", "ssh"),
+                TopologyLinkConfig("gateway", "gpu-2", "ssh"),
+            ),
+        )
+        action = IncidentActionConfig(
+            host="gpu-2",
+            condition_key="connectivity",
+            action="acknowledged",
+            until=datetime(2026, 8, 11, tzinfo=timezone.utc),
+            reason="owner notified",
+        )
+        notifications = _RecordingNotifications()
+        store = StateStore(
+            5,
+            topology=topology,
+            notifications=notifications,
+            incident_actions=(action,),
+            utc_clock=lambda: datetime(2026, 8, 10, tzinfo=timezone.utc),
+        )
+        store.set_hosts(("gpu-1", "gpu-2"))
+
+        store.apply(ProbeResult("gpu-1", "unreachable", 1))
+        store.apply(ProbeResult("gpu-2", "unreachable", 1))
+
+        # Acknowledgement records ownership without silencing delivery, but
+        # the correlator consumes only actionable connectivity conditions.
+        self.assertEqual(len(notifications.published), 2)
+        self.assertEqual(notifications.published[-1][0][0].host, "gpu-2")
+        self.assertEqual(notifications.published[-1][1], ())
+        self.assertEqual(store.incidents(10)["correlations"], [])
+
 
 class _HostSource:
     def hosts(self, _config):
@@ -1384,6 +1563,30 @@ class _ReentrantManualProbe:
         return ProbeResult(host, "online", 1)
 
 
+class _PollCycleRecordingStore(StateStore):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.apply_durations = []
+        self.record_poll_cycle_calls = 0
+
+    def apply(
+        self,
+        result,
+        retry_after_seconds=None,
+        poll_cycle_duration_seconds=None,
+    ):
+        self.apply_durations.append(poll_cycle_duration_seconds)
+        super().apply(
+            result,
+            retry_after_seconds=retry_after_seconds,
+            poll_cycle_duration_seconds=poll_cycle_duration_seconds,
+        )
+
+    def record_poll_cycle(self, duration_seconds):
+        self.record_poll_cycle_calls += 1
+        super().record_poll_cycle(duration_seconds)
+
+
 class _BlockingProbe:
     def __init__(self) -> None:
         self.slow_started = threading.Event()
@@ -1532,6 +1735,48 @@ class MonitorServiceTests(unittest.TestCase):
             service.stop()
             scheduler.join(2)
         self.assertEqual(probe.calls, 2)
+
+    def test_scheduler_publishes_batch_timing_with_the_final_apply(self) -> None:
+        config = MonitorConfig(
+            ssh_config=Path("/tmp/config"),
+            auto_discover=False,
+            hosts=("gpu-01", "gpu-02"),
+            exclude_hosts=frozenset(),
+            poll_interval_seconds=60,
+            probe_timeout_seconds=12,
+            connect_timeout_seconds=5,
+            max_workers=2,
+            listen_host="127.0.0.1",
+            listen_port=8787,
+        )
+        store = _PollCycleRecordingStore(60)
+        service = MonitorService(config, _ConfigHostSource(), _OnlineProbe(), store)
+        stop_event = threading.Event()
+        scheduler = threading.Thread(target=service.run, args=(stop_event,))
+        scheduler.start()
+        try:
+            deadline = time.monotonic() + 2
+            while store.snapshot()["lastPollDurationMs"] is None:
+                if time.monotonic() >= deadline:
+                    self.fail("scheduler never recorded the completed batch")
+                threading.Event().wait(0.005)
+        finally:
+            stop_event.set()
+            service.stop()
+            scheduler.join(2)
+
+        # The batch duration rides along with the final host's apply instead
+        # of a separate record_poll_cycle publish.
+        self.assertEqual(store.record_poll_cycle_calls, 0)
+        self.assertEqual(len(store.apply_durations), 2)
+        batch_durations = [
+            duration for duration in store.apply_durations if duration is not None
+        ]
+        self.assertEqual(len(batch_durations), 1)
+        self.assertEqual(
+            store.snapshot()["lastPollDurationMs"],
+            max(0, round(batch_durations[0] * 1000)),
+        )
 
     def test_scheduler_paces_repeated_inventory_discovery_failures(self) -> None:
         config = MonitorConfig(

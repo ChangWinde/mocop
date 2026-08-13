@@ -6,6 +6,15 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Added `mocop config check`, which parses and validates the configuration without starting the web server or opening SSH connections and reports the resolved path, host count, subsystem state, and each webhook's environment-variable names with their set/unset status (exit 0 valid, 2 invalid).
+- Added `mocop doctor --probe`, which runs one real production collection per alias and reports probe status, latency, GPU and process counts, and workload coverage; it requires live connection tests and conflicts with `--no-connect`.
+- Added a doctor warning when several aliases resolve to the same expanded `ControlPath`, since a shared multiplex socket can attach sessions to the wrong host.
+- Added a self-describing `GET /api/meta` endpoint reporting the API version, app version, schema version, capability flags, and the complete endpoint manifest with access tiers.
+- Added a stable machine-readable `code` to every API error envelope, JSON 404/405 responses (with an `Allow` header) for API-family paths, and a `Retry-After` header on manual-probe rate limits.
+- Added per-endpoint webhook delivery status (health, queue depth, last attempt and success) to the notifications status and the settings page.
+- Added weekly maintenance schedule visibility: the settings view lists every configured window with its `active` flag and a recurring badge even outside the active instance, while recurring windows stay editable only through the configuration JSON.
+- Added strong `ETag` validators with `If-None-Match` revalidation (304) to the static dashboard assets.
+- Added post-install verification to `mocop service install`: it waits for the unit to report active, then prints the dashboard URL and the log-follow command.
 - Added optional per-host display names (`host_overrides.<alias>.display_name`) that label the fleet list without changing collection identity.
 - Added weekly recurring maintenance windows (`maintenance_windows.<alias>.recurrence` with UTC weekday, start, and duration) that silence actionable alerts during every instance while collection continues; the dashboard badge shows the current instance's end time.
 - Added a browser-local "workload owners" view that aggregates current GPU memory, device, host, and process counts per Slurm/Kubernetes/process owner from the existing snapshot without extra requests.
@@ -15,7 +24,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Added a best-effort doctor check that warns when the installed package is newer than the running user service, so an upgrade is not silently left unapplied.
 - Added per-host stale-transport retry visibility (`transportRetried` in snapshots, `mocop_host_probe_transport_retried` in OpenMetrics) and a cumulative retry counter in `/healthz`.
 - Added an optional `trusted_web_hosts` list so the dashboard accepts browser `Host`/`Origin` headers beyond the loopback and non-wildcard `listen_host` defaults; writes and protected reads now require a trusted `Host`, closing a DNS-rebinding path when the service is bound to a non-loopback address or fronted by a proxy.
-- Added a `workloads.mode: "identity"` tier that reports each GPU process's owner (real UID via passwd), bounded command line, and true start time from `/proc` at roughly a third of the full tier's per-PID reads; protocol `MONITOR_V7` carries the new columns while `V6` payloads stay parseable.
+- Added a `workloads.mode: "identity"` tier that reports each GPU process's owner (real UID via passwd), bounded command line, and true start time from `/proc` at roughly a third of the full tier's per-PID reads; protocol `MONITOR_V7` carries the new columns.
 - Added per-process runtime to the GPU dialog: the true start time when a workload tier reports it, otherwise a monitor-observed first-seen lower bound tracked at zero remote cost; process rows also show the command line when available, sort by memory or runtime, and refresh in place without losing scroll position.
 
 - Added a centered per-GPU workload view with aggregate and per-process VRAM, PID and optional job context; parsing is bounded and the browser renders at most the 100 largest processes.
@@ -25,7 +34,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Added validated expected GPU counts, VRAM pressure, sustained idle-VRAM detection, and configurable incident stability windows.
 - Added validated per-host pacing and timeout overrides for empirically slow GPU nodes.
 - Added a dashboard SSH-alias inventory scan with Git/GitHub/GitLab filtering, constrained add/remove, private atomic persistence, and live scheduler updates.
-- Added six structurally distinct browser-local visual styles and six independent accent palettes, including migration from the original theme choices.
+- Added six structurally distinct browser-local visual styles and six independent accent palettes.
 - Added a centered, responsive settings workspace with browser-local density and fleet-focus preferences.
 - Added durable dashboard controls for collection cadence, complete-probe timeout, and worker concurrency.
 - Added a validated, browser-local custom background with visibility control.
@@ -48,6 +57,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Accepted any non-empty subset of the collector settings on `POST /api/settings/collector`, exposed the read-only `connectTimeoutSeconds` floor in the inventory's collector settings, and deprecated `POST /api/settings/poll-interval` and `GET /api/service` (their responses now carry `Deprecation: true`).
+- Restricted the workload owners view to online nodes; a footnote reports how many offline nodes were excluded and when the shown data was captured.
+- Marked every dashboard read with the viewer header so any open dashboard view — not only the event stream — keeps probes on the attended process cadence.
+- Capped workload identity collection at the first 512 distinct GPU process PIDs per sample and merged the per-PID `/proc` reads into one awk, cutting external processes per PID from seven to three in `identity` mode and from eight to six in `auto`.
+- Folded scheduler batch completion into the final host result of that batch, so a completed batch publishes one state revision instead of two.
+- Served HTTP snapshot reads from a shared read-only state projection instead of deep-copying the full state per request.
+- Named the SSE keepalive frame (`event: heartbeat`) so EventSource clients can observe stream liveness instead of relying on unobservable comment frames.
 - Stretched the process-telemetry cadence on devices that keep sampling zero processes (doubling per idle sample, capped at four times the base interval); activity in the five-second core telemetry cancels the stretch, so job pickup latency never exceeds the base interval while idle hosts run about one fifth fewer steady-state NVIDIA commands (13 instead of 16 per minute at the default 5-second core and 15-second process cadences).
 - Stretched the process cadence of every device to sixteen times the base interval while no dashboard is open (no event stream and no marked read for 30 seconds); the first returning viewer forces a catch-up sample on the next core cycle, and core telemetry, trends, and incidents keep their cadence. An unwatched busy host drops from 16 to about 12.25 NVIDIA commands per minute.
 - Enforced a bounded SSH keepalive (`ServerAliveInterval max(2, connect_timeout / 2)`, `ServerAliveCountMax 2`) on every remote probe, so a transport that dies mid-session is detected in seconds instead of consuming the whole probe timeout; measured dead-transport detection fell from the 30-second production probe timeout to 8.9 seconds (70%).
@@ -82,6 +98,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Split workload records on ASCII newlines only, so a Unicode line separator inside a command line or environment-derived field can no longer break record framing and drop the workload overlay.
+- Passed the captured command line and cgroup data to the per-PID awk through the environment instead of `-v` assignments, preserving backslashes verbatim.
+- Joined the `/proc/PID/stat` content into one logical record before extracting fields, so a process name containing newlines can no longer shift the start-time column.
+- Treated a reused PID whose workload start time changed as a new process instance: the service emits a stop/start event pair and restarts the first-seen timestamp instead of inheriting the old one.
+- Showed an explicit retry affordance when the GPU dialog history request or the incident panel load fails, instead of failing silently.
+- Excluded acknowledged conditions from topology correlation, matching the actionable definition used by counts and notifications.
+- Kept the dashboard's snapshot-poll fallback carrying the viewer marker, so a browser in degraded SSE mode is not mistaken for an unattended system.
+- Stopped reporting a healthy collection state when zero nodes are configured; the dashboard shows a guided empty state pointing at inventory setup instead.
 - Enforced the persistence size limit on the runtime writer connection (not only at startup), let retention pruning run during idle periods and after disk-full write failures, made schema creation and migration atomic and idempotent, and actually persisted the `transportRetried` history flag across restarts (schema v3).
 - Stopped an active recurring maintenance window from invalidating the dashboard inventory response, rejected full-week recurrences that would silence alerts permanently, and serialized maintenance state from one clock sample per snapshot so an instance boundary cannot mix the active decision with the next instance's end time.
 - Froze incident recovery while the corresponding telemetry domain is missing instead of counting blind samples toward resolution, emitted `opened` for immediate conditions on the first online sample, debounced warning/critical flapping, and delivered severity changes whose `opened` was suppressed instead of silently dropping them.
@@ -103,6 +127,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Prevented SSH or unavailable GPU-process telemetry gaps from generating false task start/stop transitions.
 - Cleared removed-node manual-probe cooldowns, process/rate baselines, policy caches, and restored history so dynamic inventory changes do not retain stale state.
 - Registered a node as in flight before starting its worker so a concurrent manual probe cannot be accepted and then lost during task submission.
+
+### Removed
+
+- Removed read compatibility for the V4 through V6 collection protocol payloads; the parser accepts only the current `MONITOR_V7`, because the fixed script and its parser ship in one process and no emitter of an older version can exist.
+- Removed the legacy probe aliases and registry names (`GpuProbe`, `OpenSshNvidiaSmiProbe`, `openssh-nvidia-smi`, and `openssh-linux-v1` through `openssh-linux-v5`); `openssh-linux-v6` remains the single registered collector.
+- Removed the unused `--config` option from `mocop service status` and `mocop service uninstall`, which operate on the fixed user unit.
+- Removed dead resolved-option query keys from doctor's `ssh -G` inspection.
+- Removed the browser-local migration of pre-release legacy theme values; current style and accent preferences are unaffected.
 
 ### Security
 
