@@ -18,7 +18,6 @@ from mocop.config import HostOverrideConfig, MonitorConfig
 from mocop.models import GpuHealthMetrics, GpuMetrics
 from mocop.probe import (
     OpenSshLinuxResourceProbe,
-    OpenSshNvidiaSmiProbe,
     _ActiveProcessRegistry,
     _BoundedProcessResult,
     _ProcessCancelled,
@@ -51,7 +50,7 @@ def config() -> MonitorConfig:
 
 def resource_payload(
     *,
-    protocol: str = "MONITOR_V5",
+    protocol: str = "MONITOR_V7",
     cpu_total: int = 1000,
     cpu_idle: int = 800,
     rx_bytes: int = 10000,
@@ -223,7 +222,7 @@ class ProbeTests(unittest.TestCase):
     def test_parses_an_explicitly_skipped_process_sample(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V6",
+                protocol="MONITOR_V7",
                 process_payload="PROCESS_SKIPPED",
             )
         )
@@ -235,21 +234,22 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflicting process telemetry"):
             parse_linux_resource_payload(
                 resource_payload(
-                    protocol="MONITOR_V6",
+                    protocol="MONITOR_V7",
                     process_payload=("PROCESS_SKIPPED\nGPU-abc, 4242, python, 2048"),
                 )
             )
-        with self.assertRaisesRegex(ValueError, "process telemetry"):
-            parse_linux_resource_payload(
-                resource_payload(process_payload="PROCESS_SKIPPED")
-            )
+        # The script and parser ship together, so retired protocol versions
+        # are rejected outright instead of being half-supported.
+        for retired in ("MONITOR_V6", "MONITOR_V5", "MONITOR_V4"):
+            with self.assertRaisesRegex(ValueError, "protocol version"):
+                parse_linux_resource_payload(resource_payload(protocol=retired))
 
     def test_maps_gpu_processes_to_read_only_slurm_and_kubernetes_metadata(
         self,
     ) -> None:
         workloads = parse_workload_records(
-            "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t\n"
-            "WORKLOAD\t4243\tkubernetes\tpod-uid\tinference\t1001\tbatch\tml"
+            "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t\t\t\n"
+            "WORKLOAD\t4243\tkubernetes\tpod-uid\tinference\t1001\tbatch\tml\t\t"
         )
 
         self.assertEqual(workloads[4242].kind, "slurm")
@@ -260,14 +260,19 @@ class ProbeTests(unittest.TestCase):
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
                 workload_payload=(
-                    "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t"
+                    "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t\t\t"
                 )
             )
         )
         self.assertEqual(gpus[0].processes[0].workload, workloads[4242])
 
         with self.assertRaisesRegex(ValueError, "workload kind"):
-            parse_workload_records("WORKLOAD\t4242\troot-shell\t1\tbad\troot\t\t")
+            parse_workload_records("WORKLOAD\t4242\troot-shell\t1\tbad\troot\t\t\t\t")
+        # Legacy eight-column records died with the retired protocols.
+        with self.assertRaisesRegex(ValueError, "invalid workload record"):
+            parse_workload_records(
+                "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t"
+            )
 
     def test_rejects_unknown_resource_protocol(self) -> None:
         with self.assertRaisesRegex(ValueError, "protocol version"):
@@ -312,7 +317,7 @@ class ProbeTests(unittest.TestCase):
         run.return_value = _BoundedProcessResult(
             0, stdout=resource_payload(), stderr=""
         )
-        result = OpenSshNvidiaSmiProbe().probe("gpu-1", config())
+        result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
         self.assertEqual(result.status, "online")
         self.assertEqual(result.system.hostname, "node-a")
         arguments = run.call_args.args[0]
@@ -469,12 +474,12 @@ class ProbeTests(unittest.TestCase):
             if "process_enabled=1" in script:
                 pid = next(due_processes)
                 payload = resource_payload(
-                    protocol="MONITOR_V6",
+                    protocol="MONITOR_V7",
                     process_payload=f"GPU-abc, {pid}, python, 2048",
                 )
             else:
                 payload = resource_payload(
-                    protocol="MONITOR_V6",
+                    protocol="MONITOR_V7",
                     process_payload="PROCESS_SKIPPED",
                 )
             return _BoundedProcessResult(0, payload, "")
@@ -537,13 +542,13 @@ class ProbeTests(unittest.TestCase):
         run.side_effect = (
             _BoundedProcessResult(
                 0,
-                resource_payload(protocol="MONITOR_V6"),
+                resource_payload(protocol="MONITOR_V7"),
                 "",
             ),
             _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V6",
+                    protocol="MONITOR_V7",
                     process_payload="PROCESS_ERROR\t1",
                 ),
                 "",
@@ -551,7 +556,7 @@ class ProbeTests(unittest.TestCase):
             _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V6",
+                    protocol="MONITOR_V7",
                     process_payload="GPU-abc, 4343, python, 1024",
                 ),
                 "",
@@ -617,7 +622,7 @@ class ProbeTests(unittest.TestCase):
     def test_rejects_injected_alias_before_process_start(self) -> None:
         with patch("mocop.probe._run_bounded_process") as run:
             with self.assertRaisesRegex(ValueError, "unsafe SSH alias"):
-                OpenSshNvidiaSmiProbe().probe("host; touch /tmp/bad", config())
+                OpenSshLinuxResourceProbe().probe("host; touch /tmp/bad", config())
             run.assert_not_called()
 
     @patch("mocop.probe._run_bounded_process")
@@ -625,7 +630,7 @@ class ProbeTests(unittest.TestCase):
         run.return_value = _BoundedProcessResult(
             255, stdout="", stderr="secret-user@192.0.2.4 private/key/path"
         )
-        result = OpenSshNvidiaSmiProbe().probe("gpu-1", config())
+        result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
         self.assertEqual(result.status, "unreachable")
         self.assertEqual(result.message, "SSH connection failed")
         self.assertNotIn("secret-user", result.message or "")
@@ -690,7 +695,7 @@ class ProbeTests(unittest.TestCase):
             return _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V6",
+                    protocol="MONITOR_V7",
                     gpu_payload=idle_gpu,
                     process_payload="",
                 ),
@@ -729,7 +734,7 @@ class ProbeTests(unittest.TestCase):
             return _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V6",
+                    protocol="MONITOR_V7",
                     gpu_payload=next(payloads),
                     process_payload="",
                 ),
@@ -786,7 +791,7 @@ class ProbeTests(unittest.TestCase):
         )
 
         run.side_effect = subprocess.TimeoutExpired(
-            ["ssh"], 12, output=b"MONITOR_V6\nHOST\tnode-a\n"
+            ["ssh"], 12, output=b"MONITOR_V7\nHOST\tnode-a\n"
         )
         stalled = OpenSshLinuxResourceProbe().probe("gpu-1", config())
         # Partial output proves the transport reached the host, so a remote
@@ -1143,7 +1148,7 @@ class ProbeTests(unittest.TestCase):
             return _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V6",
+                    protocol="MONITOR_V7",
                     gpu_payload=next(payloads),
                     process_payload="",
                 ),
@@ -1219,7 +1224,7 @@ class ProbeTests(unittest.TestCase):
             )
             _, gpus, _ = parse_linux_resource_payload(
                 resource_payload(
-                    protocol="MONITOR_V6",
+                    protocol="MONITOR_V7",
                     gpu_payload=gpu,
                     process_payload="",
                 )
@@ -1258,7 +1263,7 @@ class ProbeTests(unittest.TestCase):
     def test_malformed_process_row_keeps_the_core_sample_online(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V6",
+                protocol="MONITOR_V7",
                 process_payload="GPU-abc, 0, python, 10",
             )
         )
@@ -1312,7 +1317,7 @@ class ProbeTests(unittest.TestCase):
     def test_malformed_workload_row_keeps_processes(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V6",
+                protocol="MONITOR_V7",
                 workload_payload="WORKLOAD\t4242\tbad-kind\t1\tx\troot\t\t",
             )
         )
@@ -1329,7 +1334,7 @@ class ProbeTests(unittest.TestCase):
         )
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V6",
+                protocol="MONITOR_V7",
                 gpu_payload=two,
                 process_payload="GPU-dup, 4242, python, 2048",
                 health_payload="",
@@ -1347,7 +1352,7 @@ class ProbeTests(unittest.TestCase):
         )
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V6",
+                protocol="MONITOR_V7",
                 gpu_payload=gpu,
                 process_payload="[N/A], 4242, python, 2048",
                 health_payload="",
@@ -1435,7 +1440,11 @@ class ProbeTests(unittest.TestCase):
     )
     def test_identity_tier_collects_owner_command_and_start_time(self) -> None:
         helper = subprocess.Popen(
-            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdin.read()  #C:\\models\\train",
+            ],
             stdin=subprocess.PIPE,
         )
         try:
@@ -1481,6 +1490,9 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(workload.kind, "process")
         self.assertIsNotNone(workload.owner)
         self.assertIn("sys.stdin.read", workload.command or "")
+        # Backslashes survive verbatim: the command line travels through the
+        # awk ENVIRON table, which never interprets escape sequences.
+        self.assertIn("C:\\models\\train", workload.command or "")
         self.assertIsNotNone(workload.started_at)
         started = datetime.fromisoformat(workload.started_at.replace("Z", "+00:00"))
         now = datetime.now(timezone.utc)
