@@ -285,7 +285,7 @@ try {
   assert.match(final.connection, /live/);
   assert.match(final.feedback, /2/);
   assert.match(final.versionLabel, /v0\.8\.0/);
-  assert.equal(final.serverRatio, "2 / 3");
+  assert.equal(final.serverRatio, "2 / 4");
   assert.equal(final.totalGpus, "8");
   assert.match(final.persistenceStatus, /仅内存/);
   // "\u6295\u9012\u5f02\u5e38" = delivery unhealthy (one endpoint failing).
@@ -296,6 +296,76 @@ try {
   assert.equal(final.heatmapVisible, true);
   assert.equal(final.attentionVisible, true);
   assert.equal(final.overflow, false);
+
+  // Localized transport-failure copy: the fixture's atlas-06 carries a real
+  // collector error message, the remaining mappings are checked directly.
+  const failureMappings = await cdp.evaluate(`(() => {
+    const fleetItem = document.querySelector('.server-item[data-host="atlas-06"]');
+    return {
+      fleetIssueText: fleetItem?.querySelector(".issue-text")?.textContent || "",
+      attentionTexts: [...document.querySelectorAll(
+        "#attention-list .attention-item .attention-message",
+      )].map((node) => node.textContent),
+      transportStopped: failureText("SSH transport stopped responding"),
+      noOutput: failureText("SSH produced no output before the collection timeout"),
+      stalled: failureText("Remote collection stalled after partial output"),
+      cancelled: failureText("Resource collection cancelled"),
+      unexpected: failureText("Unexpected collector error"),
+      remoteQuery: failureText("Remote resource query failed (exit 137)"),
+      localQuery: failureText("Local resource query failed (exit 1)"),
+      unknownPassthrough: failureText("Some new backend message"),
+    };
+  })()`);
+  // "SSH \u4f20\u8f93\u5931\u53bb\u54cd\u5e94\uff08keepalive \u8d85\u65f6\uff09"
+  // = SSH transport lost responsiveness (keepalive timeout).
+  const transportStoppedText =
+    "SSH \u4F20\u8F93\u5931\u53BB\u54CD\u5E94\uFF08keepalive \u8D85\u65F6\uFF09";
+  assert.equal(
+    failureMappings.fleetIssueText,
+    transportStoppedText,
+    "fleet list localizes the transport-stopped error host",
+  );
+  assert(
+    failureMappings.attentionTexts.some(
+      (text) => text.includes(transportStoppedText),
+    ),
+    "attention panel localizes the transport-stopped incident",
+  );
+  assert.equal(failureMappings.transportStopped, transportStoppedText);
+  // "SSH \u5728\u91c7\u96c6\u8d85\u65f6\u524d\u65e0\u4efb\u4f55\u8f93\u51fa"
+  // = no output before the collection timeout.
+  assert.equal(
+    failureMappings.noOutput,
+    "SSH \u5728\u91C7\u96C6\u8D85\u65F6\u524D\u65E0\u4EFB\u4F55\u8F93\u51FA",
+  );
+  // "\u8fdc\u7aef\u91c7\u96c6\u5728\u90e8\u5206\u8f93\u51fa\u540e\u505c\u6ede"
+  // = remote collection stalled after partial output.
+  assert.equal(
+    failureMappings.stalled,
+    "\u8FDC\u7AEF\u91C7\u96C6\u5728\u90E8\u5206\u8F93\u51FA\u540E\u505C\u6EDE",
+  );
+  // "\u8d44\u6e90\u91c7\u96c6\u5df2\u53d6\u6d88" = collection cancelled.
+  assert.equal(failureMappings.cancelled, "\u8D44\u6E90\u91C7\u96C6\u5DF2\u53D6\u6D88");
+  // "\u91c7\u96c6\u5668\u53d1\u751f\u672a\u9884\u671f\u9519\u8bef"
+  // = unexpected collector error.
+  assert.equal(
+    failureMappings.unexpected,
+    "\u91C7\u96C6\u5668\u53D1\u751F\u672A\u9884\u671F\u9519\u8BEF",
+  );
+  // Prefix mappings keep the dynamic exit-code suffix verbatim:
+  // "\u8fdc\u7aef/\u672c\u673a\u8d44\u6e90\u67e5\u8be2\u5931\u8d25"
+  // = remote/local resource query failed.
+  assert.equal(
+    failureMappings.remoteQuery,
+    "\u8FDC\u7AEF\u8D44\u6E90\u67E5\u8BE2\u5931\u8D25 (exit 137)",
+    "remote query prefix mapping keeps the exit-code suffix",
+  );
+  assert.equal(
+    failureMappings.localQuery,
+    "\u672C\u673A\u8D44\u6E90\u67E5\u8BE2\u5931\u8D25 (exit 1)",
+    "local query prefix mapping keeps the exit-code suffix",
+  );
+  assert.equal(failureMappings.unknownPassthrough, "Some new backend message");
 
   const screenshotPath = process.env.MOCOP_BROWSER_SCREENSHOT;
   if (screenshotPath) {
@@ -339,7 +409,7 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     document.querySelector("#topology-toggle").click();
-    for (let attempt = 0; attempt < 40 && document.querySelectorAll(".topology-node").length < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 40 && document.querySelectorAll(".topology-node").length < 6; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     const dialog = document.querySelector("#topology-dialog");
@@ -370,14 +440,14 @@ try {
   assert.equal(topology.open, true);
   assert.deepEqual(
     topology.nodes,
-    ["monitor-console", "atlas-gateway", "atlas-01", "atlas-02", "atlas-03"],
+    ["monitor-console", "atlas-gateway", "atlas-01", "atlas-02", "atlas-03", "atlas-06"],
   );
-  assert.deepEqual(topology.links, ["STCP · 7005", "SSH", "SSH", "SSH"]);
+  assert.deepEqual(topology.links, ["STCP · 7005", "SSH", "SSH", "SSH", "SSH"]);
   assert.equal(topology.frpCount, "1");
-  assert.match(topology.live, /2 \/ 3/);
-  assert.equal(topology.offline, 1);
+  assert.match(topology.live, /2 \/ 4/);
+  assert.equal(topology.offline, 2);
   assert.equal(topology.infrastructure, 2);
-  assert.equal(topology.monitored, 3);
+  assert.equal(topology.monitored, 4);
   assert.deepEqual(
     topology.infrastructureText,
     ["连接路径节点 · 不采集资源", "连接路径节点 · 不采集资源"],
@@ -496,6 +566,13 @@ try {
   assert.equal(capacity.firstHost, "atlas-02");
   assert.match(capacity.summary, /1 个节点/);
   assert.match(capacity.rule, /60 GiB/);
+  // "\u6e29\u5ea6\u4f4e\u4e8e ... \u8b66\u6212\u7ebf" = temperature below the
+  // warning threshold, mirroring the temperature filter in capacityMatches().
+  assert.match(
+    capacity.rule,
+    /\u6E29\u5EA6\u4F4E\u4E8E 80\u00B0C \u8B66\u6212\u7EBF/,
+    "capacity rule discloses the temperature condition",
+  );
   assert(capacity.centerDelta < 2);
 
   const owners = await cdp.evaluate(`(() => {
@@ -509,7 +586,7 @@ try {
       nameTitle: row.querySelector("strong")?.title,
       vram: row.querySelector("em")?.textContent,
       metrics: metricNumbers(row),
-      hostChips: [...row.querySelectorAll(".capacity-devices span")].map(
+      hostChips: [...row.querySelectorAll(".capacity-devices .owner-host-chip")].map(
         (chip) => chip.textContent,
       ),
       cardTitle: row.title || "",
@@ -560,6 +637,141 @@ try {
   // Unattributed card hints at the opt-in identity layer (title only).
   assert.match(owners.unattributed.cardTitle, /workloads\.mode=identity/);
 
+  // Owner host chips drill down into the fleet view: clicking closes the
+  // dialog and selects the host through the regular selection path.
+  const ownersDrilldown = await cdp.evaluate(`(() => {
+    document.querySelector("#owners-toggle").click();
+    const dialog = document.querySelector("#owners-dialog");
+    const chip = [...document.querySelectorAll("#owners-results .owner-host-chip")]
+      .find((node) => node.textContent === "atlas-01");
+    const chipIsButton = chip?.tagName === "BUTTON";
+    chip?.click();
+    const result = {
+      chipFound: Boolean(chip),
+      chipIsButton,
+      dialogOpenAfterClick: dialog.open,
+      selectedHost: view.selectedHost,
+      locationHash: window.location.hash,
+    };
+    selectHost("all");
+    return result;
+  })()`);
+  assert.equal(ownersDrilldown.chipFound, true, "owners view renders host chips");
+  assert.equal(
+    ownersDrilldown.chipIsButton,
+    true,
+    "owner host chip is a keyboard-reachable button",
+  );
+  assert.equal(
+    ownersDrilldown.dialogOpenAfterClick,
+    false,
+    "owner host chip closes the owners dialog",
+  );
+  assert.equal(
+    ownersDrilldown.selectedHost,
+    "atlas-01",
+    "owner host chip selects the corresponding host",
+  );
+  assert.equal(ownersDrilldown.locationHash, "#atlas-01");
+
+  // Incident detail offers a direct path to the host's maintenance window:
+  // the shortcut closes the diagnosis dialog, opens settings and lands on the
+  // expanded maintenance editor of that host.
+  const incidentMaintenance = await cdp.evaluate(`(async () => {
+    const condition = (view.incidents?.active || []).find(
+      (item) => item.host === "atlas-03" && item.category === "connectivity",
+    );
+    if (!condition) return { conditionFound: false };
+    openIncidentDetail(condition);
+    const incidentDialog = document.querySelector("#incident-detail-dialog");
+    const button = document.querySelector("#incident-open-maintenance");
+    const hint = document.querySelector(".incident-action-hint");
+    const result = {
+      conditionFound: true,
+      incidentDialogOpen: incidentDialog.open,
+      buttonVisible: Boolean(button) && !button.hidden && !button.disabled,
+      buttonLabel: button?.textContent || "",
+      hintText: hint?.textContent || "",
+    };
+    button.click();
+    const settingsDialog = document.querySelector("#settings-dialog");
+    let row = null;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      row = [...document.querySelectorAll("#configured-host-list .inventory-host")]
+        .find((item) => item.dataset.host === "atlas-03");
+      if (row && row.querySelector(".maintenance-editor")) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    result.settingsOpen = settingsDialog.open;
+    result.incidentDialogClosedAfter = !incidentDialog.open;
+    result.rowFound = Boolean(row);
+    result.editorExpanded = Boolean(row?.querySelector(".maintenance-editor"));
+    const rowRect = row ? row.getBoundingClientRect() : null;
+    const dialogRect = settingsDialog.getBoundingClientRect();
+    result.rowVisible = Boolean(rowRect)
+      && rowRect.height > 0
+      && rowRect.bottom > dialogRect.top
+      && rowRect.top < dialogRect.bottom;
+    result.focusInRow = Boolean(row) && row.contains(document.activeElement);
+    view.maintenanceEditingHost = null;
+    view.maintenanceFocusHost = null;
+    renderInventory();
+    settingsDialog.close();
+    return result;
+  })()`, true);
+  assert.equal(
+    incidentMaintenance.conditionFound,
+    true,
+    "atlas-03 keeps an active connectivity incident",
+  );
+  assert.equal(incidentMaintenance.incidentDialogOpen, true);
+  assert.equal(
+    incidentMaintenance.buttonVisible,
+    true,
+    "incident detail offers a maintenance-window shortcut",
+  );
+  // "\u8bbe\u7f6e\u7ef4\u62a4\u7a97\u53e3" = set maintenance window.
+  assert.equal(
+    incidentMaintenance.buttonLabel,
+    "\u8BBE\u7F6E\u7EF4\u62A4\u7A97\u53E3",
+  );
+  // Static legend: "\u786e\u8ba4\uff1d..." = acknowledge keeps the alert
+  // count but marks it as noted; "\u9759\u9ed8\uff1d..." = silence stops
+  // pending-count and notifications for the chosen period.
+  assert.equal(
+    incidentMaintenance.hintText,
+    "\u786E\u8BA4\uFF1D\u4FDD\u7559\u544A\u8B66\u8BA1\u6570\u4F46\u6807\u8BB0"
+      + "\u5DF2\u77E5\u6653\uFF1B\u9759\u9ED8\uFF1D\u5728\u671F\u9650\u5185"
+      + "\u4E0D\u518D\u8BA1\u5165\u5F85\u5904\u7406\u4E0E\u901A\u77E5",
+    "incident actions carry the acknowledge/silence legend",
+  );
+  assert.equal(
+    incidentMaintenance.settingsOpen,
+    true,
+    "maintenance shortcut opens the settings dialog",
+  );
+  assert.equal(
+    incidentMaintenance.incidentDialogClosedAfter,
+    true,
+    "maintenance shortcut closes the incident dialog",
+  );
+  assert.equal(incidentMaintenance.rowFound, true);
+  assert.equal(
+    incidentMaintenance.editorExpanded,
+    true,
+    "maintenance editor pre-expands for the incident host",
+  );
+  assert.equal(
+    incidentMaintenance.rowVisible,
+    true,
+    "target host row is visible inside the settings dialog",
+  );
+  assert.equal(
+    incidentMaintenance.focusInRow,
+    true,
+    "focus lands in the maintenance editor of the target host",
+  );
+
   const grouping = await cdp.evaluate(`(() => {
     const sort = document.querySelector("#server-sort");
     sort.value = "group";
@@ -577,8 +789,8 @@ try {
     };
   })()`);
   assert.deepEqual(grouping.headings, ["Lab", "Training"]);
-  assert.deepEqual(grouping.groups, ["Lab", "Training", "Training"]);
-  assert.deepEqual(grouping.order, ["atlas-03", "atlas-01", "atlas-02"]);
+  assert.deepEqual(grouping.groups, ["Lab", "Lab", "Training", "Training"]);
+  assert.deepEqual(grouping.order, ["atlas-03", "atlas-06", "atlas-01", "atlas-02"]);
 
   // Zero configured nodes must not read as "all servers healthy". The
   // fixture always has nodes, so exercise the state on a synthetic snapshot.
@@ -1596,8 +1808,9 @@ try {
   assert.deepEqual(cdp.errors, []);
 
   console.log(JSON.stringify({
-    browser: "chrome", initial, final, transientConnection, heartbeat,
-    topologyBenchmark, capacity, owners, grouping, emptyFleet,
+    browser: "chrome", initial, final, failureMappings, transientConnection,
+    heartbeat, topologyBenchmark, capacity, owners, ownersDrilldown,
+    incidentMaintenance, grouping, emptyFleet,
     personalization, gpuTasks, resilience,
     persistedAppearance, persistedTaskSort, mobile, removedBackground, meta,
   }));
