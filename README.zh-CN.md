@@ -127,7 +127,7 @@ mocop service uninstall
 - `retry_jitter_pct` 分散共享 SSH 路径故障后的重试；默认值为 15%。
 - `topology` 描述连接树；其中的安全别名只有同时进入有效 `hosts` 清单时才会被采集。
 - `persistence.enabled` 使用 SQLite 保留有界趋势和告警上下文；默认关闭。
-- `workloads.mode: "auto"` 通过有界 `/proc` 读取补充 Slurm/Kubernetes 身份；默认关闭。
+- `workloads.mode: "identity"` 通过有界 `/proc` 读取补充进程属主（真实 UID 经 passwd 解析）、完整命令行与真实启动时间，成本约为 `"auto"` 的三分之一；`"auto"` 在此之上再识别 Slurm/Kubernetes 身份（cgroup 与环境读取）。两者默认均关闭；即使关闭，GPU 弹窗仍会显示每个进程"自监控观测起"的运行时长下限。
 
 Webhook 地址和签名密钥不写入 JSON。配置中只保存环境变量名：
 

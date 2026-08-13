@@ -18,6 +18,13 @@ This document defines reproducible measurement conditions and architecture thres
   the five-second core telemetry — a running process, utilization at or above the
   busy threshold, or VRAM above the idle-memory threshold — cancels the stretch, so
   a new job is picked up within one base interval, exactly as before the stretch.
+- Without a connected dashboard (no event stream and no marked read for 30 seconds),
+  every device stretches its process cadence to sixteen times the base interval —
+  busy hosts included, since the process list then serves only the event timeline.
+  At the defaults this cuts a watched-nobody busy host from 16 to about 12.25 NVIDIA
+  commands per minute; the first returning viewer forces a catch-up process sample
+  on the next core cycle, and core telemetry, trends, and incidents never change
+  cadence.
 - One persistent pool avoids per-cycle executor churn. `max_workers` bounds active
   probes, while a scheduler-owned deadline independently paces each host and prevents
   self-overlap. Oldest due deadlines run first, and an event wakes the scheduler only

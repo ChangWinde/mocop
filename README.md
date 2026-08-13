@@ -127,7 +127,7 @@ The generated file is complete. Edit it directly only when you need fields not e
 - `retry_jitter_pct` disperses retries after a shared SSH path fails; the default is 15%.
 - `topology` describes the connection tree. Its safe aliases are display-only unless they also appear in the active `hosts` inventory.
 - `persistence.enabled` retains bounded trends and incident context in SQLite; it is off by default.
-- `workloads.mode: "auto"` adds best-effort Slurm/Kubernetes identity from bounded `/proc` reads; it is off by default.
+- `workloads.mode: "identity"` adds the process owner (real UID via passwd), full command line, and true start time from bounded `/proc` reads at roughly a third of the cost of `"auto"`; `"auto"` additionally recognizes Slurm/Kubernetes identity from cgroup and environment reads. Both are off by default; without them the GPU dialog still shows a monitor-observed runtime lower bound per process.
 
 Webhook destinations and signing secrets stay out of JSON. A minimal endpoint uses
 environment-variable names:
