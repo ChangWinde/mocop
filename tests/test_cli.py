@@ -10,6 +10,18 @@ from unittest.mock import patch
 
 from mocop.__main__ import _arguments, main
 from mocop.lifecycle import LifecycleError
+from mocop.models import ProbeResult
+
+
+class _ScriptedProbe:
+    """Return canned statuses so --once paths avoid real SSH."""
+
+    def __init__(self, statuses: dict[str, str]) -> None:
+        self._statuses = statuses
+
+    def probe(self, host, config):
+        del config
+        return ProbeResult(host, self._statuses.get(host, "online"), 1)
 
 
 def write_config(path: Path, **overrides: object) -> Path:
@@ -48,6 +60,49 @@ class CliTests(unittest.TestCase):
         args = _arguments(["--managed-service"])
 
         self.assertTrue(args.managed_service)
+
+    def test_strict_requires_once(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(main(["--strict"]), 2)
+        self.assertIn("--strict requires --once", stderr.getvalue())
+
+    def test_once_strict_fails_when_a_host_is_not_online(self) -> None:
+        config_path = write_config(self.root / "config.json")
+        stdout, stderr = io.StringIO(), io.StringIO()
+
+        with (
+            patch(
+                "mocop.__main__.OpenSshLinuxResourceProbe",
+                lambda: _ScriptedProbe({"gpu-2": "unreachable"}),
+            ),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            code = main(["--config", str(config_path), "--once", "--strict"])
+
+        self.assertEqual(code, 1)
+        self.assertIn("gpu-2", stderr.getvalue())
+        snapshot = json.loads(stdout.getvalue())
+        self.assertEqual(len(snapshot["servers"]), 2)
+
+    def test_once_strict_passes_when_every_host_is_online(self) -> None:
+        config_path = write_config(self.root / "config.json")
+        stdout = io.StringIO()
+
+        with (
+            patch(
+                "mocop.__main__.OpenSshLinuxResourceProbe",
+                lambda: _ScriptedProbe({}),
+            ),
+            redirect_stdout(stdout),
+        ):
+            code = main(["--config", str(config_path), "--once", "--strict"])
+
+        self.assertEqual(code, 0)
+        snapshot = json.loads(stdout.getvalue())
+        statuses = {server["status"] for server in snapshot["servers"]}
+        self.assertEqual(statuses, {"online"})
 
     def test_init_and_service_commands_are_unambiguous(self) -> None:
         init_args = _arguments(["init", "--host", "gpu-01", "--host", "gpu-02"])
