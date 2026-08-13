@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import socket
+import ssl
 import threading
 import time
 import unittest
@@ -140,6 +141,12 @@ class _ScriptedTlsSocket:
 
 class _ScriptedTlsContext:
     """Duck-typed TLS context that hands back a scripted socket."""
+
+    # Python 3.10's http.client reads these attributes from the context when
+    # constructing an HTTPSConnection; newer versions do not.
+    verify_mode = ssl.CERT_REQUIRED
+    post_handshake_auth = None
+    check_hostname = True
 
     def __init__(self, tls_socket: _ScriptedTlsSocket) -> None:
         self._tls_socket = tls_socket
