@@ -21,6 +21,10 @@ This document defines reproducible measurement conditions and architecture thres
 - Without a connected dashboard (no event stream and no marked read for 30 seconds),
   every device stretches its process cadence to sixteen times the base interval —
   busy hosts included, since the process list then serves only the event timeline.
+  A read is "marked" exactly when it carries the `X-Monitor-Request: dashboard`
+  header, and a connected `/api/events` stream marks presence on every wake, so
+  non-viewer automation must not send that header or it silently pins the fleet to
+  the attended cadence.
   At the defaults this cuts a watched-nobody busy host from 16 to about 12.25 NVIDIA
   commands per minute; the first returning viewer forces a catch-up process sample
   on the next core cycle, and core telemetry, trends, and incidents never change
@@ -51,8 +55,12 @@ This document defines reproducible measurement conditions and architecture thres
   compact immutable records. Optional SQLite persistence receives non-blocking inserts
   through a bounded queue and batches writes on one dedicated thread; when persistence
   is disabled, collection performs no persistence serialization or write call.
-- Optional workload identity adds bounded `/proc` reads only for active GPU PIDs and is
-  disabled by default. It never calls a scheduler API.
+- Optional workload identity adds bounded `/proc` reads only for active GPU PIDs
+  (at most the first 512 distinct PIDs per sample) and is disabled by default. One
+  awk per PID owns the `status` and `stat` reads through in-process `getline`, with
+  the `stat` lines joined into a single logical record, so the `identity` tier runs
+  three external processes per PID (down from seven) and `auto` runs six (down from
+  eight). It never calls a scheduler API.
 - SSE publishes each completed host result and the latest completed submission-batch
   timing; it does not duplicate the full snapshot when a probe merely starts.
   Concurrent SSE readers share one read-only projection per observable state revision,
