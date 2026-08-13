@@ -216,7 +216,7 @@ The dashboard allows a 2–60 second interval, a 2–300 second probe timeout th
 - After an upgrade, use **Settings → Service status → Restart service**. This action is
   available only for the installed user service and reloads the page after recovery.
 - Upload a PNG, JPEG, WebP, or AVIF background up to 32 MiB. Sources above 8 MiB are compressed locally; no image is uploaded.
-- Export one current snapshot with `mocop --once > snapshot.json`.
+- Export one current snapshot with `mocop --once > snapshot.json`. Add `--strict` in scripts and cron jobs: it exits `1` unless every configured host produced an online sample, and lists the failing hosts on stderr.
 
 ## HTTP API
 

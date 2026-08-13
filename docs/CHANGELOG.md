@@ -8,6 +8,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 - Added `mocop config check`, which parses and validates the configuration without starting the web server or opening SSH connections and reports the resolved path, host count, subsystem state, and each webhook's environment-variable names with their set/unset status (exit 0 valid, 2 invalid).
 - Added `mocop doctor --probe`, which runs one real production collection per alias and reports probe status, latency, GPU and process counts, and workload coverage; it requires live connection tests and conflicts with `--no-connect`.
+- Added `mocop --once --strict` for scripts and cron jobs: it exits 1 unless every configured host produced an online sample and lists the failing hosts on stderr.
 - Added a doctor warning when several aliases resolve to the same expanded `ControlPath`, since a shared multiplex socket can attach sessions to the wrong host.
 - Added a self-describing `GET /api/meta` endpoint reporting the API version, app version, schema version, capability flags, and the complete endpoint manifest with access tiers.
 - Added a stable machine-readable `code` to every API error envelope, JSON 404/405 responses (with an `Allow` header) for API-family paths, and a `Retry-After` header on manual-probe rate limits.
@@ -131,7 +132,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 ### Removed
 
 - Removed read compatibility for the V4 through V6 collection protocol payloads; the parser accepts only the current `MONITOR_V7`, because the fixed script and its parser ship in one process and no emitter of an older version can exist.
-- Removed the legacy probe aliases and registry names (`GpuProbe`, `OpenSshNvidiaSmiProbe`, `openssh-nvidia-smi`, and `openssh-linux-v1` through `openssh-linux-v5`); `openssh-linux-v6` remains the single registered collector.
+- Removed the legacy probe aliases and registry names (`GpuProbe`, `OpenSshNvidiaSmiProbe`, `openssh-nvidia-smi`, and `openssh-linux-v1` through `openssh-linux-v5`).
+- Removed the probe and host-source registry indirection entirely; the entrypoint constructs the single OpenSSH collector and host source directly.
 - Removed the unused `--config` option from `mocop service status` and `mocop service uninstall`, which operate on the fixed user unit.
 - Removed dead resolved-option query keys from doctor's `ssh -G` inspection.
 - Removed the browser-local migration of pre-release legacy theme values; current style and accent preferences are unaffected.
