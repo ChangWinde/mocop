@@ -1260,6 +1260,82 @@ class ProbeTests(unittest.TestCase):
                 "81920, 40960, 40960, 287.5, 400"
             )
 
+    def test_container_root_is_collected_and_file_binds_are_ignored(self) -> None:
+        # A container's overlay root is real capacity; the single-file mounts
+        # a runtime injects report the host's filesystem and must not appear.
+        payload = resource_payload(
+            protocol="MONITOR_V7",
+            process_payload="",
+        ).replace(
+            "DISK\t/dev/sda1\text4\t104857600\t52428800\t52428800\t50\t/\n",
+            "DISK\toverlay\toverlay\t52428800\t50331648\t2097152\t95\t/\n"
+            "DISK\t/dev/nvme0n1p2\text4\t1048576000\t367001600\t681574400\t35"
+            "\t/etc/hosts\n"
+            "DISK\t/dev/nvme0n1p3\text4\t2097152000\t901775360\t1195376640\t43"
+            "\t/etc/hostname\n"
+            "DISK\t100.1.2.3:/pvc\tnfs\t10485760000\t10276044800\t209715200\t99"
+            "\t/data\n",
+        )
+
+        raw, _, _ = parse_linux_resource_payload(payload)
+
+        mounts = [disk.mountpoint for disk in raw.disks]
+        self.assertEqual(mounts, ["/", "/data"])
+        root = raw.disks[0]
+        self.assertEqual(root.filesystem_type, "overlay")
+        self.assertEqual(root.used_pct, 95)
+        self.assertAlmostEqual(root.available_mib, 2048.0, places=1)
+
+    def test_disk_filter_keeps_container_roots_but_drops_docker_host_layers(
+        self,
+    ) -> None:
+        # Run the real script against a stubbed df so the awk filter itself is
+        # under test, not a copy of it.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stub = root / "df"
+            stub.write_text(
+                "#!/bin/sh\n"
+                "cat <<'ROWS'\n"
+                "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n"
+                "overlay overlay 52428800 50331648 2097152 95% /\n"
+                "overlay overlay 100 50 50 50% /var/lib/docker/overlay2/a/merged\n"
+                "tmpfs tmpfs 100 50 50 50% /run\n"
+                "/dev/nvme0n1p2 ext4 1048576000 367001600 681574400 35% /etc/hosts\n"
+                "/dev/sda1 ext4 1000 500 500 50% /data\n"
+                "ROWS\n",
+                encoding="utf-8",
+            )
+            stub.chmod(0o700)
+            completed = _run_bounded_process(
+                ["sh", "-s"],
+                input_text=_remote_script("disabled", False),
+                timeout_seconds=10,
+                max_output_bytes=2_097_152,
+                environment={
+                    **os.environ,
+                    "LC_ALL": "C",
+                    "PATH": f"{root}:{os.environ['PATH']}",
+                },
+            )
+
+        self.assertEqual(completed.returncode, 0)
+        emitted = [
+            line.split("\t")[7]
+            for line in completed.stdout.splitlines()
+            if line.startswith("DISK\t")
+        ]
+        # The container root survives; the Docker host's per-container layer
+        # and the pseudo filesystem do not.
+        self.assertIn("/", emitted)
+        self.assertIn("/data", emitted)
+        self.assertNotIn("/var/lib/docker/overlay2/a/merged", emitted)
+        self.assertNotIn("/run", emitted)
+
+        raw, _, _ = parse_linux_resource_payload(completed.stdout)
+        # The injected file bind mount is dropped during parsing.
+        self.assertEqual(sorted(disk.mountpoint for disk in raw.disks), ["/", "/data"])
+
     def test_malformed_process_row_keeps_the_core_sample_online(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(

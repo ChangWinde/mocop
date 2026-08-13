@@ -40,6 +40,10 @@ _UNAVAILABLE = {"", "n/a", "[n/a]", "not supported", "[not supported]"}
 _PROCESS_READ_CHUNK_BYTES = 65_536
 _MAX_GPUS_PER_HOST = 256
 _MAX_DISKS_PER_HOST = 1_024
+# Single-file mounts injected by Docker, containerd and Kubernetes.
+_CONTAINER_FILE_BIND_MOUNTS = frozenset(
+    {"/etc/hosts", "/etc/hostname", "/etc/resolv.conf"}
+)
 _MAX_PROCESSES_PER_HOST = 4_096
 
 
@@ -782,6 +786,11 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
         if in_disks and parts[0] == "DISK" and len(parts) == 8:
             if len(disks) >= _MAX_DISKS_PER_HOST:
                 raise ValueError("resource payload has too many disk records")
+            if parts[7] in _CONTAINER_FILE_BIND_MOUNTS:
+                # Container runtimes bind-mount these single files from the
+                # host, so df reports the host's filesystem under a file path.
+                # That capacity is not this target's and would double-count.
+                continue
             total = _required_number(parts[3], "disk total") / 1024
             used = _required_number(parts[4], "disk used") / 1024
             available = _required_number(parts[5], "disk available") / 1024

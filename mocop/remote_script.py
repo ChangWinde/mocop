@@ -98,7 +98,10 @@ awk '
 ' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/net/dev /sys/block/*/stat 2>/dev/null
 printf 'DISKS_BEGIN\n'
 df -PTk 2>/dev/null | awk '
-  NR > 1 && $2 !~ /^(tmpfs|devtmpfs|squashfs|overlay|proc|sysfs|cgroup2?|efivarfs|tracefs|debugfs|mqueue|fusectl|securityfs|pstore|configfs|autofs|binfmt_misc|ramfs|nsfs)$/ {
+  # An overlay mounted at / is a container root with real backing storage, so
+  # it must be reported; overlay mounts elsewhere belong to containers running
+  # on a Docker host and are not this target'"'"'s capacity.
+  NR > 1 && ($2 !~ /^(tmpfs|devtmpfs|squashfs|overlay|proc|sysfs|cgroup2?|efivarfs|tracefs|debugfs|mqueue|fusectl|securityfs|pstore|configfs|autofs|binfmt_misc|ramfs|nsfs)$/ || ($2 == "overlay" && $7 == "/")) {
     pct=$6; gsub(/%/, "", pct)
     printf "DISK\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $5, pct, $7
   }
