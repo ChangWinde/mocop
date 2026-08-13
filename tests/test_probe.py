@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1248,14 +1249,11 @@ class ProbeTests(unittest.TestCase):
         # NUL handling differs by interpreter (older csv modules raise, newer
         # ones pass the byte through); both outcomes must stay within the
         # protocol's ValueError contract.
-        for payload in (
-            "0, GPU-\x00abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
-            "81920, 40960, 40960, 287.5, 400",
-        ):
-            try:
-                parse_nvidia_smi_csv(payload)
-            except ValueError:
-                pass
+        with suppress(ValueError):
+            parse_nvidia_smi_csv(
+                "0, GPU-\x00abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+                "81920, 40960, 40960, 287.5, 400"
+            )
 
     def test_malformed_process_row_keeps_the_core_sample_online(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
