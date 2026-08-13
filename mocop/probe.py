@@ -382,8 +382,20 @@ def _parse_nvidia_smi_row(row: list[str], row_number: int) -> GpuMetrics:
     )
 
 
+def _csv_rows(payload: str):
+    """Yield CSV rows while mapping csv-module errors to protocol errors.
+
+    A NUL byte or an oversized field raises ``csv.Error``, which is not a
+    ``ValueError`` and would otherwise escape the payload classification.
+    """
+    try:
+        yield from csv.reader(io.StringIO(payload), skipinitialspace=True)
+    except csv.Error as exc:
+        raise ValueError(f"nvidia-smi returned unparseable CSV: {exc}") from exc
+
+
 def parse_nvidia_smi_csv(payload: str) -> tuple[GpuMetrics, ...]:
-    rows = csv.reader(io.StringIO(payload), skipinitialspace=True)
+    rows = _csv_rows(payload)
     gpus: list[GpuMetrics] = []
     for row_number, row in enumerate(rows, start=1):
         if not row or not any(cell.strip() for cell in row):
@@ -395,7 +407,7 @@ def parse_nvidia_smi_csv(payload: str) -> tuple[GpuMetrics, ...]:
 
 
 def parse_nvidia_processes_csv(payload: str) -> dict[str, tuple[GpuProcess, ...]]:
-    rows = csv.reader(io.StringIO(payload), skipinitialspace=True)
+    rows = _csv_rows(payload)
     processes: dict[str, list[GpuProcess]] = {}
     count = 0
     for row_number, row in enumerate(rows, start=1):
@@ -547,7 +559,7 @@ def _parse_nvidia_health_row(
 
 
 def parse_nvidia_health_csv(payload: str) -> dict[str, GpuHealthMetrics]:
-    rows = csv.reader(io.StringIO(payload), skipinitialspace=True)
+    rows = _csv_rows(payload)
     health: dict[str, GpuHealthMetrics] = {}
     for row_number, row in enumerate(rows, start=1):
         if not row or not any(cell.strip() for cell in row):
@@ -568,7 +580,7 @@ def parse_nvidia_combined_csv(
     gpus: list[GpuMetrics] = []
     health: dict[str, GpuHealthMetrics] = {}
     health_valid = True
-    rows = csv.reader(io.StringIO(payload), skipinitialspace=True)
+    rows = _csv_rows(payload)
     for row_number, row in enumerate(rows, start=1):
         if not row or not any(cell.strip() for cell in row):
             continue
@@ -885,7 +897,7 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
     first_gpu_row = next(
         (
             row
-            for row in csv.reader(io.StringIO(gpu_payload), skipinitialspace=True)
+            for row in _csv_rows(gpu_payload)
             if row and any(cell.strip() for cell in row)
         ),
         None,

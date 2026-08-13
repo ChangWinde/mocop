@@ -1226,6 +1226,37 @@ class ProbeTests(unittest.TestCase):
             self.assertEqual(len(gpus), 1)
             self.assertEqual(gpus[0].name, name)
 
+    def test_csv_module_errors_classify_as_protocol_value_errors(self) -> None:
+        # An oversized quoted field raises csv.Error on every interpreter and
+        # must surface as the protocol ValueError instead of escaping the
+        # collector's classification.
+        oversized = '0, "' + "x" * 200_000 + '", n, d, P0, 61, 93, 34, 1, 1, 1, 1, 1'
+        with self.assertRaisesRegex(ValueError, "unparseable CSV"):
+            parse_nvidia_smi_csv(oversized)
+
+        # An oversized field inside the process section degrades only that
+        # view while the core sample stays online.
+        _, gpus, _ = parse_linux_resource_payload(
+            resource_payload(
+                protocol="MONITOR_V7",
+                process_payload='GPU-abc, 4242, "' + "x" * 200_000 + '", 2048',
+            )
+        )
+        self.assertEqual(len(gpus), 1)
+        self.assertFalse(gpus[0].processes_available)
+
+        # NUL handling differs by interpreter (older csv modules raise, newer
+        # ones pass the byte through); both outcomes must stay within the
+        # protocol's ValueError contract.
+        for payload in (
+            "0, GPU-\x00abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+            "81920, 40960, 40960, 287.5, 400",
+        ):
+            try:
+                parse_nvidia_smi_csv(payload)
+            except ValueError:
+                pass
+
     def test_malformed_process_row_keeps_the_core_sample_online(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
