@@ -10,6 +10,7 @@ _CATEGORY_UNITS = {
     "memory": "%",
     "swap": "%",
     "disk": "%",
+    "pressure": "%",
     "gpu_memory": "%",
     "gpu_idle_memory": "%",
     "gpu_temperature": "°C",
@@ -107,6 +108,17 @@ def diagnose_condition(
         next_steps = [
             "Compare RAM availability with active workloads.",
             "Check whether swap use is stable or continuing to grow.",
+        ]
+    elif category == "pressure":
+        title = "Tasks are stalling on a saturated resource"
+        summary = (
+            f"{resource} kept tasks stalled for the reported share of the last "
+            "minute (kernel PSI), even if utilization figures still look normal."
+        )
+        next_steps = [
+            "Identify the heaviest consumers of the stalled resource on this node.",
+            "For memory pressure, check reclaim and swap activity; for I/O, "
+            "check checkpoint or dataset traffic on the busiest device.",
         ]
     elif category == "memory":
         title = "Memory pressure is elevated"

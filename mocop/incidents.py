@@ -13,7 +13,7 @@ IncidentState = Literal["opened", "resolved", "escalated", "deescalated"]
 _GPU_QUERY_FAILURE_MESSAGES = frozenset(
     {"nvidia-smi is unavailable", "nvidia-smi query failed"}
 )
-_SYSTEM_CATEGORIES = frozenset({"cpu", "memory", "swap", "disk"})
+_SYSTEM_CATEGORIES = frozenset({"cpu", "memory", "swap", "disk", "pressure"})
 _GPU_HEALTH_CATEGORIES = frozenset({"gpu_ecc", "gpu_memory_repair", "gpu_slowdown"})
 
 
@@ -259,6 +259,33 @@ class ThresholdIncidentPolicy:
                     observed_at=result.observed_at,
                     critical_at=90,
                 )
+            pressure = system.pressure
+            if pressure is not None:
+                # Utilization alone cannot see reclaim or I/O stalls, so the
+                # PSI "some avg60" window alerts on sustained task stalls; CPU
+                # pressure is intentionally excluded because the load averages
+                # already cover runnable-queue contention.
+                for psi_resource, sample, threshold_name, label in (
+                    ("memory", pressure.memory, "psi_memory_some_pct", "Memory"),
+                    ("io", pressure.io, "psi_io_some_pct", "I/O"),
+                ):
+                    if sample is None:
+                        continue
+                    psi_threshold = threshold(threshold_name)
+                    self._add_percentage(
+                        conditions,
+                        key=f"pressure:{psi_resource}",
+                        category="pressure",
+                        resource=f"{label} pressure",
+                        value=sample.some_avg60,
+                        threshold=psi_threshold,
+                        observed_at=result.observed_at,
+                        critical_at=min(100.0, psi_threshold * 2),
+                        detail=(
+                            f"Tasks stalled on {psi_resource} for "
+                            f"{round(sample.some_avg60, 2)}% of the last minute"
+                        ),
+                    )
             minimum_free_mib = threshold("disk_min_free_gib") * 1024
             for disk in system.disks:
                 if disk.mountpoint in self._excluded_disk_mounts(result.host):
@@ -438,6 +465,7 @@ class ThresholdIncidentPolicy:
         observed_at: str,
         critical_at: float = 95,
         group_key: str | None = None,
+        detail: str | None = None,
     ) -> None:
         if value is None or value < threshold:
             return
@@ -450,6 +478,7 @@ class ThresholdIncidentPolicy:
             value=rounded,
             threshold=threshold,
             observed_at=observed_at,
+            detail=detail,
             open_after_cycles=self._incidents.resource_open_cycles,
             recovery_cycles=self._incidents.recovery_cycles,
             group_key=group_key,

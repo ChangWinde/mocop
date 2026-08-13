@@ -482,6 +482,7 @@ class ConfigTests(unittest.TestCase):
             "gpu_temperature_warning_c": 91,
             "gpu_memory_warning_pct": 88,
             "gpu_idle_memory_pct": 25,
+            "psi_memory_some_pct": 15,
         }
         config = load_config(self.write(value))
         self.assertEqual(config.thresholds.cpu_warning_pct, 77)
@@ -489,10 +490,17 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.thresholds.disk_warning_pct, 85)
         self.assertEqual(config.thresholds.gpu_memory_warning_pct, 88)
         self.assertEqual(config.thresholds.gpu_idle_memory_pct, 25)
+        self.assertEqual(config.thresholds.psi_memory_some_pct, 15)
+        self.assertEqual(config.thresholds.psi_io_some_pct, 30)
 
-        value["thresholds"] = {"disk_warning_pct": 101}
-        with self.assertRaisesRegex(ConfigError, "must be between"):
-            load_config(self.write(value))
+        for invalid in (
+            {"disk_warning_pct": 101},
+            {"psi_memory_some_pct": 101},
+            {"psi_io_some_pct": -1},
+        ):
+            value["thresholds"] = invalid
+            with self.assertRaisesRegex(ConfigError, "must be between"):
+                load_config(self.write(value))
 
     def test_rejects_numbers_too_large_for_float_conversion(self) -> None:
         huge = 10**400

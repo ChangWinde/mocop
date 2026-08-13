@@ -43,6 +43,11 @@ class ThresholdConfig:
     # however large it is; a small partition under the percentage threshold is
     # unaffected.
     disk_min_free_gib: float = 5
+    # Pressure stall warnings fire on the 60-second "some" average: the share
+    # of the last minute during which at least one task was stalled on the
+    # resource. Twice the warning value escalates to critical.
+    psi_memory_some_pct: float = 20
+    psi_io_some_pct: float = 30
     gpu_temperature_warning_c: float = 80
     gpu_busy_pct: float = 10
     gpu_memory_warning_pct: float = 90
@@ -333,6 +338,8 @@ _THRESHOLD_KEYS = {
     "swap_warning_pct",
     "disk_warning_pct",
     "disk_min_free_gib",
+    "psi_memory_some_pct",
+    "psi_io_some_pct",
     "gpu_temperature_warning_c",
     "gpu_busy_pct",
     "gpu_memory_warning_pct",
@@ -1006,6 +1013,8 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         swap_warning_pct=threshold("swap_warning_pct"),
         disk_warning_pct=threshold("disk_warning_pct"),
         disk_min_free_gib=threshold("disk_min_free_gib", 1_048_576),
+        psi_memory_some_pct=threshold("psi_memory_some_pct"),
+        psi_io_some_pct=threshold("psi_io_some_pct"),
         gpu_temperature_warning_c=threshold("gpu_temperature_warning_c", 150),
         gpu_busy_pct=threshold("gpu_busy_pct"),
         gpu_memory_warning_pct=threshold("gpu_memory_warning_pct"),
