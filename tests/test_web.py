@@ -4,6 +4,7 @@ import http.client
 import json
 import socket
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
@@ -154,6 +155,34 @@ class WebTests(unittest.TestCase):
             return raised.exception.headers
         finally:
             raised.exception.close()
+
+    def test_dashboard_reads_and_event_streams_mark_viewer_presence(self) -> None:
+        self.assertFalse(self.state.dashboard_attended())
+
+        # An unmarked probe (curl, scraper, health check) is not a viewer.
+        with urlopen(f"{self.base}/healthz", timeout=2) as response:
+            response.read()
+        self.assertFalse(self.state.dashboard_attended())
+
+        with urlopen(
+            Request(
+                f"{self.base}/api/snapshot",
+                headers={"X-Monitor-Request": "dashboard"},
+            ),
+            timeout=2,
+        ) as response:
+            response.read()
+        self.assertTrue(self.state.dashboard_attended())
+
+        # A live event stream keeps refreshing presence on its own.
+        fresh = self.standalone_server()
+        self.assertFalse(fresh.state.dashboard_attended())
+        stream = self.open_event_stream(fresh.server_port)
+        stream.recv(256)
+        deadline = time.monotonic() + 2
+        while not fresh.state.dashboard_attended() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(fresh.state.dashboard_attended())
 
     def standalone_server(self, **kwargs) -> MonitorHttpServer:
         server, thread = serve_in_thread("127.0.0.1", 0, StateStore(5), **kwargs)

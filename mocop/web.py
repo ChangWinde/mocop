@@ -252,6 +252,11 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         request_url = self._split_request_target()
         if request_url is None:
             return
+        # Any dashboard-marked read (snapshot polling included) is a live
+        # viewer; the event stream marks presence separately because
+        # EventSource cannot attach the marker header.
+        if self.headers.get("X-Monitor-Request") == "dashboard":
+            self.monitor_server.state.record_dashboard_activity()
         path = request_url.path
         if path == "/api/snapshot":
             snapshot = self.monitor_server.state.snapshot()
@@ -1066,6 +1071,9 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             version = -1
             heartbeat_at = time.monotonic() + _SSE_HEARTBEAT_SECONDS
             while not server.shutdown_event.is_set():
+                # A connected event stream is a live viewer: refreshing this
+                # every wake keeps the probes on the attended cadence.
+                server.state.record_dashboard_activity()
                 snapshot = server.state.wait_for_update(version, _SSE_STOP_POLL_SECONDS)
                 if snapshot is None:
                     if time.monotonic() < heartbeat_at:
