@@ -87,6 +87,7 @@
     "memory_warning_pct": 90,
     "swap_warning_pct": 50,
     "disk_warning_pct": 85,
+    "disk_min_free_gib": 5,
     "gpu_temperature_warning_c": 80,
     "gpu_busy_pct": 10,
     "gpu_memory_warning_pct": 90,

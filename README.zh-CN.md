@@ -156,6 +156,7 @@ mocop service uninstall
 ```
 - `gpu_process_poll_interval_seconds` 单独控制带时间戳的 GPU 任务刷新；默认 15 秒，核心 GPU 数据仍保持正常采集周期。
 - `incident_overrides` 可按节点或分组覆盖有界阈值，并精确排除磁盘挂载点；节点配置优先。
+- `thresholds.disk_min_free_gib`（默认 5）：文件系统在超过 `disk_warning_pct` 之后，若绝对剩余空间低于该 GiB 数即升级为 critical——这样"快满的 50 GiB 根分区"会排在"同样占比的 10 TiB 卷"之前。未超过百分比阈值的分区一律不升级，因此 `/boot/efi` 这类小分区不会误报。
 - `incident_actions` 保存网页中的告警确认与静默及其 UTC 失效时间，通常由网页维护。
 - `manual_probe_cooldown_seconds` 限制同一节点的手动探测频率；默认 5 秒。
 - `retry_jitter_pct` 分散共享 SSH 路径故障后的重试；默认值为 15%。

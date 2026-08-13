@@ -39,6 +39,28 @@ def _threshold_evidence(
     return evidence
 
 
+def _filesystem_headroom_evidence(
+    mountpoint: str, server: dict[str, object] | None
+) -> list[dict[str, object]]:
+    """Report the absolute headroom left on the alerting mount, in GiB."""
+    system = (server or {}).get("system")
+    if not isinstance(system, dict):
+        return []
+    for disk in system.get("disks", ()):
+        if not isinstance(disk, dict) or disk.get("mountpoint") != mountpoint:
+            continue
+        evidence: list[dict[str, object]] = []
+        for label, key in (("freeSpace", "available_mib"), ("capacity", "total_mib")):
+            number = _number(disk.get(key))
+            if number is None:
+                continue
+            evidence.append(
+                {"label": label, "value": round(number / 1024, 1), "unit": "GiB"}
+            )
+        return evidence
+    return []
+
+
 def diagnose_condition(
     condition: dict[str, object],
     server: dict[str, object] | None,
@@ -76,6 +98,9 @@ def diagnose_condition(
             "Confirm whether the filesystem is expected to grow.",
             "Inspect large directories and retention policies on this mount.",
         ]
+        # A percentage alone cannot be triaged: 96% of a 50 GiB root leaves
+        # minutes of headroom while 99% of a 10 TiB volume leaves days.
+        evidence.extend(_filesystem_headroom_evidence(resource, server))
     elif category == "swap":
         title = "Swap pressure is elevated"
         summary = "Swap use crossed the configured threshold and may indicate sustained memory pressure."

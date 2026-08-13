@@ -156,6 +156,7 @@ The generated file is complete. Edit it directly only when you need fields not e
 ```
 - `gpu_process_poll_interval_seconds` controls timestamped GPU task refresh independently; the 15-second default reduces NVIDIA command overhead while core GPU data keeps the normal cadence.
 - `incident_overrides` applies bounded host/group thresholds and exact disk-mount exclusions; host settings take precedence.
+- `thresholds.disk_min_free_gib` (default 5) escalates a filesystem that is already over `disk_warning_pct` to critical once its absolute free space falls below that many GiB, so a nearly full 50 GiB root outranks a 10 TiB volume sitting at the same percentage. A partition below the percentage threshold is never escalated, so small ones such as `/boot/efi` stay quiet.
 - `incident_actions` stores dashboard acknowledgements and silences with UTC expiry. It is maintained by the UI in normal use.
 - `manual_probe_cooldown_seconds` bounds repeated on-demand probes of one node; the default is 5 seconds.
 - `retry_jitter_pct` disperses retries after a shared SSH path fails; the default is 15%.

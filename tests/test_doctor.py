@@ -1098,6 +1098,47 @@ class DiagnosticsTests(unittest.TestCase):
             if item["label"] in ("current", "threshold")
         }
 
+    def test_disk_evidence_reports_absolute_headroom(self) -> None:
+        server = {
+            "system": {
+                "disks": [
+                    {
+                        "mountpoint": "/other",
+                        "available_mib": 999999,
+                        "total_mib": 999999,
+                    },
+                    {
+                        "mountpoint": "/",
+                        "available_mib": 2252.8,
+                        "total_mib": 51200,
+                    },
+                ]
+            }
+        }
+        diagnosis = diagnose_condition(
+            {"category": "disk", "resource": "/", "value": 96, "threshold": 85},
+            server,
+        )
+
+        evidence = {item["label"]: item for item in diagnosis["evidence"]}
+        # A percentage cannot be triaged on its own, so the alert carries the
+        # headroom that distinguishes minutes of runway from days.
+        self.assertEqual(evidence["freeSpace"]["value"], 2.2)
+        self.assertEqual(evidence["freeSpace"]["unit"], "GiB")
+        self.assertEqual(evidence["capacity"]["value"], 50.0)
+        self.assertEqual(evidence["current"]["unit"], "%")
+
+    def test_disk_evidence_omits_headroom_when_mount_is_unknown(self) -> None:
+        diagnosis = diagnose_condition(
+            {"category": "disk", "resource": "/gone", "value": 96, "threshold": 85},
+            {"system": {"disks": [{"mountpoint": "/", "available_mib": 10}]}},
+        )
+
+        self.assertEqual(
+            [item["label"] for item in diagnosis["evidence"]],
+            ["current", "threshold"],
+        )
+
     def test_gpu_temperature_evidence_uses_celsius(self) -> None:
         diagnosis = diagnose_condition(
             {

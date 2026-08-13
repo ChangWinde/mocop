@@ -307,7 +307,7 @@ Top-level fields:
 | `collectorError` | string \| null | Fleet-level collector failure (e.g. discovery failed), else `null`. |
 | `persistence` | object | `{enabled, backend, healthy, queuedWrites, droppedWrites, lastError}` (+ `writtenRecords` when SQLite). |
 | `notifications` | object | `{enabled, healthy, queuedDeliveries, droppedDeliveries, endpoints[]}`; each endpoint reports `{name, healthy, queuedDeliveries, deliveredEvents, droppedDeliveries, lastError, lastAttemptAt, lastSuccessAt}`. |
-| `thresholds` | object | The eight active incident thresholds (`cpu_warning_pct`, …). |
+| `thresholds` | object | The nine active incident thresholds (`cpu_warning_pct`, …, `disk_min_free_gib`). |
 | `stats` | object | Fleet aggregates; see below. |
 | `servers` | array | Per-host state; see below. |
 
