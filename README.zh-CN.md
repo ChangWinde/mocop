@@ -36,11 +36,12 @@ Mocop 是面向 NVIDIA GPU 集群的本地网页监控工具。它复用已有 O
 
 - GPU 利用率、显存、温度、功耗、型号、驱动、硬件健康和每卡进程
 - GPU 算力匹配、调度热力图、连接拓扑、搜索、筛选和 CSV 导出
-- CPU、Load、内存、Swap、磁盘容量与 I/O、网络速率和运行时间
+- CPU、Load、内存、Swap、磁盘容量与 I/O、网络速率、运行时间和内核压力失速（PSI）遥测
 - 带诊断、确认/静默、分级阈值、防抖处理和定时维护的告警
 - 节点级独立调度、可能的共享链路聚合和可选 HTTPS Webhook
 - 基于配置的节点资产、预期 GPU 数、本机采集和节点分组
-- 单卡趋势和进程时间线，以及可选的有界 SQLite 留存与只读 Slurm/Kubernetes 上下文
+- 单卡趋势和进程时间线，以及可选的有界 SQLite 留存与只读 Slurm/Kubernetes/Docker/Podman 上下文
+- 按使用者聚合的 GPU 占用与闲置占比账单（`GET /api/usage` 与使用者面板，窗口可选）
 - 六种视觉风格、六种独立主题色、紧凑模式、排序记忆和经过校验的本地背景
 - 可供 Prometheus 和 Grafana 使用的 OpenMetrics 1.0 端点
 
@@ -157,12 +158,13 @@ mocop service uninstall
 - `gpu_process_poll_interval_seconds` 单独控制带时间戳的 GPU 任务刷新；默认 15 秒，核心 GPU 数据仍保持正常采集周期。
 - `incident_overrides` 可按节点或分组覆盖有界阈值，并精确排除磁盘挂载点；节点配置优先。
 - `thresholds.disk_min_free_gib`（默认 5）：文件系统在超过 `disk_warning_pct` 之后，若绝对剩余空间低于该 GiB 数即升级为 critical——这样"快满的 50 GiB 根分区"会排在"同样占比的 10 TiB 卷"之前。未超过百分比阈值的分区一律不升级，因此 `/boot/efi` 这类小分区不会误报。
+- `thresholds.psi_memory_some_pct`（默认 20）与 `thresholds.psi_io_some_pct`（默认 30）：当内核压力失速信息（PSI）显示最近一分钟内任务因内存或 I/O 阻塞的时间占比达到该值时告警——这类"利用率看起来正常但节点已在失速"的状态（如内存回收、checkpoint 写入）只有 PSI 能暴露。达到阈值两倍即升级为 critical。内核不支持 PSI（低于 4.20）时不产生压力数据。
 - `incident_actions` 保存网页中的告警确认与静默及其 UTC 失效时间，通常由网页维护。
 - `manual_probe_cooldown_seconds` 限制同一节点的手动探测频率；默认 5 秒。
 - `retry_jitter_pct` 分散共享 SSH 路径故障后的重试；默认值为 15%。
 - `topology` 描述连接树；其中的安全别名只有同时进入有效 `hosts` 清单时才会被采集。
 - `persistence.enabled` 使用 SQLite 保留有界趋势和告警上下文；默认关闭。
-- `workloads.mode: "identity"` 通过有界 `/proc` 读取补充进程属主（真实 UID 经 passwd 解析）、完整命令行与真实启动时间，成本约为 `"auto"` 的三分之一；`"auto"` 在此之上再识别 Slurm/Kubernetes 身份（cgroup 与环境读取）。两者默认均关闭；即使关闭，GPU 弹窗仍会显示每个进程"自监控观测起"的运行时长下限。工作负载身份采集每次样本最多覆盖前 512 个不同的 GPU 进程 PID。
+- `workloads.mode: "identity"` 通过有界 `/proc` 读取补充进程属主（真实 UID 经 passwd 解析）、完整命令行与真实启动时间，成本约为 `"auto"` 的三分之一；`"auto"` 在此之上再识别 Slurm/Kubernetes 调度身份与 Docker/Podman 容器（12 位短 ID，cgroup 与环境读取）。两者默认均关闭；即使关闭，GPU 弹窗仍会显示每个进程"自监控观测起"的运行时长下限。工作负载身份采集每次样本最多覆盖前 512 个不同的 GPU 进程 PID。
 
 Webhook 地址和签名密钥不写入 JSON。配置中只保存环境变量名：
 

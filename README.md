@@ -36,11 +36,12 @@ Here, **AI-native** means that the interface is built around GPU capacity, task 
 
 - GPU utilization, VRAM, temperature, power, model, driver, hardware health, and per-GPU processes
 - GPU capacity matching, scheduling heatmap, connection map, search, filters, and CSV export
-- CPU, load, memory, swap, disk capacity and I/O, network rate, and uptime
+- CPU, load, memory, swap, disk capacity and I/O, network rate, uptime, and kernel pressure stall (PSI) telemetry
 - Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, and timed maintenance
 - Independent per-host scheduling, possible shared-path grouping, and optional HTTPS webhooks
 - Config-backed host inventory, expected GPU counts, local-host collection, and host groups
-- Per-GPU trends and process timelines, with optional bounded SQLite retention and read-only Slurm/Kubernetes context
+- Per-GPU trends and process timelines, with optional bounded SQLite retention and read-only Slurm/Kubernetes/Docker/Podman context
+- Per-owner GPU occupancy and idle-share rollups over a selectable window (`GET /api/usage` and the owners dialog)
 - Six visual styles, six independent accents, compact mode, saved ordering, and validated local backgrounds
 - OpenMetrics 1.0 endpoint for Prometheus and Grafana
 
@@ -157,12 +158,13 @@ The generated file is complete. Edit it directly only when you need fields not e
 - `gpu_process_poll_interval_seconds` controls timestamped GPU task refresh independently; the 15-second default reduces NVIDIA command overhead while core GPU data keeps the normal cadence.
 - `incident_overrides` applies bounded host/group thresholds and exact disk-mount exclusions; host settings take precedence.
 - `thresholds.disk_min_free_gib` (default 5) escalates a filesystem that is already over `disk_warning_pct` to critical once its absolute free space falls below that many GiB, so a nearly full 50 GiB root outranks a 10 TiB volume sitting at the same percentage. A partition below the percentage threshold is never escalated, so small ones such as `/boot/efi` stay quiet.
+- `thresholds.psi_memory_some_pct` (default 20) and `thresholds.psi_io_some_pct` (default 30) alert when the kernel's pressure stall information reports tasks stalled on memory or I/O for that share of the last minute — the signal that catches a node stuck in reclaim or checkpoint I/O while CPU and memory percentages still look normal. Twice the threshold escalates to critical. Kernels without PSI (pre-4.20) simply report no pressure data.
 - `incident_actions` stores dashboard acknowledgements and silences with UTC expiry. It is maintained by the UI in normal use.
 - `manual_probe_cooldown_seconds` bounds repeated on-demand probes of one node; the default is 5 seconds.
 - `retry_jitter_pct` disperses retries after a shared SSH path fails; the default is 15%.
 - `topology` describes the connection tree. Its safe aliases are display-only unless they also appear in the active `hosts` inventory.
 - `persistence.enabled` retains bounded trends and incident context in SQLite; it is off by default.
-- `workloads.mode: "identity"` adds the process owner (real UID via passwd), full command line, and true start time from bounded `/proc` reads at roughly a third of the cost of `"auto"`; `"auto"` additionally recognizes Slurm/Kubernetes identity from cgroup and environment reads. Both are off by default; without them the GPU dialog still shows a monitor-observed runtime lower bound per process. Workload identity covers at most the first 512 distinct GPU process PIDs per sample.
+- `workloads.mode: "identity"` adds the process owner (real UID via passwd), full command line, and true start time from bounded `/proc` reads at roughly a third of the cost of `"auto"`; `"auto"` additionally recognizes Slurm/Kubernetes scheduler identity and Docker/Podman containers (12-character short ID) from cgroup and environment reads. Both are off by default; without them the GPU dialog still shows a monitor-observed runtime lower bound per process. Workload identity covers at most the first 512 distinct GPU process PIDs per sample.
 
 Webhook destinations and signing secrets stay out of JSON. A minimal endpoint uses
 environment-variable names:

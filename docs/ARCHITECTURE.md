@@ -78,7 +78,7 @@ OpenSSH scan or remote probe and is fetched separately from the telemetry SSE.
 
 Collection produces immutable `ProbeResult`, `SystemMetrics`, `DiskMetrics`,
 `GpuMetrics`, `GpuHealthMetrics`, `GpuProcess`, and optional `WorkloadMetadata`
-values. The system section uses the versioned `MONITOR_V7` tab-separated protocol.
+values. The system section uses the versioned `MONITOR_V8` tab-separated protocol.
 The parser accepts only that current version: the fixed script and its parser ship
 in one process and the script is re-sent on every probe, so no emitter of an older
 version can exist ([ADR-0016](adr/0016-single-version-protocol-and-agent-api.md)
