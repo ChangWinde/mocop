@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -17,6 +18,10 @@ from typing import Protocol
 from .config import PersistenceConfig
 from .incidents import IncidentCondition, IncidentEvent
 
+# Keep the released v3 process_events table byte-for-byte compatible.  Older
+# writers use positional INSERTs, so even an appended nullable column would
+# break package rollback.  Same-timestamp transitions are ordered
+# deterministically at read time, with ``stopped`` before ``started``.
 _SCHEMA_VERSION = 3
 _QUEUE_CAPACITY = 4096
 _WRITE_BATCH_SIZE = 128
@@ -37,6 +42,8 @@ _HISTORY_FIELDS = (
 )
 _INCIDENT_STATES = frozenset({"opened", "resolved", "escalated", "deescalated"})
 _INCIDENT_SEVERITIES = frozenset({"warning", "critical"})
+_INTERNAL_USAGE_HOST = "\x00mocop-process-usage-v1"
+_INTERNAL_USAGE_KEY = "_mocopProcessUsageV1"
 
 # Rows whose stored types cannot round-trip are excluded in SQL before any
 # restore limit applies, so corrupt rows never displace older valid records.
@@ -100,15 +107,15 @@ _GPU_ROW_FILTER = " AND ".join(
 )
 _PROCESS_ROW_FILTER = " AND ".join(
     (
-        "typeof(host) = 'text'",
-        "typeof(gpu_id) = 'text'",
-        "typeof(gpu_index) = 'integer'",
-        "typeof(observed_at) = 'text'",
-        "event_type IN ('started', 'stopped')",
-        "typeof(pid) = 'integer'",
-        "typeof(name) = 'text'",
-        f"typeof(used_memory_mib) IN {_NUMERIC_COLUMN_TYPES}",
-        "typeof(workload_json) IN ('text', 'null')",
+        "typeof(p.host) = 'text'",
+        "typeof(p.gpu_id) = 'text'",
+        "typeof(p.gpu_index) = 'integer'",
+        "typeof(p.observed_at) = 'text'",
+        "p.event_type IN ('started', 'stopped')",
+        "typeof(p.pid) = 'integer'",
+        "typeof(p.name) = 'text'",
+        f"typeof(p.used_memory_mib) IN {_NUMERIC_COLUMN_TYPES}",
+        "typeof(p.workload_json) IN ('text', 'null')",
     )
 )
 
@@ -305,12 +312,8 @@ class _Flush:
     committed: bool = True
 
 
-class _Stop:
-    pass
-
-
 _Write = _HistoryWrite | _IncidentWrite | _GpuTelemetryWrite
-_QueueItem = _Write | _Flush | _Stop
+_QueueItem = _Write | _Flush
 
 
 class SqliteTelemetryPersistence:
@@ -326,8 +329,13 @@ class SqliteTelemetryPersistence:
         self._config = config
         self._path = path.expanduser().absolute()
         self._queue: queue.Queue[_QueueItem] = queue.Queue(_QUEUE_CAPACITY)
+        # Serializes producer admission with close.  Without this boundary a
+        # producer could observe ``_closed == False``, lose the CPU to close,
+        # and enqueue after the writer had already exited.
+        self._admission_lock = threading.Lock()
         self._status_lock = threading.Lock()
         self._closed = False
+        self._stop_requested = threading.Event()
         self._dropped_writes = 0
         self._written_records = 0
         self._last_error: str | None = None
@@ -400,16 +408,16 @@ class SqliteTelemetryPersistence:
                     SELECT host, gpu_id, gpu_index, observed_at, event_type,
                            pid, name, used_memory_mib, workload_json
                     FROM (
-                        SELECT *, ROW_NUMBER() OVER (
-                            PARTITION BY host, gpu_id
-                            ORDER BY observed_at DESC, event_type DESC,
-                                     pid DESC, name DESC
+                        SELECT p.*, ROW_NUMBER() OVER (
+                            PARTITION BY p.host, p.gpu_id
+                            ORDER BY p.observed_at DESC, p.event_type ASC,
+                                     p.pid DESC, p.name DESC
                         ) AS position
-                        FROM process_events
+                        FROM process_events AS p
                         WHERE {_PROCESS_ROW_FILTER}
                     )
                     WHERE position <= ?
-                    ORDER BY host, gpu_id, observed_at, event_type, pid, name
+                    ORDER BY host, gpu_id, observed_at, event_type DESC, pid, name
                     """,
                     (incident_points,),
                 ).fetchall()
@@ -487,13 +495,41 @@ class SqliteTelemetryPersistence:
             ):
                 continue
             workload = None
-            if isinstance(raw_workload, str) and len(raw_workload) <= 4096:
+            parsed: object = None
+            if isinstance(raw_workload, str) and len(raw_workload) <= 16_384:
                 try:
                     parsed = json.loads(raw_workload)
                 except json.JSONDecodeError:
                     parsed = None
-                if isinstance(parsed, dict):
-                    workload = parsed
+            visible = host != _INTERNAL_USAGE_HOST
+            if not visible:
+                marker = (
+                    parsed.get(_INTERNAL_USAGE_KEY)
+                    if isinstance(parsed, dict)
+                    else None
+                )
+                if not isinstance(marker, dict):
+                    continue
+                restored_host = marker.get("host")
+                restored_gpu_id = marker.get("gpuId")
+                restored_workload = marker.get("workload")
+                if (
+                    not isinstance(restored_host, str)
+                    or not 0 < len(restored_host) <= 253
+                    or "\x00" in restored_host
+                    or not isinstance(restored_gpu_id, str)
+                    or not 0 < len(restored_gpu_id) <= 512
+                    or (
+                        restored_workload is not None
+                        and not isinstance(restored_workload, dict)
+                    )
+                ):
+                    continue
+                host = restored_host
+                gpu_id = restored_gpu_id
+                workload = restored_workload
+            elif isinstance(parsed, dict) and len(raw_workload) <= 4096:
+                workload = parsed
             process_events.setdefault((host, gpu_id), []).append(
                 {
                     "observedAt": observed_at,
@@ -504,14 +540,27 @@ class SqliteTelemetryPersistence:
                     "name": name,
                     "usedMemoryMiB": memory,
                     "workload": workload,
+                    **({"_visible": False} if not visible else {}),
                 }
             )
+
+        restored_process_events = {}
+        for key, items in process_events.items():
+            items.sort(
+                key=lambda item: (
+                    str(item["observedAt"]),
+                    0 if item["event"] == "stopped" else 1,
+                    int(item["pid"]),
+                    str(item["name"]),
+                )
+            )
+            restored_process_events[key] = tuple(items[-incident_points:])
 
         return LoadedTelemetry(
             history={host: tuple(points) for host, points in history.items()},
             incident_events=events,
             gpu_history={key: tuple(points) for key, points in gpu_history.items()},
-            process_events={key: tuple(items) for key, items in process_events.items()},
+            process_events=restored_process_events,
         )
 
     def record_history(self, host: str, point: dict[str, object]) -> None:
@@ -549,39 +598,49 @@ class SqliteTelemetryPersistence:
             }
 
     def flush(self, timeout_seconds: float = 5.0) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
         barrier = _Flush(threading.Event())
-        try:
-            self._queue.put(barrier, timeout=max(0.0, timeout_seconds))
-        except queue.Full:
-            return False
-        if not barrier.completed.wait(max(0.0, timeout_seconds)):
+        while True:
+            with self._admission_lock:
+                with self._status_lock:
+                    if self._closed:
+                        return False
+                try:
+                    self._queue.put_nowait(barrier)
+                except queue.Full:
+                    pass
+                else:
+                    break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
+        if not barrier.completed.wait(max(0.0, deadline - time.monotonic())):
             return False
         return barrier.committed
 
     def close(self, timeout_seconds: float = 5.0) -> None:
-        with self._status_lock:
-            if self._closed:
-                return
-            self._closed = True
-        try:
-            self._queue.put(_Stop(), timeout=max(0.0, timeout_seconds))
-        except queue.Full:
-            self._set_error("history queue did not drain during shutdown")
-            return
+        with self._admission_lock:
+            with self._status_lock:
+                self._closed = True
+            self._stop_requested.set()
         self._writer.join(max(0.0, timeout_seconds))
         if self._writer.is_alive():
             self._set_error("history writer did not stop cleanly")
 
     def _enqueue(self, item: _Write) -> None:
-        with self._status_lock:
-            if self._closed:
-                return
-        try:
-            self._queue.put_nowait(item)
-        except queue.Full:
+        with self._admission_lock:
             with self._status_lock:
-                self._dropped_writes += 1
-                self._last_error = "history write queue is full"
+                if self._closed:
+                    self._dropped_writes += 1
+                    self._last_error = "history persistence is closed"
+                    return
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                with self._status_lock:
+                    self._dropped_writes += 1
+                    self._last_error = "history write queue is full"
 
     def _prepare_database(self) -> None:
         try:
@@ -609,6 +668,8 @@ class SqliteTelemetryPersistence:
                     self._migrate_v1(connection)
                 elif version == 2:
                     self._migrate_v2(connection)
+                elif version == 3:
+                    self._migrate_v3(connection)
                 self._prune(connection)
                 page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
                 page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
@@ -637,6 +698,10 @@ class SqliteTelemetryPersistence:
     def _migrate_v2(cls, connection: sqlite3.Connection) -> None:
         cls._apply_schema(connection, ())
 
+    @classmethod
+    def _migrate_v3(cls, connection: sqlite3.Connection) -> None:
+        cls._apply_schema(connection, ())
+
     @staticmethod
     def _apply_schema(
         connection: sqlite3.Connection, statements: tuple[str, ...]
@@ -658,6 +723,41 @@ class SqliteTelemetryPersistence:
                     "ALTER TABLE history"
                     " ADD COLUMN transport_retried INTEGER NOT NULL DEFAULT 0"
                 )
+            process_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(process_events)")
+            }
+            if "sequence" in process_columns:
+                # Restore the released v3 nine-column table contract.  Older
+                # writers use positional INSERTs and must remain able to write
+                # after a one-version package rollback.
+                connection.execute("DROP INDEX IF EXISTS process_events_observed_at")
+                connection.execute(
+                    "ALTER TABLE process_events RENAME TO process_events_sequenced"
+                )
+                for statement in _GPU_TABLE_STATEMENTS[2:4]:
+                    connection.execute(statement)
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO process_events (
+                        host, gpu_id, gpu_index, observed_at, event_type,
+                        pid, name, used_memory_mib, workload_json
+                    )
+                    SELECT host, gpu_id, gpu_index, observed_at, event_type,
+                           pid, name, used_memory_mib, workload_json
+                    FROM process_events_sequenced
+                    """
+                )
+                connection.execute("DROP TABLE process_events_sequenced")
+            # Remove tables/triggers created by short-lived development builds.
+            # They were never part of a released schema and can otherwise use
+            # retention space that a rolled-back v3 binary cannot reclaim.
+            connection.execute("DROP TRIGGER IF EXISTS process_events_order_insert")
+            connection.execute("DROP TRIGGER IF EXISTS process_events_order_delete")
+            connection.execute("DROP TRIGGER IF EXISTS process_events_prune_order")
+            connection.execute("DROP TRIGGER IF EXISTS gpu_history_prune_usage_events")
+            connection.execute("DROP TABLE IF EXISTS process_event_order")
+            connection.execute("DROP TABLE IF EXISTS process_usage_events")
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         except Exception:
             if connection.in_transaction:
@@ -695,13 +795,14 @@ class SqliteTelemetryPersistence:
             return
         next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
         try:
-            should_stop = False
-            while not should_stop:
+            while True:
                 try:
                     first = self._queue.get(
-                        timeout=max(0.0, next_prune_at - time.monotonic())
+                        timeout=min(0.1, max(0.0, next_prune_at - time.monotonic()))
                     )
                 except queue.Empty:
+                    if self._stop_requested.is_set():
+                        break
                     # Retention must keep holding during idle periods too.
                     self._prune_batch(connection)
                     next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
@@ -716,7 +817,7 @@ class SqliteTelemetryPersistence:
                         except queue.Empty:
                             break
                         items.append(item)
-                        if isinstance(item, _Flush | _Stop):
+                        if isinstance(item, _Flush):
                             break
 
                 writes = tuple(
@@ -735,8 +836,6 @@ class SqliteTelemetryPersistence:
                     if isinstance(item, _Flush):
                         item.committed = committed
                         item.completed.set()
-                    elif isinstance(item, _Stop):
-                        should_stop = True
                     self._queue.task_done()
         except Exception:
             # Corrupt internal records must fail this writer, not the collector.
@@ -861,9 +960,17 @@ class SqliteTelemetryPersistence:
             )
             written_records += max(0, cursor.rowcount)
         if item.process_events:
+            visible_events = tuple(
+                event
+                for event in item.process_events
+                if event.get("_visible") is not False
+            )
             cursor = connection.executemany(
                 """
-                INSERT OR IGNORE INTO process_events VALUES (
+                INSERT OR IGNORE INTO process_events (
+                    host, gpu_id, gpu_index, observed_at, event_type,
+                    pid, name, used_memory_mib, workload_json
+                ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
@@ -879,11 +986,65 @@ class SqliteTelemetryPersistence:
                         event.get("usedMemoryMiB"),
                         SqliteTelemetryPersistence._serialize_workload(event),
                     )
-                    for event in item.process_events
+                    for event in visible_events
                 ),
             )
             written_records += max(0, cursor.rowcount)
+            hidden_events = tuple(
+                event for event in item.process_events if event.get("_visible") is False
+            )
+            hidden_cursor = connection.executemany(
+                """
+                INSERT OR IGNORE INTO process_events (
+                    host, gpu_id, gpu_index, observed_at, event_type,
+                    pid, name, used_memory_mib, workload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        _INTERNAL_USAGE_HOST,
+                        SqliteTelemetryPersistence._internal_usage_gpu_key(
+                            item.host, event
+                        ),
+                        event.get("index"),
+                        event.get("observedAt"),
+                        event.get("event"),
+                        event.get("pid"),
+                        event.get("name"),
+                        event.get("usedMemoryMiB"),
+                        SqliteTelemetryPersistence._serialize_hidden_usage(
+                            item.host, event
+                        ),
+                    )
+                    for event in hidden_events
+                ),
+            )
+            written_records += max(0, hidden_cursor.rowcount)
         return written_records
+
+    @staticmethod
+    def _internal_usage_gpu_key(host: str, event: dict[str, object]) -> str:
+        identity = f"{host}\x00{event.get('gpuId')}".encode(
+            "utf-8", errors="surrogatepass"
+        )
+        return hashlib.sha256(identity).hexdigest()
+
+    @staticmethod
+    def _serialize_hidden_usage(host: str, event: dict[str, object]) -> str:
+        return json.dumps(
+            {
+                _INTERNAL_USAGE_KEY: {
+                    "host": host,
+                    "gpuId": event.get("gpuId"),
+                    "workload": event.get("workload")
+                    if isinstance(event.get("workload"), dict)
+                    else None,
+                }
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     @staticmethod
     def _serialize_workload(event: dict[str, object]) -> str | None:

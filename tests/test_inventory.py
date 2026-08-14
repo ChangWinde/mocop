@@ -194,7 +194,12 @@ class InventoryTests(unittest.TestCase):
 
     def test_persists_and_clears_one_bounded_incident_action(self) -> None:
         snapshot = self.inventory.update_incident_action(
-            "gpu-01", "disk:/dev/a:/data", "silenced", 3600, "cleanup running"
+            "gpu-01",
+            "disk:/dev/a:/data",
+            "silenced",
+            3600,
+            "cleanup running",
+            "2026-08-14T00:00:00Z",
         )
 
         action = load_config(self.config_path).incident_actions[0]
@@ -331,6 +336,75 @@ class InventoryTests(unittest.TestCase):
                 ],
             },
         )
+
+    def test_removing_an_intermediate_topology_node_prunes_descendants(self) -> None:
+        self.inventory.change("add", "gpu-02")
+        data = json.loads(self.config_path.read_text(encoding="utf-8"))
+        data["topology"] = {
+            "root": "monitor-host",
+            "links": [
+                {
+                    "source": "monitor-host",
+                    "target": "gpu-01",
+                    "transport": "ssh",
+                },
+                {
+                    "source": "gpu-01",
+                    "target": "gpu-02",
+                    "transport": "ssh",
+                },
+            ],
+        }
+        self.config_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        self.inventory.change("remove", "gpu-01")
+
+        topology = json.loads(self.config_path.read_text(encoding="utf-8"))["topology"]
+        self.assertEqual(topology["links"], [])
+
+    def test_failed_response_projection_does_not_commit_or_notify(self) -> None:
+        before = self.config_path.read_bytes()
+        with (
+            patch.object(
+                self.inventory._host_source,
+                "aliases",
+                side_effect=OSError("scan failed"),
+            ),
+            self.assertRaisesRegex(InventoryError, "could not be scanned"),
+        ):
+            self.inventory.update_maintenance("gpu-01", 3600, "planned repair")
+
+        self.assertEqual(self.config_path.read_bytes(), before)
+        self.assertEqual(self.updates, [])
+
+    def test_independent_controllers_serialize_without_losing_updates(self) -> None:
+        other_updates = []
+        other = ConfigInventory(
+            self.config_path,
+            OpenSshConfigHostSource(),
+            other_updates.append,
+        )
+        barrier = Barrier(2)
+
+        def add_host() -> None:
+            barrier.wait()
+            self.inventory.change("add", "gpu-02")
+
+        def change_poll() -> None:
+            barrier.wait()
+            other.update_collector_settings({"pollIntervalSeconds": 10})
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(add_host), pool.submit(change_poll)]
+            for future in futures:
+                future.result(timeout=5)
+
+        config = load_config(self.config_path)
+        self.assertEqual(config.hosts, ("gpu-01", "gpu-02"))
+        self.assertEqual(config.poll_interval_seconds, 10)
 
     def test_sets_clears_and_avoids_rewriting_shared_host_groups(self) -> None:
         changed = self.inventory.update_host_group("gpu-01", " Training ")

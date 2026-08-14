@@ -10,8 +10,10 @@ from pathlib import Path
 from mocop.config import (
     BUNDLED_CONFIG_PATH,
     CONFIG_ENV_VAR,
+    CONFIG_MAX_BYTES,
     ConfigError,
     load_config,
+    load_private_config,
     resolve_config_path,
 )
 
@@ -238,6 +240,50 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("not valid UTF-8", message)
         self.assertIn(str(path), message)
         self.assertIn("byte 16", message)
+
+    def test_rejects_oversized_and_excessively_nested_config_files(self) -> None:
+        oversized = self.write_raw(b" " * (CONFIG_MAX_BYTES + 1))
+        with self.assertRaisesRegex(ConfigError, "exceeds.*byte limit"):
+            load_config(oversized)
+
+        nested = self.write_raw(
+            '{"unexpected":' + "[" * 1_200 + "0" + "]" * 1_200 + "}"
+        )
+        with self.assertRaisesRegex(ConfigError, "nesting is too deep"):
+            load_config(nested)
+
+    def test_rejects_invalid_ssh_config_path_without_leaking_path_errors(self) -> None:
+        for raw_path in ("~__mocop_no_such_user__/config", "\ud800"):
+            with self.subTest(raw_path=repr(raw_path)):
+                value = valid_config()
+                value["ssh_config"] = raw_path
+                with self.assertRaisesRegex(ConfigError, "ssh_config"):
+                    load_config(self.write(value))
+
+    def test_managed_config_requires_the_same_private_owned_regular_file(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        path = root / "config.json"
+        path.write_text(json.dumps(valid_config()), encoding="utf-8")
+        path.chmod(0o600)
+
+        self.assertEqual(load_private_config(path).listen_port, 8787)
+
+        path.chmod(0o644)
+        with self.assertRaisesRegex(ConfigError, "must be private"):
+            load_private_config(path)
+        path.chmod(0o600)
+
+        link = root / "linked.json"
+        link.symlink_to(path)
+        with self.assertRaisesRegex(ConfigError, "cannot open managed config"):
+            load_private_config(link)
+
+        root.chmod(0o777)
+        self.addCleanup(root.chmod, 0o700)
+        with self.assertRaisesRegex(ConfigError, "not be group/other-writable"):
+            load_private_config(path)
 
     def test_loads_and_bounds_optional_history_persistence(self) -> None:
         value = valid_config()
@@ -482,6 +528,7 @@ class ConfigTests(unittest.TestCase):
             "gpu_temperature_warning_c": 91,
             "gpu_memory_warning_pct": 88,
             "gpu_idle_memory_pct": 25,
+            "psi_memory_some_pct": 15,
         }
         config = load_config(self.write(value))
         self.assertEqual(config.thresholds.cpu_warning_pct, 77)
@@ -489,10 +536,17 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.thresholds.disk_warning_pct, 85)
         self.assertEqual(config.thresholds.gpu_memory_warning_pct, 88)
         self.assertEqual(config.thresholds.gpu_idle_memory_pct, 25)
+        self.assertEqual(config.thresholds.psi_memory_some_pct, 15)
+        self.assertEqual(config.thresholds.psi_io_some_pct, 30)
 
-        value["thresholds"] = {"disk_warning_pct": 101}
-        with self.assertRaisesRegex(ConfigError, "must be between"):
-            load_config(self.write(value))
+        for invalid in (
+            {"disk_warning_pct": 101},
+            {"psi_memory_some_pct": 101},
+            {"psi_io_some_pct": -1},
+        ):
+            value["thresholds"] = invalid
+            with self.assertRaisesRegex(ConfigError, "must be between"):
+                load_config(self.write(value))
 
     def test_rejects_numbers_too_large_for_float_conversion(self) -> None:
         huge = 10**400
@@ -1082,6 +1136,18 @@ class ConfigTests(unittest.TestCase):
             resolve_config_path(environ=values, cwd=root),
             BUNDLED_CONFIG_PATH.resolve(),
         )
+
+    def test_invalid_explicit_path_is_reported_as_a_config_error(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "configuration path is invalid"):
+            resolve_config_path("~mocop-user-that-must-not-exist/config.json")
+
+    def test_listen_host_rejects_controls_and_invalid_unicode(self) -> None:
+        for listen_host in ("127.0.0.1\x00attacker", "\udcff", "bad host"):
+            with self.subTest(listen_host=repr(listen_host)):
+                value = valid_config()
+                value["listen_host"] = listen_host
+                with self.assertRaisesRegex(ConfigError, "valid hostname"):
+                    load_config(self.write(value))
 
     def test_relative_ssh_config_is_resolved_from_monitor_config(self) -> None:
         value = valid_config()

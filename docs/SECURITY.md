@@ -2,13 +2,20 @@
 
 ## Threat contract
 
-**Assets and sensitive data:** SSH private keys and agent capabilities, SSH
-usernames/addresses in local configuration, the operator-authored logical connection
-topology, remote inventory, system/GPU telemetry including GPU process and optional
-job/user metadata, optional SQLite history, webhook URLs and signing secrets, and
-monitor host availability.
+**Assets and sensitive data:** the dashboard Bearer capability, SSH private keys and
+agent capabilities, SSH usernames/addresses in local configuration, the
+operator-authored logical connection topology, remote inventory, system/GPU telemetry
+including GPU process and optional job/user metadata, optional SQLite history, webhook
+URLs and signing secrets, and monitor host availability.
 
-**Actors and privileges:** the local operator can edit the JSON, logical connection topology, and OpenSSH configuration; a dashboard user can read telemetry and the approved logical topology, persist three bounded collector fields, add or remove only locally discovered SSH aliases, assign a bounded group to an explicit host, set finite maintenance windows, and request a restart only when the process explicitly reports that it is supervised; remote SSH servers return telemetry. There are no application tenants or built-in viewer identities. Because the dashboard has no built-in accounts, access to its loopback listener is the authorization boundary for dashboard-managed configuration changes.
+**Actors and privileges:** the local operator can edit the JSON, logical connection
+topology, OpenSSH configuration, and private per-install Bearer capability. A client
+holding that capability has one operator role: it can read telemetry and, after the
+browser-origin checks, persist the narrow collector/inventory/action schemas and
+request a restart only when explicitly supervised. Remote SSH servers return
+telemetry. There are no application tenants, separate viewer identities, or
+role-based permissions. TCP loopback is shared by local Unix users and is not by
+itself an authorization boundary.
 
 **Entry points and trust boundaries:** operator-owned JSON, OpenSSH files, and optional
 service environment variables enter the process; versioned tab-separated system,
@@ -26,11 +33,12 @@ secrets.
 **Local lifecycle boundary:** `mocop init` creates a `0600` configuration without
 overwrite. Service management writes only the fixed user unit path and invokes
 `systemctl --user` with fixed arguments, never a shell. The unit applies
-`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, restricted address families,
-`UMask=0077`, and a private `StateDirectory=mocop`. `ReadWritePaths` grants only the
-configuration directory. If an optional `environment` file exists beside the selected
-configuration, installation rejects symlinks, non-regular files, foreign ownership,
-or group/other permissions before systemd may read it.
+`NoNewPrivileges=true`, restricted address families, `UMask=0077`, and a private
+`StateDirectory=mocop`. It intentionally makes no mount-namespace filesystem-isolation
+claim in a user manager; private ownership/modes protect configuration and secrets
+without breaking required SSH agent or multiplex-socket paths. Installation rejects
+symlink, non-regular, foreign-owned, or group/other-accessible capability and optional
+environment files before systemd may read them.
 The generated unit marks its process as supervised. In that mode an exact empty JSON
 restart request sets a fixed in-process event and exits with status 75 after the HTTP
 acknowledgement; systemd's existing failure policy starts the replacement. The web
@@ -43,31 +51,49 @@ optional `nvidia-smi`, SQLite from the Python standard library, configured HTTPS
 webhook services, DNS/TLS infrastructure, and the browser. Exact hardening of SSH
 servers, webhook receivers, and reverse proxies is **UNABLE TO DETERMINE** here.
 
-**Required properties:** never put secrets or deployment inventory into source
-artifacts, JSON, or browser errors; never accept command construction or an outbound
-destination from HTTP; preserve host-key and TLS verification; reject webhook SSRF by
-default; bound probe time, output, concurrency, storage retention/size, background
-queues, retries, and remote metadata; keep persistence and notifications out of the
-collection critical path; listen locally by default.
+**Required properties:** never put credentials into source artifacts, configuration
+JSON, API payloads, persistent browser storage, or logs; keep resolved destinations and raw
+connection errors out of browser/support responses; authenticate every telemetry,
+metrics, SSE, and write request with exactly one Bearer capability; never accept
+command construction or an outbound destination from HTTP; preserve host-key and TLS
+verification; reject webhook SSRF by default; bound probe time, output, concurrency,
+storage retention/size, background queues, retries, and remote metadata; keep
+persistence and notifications out of the collection critical path; listen locally by
+default.
 
 **Credible abuse cases:** the existing browser, configuration, SSH-option, remote
 output, CSV, and exposed-listener attacks; a remote process supplies excessive or
 control-character metadata; SQLite fills the operator's disk or blocks collection; a
 webhook URL targets loopback/cloud metadata, changes DNS after validation, stalls a
 sender, returns failures to amplify retries, or exposes a secret through configuration
-or status output; a dashboard reader repeatedly requests service restarts, probes, or
-notification tests; a support bundle leaks aliases, GPU UUIDs, command lines, or raw
-connection errors.
+or status output; a capability is copied from its file, shell input, tab session storage,
+or an injected same-origin script; a capability holder repeatedly requests service
+restarts, probes, or notification tests; a support bundle leaks aliases, GPU UUIDs,
+command lines, or raw connection errors.
 
-**Enforcement:** static routes use an exact allowlist; host and GPU history routes validate alias/identity grammar, current telemetry membership, and a 300-point cap; the incident route accepts only one integer capped at 200. GPU history and redacted diagnostics require `X-Monitor-Request: dashboard` and reject cross-site Fetch Metadata. The diagnostic serializer uses an explicit field allowlist, aliases nodes in its output, and omits raw errors, UUIDs, paths, configuration, processes, and workload identity. The inventory scan and topology projection use the same read guard. The topology endpoint accepts no query, reads only the already validated local JSON, starts no process, and returns no resolved OpenSSH field. Topology aliases use the same option-safe grammar as inventory aliases, but only `HostSource.hosts()` can authorize a probe. All write routes require an exact queryless path, a syntactically valid HTTP(S) `Origin`, the same dashboard marker, non-cross-site Fetch Metadata when present, exact JSON media type, unique keys and a route-specific body cap. The cadence schema is one finite non-boolean number from 2 to 60 in at most 128 bytes. The collector schema contains exactly a 2–60 second cadence, a finite 2–300 second complete-probe timeout greater than the configured SSH connection timeout, and integer concurrency from 1 to 64 in at most 512 bytes. Inventory, group, maintenance, and condition-action mutations accept exact bounded schemas and only explicitly monitored aliases. Condition actions use fixed durations and a bounded condition key/reason; expired entries have no effect. A manual-probe request contains one current host alias, enters the existing fixed scheduler, cannot overlap that host, coalesces duplicates, and is rate-limited. A notification test accepts only an empty object and targets only startup-validated configured workers, which also enforce their own test cooldown. The restart schema is exactly an empty object in at most 32 bytes and is unavailable without the supervised-process callback. An add is authorized again against a fresh server-side scan, and recognizable Git/GitHub/GitLab aliases plus `exclude_hosts` entries are ineligible. A removal must match the active inventory; automatic discovery adds a removed alias to the final deny-list. Removal also clears matching expected counts, host overrides, maintenance windows, condition actions, groups, and topology links, and clears `local_host` instead of accidentally converting it into a remote target. Removing the topology root clears the topology rather than selecting another root implicitly.
+**Enforcement:** static routes use an exact allowlist. `/api/meta`, `/healthz`, and
+`/readyz` are public; every other API-family route and `/metrics` first requires
+exactly one valid `Authorization: Bearer` header. Reader routes additionally require a
+trusted `Host`, `X-Monitor-Request: dashboard`, and non-cross-site Fetch Metadata when
+present. Host and GPU history validate identity grammar, current telemetry membership,
+and a 300-point cap; the incident route accepts only one integer capped at 200. The
+diagnostic serializer uses an explicit field allowlist, aliases nodes, and omits raw
+errors, UUIDs, paths, configuration, processes, and workload identity. The inventory
+scan and topology projection use the same read guard. The topology endpoint accepts no
+query, reads only validated local JSON, starts no process, and returns no resolved
+OpenSSH field. Only `HostSource.hosts()` authorizes a probe. All write routes require
+Bearer authentication, an exact queryless path, valid trusted HTTP(S) `Origin`, the
+dashboard marker, non-cross-site Fetch Metadata when present, exact JSON media type,
+unique keys, exact schema, and a route-specific body cap. The detailed route bounds
+and stable errors are the tested contract in [API.md](API.md).
 
 The write guard intentionally does not compare external Origin with a proxy-rewritten
 backend Host. JSON plus the custom header make every POST non-simple, every CORS
 preflight is rejected with no `Access-Control-Allow-Origin`, forms cannot add the
 marker or required media type, and browser-supplied Fetch Metadata must not be
 cross-site. This preserves browser CSRF protection behind a same-origin Host-rewriting
-proxy. Non-browser local clients could forge these headers and remain inside the
-existing loopback/operator trust boundary. POST connections close so rejected unread
+proxy. Non-browser clients can forge these browser-defense headers but must still
+possess the Bearer capability. POST connections close so rejected unread
 bytes cannot be reused as another request. Configuration mutation serializes
 concurrent changes, reloads the current file, limits the file to 1 MiB, refuses the
 bundled template and non-regular or differently owned files, writes a `0600`
@@ -77,14 +103,20 @@ then wakes the scheduler with the new immutable configuration. A no-op settings 
 does not rewrite the file. A partial temporary file never replaces the active
 configuration.
 
-`/metrics` is read-only and inherits the same listener-level confidentiality boundary as JSON/SSE telemetry. It does not accept a target, query, or collection control and never starts remote work. Operators who expose Mocop beyond loopback must apply the same authenticated TLS or VPN policy to this route as to the dashboard.
+`/metrics` is read-only and requires the same Bearer capability as JSON/SSE telemetry.
+It does not accept a target, query, or collection control and never starts remote work.
+Operators who expose Mocop beyond loopback must apply authenticated TLS or private-VPN
+transport to this route as well.
 
 All remote values—including shared-storage devices, mountpoints and heatmap labels—enter the DOM only through `textContent` or property assignment. Shared-resource grouping and focus filters transform only the in-memory snapshot; they do not construct URLs, commands or HTML. CSV cells are always quoted, embedded quotes are doubled, and values whose trimmed form starts with `=`, `+`, `-` or `@` receive a leading apostrophe before the browser creates a short-lived object URL. OpenMetrics labels escape backslashes, quotes, and newlines; current GPU and system resource series omit stale hosts, and process names/PIDs are not exported. Browser-selected backgrounds accept only PNG, JPEG, WebP or AVIF sources up to 32 MiB, must match the declared container signature, and must decode within 8,192 pixels per side and 32 megapixels. Sources above 8 MiB are locally resized to at most 4,096 pixels per side and 12 megapixels, encoded as a static WebP no larger than 8 MiB, and revalidated before one IndexedDB `Blob` is replaced. SVG and animated formats are rejected before decode. Rendering uses a browser-generated, revocable `blob:` URL; CSP grants `blob:` only to `img-src`, and no upload endpoint exists.
 
-Aliases pass a strict grammar; remote aliases follow `--`, while the local target uses the constant `sh -s` argv. Both transports receive the same repository-owned fixed script through stdin. A selector drains stdout and stderr incrementally into buffers sharing the configured 64 KiB–16 MiB hard limit; crossing it kills the isolated process group and returns a finite error. The parser accepts only the current `MONITOR_V7` protocol version and rejects everything else, along with incomplete metric sections, conflicting sampled/skipped process states, missing fields, invalid GPU or health values, duplicate health UUIDs, oversized text and more than 256 GPU or health, 1,024 disk, or 4,096 GPU-process records per host. `MONITOR_V7` can explicitly skip the fixed process query between its bounded deadlines; no browser value controls that decision. Base GPU and health fields share one fixed query, but parsing still treats health as additive: malformed or unsupported health fields cannot suppress valid base telemetry, and an unsupported combined query falls back to the fixed base query. Strict host-key checking and batch mode are mandatory for remote targets; configured timeouts, worker bounds and jittered failure backoff isolate slow targets and disperse shared-path retries; security headers include a same-origin CSP. Network abuse is prevented by the default loopback bind and requires authenticated TLS proxy/VPN controls if the operator changes that default.
+Aliases pass a strict grammar; remote aliases follow `--`, while the local target uses the constant `sh -s` argv. Both transports receive the same repository-owned fixed script through stdin. A selector drains stdout and stderr incrementally into buffers sharing the configured 64 KiB–16 MiB hard limit; crossing it kills the isolated process group and returns a finite error. The parser accepts only the current `MONITOR_V8` protocol version and rejects everything else, along with incomplete metric sections, conflicting sampled/skipped process states, missing fields, invalid GPU or health values, duplicate health UUIDs, oversized text and more than 256 GPU or health, 1,024 disk, or 4,096 GPU-process records per host. `MONITOR_V8` can explicitly skip the fixed process query between its bounded deadlines; no browser value controls that decision. Base GPU and health fields share one fixed query, but parsing still treats health as additive: malformed or unsupported health fields cannot suppress valid base telemetry, and an unsupported combined query falls back to the fixed base query. Strict host-key checking and batch mode are mandatory for remote targets; configured timeouts, worker bounds and jittered failure backoff isolate slow targets and disperse shared-path retries; security headers include a same-origin CSP. The default loopback bind reduces network reachability, while the Bearer capability isolates private HTTP surfaces from unrelated local users. Remote exposure requires authenticated TLS proxy/VPN controls.
 
 Optional workload records are capped at the GPU-process limit, accept only the
-`process`, `slurm`, and `kubernetes` kinds, and bound every field. The fixed script
+`process`, `slurm`, `kubernetes`, `docker`, and `podman` kinds, and bound every
+field. Container IDs are accepted only from anchored Docker/Podman cgroup segments
+with 12–64 lowercase hexadecimal characters and are truncated to the conventional
+12-character display form. The fixed script
 reads at most 16 KiB of cgroup data and 64 KiB of environment data per active GPU PID.
 It selects only workload identity fields and never executes a scheduler client.
 
@@ -110,14 +142,19 @@ networks, and local operator configuration are trusted administrative inputs. A 
 compromised SSH endpoint can consume one probe timeout and output allowance per active
 worker. Process and opted-in workload metadata are intentionally visible to dashboard
 readers and omitted from OpenMetrics. SQLite is not encrypted at rest; protect the user
-account and state directory. Webhook delivery is not a persistent outbox. Multi-user
-authorization remains out of scope because the service is local by default.
+account and state directory. Webhook delivery is not a persistent outbox. Separate
+roles, per-person identity, revocation lists, and multi-tenant authorization remain out
+of scope: one bearer capability grants the complete operator surface.
 
 ## Secret handling
 
 The process inherits the operator's SSH environment so OpenSSH can use ssh-agent. It
 never opens private-key files itself. Raw SSH stderr is classified locally and is not
-stored or emitted. Webhook URLs and signing secrets are read from environment variables;
+stored or emitted. The managed dashboard capability is an owner-only regular file
+beside the selected configuration. The browser removes it from the URL fragment and
+keeps it in tab-scoped `sessionStorage` so an intentional reload remains authenticated;
+it is never stored in a cookie, persistent `localStorage`, or IndexedDB. Closing the
+tab ends that browser session. Webhook URLs and signing secrets are read from environment variables;
 for the generated service, place them in the optional private `environment` file next
 to `config.json`. They never enter the config API, snapshot, status, or logs.
 
@@ -133,4 +170,10 @@ multiplexed session, and doctor flags it.
 
 ## Deployment requirement
 
-Changing `listen_host` away from loopback is a security-sensitive deployment decision. Put the service behind TLS plus authenticated authorization (or a private VPN), restrict source networks, and do not forward `/api/events` anonymously. Credential rotation, viewer access review and proxy configuration are deployment responsibilities.
+Changing `listen_host` away from loopback is a security-sensitive deployment
+decision. Bearer authentication is still required but does not encrypt plain HTTP or
+authenticate the server. Put the service behind TLS plus authenticated authorization
+(or a private VPN), restrict source networks, and do not forward `/api/events`
+anonymously. Capability rotation, viewer access review, proxy configuration, upgrade,
+and rollback are deployment responsibilities; see [OPERATIONS.md](OPERATIONS.md) and
+[ADR-0017](adr/0017-per-install-dashboard-capability.md).

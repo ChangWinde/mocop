@@ -14,7 +14,8 @@ Operators can already inspect live telemetry and change the running collection c
 - Never accept a browser-supplied destination that was not discovered locally.
 - Apply inventory changes without restarting the process or interrupting healthy hosts.
 - Preserve the dependency-free runtime and bounded OpenSSH-config parser.
-- Keep configuration writes private, atomic, and narrowly authorized by the user service sandbox.
+- Keep configuration writes private, atomic, and narrowly authorized by the typed
+  controller, Bearer capability, and operator-owned filesystem boundary.
 
 ## Candidates
 
@@ -42,7 +43,7 @@ Choose Option C. `HostSource.aliases()` exposes only literal, validated OpenSSH 
 
 `host_groups` is a narrow extension of the same inventory authority: it maps one explicit alias to one bounded visible group name. The dashboard may set or clear only that value for an already explicit host. The service publishes the normalized group with each host snapshot, while the browser decides whether to sort and render group sections. Arbitrary tags, group-triggered collection policy, and browser-local shared metadata remain out of scope.
 
-`ConfigInventory` owns the write boundary. It serializes mutations, reloads the current file for each operation, writes a same-directory private temporary file, validates that complete candidate with the normal strict configuration loader, atomically replaces the target, and then invokes a typed runtime-update callback. The web layer depends only on the `DashboardConfigController` protocol and exposes one exact action schema. The service unit grants write access only to the selected configuration directory under `ProtectSystem=strict`, because atomic rename requires directory-level permission.
+`ConfigInventory` owns the write boundary. It serializes mutations, reloads the current file for each operation, writes a same-directory private temporary file, validates that complete candidate with the normal strict configuration loader, atomically replaces the target, and then invokes a typed runtime-update callback. The web layer depends only on the `DashboardConfigController` protocol and exposes one exact action schema. The selected configuration file and parent are validated as operator-owned private filesystem objects; the generated user unit does not claim a portable mount-namespace write sandbox. HTTP authorization is the per-install capability plus the W-tier browser-origin checks defined by [ADR-0017](0017-per-install-dashboard-capability.md).
 
 ## Impact
 

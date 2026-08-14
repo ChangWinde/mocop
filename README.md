@@ -32,15 +32,20 @@ Remote hosts need no agent, database, Python installation, or monitoring port. T
 
 Here, **AI-native** means that the interface is built around GPU capacity, task placement, and failure diagnosis. Mocop does not call an AI service or upload telemetry.
 
+The shipped dashboard UI is currently Simplified Chinese and has no locale
+switch yet. The English README, API, operations, and engineering references are
+fully maintained.
+
 ## Features
 
 - GPU utilization, VRAM, temperature, power, model, driver, hardware health, and per-GPU processes
 - GPU capacity matching, scheduling heatmap, connection map, search, filters, and CSV export
-- CPU, load, memory, swap, disk capacity and I/O, network rate, and uptime
+- CPU, load, memory, swap, disk capacity and I/O, network rate, uptime, and kernel pressure stall (PSI) telemetry
 - Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, and timed maintenance
 - Independent per-host scheduling, possible shared-path grouping, and optional HTTPS webhooks
 - Config-backed host inventory, expected GPU counts, local-host collection, and host groups
-- Per-GPU trends and process timelines, with optional bounded SQLite retention and read-only Slurm/Kubernetes context
+- Per-GPU trends and process timelines, with optional bounded SQLite retention and read-only Slurm/Kubernetes/Docker/Podman context
+- Per-owner GPU occupancy and idle-share rollups over a selectable window (`GET /api/usage` and the owners dialog)
 - Six visual styles, six independent accents, compact mode, saved ordering, and validated local backgrounds
 - OpenMetrics 1.0 endpoint for Prometheus and Grafana
 
@@ -107,7 +112,13 @@ mocop doctor
 mocop service install
 ```
 
-Open <http://127.0.0.1:8787>. The command installs, enables, and starts a user-level systemd service. It does not change the system linger policy.
+Open the exact `Dashboard:` capability URL printed by the command, for example
+`http://127.0.0.1:8787/#access_token=...`. The fragment is not sent over HTTP;
+the page removes it immediately and keeps the capability in tab-scoped
+`sessionStorage`, so reloads and the managed restart flow remain authenticated.
+Closing the tab or opening an independent tab requires the printed URL again. The command installs,
+enables, starts, and verifies a user-level systemd service. It does not change
+the system linger policy.
 
 Run `mocop` for a foreground process, or manage the service with:
 
@@ -116,9 +127,18 @@ mocop service status
 mocop service uninstall
 ```
 
+Uninstall stops/disables the service and removes only its generated unit. It
+retains the configuration, Bearer token, optional environment file, SQLite
+state, browser data, journal, SSH files/control sockets, installed package, and
+linger policy. See the [operations runbook](docs/OPERATIONS.md) before upgrade,
+rollback, token rotation, or manual cleanup.
+
 ## Configuration
 
-The generated file is complete. Edit it directly only when you need fields not exposed in the dashboard. This excerpt shows the main inventory fields:
+The generated file is complete. Edit it directly only when you need fields not
+exposed in the dashboard. The [configuration reference](docs/CONFIGURATION.md)
+is authoritative for every field, default, relationship, and hard boundary.
+This excerpt shows the main inventory fields:
 
 ```json
 {
@@ -157,12 +177,13 @@ The generated file is complete. Edit it directly only when you need fields not e
 - `gpu_process_poll_interval_seconds` controls timestamped GPU task refresh independently; the 15-second default reduces NVIDIA command overhead while core GPU data keeps the normal cadence.
 - `incident_overrides` applies bounded host/group thresholds and exact disk-mount exclusions; host settings take precedence.
 - `thresholds.disk_min_free_gib` (default 5) escalates a filesystem that is already over `disk_warning_pct` to critical once its absolute free space falls below that many GiB, so a nearly full 50 GiB root outranks a 10 TiB volume sitting at the same percentage. A partition below the percentage threshold is never escalated, so small ones such as `/boot/efi` stay quiet.
+- `thresholds.psi_memory_some_pct` (default 20) and `thresholds.psi_io_some_pct` (default 30) alert when the kernel's pressure stall information reports tasks stalled on memory or I/O for that share of the last minute — the signal that catches a node stuck in reclaim or checkpoint I/O while CPU and memory percentages still look normal. Twice the threshold escalates to critical. Kernels without PSI (pre-4.20) simply report no pressure data.
 - `incident_actions` stores dashboard acknowledgements and silences with UTC expiry. It is maintained by the UI in normal use.
 - `manual_probe_cooldown_seconds` bounds repeated on-demand probes of one node; the default is 5 seconds.
 - `retry_jitter_pct` disperses retries after a shared SSH path fails; the default is 15%.
 - `topology` describes the connection tree. Its safe aliases are display-only unless they also appear in the active `hosts` inventory.
 - `persistence.enabled` retains bounded trends and incident context in SQLite; it is off by default.
-- `workloads.mode: "identity"` adds the process owner (real UID via passwd), full command line, and true start time from bounded `/proc` reads at roughly a third of the cost of `"auto"`; `"auto"` additionally recognizes Slurm/Kubernetes identity from cgroup and environment reads. Both are off by default; without them the GPU dialog still shows a monitor-observed runtime lower bound per process. Workload identity covers at most the first 512 distinct GPU process PIDs per sample.
+- `workloads.mode: "identity"` adds the process owner (real UID via passwd), full command line, and true start time from bounded `/proc` reads at roughly a third of the cost of `"auto"`; `"auto"` additionally recognizes Slurm/Kubernetes scheduler identity and Docker/Podman containers (12-character short ID) from cgroup and environment reads. Both are off by default; without them the GPU dialog still shows a monitor-observed runtime lower bound per process. Workload identity covers at most the first 512 distinct GPU process PIDs per sample.
 
 Webhook destinations and signing secrets stay out of JSON. A minimal endpoint uses
 environment-variable names:
@@ -214,14 +235,21 @@ The dashboard allows a 2–60 second interval, a 2–300 second probe timeout th
 - Use **Match capacity** to find same-host, same-model GPUs with enough free VRAM. The result is not a reservation.
 - Set a maintenance window to silence actionable alerts while collection continues.
 - Scan SSH aliases in **Settings → Monitored nodes** to add or remove eligible compute nodes.
-- After an upgrade, use **Settings → Service status → Restart service**. This action is
-  available only for the installed user service and reloads the page after recovery.
+- Follow the [upgrade and rollback runbook](docs/OPERATIONS.md). After a verified
+  package upgrade, **Settings → Service status → Restart service** is available only
+  for the installed user service and reloads the page after recovery.
 - Upload a PNG, JPEG, WebP, or AVIF background up to 32 MiB. Sources above 8 MiB are compressed locally; no image is uploaded.
 - Export one current snapshot with `mocop --once > snapshot.json`. Add `--strict` in scripts and cron jobs: it exits `1` unless every configured host produced an online sample, and lists the failing hosts on stderr.
 
 ## HTTP API
 
-Everything the dashboard shows is also a small JSON API with stable machine-readable error codes, a self-describing `GET /api/meta` endpoint, and documented access tiers for automation. See the [API reference](docs/API.md) for every endpoint, field table, and agent playbook — including why non-viewer automation must not send the `X-Monitor-Request: dashboard` header.
+Everything the dashboard shows is also a small JSON API with stable
+machine-readable error codes, a public self-describing `GET /api/meta` endpoint,
+and P/A/R/W access tiers. Telemetry, SSE, and OpenMetrics require the
+per-install Bearer capability; only API discovery and health/readiness are
+public. See the [API reference](docs/API.md) for authenticated curl examples,
+every endpoint and field, and why non-viewer automation must not send the
+`X-Monitor-Request: dashboard` header.
 
 ## Prometheus
 
@@ -230,11 +258,18 @@ Everything the dashboard shows is also a small JSON API with stable machine-read
 ```yaml
 scrape_configs:
   - job_name: mocop
+    authorization:
+      type: Bearer
+      credentials_file: /home/alice/.config/mocop/access-token
     static_configs:
       - targets: ["127.0.0.1:8787"]
 ```
 
-The endpoint includes collection and background-subsystem health, host availability, incidents, system resources, and current GPU metrics. Stale resource values, process names, and PIDs are not exported.
+Use an absolute credential path; Prometheus must run as an identity permitted to
+read that private file, or receive a separately protected copy. The endpoint
+includes collection and background-subsystem health, host availability,
+incidents, system resources, and current GPU metrics. Stale resource values,
+process names, and PIDs are not exported.
 
 ## Failure behavior
 
@@ -304,7 +339,11 @@ mocop doctor --probe                       # one real production collection per 
 
 Mocop accepts only explicit SSH aliases and runs one fixed, read-only probe. It enforces host-key checking, batch mode, timeouts, output limits, bounded concurrency, private atomic configuration writes, and safe rendering of remote text.
 
-The service has no built-in user accounts and listens on `127.0.0.1` by default. If you expose the dashboard or `/metrics` remotely, place it behind authenticated TLS or a private VPN.
+The service has no built-in user accounts and listens on `127.0.0.1` by default.
+A private per-install Bearer capability protects telemetry, metrics, SSE, and
+writes from unrelated local users, but grants one complete operator role. If you
+expose Mocop remotely, use authenticated TLS or a private VPN: a Bearer header
+over plain HTTP has no network confidentiality or server authentication.
 
 Read the [threat model](docs/SECURITY.md) and [security policy](.github/SECURITY.md) before changing a trust boundary.
 
@@ -317,7 +356,10 @@ uvx --from ruff==0.12.11 ruff format --check .
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-See [CONTRIBUTING.md](.github/CONTRIBUTING.md), [architecture](docs/ARCHITECTURE.md), [API reference](docs/API.md), [performance](docs/PERFORMANCE.md), and the [changelog](docs/CHANGELOG.md).
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md),
+[architecture](docs/ARCHITECTURE.md), [configuration](docs/CONFIGURATION.md),
+[operations](docs/OPERATIONS.md), [API reference](docs/API.md),
+[performance](docs/PERFORMANCE.md), and the [changelog](docs/CHANGELOG.md).
 
 ## License
 

@@ -24,10 +24,27 @@ from mocop.models import (
     SystemMetrics,
     WorkloadMetadata,
 )
+from mocop.persistence import DisabledPersistence, LoadedTelemetry
 from mocop.service import _MAX_GPU_IDENTITIES_PER_HOST, MonitorService, StateStore
 
 
 class StateStoreTests(unittest.TestCase):
+    def test_rejects_a_result_from_a_removed_host_incarnation(self) -> None:
+        store = StateStore(5)
+        store.set_hosts(("gpu-1",))
+        old_incarnation = store.host_incarnation("gpu-1")
+        store.set_hosts(())
+        store.set_hosts(("gpu-1",))
+
+        accepted = store.apply(
+            ProbeResult("gpu-1", "online", 777, message="old incarnation"),
+            expected_incarnation=old_incarnation,
+        )
+
+        self.assertFalse(accepted)
+        self.assertNotEqual(store.host_incarnation("gpu-1"), old_incarnation)
+        self.assertEqual(store.snapshot()["servers"][0]["status"], "pending")
+
     def test_disabled_persistence_skips_every_write_path(self) -> None:
         persistence = Mock()
         persistence.is_enabled.return_value = False
@@ -99,6 +116,7 @@ class StateStoreTests(unittest.TestCase):
             action="acknowledged",
             until=datetime(2026, 8, 11, tzinfo=timezone.utc),
             reason="owner notified",
+            incident_started_at="2026-08-10T00:00:00Z",
         )
         store = StateStore(5, incident_actions=(action,), utc_clock=clock)
         store.set_hosts(("offline",))
@@ -121,6 +139,219 @@ class StateStoreTests(unittest.TestCase):
         self.assertFalse(condition["actionable"])
         self.assertEqual(condition["actionReason"], "owner notified")
         self.assertEqual(condition["diagnosis"]["title"], "Collection path unavailable")
+
+    def test_legacy_actions_remain_effective_until_their_existing_expiry(self) -> None:
+        def clock() -> datetime:
+            return datetime(2026, 8, 10, tzinfo=timezone.utc)
+
+        for action_name in ("acknowledged", "silenced"):
+            notifications = _RecordingNotifications()
+            action = IncidentActionConfig(
+                host="offline",
+                condition_key="connectivity",
+                action=action_name,
+                until=datetime(2026, 8, 11, tzinfo=timezone.utc),
+                reason="legacy operator action",
+            )
+            store = StateStore(
+                5,
+                incident_actions=(action,),
+                notifications=notifications,
+                utc_clock=clock,
+            )
+            store.set_hosts(("offline",))
+            store.apply(
+                ProbeResult(
+                    "offline",
+                    "unreachable",
+                    1,
+                    observed_at="2026-08-10T00:00:00Z",
+                )
+            )
+
+            with self.subTest(action=action_name):
+                active = store.incidents(10)["active"][0]
+                self.assertEqual(active[action_name], True)
+                self.assertFalse(active["actionable"])
+                self.assertEqual(
+                    bool(notifications.published), action_name != "silenced"
+                )
+
+    def test_bound_action_survives_restart_but_not_a_resolved_recurrence(self) -> None:
+        opened_at = "2026-08-10T00:00:00Z"
+        action = IncidentActionConfig(
+            host="offline",
+            condition_key="connectivity",
+            action="silenced",
+            until=datetime(2026, 8, 11, tzinfo=timezone.utc),
+            reason="planned investigation",
+            incident_started_at=opened_at,
+        )
+        notifications = _RecordingNotifications()
+        store = StateStore(
+            5,
+            incident_actions=(action,),
+            notifications=notifications,
+            utc_clock=lambda: datetime(2026, 8, 10, tzinfo=timezone.utc),
+        )
+        store.set_hosts(("offline",))
+
+        self.assertEqual(store.incidents(10)["active"], [])
+        store.apply(
+            ProbeResult(
+                "offline",
+                "unreachable",
+                1,
+                observed_at="2026-08-10T00:05:00Z",
+            )
+        )
+        active = store.incidents(10)["active"][0]
+        self.assertEqual(active["firstObservedAt"], "2026-08-10T00:05:00Z")
+        self.assertTrue(active["silenced"])
+        self.assertEqual(notifications.published, [])
+
+        store.apply(
+            ProbeResult("offline", "online", 1, observed_at="2026-08-10T00:06:00Z")
+        )
+        store.apply(
+            ProbeResult("offline", "online", 1, observed_at="2026-08-10T00:07:00Z")
+        )
+        store.apply(
+            ProbeResult(
+                "offline",
+                "unreachable",
+                1,
+                observed_at="2026-08-10T00:08:00Z",
+            )
+        )
+
+        recurrent = store.incidents(10)["active"][0]
+        self.assertEqual(recurrent["firstObservedAt"], "2026-08-10T00:08:00Z")
+        self.assertFalse(recurrent["silenced"])
+        self.assertTrue(recurrent["actionable"])
+
+    def test_healthy_post_restart_sample_consumes_a_stale_bound_action(self) -> None:
+        action = IncidentActionConfig(
+            host="offline",
+            condition_key="connectivity",
+            action="silenced",
+            until=datetime(2026, 8, 11, tzinfo=timezone.utc),
+            reason="old incident",
+            incident_started_at="2026-08-10T00:00:00Z",
+        )
+        store = StateStore(
+            5,
+            incident_actions=(action,),
+            utc_clock=lambda: datetime(2026, 8, 10, tzinfo=timezone.utc),
+        )
+        store.set_hosts(("offline",))
+        store.apply(
+            ProbeResult("offline", "online", 1, observed_at="2026-08-10T00:05:00Z")
+        )
+        store.apply(
+            ProbeResult(
+                "offline",
+                "unreachable",
+                1,
+                observed_at="2026-08-10T00:06:00Z",
+            )
+        )
+
+        recurrent = store.incidents(10)["active"][0]
+        self.assertFalse(recurrent["silenced"])
+        self.assertTrue(recurrent["actionable"])
+
+    def test_unknown_gpu_telemetry_does_not_consume_startup_action_binding(
+        self,
+    ) -> None:
+        def gpu(temperature: float | None) -> GpuMetrics:
+            return GpuMetrics(
+                index=0,
+                uuid="GPU-1",
+                name="Test GPU",
+                driver_version="550",
+                pstate="P0",
+                temperature_c=temperature,
+                utilization_gpu_pct=10,
+                utilization_memory_pct=10,
+                memory_total_mib=1000,
+                memory_used_mib=100,
+                memory_free_mib=900,
+                power_draw_w=50,
+                power_limit_w=200,
+            )
+
+        action = IncidentActionConfig(
+            host="gpu-1",
+            condition_key="gpu_temperature:GPU-1",
+            action="silenced",
+            until=datetime(2026, 8, 11, tzinfo=timezone.utc),
+            reason="ongoing thermal investigation",
+            incident_started_at="2026-08-10T00:00:00Z",
+        )
+
+        def store() -> StateStore:
+            value = StateStore(
+                5,
+                incident_actions=(action,),
+                utc_clock=lambda: datetime(2026, 8, 10, tzinfo=timezone.utc),
+            )
+            value.set_hosts(("gpu-1",))
+            return value
+
+        continuous = store()
+        continuous.apply(
+            ProbeResult(
+                "gpu-1",
+                "unreachable",
+                1,
+                observed_at="2026-08-10T00:01:00Z",
+            )
+        )
+        continuous.apply(
+            ProbeResult(
+                "gpu-1",
+                "online",
+                1,
+                (gpu(None),),
+                observed_at="2026-08-10T00:02:00Z",
+            )
+        )
+        for minute in (3, 4):
+            continuous.apply(
+                ProbeResult(
+                    "gpu-1",
+                    "online",
+                    1,
+                    (gpu(90),),
+                    observed_at=f"2026-08-10T00:0{minute}:00Z",
+                )
+            )
+        self.assertTrue(continuous.incidents(10)["active"][0]["silenced"])
+
+        recovered = store()
+        recovered.apply(
+            ProbeResult(
+                "gpu-1",
+                "online",
+                1,
+                (gpu(60),),
+                observed_at="2026-08-10T00:01:00Z",
+            )
+        )
+        for minute in (2, 3):
+            recovered.apply(
+                ProbeResult(
+                    "gpu-1",
+                    "online",
+                    1,
+                    (gpu(90),),
+                    observed_at=f"2026-08-10T00:0{minute}:00Z",
+                )
+            )
+        recurrent = recovered.incidents(10)["active"][0]
+        self.assertFalse(recurrent["silenced"])
+        self.assertTrue(recurrent["actionable"])
 
     def test_tracks_per_gpu_history_and_only_real_process_transitions(self) -> None:
         first = GpuMetrics(
@@ -741,6 +972,35 @@ class StateStoreTests(unittest.TestCase):
         self.assertIsNotNone(store.gpu_history("gpu-1", newest, 10))
         self.assertIsNotNone(store.gpu_history("gpu-1", "GPU-churn-0", 10))
 
+    def test_restored_gpu_identity_churn_is_bounded_before_live_samples(self) -> None:
+        base = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        restored = LoadedTelemetry(
+            history={},
+            incident_events=(),
+            gpu_history={
+                ("gpu-1", f"GPU-{index:03d}"): (
+                    {
+                        "observedAt": (base + timedelta(seconds=index))
+                        .isoformat(timespec="seconds")
+                        .replace("+00:00", "Z"),
+                        "index": index,
+                    },
+                )
+                for index in range(_MAX_GPU_IDENTITIES_PER_HOST + 1)
+            },
+        )
+
+        store = StateStore(5, restored=restored)
+        store.set_hosts(("gpu-1",))
+
+        retained = [key for key in store._gpu_history if key[0] == "gpu-1"]
+        self.assertEqual(len(retained), _MAX_GPU_IDENTITIES_PER_HOST)
+        self.assertNotIn(("gpu-1", "GPU-000"), store._gpu_history)
+        self.assertIn(
+            ("gpu-1", f"GPU-{_MAX_GPU_IDENTITIES_PER_HOST:03d}"),
+            store._gpu_history,
+        )
+
     def test_aggregates_server_gpu_and_memory_stats(self) -> None:
         gpu = GpuMetrics(
             index=0,
@@ -977,6 +1237,25 @@ class StateStoreTests(unittest.TestCase):
         store.set_hosts(("new-host",))
         self.assertIsNotNone(store.wait_for_update(version, 0.001))
 
+    def test_adapter_status_change_gets_a_revision_and_wakes_waiters(self) -> None:
+        class MutablePersistence(DisabledPersistence):
+            def __init__(self) -> None:
+                self.healthy = True
+
+            def status(self) -> dict[str, object]:
+                return {**super().status(), "healthy": self.healthy}
+
+        persistence = MutablePersistence()
+        store = StateStore(5, persistence=persistence)
+        before = store.snapshot()
+
+        persistence.healthy = False
+        changed = store.wait_for_update(before["version"], 0.3)
+
+        self.assertIsNotNone(changed)
+        self.assertGreater(changed["version"], before["version"])
+        self.assertFalse(changed["persistence"]["healthy"])
+
     def test_sse_readers_reuse_one_snapshot_without_exposing_mutable_state(
         self,
     ) -> None:
@@ -997,9 +1276,7 @@ class StateStoreTests(unittest.TestCase):
         changed = store.wait_for_update(version, 0.001)
         self.assertIsNot(first, changed)
 
-    def test_preserves_configured_host_order_without_publishing_poll_start(
-        self,
-    ) -> None:
+    def test_preserves_host_order_and_publishes_observable_poll_start(self) -> None:
         store = StateStore(5)
         store.set_hosts(("node-b", "node-a"))
         version = store.snapshot()["version"]
@@ -1010,7 +1287,7 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(
             [server["host"] for server in snapshot["servers"]], ["node-b", "node-a"]
         )
-        self.assertEqual(snapshot["version"], version)
+        self.assertEqual(snapshot["version"], version + 1)
         self.assertEqual(snapshot["stats"]["pollingServers"], 2)
 
     def test_exposes_configured_collection_freshness_window(self) -> None:
@@ -1251,15 +1528,19 @@ class StateStoreTests(unittest.TestCase):
         store.set_hosts(("offline",))
         store.apply(ProbeResult("offline", "unreachable", 5000))
         silenced = store.snapshot()
+        silenced_version = silenced["version"]
 
         current[0] = window.until
-        expired = store.snapshot()
+        expired = store.wait_for_update(silenced_version, 0)
 
+        self.assertIsNotNone(expired)
+        assert expired is not None
         self.assertEqual(silenced["stats"]["actionableIncidents"], 0)
         self.assertEqual(expired["stats"]["actionableIncidents"], 1)
         self.assertEqual(expired["stats"]["maintenanceServers"], 0)
         self.assertIsNone(expired["servers"][0]["maintenance"])
         self.assertGreater(expired["incidentVersion"], silenced["incidentVersion"])
+        self.assertGreater(expired["version"], silenced_version)
         self.assertFalse(store.incidents(10)["active"][0]["silenced"])
 
     def test_publishes_and_hot_replaces_shared_host_groups(self) -> None:
@@ -1351,6 +1632,22 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(notifications.published[-1][0][0].host, "gpu-2")
         self.assertEqual(notifications.published[-1][1][0]["anchor"], "gateway")
 
+    def test_queued_notification_is_fenced_by_host_incarnation(self) -> None:
+        notifications = _RecordingNotifications()
+        store = StateStore(5, notifications=notifications)
+        store.set_hosts(("gpu-1",))
+        store.apply(ProbeResult("gpu-1", "unreachable", 1))
+        old_event = notifications.published[-1][0][0]
+        self.assertTrue(notifications.actionable_check(old_event))
+
+        store.set_hosts(())
+        store.set_hosts(("gpu-1",))
+        store.apply(ProbeResult("gpu-1", "unreachable", 1))
+        new_event = notifications.published[-1][0][0]
+
+        self.assertFalse(notifications.actionable_check(old_event))
+        self.assertTrue(notifications.actionable_check(new_event))
+
     def test_acknowledged_conditions_do_not_feed_correlation(self) -> None:
         topology = ConnectionTopologyConfig(
             root="monitor",
@@ -1366,6 +1663,7 @@ class StateStoreTests(unittest.TestCase):
             action="acknowledged",
             until=datetime(2026, 8, 11, tzinfo=timezone.utc),
             reason="owner notified",
+            incident_started_at="2026-08-10T00:00:00Z",
         )
         notifications = _RecordingNotifications()
         store = StateStore(
@@ -1377,8 +1675,12 @@ class StateStoreTests(unittest.TestCase):
         )
         store.set_hosts(("gpu-1", "gpu-2"))
 
-        store.apply(ProbeResult("gpu-1", "unreachable", 1))
-        store.apply(ProbeResult("gpu-2", "unreachable", 1))
+        store.apply(
+            ProbeResult("gpu-1", "unreachable", 1, observed_at="2026-08-10T00:00:00Z")
+        )
+        store.apply(
+            ProbeResult("gpu-2", "unreachable", 1, observed_at="2026-08-10T00:00:00Z")
+        )
 
         # Acknowledgement records ownership without silencing delivery, but
         # the correlator consumes only actionable connectivity conditions.
@@ -1409,6 +1711,11 @@ class _OnlineProbe:
     def probe(self, host, _config):
         self.calls += 1
         return ProbeResult(host, "online", 17_000)
+
+
+class _ExplodingProbe:
+    def probe(self, _host, _config):
+        raise RuntimeError("sensitive internal detail")
 
 
 class _ConfigHostSource:
@@ -1516,6 +1823,9 @@ class _RecordingNotifications:
     def publish(self, events, correlations):
         self.published.append((events, correlations))
 
+    def set_actionable_check(self, check):
+        self.actionable_check = check
+
     def status(self):
         return {
             "enabled": True,
@@ -1574,12 +1884,14 @@ class _PollCycleRecordingStore(StateStore):
         result,
         retry_after_seconds=None,
         poll_cycle_duration_seconds=None,
+        expected_incarnation=None,
     ):
         self.apply_durations.append(poll_cycle_duration_seconds)
-        super().apply(
+        return super().apply(
             result,
             retry_after_seconds=retry_after_seconds,
             poll_cycle_duration_seconds=poll_cycle_duration_seconds,
+            expected_incarnation=expected_incarnation,
         )
 
     def record_poll_cycle(self, duration_seconds):
@@ -1609,6 +1921,35 @@ class _BlockingProbe:
 
 
 class MonitorServiceTests(unittest.TestCase):
+    def test_unexpected_probe_failure_is_actionably_and_safely_reported(self) -> None:
+        config = MonitorConfig(
+            ssh_config=Path("/tmp/config"),
+            auto_discover=False,
+            hosts=("gpu-01",),
+            exclude_hosts=frozenset(),
+            poll_interval_seconds=60,
+            probe_timeout_seconds=12,
+            connect_timeout_seconds=5,
+            max_workers=1,
+            listen_host="127.0.0.1",
+            listen_port=8787,
+        )
+        store = StateStore(60)
+        service = MonitorService(config, _ConfigHostSource(), _ExplodingProbe(), store)
+
+        with self.assertLogs("mocop.service", "ERROR") as captured:
+            service.poll_once()
+
+        snapshot = store.snapshot()
+        self.assertEqual(
+            snapshot["servers"][0]["message"], "Unexpected collector error"
+        )
+        self.assertIn("internal probe failure", snapshot["collectorError"])
+        log = "\n".join(captured.output)
+        self.assertIn("RuntimeError", log)
+        self.assertNotIn("sensitive internal detail", log)
+        self.assertEqual(store.health()["reason"], "collector failed unexpectedly")
+
     def test_in_flight_state_is_visible_before_probe_worker_starts(self) -> None:
         config = MonitorConfig(
             ssh_config=Path("/tmp/config"),
@@ -2204,6 +2545,297 @@ class MonitorServiceTests(unittest.TestCase):
         service.poll_once()
 
         self.assertEqual(probe.calls, 2)
+
+
+class UsageRollupTests(unittest.TestCase):
+    """StateStore.usage(): occupancy pairing, idle classification, anchors."""
+
+    _NOW = datetime(2026, 8, 14, 2, 0, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _gpu(
+        processes: tuple[GpuProcess, ...],
+        utilization: float | None = 50,
+    ) -> GpuMetrics:
+        return GpuMetrics(
+            index=0,
+            uuid="GPU-1",
+            name="Test GPU",
+            driver_version="550",
+            pstate="P0",
+            temperature_c=60,
+            utilization_gpu_pct=utilization,
+            utilization_memory_pct=20,
+            memory_total_mib=1000,
+            memory_used_mib=250,
+            memory_free_mib=750,
+            power_draw_w=100,
+            power_limit_w=200,
+            processes=processes,
+        )
+
+    def _store(self, **kwargs: object) -> StateStore:
+        store = StateStore(5, utc_clock=lambda: self._NOW, **kwargs)
+        store.set_hosts(("gpu-1",))
+        return store
+
+    def _apply(
+        self,
+        store: StateStore,
+        observed_at: str,
+        processes: tuple[GpuProcess, ...],
+        utilization: float | None = 50,
+    ) -> None:
+        store.apply(
+            ProbeResult(
+                "gpu-1",
+                "online",
+                1,
+                (self._gpu(processes, utilization),),
+                observed_at=observed_at,
+            )
+        )
+
+    def test_usage_pairs_transitions_and_classifies_idle_occupancy(self) -> None:
+        store = self._store()
+        process = GpuProcess(
+            10, "train.py", 250, WorkloadMetadata(kind="process", owner="alice")
+        )
+        self._apply(store, "2026-08-14T01:00:00Z", (), utilization=50)
+        self._apply(store, "2026-08-14T01:00:30Z", (process,), utilization=50)
+        self._apply(store, "2026-08-14T01:01:00Z", (process,), utilization=0)
+        self._apply(store, "2026-08-14T01:01:30Z", (), utilization=0)
+
+        usage = store.usage(1, 50)
+
+        self.assertEqual(usage["windowHours"], 1)
+        self.assertEqual(usage["sinceAt"], "2026-08-14T01:00:00Z")
+        self.assertEqual(usage["earliestDataAt"], "2026-08-14T01:00:00Z")
+        self.assertEqual(usage["totalOwners"], 1)
+        self.assertEqual(usage["droppedRecords"], 0)
+        self.assertEqual(usage["totalGpuSeconds"], 60.0)
+        (owner,) = usage["owners"]
+        self.assertEqual(owner["owner"], "alice")
+        self.assertEqual(owner["gpuSeconds"], 60.0)
+        # One half of the interval was sampled busy, the other half idle.
+        self.assertEqual(owner["sampledSeconds"], 60.0)
+        self.assertEqual(owner["idleSeconds"], 30.0)
+        self.assertEqual(owner["idleShare"], 0.5)
+        self.assertEqual(owner["hosts"], ["gpu-1"])
+        self.assertEqual(owner["gpus"], 1)
+        self.assertEqual(owner["processes"], 1)
+        self.assertEqual(owner["kinds"], {"process": 1})
+
+    def test_usage_includes_open_intervals_up_to_now(self) -> None:
+        store = self._store()
+        process = GpuProcess(
+            11, "serve.py", 200, WorkloadMetadata(kind="process", owner="bob")
+        )
+        self._apply(store, "2026-08-14T01:59:00Z", ())
+        self._apply(store, "2026-08-14T01:59:45Z", (process,))
+
+        (owner,) = store.usage(1, 50)["owners"]
+        self.assertEqual(owner["owner"], "bob")
+        self.assertEqual(owner["gpuSeconds"], 15.0)
+
+    def test_usage_covers_processes_seeded_before_any_transition(self) -> None:
+        # The very first sample of a GPU seeds the live process table without
+        # emitting a started transition; the rollup must still count it.
+        store = self._store()
+        process = GpuProcess(
+            12, "notebook.py", 100, WorkloadMetadata(kind="process", owner="dora")
+        )
+        self._apply(store, "2026-08-14T01:59:00Z", (process,))
+
+        (owner,) = store.usage(1, 50)["owners"]
+        self.assertEqual(owner["owner"], "dora")
+        self.assertEqual(owner["gpuSeconds"], 60.0)
+
+    def test_usage_drops_unmatched_stops_instead_of_using_process_start(self) -> None:
+        record = {
+            "observedAt": "2026-08-14T01:30:00Z",
+            "gpuId": "GPU-1",
+            "index": 0,
+            "event": "stopped",
+            "pid": 7,
+            "name": "old.py",
+            "usedMemoryMiB": 10.0,
+            "workload": {
+                "kind": "docker",
+                "workload_id": "abc123def456",
+                "owner": "carol",
+                "started_at": "2026-08-14T00:00:00Z",
+            },
+        }
+        anonymous = {
+            **record,
+            "observedAt": "2026-08-14T01:40:00Z",
+            "pid": 8,
+            "name": "anon.py",
+            "workload": None,
+        }
+        restored = LoadedTelemetry(
+            history={},
+            incident_events=(),
+            process_events={("gpu-1", "GPU-1"): (record, anonymous)},
+        )
+        store = self._store(restored=restored)
+
+        usage = store.usage(1, 50)
+
+        # A process start timestamp predates GPU observation and is not a safe
+        # accounting anchor.  Both orphan stops are therefore reported.
+        self.assertEqual(usage["owners"], [])
+        self.assertEqual(usage["droppedRecords"], 2)
+
+    def test_usage_unions_concurrent_processes_for_one_owner_and_gpu(self) -> None:
+        store = self._store()
+        first = GpuProcess(
+            10, "train-a.py", 250, WorkloadMetadata(kind="process", owner="alice")
+        )
+        second = GpuProcess(
+            11, "train-b.py", 250, WorkloadMetadata(kind="process", owner="alice")
+        )
+        self._apply(store, "2026-08-14T01:00:00Z", (first, second))
+        self._apply(store, "2026-08-14T02:00:00Z", ())
+
+        (owner,) = store.usage(1, 50)["owners"]
+        self.assertEqual(owner["gpuSeconds"], 3600.0)
+        self.assertEqual(owner["processes"], 2)
+
+    def test_usage_starts_at_first_gpu_observation_not_workload_start(self) -> None:
+        store = self._store()
+        process = GpuProcess(
+            12,
+            "late-context.py",
+            100,
+            WorkloadMetadata(
+                kind="process",
+                owner="alice",
+                started_at="2026-08-13T20:00:00Z",
+            ),
+        )
+        self._apply(store, "2026-08-14T01:59:00Z", (process,))
+
+        (owner,) = store.usage(1, 50)["owners"]
+        self.assertEqual(owner["gpuSeconds"], 60.0)
+        self.assertEqual(store.usage(1, 50)["earliestDataAt"], "2026-08-14T01:59:00Z")
+
+    def test_usage_closes_at_last_successful_sample_on_disconnect(self) -> None:
+        store = self._store()
+        process = GpuProcess(
+            13, "train.py", 100, WorkloadMetadata(kind="process", owner="alice")
+        )
+        self._apply(store, "2026-08-14T01:00:00Z", (process,))
+        self._apply(store, "2026-08-14T01:30:00Z", (process,))
+        store.apply(
+            ProbeResult(
+                "gpu-1",
+                "unreachable",
+                1,
+                (),
+                message="SSH failed",
+                observed_at="2026-08-14T01:31:00Z",
+            )
+        )
+
+        usage = store.usage(1, 50)
+        (owner,) = usage["owners"]
+        self.assertEqual(owner["gpuSeconds"], 1800.0)
+        self.assertEqual(usage["droppedRecords"], 0)
+
+    def test_usage_history_does_not_change_with_current_poll_interval(self) -> None:
+        store = self._store()
+        process = GpuProcess(
+            14, "train.py", 100, WorkloadMetadata(kind="process", owner="alice")
+        )
+        self._apply(store, "2026-08-14T01:00:00Z", (process,), utilization=0)
+        self._apply(store, "2026-08-14T01:02:00Z", (), utilization=0)
+        before = store.usage(1, 50)
+
+        store.set_poll_interval_seconds(60)
+        after = store.usage(1, 50)
+
+        self.assertEqual(before["owners"], after["owners"])
+        self.assertEqual(before["owners"][0]["sampledSeconds"], 0.0)
+
+    def test_usage_reconciles_restored_pid_reuse_before_attribution(self) -> None:
+        restored = LoadedTelemetry(
+            history={},
+            incident_events=(),
+            gpu_history={
+                ("gpu-1", "GPU-1"): (
+                    {"observedAt": "2026-08-14T01:30:00Z", "index": 0},
+                )
+            },
+            process_events={
+                ("gpu-1", "GPU-1"): (
+                    {
+                        "observedAt": "2026-08-14T01:00:00Z",
+                        "gpuId": "GPU-1",
+                        "index": 0,
+                        "event": "started",
+                        "pid": 42,
+                        "name": "python",
+                        "usedMemoryMiB": 100,
+                        "workload": {
+                            "kind": "process",
+                            "owner": "alice",
+                            "started_at": "2026-08-14T00:30:00Z",
+                        },
+                    },
+                )
+            },
+        )
+        store = self._store(restored=restored)
+        replacement = GpuProcess(
+            42,
+            "python",
+            100,
+            WorkloadMetadata(
+                kind="process",
+                owner="bob",
+                started_at="2026-08-14T01:58:00Z",
+            ),
+        )
+        self._apply(store, "2026-08-14T01:58:00Z", (replacement,))
+
+        owners = {item["owner"]: item for item in store.usage(1, 50)["owners"]}
+        self.assertEqual(owners["alice"]["gpuSeconds"], 1800.0)
+        self.assertEqual(owners["bob"]["gpuSeconds"], 120.0)
+
+    def test_usage_does_not_extend_orphaned_starts_across_collection_gaps(self) -> None:
+        started = {
+            "observedAt": "2026-08-14T01:30:00Z",
+            "gpuId": "GPU-1",
+            "index": 0,
+            "event": "started",
+            "pid": 9,
+            "name": "finished-during-gap.py",
+            "usedMemoryMiB": 10.0,
+            "workload": {
+                "kind": "process",
+                "owner": "eve",
+                "started_at": "2026-08-14T01:30:00Z",
+            },
+        }
+        restored = LoadedTelemetry(
+            history={},
+            incident_events=(),
+            process_events={("gpu-1", "GPU-1"): (started,)},
+        )
+        store = self._store(restored=restored)
+
+        usage = store.usage(1, 50)
+
+        self.assertEqual(usage["owners"], [])
+        self.assertEqual(usage["totalGpuSeconds"], 0)
+        self.assertEqual(usage["droppedRecords"], 1)
+
+    def test_usage_uses_the_store_clock_for_generated_timestamp(self) -> None:
+        usage = self._store().usage(1, 50)
+
+        self.assertEqual(usage["generatedAt"], "2026-08-14T02:00:00Z")
 
 
 if __name__ == "__main__":

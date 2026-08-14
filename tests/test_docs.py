@@ -5,13 +5,26 @@ import unittest
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from mocop.web import API_ROUTES
+from mocop.config import _OPTIONAL_KEYS, _REQUIRED_KEYS
+from mocop.remote_script import _PROTOCOL_VERSION
+from mocop.web import _API_VERSION, API_ROUTES
 
 ROOT = Path(__file__).resolve().parents[1]
 MARKDOWN_TARGET = re.compile(r"\[[^]]*]\(([^)]+)\)")
 HTML_TARGET = re.compile(r'(?:href|src)="([^"]+)"')
 HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 API_PATH = re.compile(r"/api/[a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)*")
+ROUTE_ROW = re.compile(r"^\| (GET|POST) \| `([^`]+)` \| ([PARW]) \|", re.MULTILINE)
+ERROR_ROW = re.compile(r"^\| `([A-Z][A-Z0-9_]+)` \| \d{3} \|", re.MULTILINE)
+CONFIG_ROW = re.compile(r"^\| `([^`]+)` \| (?:yes|no) \|", re.MULTILINE)
+ERROR_LITERAL = re.compile(r"^[A-Z][A-Z0-9_]+$")
+ACCESS_ABBREVIATIONS = {
+    "public": "P",
+    "authenticated": "A",
+    "reader": "R",
+    "writer": "W",
+}
+NON_ERROR_LITERALS = {"DELETE", "DENY", "GET", "HEAD", "PATCH", "POST", "PUT", "TRACE"}
 
 
 def heading_anchors(content: str) -> set[str]:
@@ -48,6 +61,71 @@ class ApiReferenceDriftTests(unittest.TestCase):
                 routed_paths,
                 f"docs/API.md mentions unrouted API path {documented}",
             )
+
+    def test_endpoint_index_matches_route_methods_paths_and_access(self) -> None:
+        documented = {
+            (method, path, access)
+            for method, path, access in ROUTE_ROW.findall(self.reference)
+        }
+        implemented = {
+            (method, path, ACCESS_ABBREVIATIONS[access])
+            for method, path, access in API_ROUTES
+        }
+        self.assertEqual(implemented, documented)
+
+    def test_stable_error_code_table_matches_web_implementation(self) -> None:
+        import ast
+
+        source = (ROOT / "mocop" / "web.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        implemented = {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and ERROR_LITERAL.fullmatch(node.value)
+            and node.value not in NON_ERROR_LITERALS
+        }
+        self.assertEqual(implemented, set(ERROR_ROW.findall(self.reference)))
+
+    def test_authentication_and_protocol_contracts_are_current(self) -> None:
+        self.assertIn(f"**API version:** `{_API_VERSION}`", self.reference)
+        self.assertIn("Authorization: Bearer ${MOCOP_TOKEN}", self.reference)
+        self.assertIn("fetch()", self.reference)
+        self.assertIn("never creates an ambient Cookie", self.reference)
+        self.assertNotIn("Tier L", self.reference)
+        self.assertNotIn("| L |", self.reference)
+
+        current_contracts = (
+            ROOT / "docs" / "API.md",
+            ROOT / "docs" / "ARCHITECTURE.md",
+            ROOT / "docs" / "SECURITY.md",
+            ROOT / "docs" / "adr" / "0016-single-version-protocol-and-agent-api.md",
+        )
+        for document in current_contracts:
+            content = document.read_text(encoding="utf-8")
+            self.assertIn(_PROTOCOL_VERSION, content, f"missing protocol in {document}")
+
+
+class ConfigurationReferenceDriftTests(unittest.TestCase):
+    def test_top_level_field_table_matches_strict_schema(self) -> None:
+        reference = (ROOT / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
+        documented = set(CONFIG_ROW.findall(reference))
+        self.assertEqual(_REQUIRED_KEYS | _OPTIONAL_KEYS, documented)
+
+    def test_current_service_docs_do_not_claim_mount_namespace_guarantees(self) -> None:
+        for relative in ("docs/ARCHITECTURE.md", "docs/SECURITY.md"):
+            content = (ROOT / relative).read_text(encoding="utf-8")
+            for directive in ("PrivateTmp", "ProtectSystem", "ReadWritePaths"):
+                self.assertNotIn(directive, content, f"stale guarantee in {relative}")
+
+    def test_readmes_point_to_capability_and_retention_contracts(self) -> None:
+        for relative in ("README.md", "README.zh-CN.md"):
+            content = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("#access_token=...", content)
+            self.assertIn("docs/CONFIGURATION.md", content)
+            self.assertIn("docs/OPERATIONS.md", content)
+            self.assertIn("SQLite", content)
 
 
 class DocumentationTests(unittest.TestCase):

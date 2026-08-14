@@ -15,6 +15,8 @@ from mocop.models import (
     GpuHealthMetrics,
     GpuMetrics,
     GpuProcess,
+    PressureStallMetrics,
+    PressureStallSample,
     ProbeResult,
     SystemMetrics,
 )
@@ -125,6 +127,49 @@ class IncidentTrackerTests(unittest.TestCase):
         # A small partition well under the percentage threshold stays quiet
         # even though its absolute headroom is tiny (for example /boot/efi).
         self.assertIsNone(disk_condition(0.5, 2, mount="/boot/efi"))
+
+    def test_pressure_stall_conditions_follow_the_some_avg60_window(self) -> None:
+        policy = ThresholdIncidentPolicy(ThresholdConfig(), incidents=IncidentConfig())
+
+        def conditions_for(pressure: PressureStallMetrics | None) -> dict:
+            return policy.conditions(
+                ProbeResult(
+                    "node-a",
+                    "online",
+                    1,
+                    (),
+                    observed_at="2026-08-14T00:00:00Z",
+                    system=replace(system(10, 10), pressure=pressure),
+                )
+            )
+
+        def stall(avg60: float) -> PressureStallSample:
+            return PressureStallSample(some_avg10=avg60, some_avg60=avg60)
+
+        # Kernels without PSI produce no pressure conditions at all.
+        self.assertNotIn("pressure:memory", conditions_for(None))
+
+        quiet = conditions_for(
+            PressureStallMetrics(memory=stall(19.99), io=stall(29.99))
+        )
+        self.assertNotIn("pressure:memory", quiet)
+        self.assertNotIn("pressure:io", quiet)
+
+        elevated = conditions_for(PressureStallMetrics(memory=stall(25), io=stall(35)))
+        self.assertEqual(elevated["pressure:memory"].severity, "warning")
+        self.assertEqual(elevated["pressure:memory"].value, 25)
+        self.assertEqual(elevated["pressure:memory"].threshold, 20)
+        self.assertIn("stalled on memory", elevated["pressure:memory"].detail)
+        self.assertEqual(elevated["pressure:io"].severity, "warning")
+
+        # Twice the warning threshold escalates to critical.
+        stuck = conditions_for(
+            PressureStallMetrics(memory=stall(40), io=stall(60), cpu=stall(90))
+        )
+        self.assertEqual(stuck["pressure:memory"].severity, "critical")
+        self.assertEqual(stuck["pressure:io"].severity, "critical")
+        # CPU pressure is covered by the load averages and never alerts.
+        self.assertNotIn("pressure:cpu", stuck)
 
     def test_initial_online_sample_honors_open_window_without_events(self) -> None:
         warning = ProbeResult(
@@ -479,6 +524,51 @@ class IncidentTrackerTests(unittest.TestCase):
             },
             {(event["conditionKey"], event["state"]) for event in final["events"]},
         )
+
+    def test_missing_gpu_fields_freeze_field_specific_recovery(self) -> None:
+        hot_gpu = replace(
+            gpu(82),
+            memory_used_mib=950,
+            memory_total_mib=1000,
+        )
+        warning = ProbeResult("node-a", "online", 1, (hot_gpu,), system=system(20, 20))
+        self.tracker.update(warning)
+        self.tracker.update(warning)
+
+        unknown_gpu = replace(
+            hot_gpu,
+            temperature_c=None,
+            memory_used_mib=None,
+            memory_total_mib=None,
+        )
+        unknown = replace(warning, gpus=(unknown_gpu,))
+        self.tracker.update(unknown)
+        self.tracker.update(unknown)
+
+        active = {item["conditionKey"] for item in self.tracker.snapshot(20)["active"]}
+        self.assertIn("gpu_temperature:GPU-1", active)
+        self.assertIn("gpu_memory:GPU-1", active)
+
+    def test_missing_cpu_and_pressure_fields_freeze_recovery(self) -> None:
+        pressure = PressureStallMetrics(
+            memory=PressureStallSample(some_avg10=50, some_avg60=50),
+            io=None,
+        )
+        stressed_system = replace(system(90, 20), pressure=pressure)
+        warning = ProbeResult("node-a", "online", 1, system=stressed_system)
+        self.tracker.update(warning)
+        self.tracker.update(warning)
+
+        unknown = replace(
+            warning,
+            system=replace(stressed_system, cpu_usage_pct=None, pressure=None),
+        )
+        self.tracker.update(unknown)
+        self.tracker.update(unknown)
+
+        active = {item["conditionKey"] for item in self.tracker.snapshot(20)["active"]}
+        self.assertIn("cpu", active)
+        self.assertIn("pressure:memory", active)
 
     def test_missing_health_telemetry_freezes_health_recovery(self) -> None:
         def health(errors: int) -> GpuHealthMetrics:

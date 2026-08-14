@@ -14,6 +14,7 @@ import time
 import zlib
 from collections import OrderedDict, deque
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import SplitResult, urlsplit
@@ -26,6 +27,8 @@ from .models import utc_now
 _WEBHOOK_QUEUE_CAPACITY = 1024
 _WEBHOOK_RESPONSE_LIMIT_BYTES = 65_536
 _WEBHOOK_SEEN_CAPACITY = 4096
+_RESOLVER_QUEUE_CAPACITY = 16
+_RESOLVER_WORKERS = 2
 
 
 class NotificationError(RuntimeError):
@@ -50,6 +53,7 @@ class NotificationEnvelope:
 class DeliveryResult:
     success: bool
     retryable: bool
+    error_code: str | None = None
 
 
 class WebhookSender(Protocol):
@@ -118,7 +122,7 @@ def _validated_addresses(
     port = endpoint.parsed_url.port or 443
     try:
         records = resolver(hostname, port, type=socket.SOCK_STREAM)
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise NotificationError("webhook hostname cannot be resolved") from exc
     addresses = []
     for record in records:
@@ -132,35 +136,108 @@ def _validated_addresses(
         addresses.append(address)
     if not addresses:
         raise NotificationError("webhook hostname has no usable address")
-    return tuple(dict.fromkeys(addresses))
+    return tuple(dict.fromkeys(addresses))[:64]
 
 
-def _resolver_with_deadline(
-    resolver: AddressResolver, deadline: float
-) -> AddressResolver:
-    """Bound DNS resolution by the same delivery deadline as the request."""
+@dataclass(frozen=True, slots=True)
+class _ResolutionTask:
+    args: tuple[object, ...]
+    kwargs: dict[str, object]
+    outcome: queue.SimpleQueue[object]
 
-    def resolve(*args: object, **kwargs: object) -> list[tuple[object, ...]]:
+
+class _ResolverStop:
+    pass
+
+
+class _BoundedResolver:
+    """Run blocking DNS calls on a fixed-size, bounded daemon pool."""
+
+    def __init__(self, resolver: AddressResolver) -> None:
+        self._resolver = resolver
+        self._queue: queue.Queue[_ResolutionTask | _ResolverStop] = queue.Queue(
+            _RESOLVER_QUEUE_CAPACITY
+        )
+        self._lock = threading.Lock()
+        self._closed = False
+        self._stop = threading.Event()
+        self._workers = tuple(
+            threading.Thread(
+                target=self._run,
+                name=f"mocop-webhook-resolver-{index + 1}",
+                daemon=True,
+            )
+            for index in range(_RESOLVER_WORKERS)
+        )
+        for worker in self._workers:
+            worker.start()
+
+    def resolve(
+        self, deadline: float, *args: object, **kwargs: object
+    ) -> list[tuple[object, ...]]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("webhook DNS resolution deadline exceeded")
         outcome: queue.SimpleQueue[object] = queue.SimpleQueue()
-
-        def run() -> None:
-            try:
-                outcome.put(resolver(*args, **kwargs))
-            except Exception as exc:
-                outcome.put(exc)
-
-        worker = threading.Thread(target=run, name="mocop-webhook-resolve", daemon=True)
-        worker.start()
+        task = _ResolutionTask(args, dict(kwargs), outcome)
+        with self._lock:
+            if self._closed:
+                raise TimeoutError("webhook DNS resolver is closed")
         try:
-            value = outcome.get(timeout=remaining)
+            self._queue.put(task, timeout=remaining)
+        except queue.Full:
+            raise TimeoutError("webhook DNS resolution queue is full") from None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("webhook DNS resolution deadline exceeded")
+        try:
+            value = task.outcome.get(timeout=remaining)
         except queue.Empty:
             raise TimeoutError("webhook DNS resolution deadline exceeded") from None
         if isinstance(value, BaseException):
             raise value
         return value  # type: ignore[return-value]
+
+    def close(self, timeout_seconds: float = 0.2) -> None:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        with self._lock:
+            self._closed = True
+            self._stop.set()
+        while True:
+            try:
+                task = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(task, _ResolutionTask):
+                task.outcome.put(TimeoutError("webhook DNS resolver is closed"))
+            self._queue.task_done()
+        for worker in self._workers:
+            worker.join(max(0.0, deadline - time.monotonic()))
+
+    def _run(self) -> None:
+        while True:
+            if self._stop.is_set() and self._queue.empty():
+                return
+            try:
+                task = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                if isinstance(task, _ResolverStop):
+                    return
+                try:
+                    task.outcome.put(self._resolver(*task.args, **task.kwargs))
+                except Exception as exc:
+                    task.outcome.put(exc)
+            finally:
+                self._queue.task_done()
+
+
+def _resolver_with_deadline(
+    resolver: _BoundedResolver, deadline: float
+) -> AddressResolver:
+    def resolve(*args: object, **kwargs: object) -> list[tuple[object, ...]]:
+        return resolver.resolve(deadline, *args, **kwargs)
 
     return resolve
 
@@ -180,8 +257,9 @@ class PinnedHttpsWebhookSender:
         resolver: AddressResolver = socket.getaddrinfo,
         tls_context: ssl.SSLContext | None = None,
         connect: Callable[..., socket.socket] = socket.create_connection,
+        resolver_pool: _BoundedResolver | None = None,
     ) -> None:
-        self._resolver = resolver
+        self._resolver_pool = resolver_pool or _BoundedResolver(resolver)
         self._tls_context = tls_context or ssl.create_default_context()
         self._connect = connect
 
@@ -194,10 +272,15 @@ class PinnedHttpsWebhookSender:
         deadline = time.monotonic() + endpoint.config.timeout_seconds
         try:
             addresses = _validated_addresses(
-                endpoint, _resolver_with_deadline(self._resolver, deadline)
+                endpoint, _resolver_with_deadline(self._resolver_pool, deadline)
             )
-        except NotificationError:
-            return DeliveryResult(False, True)
+        except NotificationError as exc:
+            code = (
+                "unsafe_destination"
+                if "non-public network" in str(exc) or "no usable address" in str(exc)
+                else "dns_resolution_failed"
+            )
+            return DeliveryResult(False, True, code)
         hostname = endpoint.parsed_url.hostname
         assert hostname is not None
         port = endpoint.parsed_url.port or 443
@@ -214,8 +297,12 @@ class PinnedHttpsWebhookSender:
             return DeliveryResult(
                 False,
                 status in {408, 425, 429} or status >= 500,
+                f"http_{status}",
             )
-        return DeliveryResult(False, True)
+        return DeliveryResult(False, True, "network_or_tls_failure")
+
+    def close(self, timeout_seconds: float = 0.2) -> None:
+        self._resolver_pool.close(timeout_seconds)
 
     def _request_status(
         self,
@@ -235,6 +322,12 @@ class PinnedHttpsWebhookSender:
             context=self._tls_context,
         )
         raw_socket: socket.socket | None = None
+        watchdog = threading.Timer(
+            max(0.0, deadline - time.monotonic()),
+            lambda: self._abort_request(connection, raw_socket),
+        )
+        watchdog.daemon = True
+        watchdog.start()
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -267,9 +360,24 @@ class PinnedHttpsWebhookSender:
         except (OSError, ssl.SSLError, http.client.HTTPException):
             return None
         finally:
+            watchdog.cancel()
+            watchdog.join()
             if raw_socket is not None:
                 raw_socket.close()
             connection.close()
+
+    @staticmethod
+    def _abort_request(
+        connection: http.client.HTTPSConnection,
+        raw_socket: socket.socket | None,
+    ) -> None:
+        active_socket = connection.sock or raw_socket
+        if active_socket is not None:
+            with suppress(OSError, AttributeError):
+                active_socket.shutdown(socket.SHUT_RDWR)
+            with suppress(OSError):
+                active_socket.close()
+        connection.close()
 
     @staticmethod
     def _drain(
@@ -295,10 +403,6 @@ class PinnedHttpsWebhookSender:
             return
 
 
-class _Stop:
-    pass
-
-
 class _WebhookWorker:
     def __init__(
         self,
@@ -309,10 +413,11 @@ class _WebhookWorker:
         self._endpoint = endpoint
         self._sender = sender
         self._actionable_check = actionable_check
-        self._queue: queue.Queue[NotificationEnvelope | _Stop] = queue.Queue(
+        self._queue: queue.Queue[NotificationEnvelope] = queue.Queue(
             _WEBHOOK_QUEUE_CAPACITY
         )
         self._stop = threading.Event()
+        self._closing = threading.Event()
         self._status_lock = threading.Lock()
         self._seen_order: deque[int] = deque()
         self._seen: set[int] = set()
@@ -322,6 +427,7 @@ class _WebhookWorker:
         self._last_attempt_at: str | None = None
         self._last_success_at: str | None = None
         self._last_test_queued_at = float("-inf")
+        self._closed = False
         self._active_conditions: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._thread = threading.Thread(
             target=self._run,
@@ -350,33 +456,33 @@ class _WebhookWorker:
         if event.state not in self._endpoint.config.events:
             return
         with self._status_lock:
+            if self._closed:
+                self._dropped += 1
+                self._last_error = "notification endpoint is closed"
+                return
             if event.event_id in self._seen:
+                return
+            try:
+                self._queue.put_nowait(envelope)
+            except queue.Full:
+                self._dropped += 1
+                self._last_error = "delivery queue is full"
                 return
             self._seen.add(event.event_id)
             self._seen_order.append(event.event_id)
             while len(self._seen_order) > _WEBHOOK_SEEN_CAPACITY:
                 self._seen.discard(self._seen_order.popleft())
-        try:
-            self._queue.put_nowait(envelope)
-        except queue.Full:
-            with self._status_lock:
-                self._dropped += 1
-                self._last_error = "delivery queue is full"
 
-    def publish_test(self, envelope: NotificationEnvelope) -> bool:
-        now = time.monotonic()
-        with self._status_lock:
-            if now - self._last_test_queued_at < 30:
-                return False
-            self._last_test_queued_at = now
-        try:
-            self._queue.put_nowait(envelope)
-        except queue.Full:
-            with self._status_lock:
-                self._dropped += 1
-                self._last_error = "delivery queue is full"
-            return False
-        return True
+    def _test_available_locked(self, now: float) -> bool:
+        return (
+            not self._closed
+            and now - self._last_test_queued_at >= 30
+            and not self._queue.full()
+        )
+
+    def _queue_test_locked(self, envelope: NotificationEnvelope, now: float) -> None:
+        self._queue.put_nowait(envelope)
+        self._last_test_queued_at = now
 
     def status(self) -> dict[str, object]:
         with self._status_lock:
@@ -393,24 +499,30 @@ class _WebhookWorker:
 
     def close(self, timeout_seconds: float) -> None:
         timeout = max(0.0, timeout_seconds)
-        try:
-            self._queue.put(_Stop(), timeout=timeout)
-        except queue.Full:
-            self._stop.set()
-            self._thread.join(timeout)
-            return
-        self._thread.join(timeout)
+        deadline = time.monotonic() + timeout
+        with self._status_lock:
+            self._closed = True
+        self._closing.set()
+        # Reserve half the caller's budget for forced cancellation instead of
+        # applying the full timeout twice.
+        self._thread.join(timeout / 2)
         if self._thread.is_alive():
             self._stop.set()
-            self._thread.join(min(1.0, timeout))
+            self._thread.join(max(0.0, deadline - time.monotonic()))
+        if self._thread.is_alive():
+            with self._status_lock:
+                self._last_error = "notification worker did not stop cleanly"
 
     def _run(self) -> None:
         next_delivery_at = 0.0
         while True:
-            item = self._queue.get()
+            if self._closing.is_set() and self._queue.empty():
+                return
             try:
-                if isinstance(item, _Stop):
-                    return
+                item = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
                 condition_key = (item.event.host, item.event.condition.key)
                 paired_delivery = not item.is_test and {"opened", "resolved"}.issubset(
                     self._endpoint.config.events
@@ -429,6 +541,7 @@ class _WebhookWorker:
                 headers = self._headers(item.event, body)
                 delivered = False
                 suppressed = False
+                last_error_code = "delivery_failed"
                 for attempt in range(self._endpoint.config.max_attempts):
                     if attempt:
                         retry_delay = self._retry_delay(item.event.event_id, attempt)
@@ -448,13 +561,14 @@ class _WebhookWorker:
                         result = self._sender.send(self._endpoint, body, headers)
                     except Exception:
                         # A sender adapter failure must not terminate this endpoint.
-                        result = DeliveryResult(False, True)
+                        result = DeliveryResult(False, True, "sender_internal_failure")
                     next_delivery_at = (
                         time.monotonic() + self._endpoint.config.min_interval_seconds
                     )
                     if result.success:
                         delivered = True
                         break
+                    last_error_code = result.error_code or "delivery_failed"
                     if not result.retryable:
                         break
                 with self._status_lock:
@@ -474,7 +588,7 @@ class _WebhookWorker:
                     else:
                         self._dropped += 1
                         if not suppressed:
-                            self._last_error = "delivery failed"
+                            self._last_error = last_error_code
             finally:
                 self._queue.task_done()
 
@@ -531,10 +645,21 @@ class WebhookNotificationSink:
         actionable_check: ActionableCheck | None = None,
     ) -> None:
         selected_sender = sender or PinnedHttpsWebhookSender()
-        self._workers = tuple(
-            _WebhookWorker(endpoint, selected_sender, actionable_check)
-            for endpoint in endpoints
-        )
+        self._sender = selected_sender
+        workers = []
+        try:
+            for endpoint in endpoints:
+                workers.append(
+                    _WebhookWorker(endpoint, selected_sender, actionable_check)
+                )
+        except Exception:
+            for worker in reversed(workers):
+                worker.close(1.0)
+            close_sender = getattr(selected_sender, "close", None)
+            if callable(close_sender):
+                close_sender()
+            raise
+        self._workers = tuple(workers)
 
     def set_actionable_check(self, check: ActionableCheck | None) -> None:
         """Re-check queued events with this callback right before delivery."""
@@ -594,19 +719,41 @@ class WebhookNotificationSink:
             observed_at=observed_at,
         )
         envelope = NotificationEnvelope(event, is_test=True)
-        queued = [worker.publish_test(envelope) for worker in self._workers]
-        return any(queued)
+        now = time.monotonic()
+        acquired: list[threading.Lock] = []
+        try:
+            for worker in self._workers:
+                worker._status_lock.acquire()
+                acquired.append(worker._status_lock)
+            if not self._workers or not all(
+                worker._test_available_locked(now) for worker in self._workers
+            ):
+                return False
+            for worker in self._workers:
+                worker._queue_test_locked(envelope, now)
+            return True
+        finally:
+            for lock in reversed(acquired):
+                lock.release()
 
     def close(self, timeout_seconds: float = 5.0) -> None:
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         for worker in self._workers:
             worker.close(max(0.0, deadline - time.monotonic()))
+        close_sender = getattr(self._sender, "close", None)
+        if callable(close_sender):
+            try:
+                close_sender(max(0.0, deadline - time.monotonic()))
+            except TypeError:
+                # Third-party test adapters may implement the older no-arg
+                # close hook; production's sender accepts the shared budget.
+                close_sender()
 
 
 def _resolve_endpoints(
     configs: tuple[WebhookConfig, ...],
     environ: dict[str, str],
-    resolver: AddressResolver,
+    resolver: _BoundedResolver,
 ) -> tuple[_Endpoint, ...]:
     endpoints = []
     for config in configs:
@@ -618,9 +765,13 @@ def _resolve_endpoints(
         if len(url) > 2048:
             raise NotificationError(f"webhook {config.name!r} URL is too long")
         try:
+            # Environment strings may contain surrogateescaped bytes on Unix.
+            # Reject them here so URL/DNS/TLS layers never leak raw Unicode
+            # exceptions or partially initialize a configured sink.
+            url.encode("utf-8")
             parsed = urlsplit(url)
             port = parsed.port
-        except ValueError as exc:
+        except (ValueError, UnicodeError) as exc:
             raise NotificationError(f"webhook {config.name!r} URL is invalid") from exc
         if (
             parsed.scheme != "https"
@@ -636,13 +787,20 @@ def _resolve_endpoints(
         secret: bytes | None = None
         if config.secret_env is not None:
             secret_value = environ.get(config.secret_env, "")
-            if not secret_value or len(secret_value.encode("utf-8")) > 4096:
+            try:
+                encoded_secret = secret_value.encode("utf-8")
+            except UnicodeError as exc:
+                raise NotificationError(
+                    f"webhook {config.name!r} signing secret is invalid"
+                ) from exc
+            if not encoded_secret or len(encoded_secret) > 4096:
                 raise NotificationError(
                     f"webhook {config.name!r} signing secret is missing or too long"
                 )
-            secret = secret_value.encode("utf-8")
+            secret = encoded_secret
         endpoint = _Endpoint(config, parsed, secret)
-        _validated_addresses(endpoint, resolver)
+        deadline = time.monotonic() + config.timeout_seconds
+        _validated_addresses(endpoint, _resolver_with_deadline(resolver, deadline))
         endpoints.append(endpoint)
     return tuple(endpoints)
 
@@ -657,9 +815,21 @@ def create_notification_sink(
 ) -> IncidentNotificationSink:
     if not configs:
         return DisabledNotificationSink()
-    endpoints = _resolve_endpoints(
-        configs,
-        dict(os.environ if environ is None else environ),
-        resolver,
-    )
-    return WebhookNotificationSink(endpoints, sender, actionable_check)
+    resolver_pool = _BoundedResolver(resolver)
+    try:
+        endpoints = _resolve_endpoints(
+            configs,
+            dict(os.environ if environ is None else environ),
+            resolver_pool,
+        )
+    except Exception:
+        resolver_pool.close()
+        raise
+    if sender is None:
+        selected_sender: WebhookSender = PinnedHttpsWebhookSender(
+            resolver_pool=resolver_pool
+        )
+    else:
+        resolver_pool.close()
+        selected_sender = sender
+    return WebhookNotificationSink(endpoints, selected_sender, actionable_check)

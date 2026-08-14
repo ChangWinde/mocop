@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import _thread
 import io
 import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -422,7 +425,41 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 0)
         run.assert_not_called()
         self.assertIn("local target, SSH not used", output)
-        self.assertIn("no remote SSH aliases", output)
+        self.assertNotIn("no remote SSH aliases", output)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_local_host_filter_is_valid_and_never_uses_ssh(self, run) -> None:
+        code, output = self.run_doctor(
+            config(hosts=("star-l", "gpu-1"), local_host="star-l"),
+            host_filter=("star-l",),
+            probe_connection=False,
+        )
+
+        self.assertEqual(code, 0)
+        run.assert_not_called()
+        self.assertIn("star-l: local target", output)
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_auto_discovered_hosts_are_diagnosed(self, run) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ssh_config = Path(directory) / "config"
+            ssh_config.write_text("Host discovered-gpu\n", encoding="utf-8")
+            discovered = replace(
+                config(hosts=()), auto_discover=True, ssh_config=ssh_config
+            )
+            run.return_value = _BoundedProcessResult(
+                0, stdout=ssh_g_output(), stderr=""
+            )
+
+            code, output = self.run_doctor(
+                discovered, probe_connection=False, as_json=True
+            )
+
+        self.assertEqual(code, 0)
+        report = json.loads(output)
+        self.assertEqual(
+            [item["alias"] for item in report["hosts"]], ["discovered-gpu"]
+        )
 
     @patch("mocop.doctor._run_bounded_process")
     def test_rejects_unsafe_alias_without_subprocess(self, run) -> None:
@@ -430,9 +467,9 @@ class DoctorTests(unittest.TestCase):
             config(hosts=("gpu-1;rm",)), probe_connection=False
         )
 
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         run.assert_not_called()
-        self.assertIn("unsafe characters", output)
+        self.assertEqual(output, "")
 
     @patch("mocop.doctor._run_bounded_process")
     def test_probe_uses_keepalive_and_host_timeout_override(self, run) -> None:
@@ -542,9 +579,23 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("nvidiaFailure", profile)
         self.assertEqual(run_remote.call_args.args[2], ("sh", "-s"))
         script = run_remote.call_args.kwargs["input_text"]
-        self.assertIn("date +%s%N", script)
+        self.assertIn("/proc/uptime", script)
+        self.assertNotIn("date +%s%N", script)
         self.assertIn("nvidia-smi --query-gpu=", script)
         self.assertIn("MOCOP_PROFILE_V1", script)
+
+    def test_profile_script_uses_a_busybox_compatible_monotonic_clock(self) -> None:
+        completed = subprocess.run(
+            ["sh", "-s"],
+            input=doctor._PROFILE_SCRIPT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIsNotNone(doctor._parse_profile_marker(completed.stdout))
 
     @patch("mocop.doctor._run_bounded_process")
     def test_profile_runs_one_instrumented_remote_call(self, run) -> None:
@@ -894,6 +945,36 @@ class DoctorTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertNotIn("wrong host", output)
+
+    def test_keyboard_interrupt_cancels_parallel_host_jobs(self) -> None:
+        started = threading.Event()
+        stopped = threading.Event()
+
+        def blocked_diagnosis(_alias, _config, **kwargs):
+            registry = kwargs["process_registry"]
+            started.set()
+            registry.cancelled.wait(2)
+            stopped.set()
+            return {"alias": "gpu-1", "warnings": [], "reachable": False}
+
+        def interrupt() -> None:
+            if started.wait(1):
+                _thread.interrupt_main()
+
+        trigger = threading.Thread(target=interrupt)
+        trigger.start()
+        begun = time.monotonic()
+        try:
+            with (
+                patch("mocop.doctor._diagnose_host", side_effect=blocked_diagnosis),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                run_doctor(config(), stdout=io.StringIO())
+        finally:
+            trigger.join(1)
+
+        self.assertTrue(stopped.wait(0.5))
+        self.assertLess(time.monotonic() - begun, 1.5)
 
 
 class ServiceStalenessTests(unittest.TestCase):

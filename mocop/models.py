@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-ProbeStatus = Literal["online", "unreachable", "no_nvidia_smi", "error"]
-WorkloadKind = Literal["process", "slurm", "kubernetes"]
+ProbeStatus = Literal["online", "unreachable", "error"]
+WorkloadKind = Literal["process", "slurm", "kubernetes", "docker", "podman"]
 
 
 def utc_now() -> str:
@@ -131,6 +131,43 @@ class GpuMetrics:
 
 
 @dataclass(frozen=True, slots=True)
+class PressureStallSample:
+    """One /proc/pressure resource: percent of wall time tasks were stalled.
+
+    ``some`` counts time when at least one task stalled; ``full`` counts time
+    when no task made progress at all. The kernel omits the full line for CPU
+    on older releases, so the full averages stay optional.
+    """
+
+    some_avg10: float
+    some_avg60: float
+    full_avg10: float | None = None
+    full_avg60: float | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "some_avg10": self.some_avg10,
+            "some_avg60": self.some_avg60,
+            "full_avg10": self.full_avg10,
+            "full_avg60": self.full_avg60,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PressureStallMetrics:
+    cpu: PressureStallSample | None = None
+    memory: PressureStallSample | None = None
+    io: PressureStallSample | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cpu": self.cpu.to_dict() if self.cpu else None,
+            "memory": self.memory.to_dict() if self.memory else None,
+            "io": self.io.to_dict() if self.io else None,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class DiskMetrics:
     device: str
     filesystem_type: str
@@ -173,6 +210,9 @@ class SystemMetrics:
     disk_read_bps: float | None = None
     disk_write_bps: float | None = None
     disks: tuple[DiskMetrics, ...] = ()
+    # None when the kernel does not expose /proc/pressure (pre-4.20 or
+    # CONFIG_PSI disabled); consumers must treat absence as "unknown".
+    pressure: PressureStallMetrics | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -195,6 +235,7 @@ class SystemMetrics:
             "disk_read_bps": self.disk_read_bps,
             "disk_write_bps": self.disk_write_bps,
             "disks": [disk.to_dict() for disk in self.disks],
+            "pressure": self.pressure.to_dict() if self.pressure else None,
         }
 
 

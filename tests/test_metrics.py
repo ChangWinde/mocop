@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from mocop.config import MaintenanceWindowConfig
-from mocop.metrics import render_openmetrics
+from mocop.metrics import OpenMetricsLimitError, render_openmetrics
 from mocop.models import GpuHealthMetrics, GpuMetrics, ProbeResult, SystemMetrics
 from mocop.service import StateStore
 
@@ -35,8 +35,8 @@ def _system() -> SystemMetrics:
 def _gpu() -> GpuMetrics:
     return GpuMetrics(
         index=0,
-        uuid='GPU-quote"slash\\line\nend',
-        name='NVIDIA "Test"\\GPU\nModel',
+        uuid='GPU-quote"slash\\line\ncr\rend',
+        name='NVIDIA "Test"\\GPU\r\nModel',
         driver_version="550.1",
         pstate="P0",
         temperature_c=65,
@@ -143,8 +143,9 @@ class OpenMetricsTests(unittest.TestCase):
     def test_escapes_untrusted_labels_and_omits_stale_gpu_samples(self) -> None:
         body = render_openmetrics(self.store.snapshot()).decode()
 
-        self.assertIn('uuid="GPU-quote\\"slash\\\\line\\nend"', body)
+        self.assertIn('uuid="GPU-quote\\"slash\\\\line\\ncr\\nend"', body)
         self.assertIn('model="NVIDIA \\"Test\\"\\\\GPU\\nModel"', body)
+        self.assertNotIn("\r", body)
         self.store.apply(
             ProbeResult(
                 "gpu-01",
@@ -173,6 +174,41 @@ class OpenMetricsTests(unittest.TestCase):
         self.assertNotIn("mocop_collection_poll_interval_seconds", body)
         self.assertTrue(body.endswith("# EOF\n"))
 
+    def test_omits_process_count_when_process_telemetry_failed(self) -> None:
+        snapshot = self.store.snapshot()
+        gpu = snapshot["servers"][0]["gpus"][0]
+        gpu["processes"] = []
+        gpu["processes_available"] = False
+        gpu["processes_sampled"] = True
+
+        body = render_openmetrics(snapshot).decode()
+
+        labels = 'host="gpu-01",index="0"'
+        self.assertNotIn(f"mocop_gpu_processes{{{labels}", body)
+        self.assertIn("mocop_gpu_process_telemetry_available", body)
+        self.assertIn("mocop_gpu_process_telemetry_sampled", body)
+        self.assertIn("attempted process telemetry", body)
+
+    def test_rejects_expositions_above_the_series_budget_before_rendering(self) -> None:
+        snapshot = {
+            "appVersion": "test",
+            "stats": {},
+            "servers": [
+                {
+                    "host": "gpu-01",
+                    "status": "online",
+                    "stale": False,
+                    "gpus": [
+                        {"index": index, "uuid": f"GPU-{index}"}
+                        for index in range(5_001)
+                    ],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(OpenMetricsLimitError, "series budget"):
+            render_openmetrics(snapshot)
+
     def test_exports_gpu_metrics_when_system_metrics_are_missing(self) -> None:
         self.store.apply(
             ProbeResult(
@@ -194,6 +230,57 @@ class OpenMetricsTests(unittest.TestCase):
         self.assertIn(
             'mocop_gpu_utilization_ratio{host="gpu-01",index="0",uuid=',
             body,
+        )
+
+    def test_exports_pressure_stall_ratios_with_resource_labels(self) -> None:
+        payload = {
+            "appVersion": "test",
+            "stats": {},
+            "servers": [
+                {
+                    "host": "gpu-01",
+                    "status": "online",
+                    "stale": False,
+                    "system": {
+                        "pressure": {
+                            "cpu": {
+                                "some_avg10": 1.5,
+                                "some_avg60": 1.0,
+                                "full_avg10": None,
+                                "full_avg60": None,
+                            },
+                            "memory": {
+                                "some_avg10": 25.0,
+                                "some_avg60": 20.0,
+                                "full_avg10": 10.0,
+                                "full_avg60": 5.0,
+                            },
+                            "io": None,
+                        },
+                    },
+                    "gpus": [],
+                }
+            ],
+        }
+
+        body = render_openmetrics(payload).decode()
+
+        self.assertIn(
+            'mocop_host_pressure_some_ratio{host="gpu-01",resource="cpu"} 0.015\n',
+            body,
+        )
+        self.assertIn(
+            'mocop_host_pressure_some_ratio{host="gpu-01",resource="memory"} 0.25\n',
+            body,
+        )
+        self.assertIn(
+            'mocop_host_pressure_full_ratio{host="gpu-01",resource="memory"} 0.1\n',
+            body,
+        )
+        # Unreported resources and unavailable full averages are omitted, not zero.
+        self.assertNotIn('resource="io"', body)
+        self.assertNotIn(
+            'mocop_host_pressure_full_ratio{host="gpu-01",resource="cpu"}', body
         )
 
     def test_omits_mib_samples_that_overflow_when_scaled_to_bytes(self) -> None:

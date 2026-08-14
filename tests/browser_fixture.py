@@ -23,11 +23,18 @@ from mocop.web import MonitorHttpServer, MonitorRequestHandler
 # attended probe cadence; these level-triggered paths accept unmarked reads
 # (curl, scripts) but the dashboard itself must never send one.
 _TRACKED_DASHBOARD_PATHS = frozenset(
-    {"/api/snapshot", "/api/history", "/api/gpu-history", "/api/incidents"}
+    {
+        "/api/snapshot",
+        "/api/history",
+        "/api/gpu-history",
+        "/api/incidents",
+        "/api/usage",
+    }
 )
 _COLLECTOR_SETTINGS_KEYS = frozenset(
     {"pollIntervalSeconds", "probeTimeoutSeconds", "maxWorkers"}
 )
+_BROWSER_ACCESS_TOKEN = "B" * 43
 
 
 class DemoInventory:
@@ -159,6 +166,7 @@ class DemoInventory:
         action: str,
         duration_seconds: int,
         reason: str,
+        incident_started_at: str | None = None,
     ) -> dict[str, object]:
         del duration_seconds
         self.incident_actions = [
@@ -171,6 +179,7 @@ class DemoInventory:
                 {
                     "host": host,
                     "condition_key": condition_key,
+                    "incident_started_at": incident_started_at,
                     "action": action,
                     "until": "2030-06-15T12:30:00Z",
                     "reason": reason,
@@ -249,25 +258,40 @@ class DemoRequestHandler(MonitorRequestHandler):
         if path == "/api/meta":
             self._send_json(
                 {
-                    "apiVersion": 1,
+                    "apiVersion": "2",
                     "appVersion": __version__,
                     "schemaVersion": 1,
+                    "authenticationRequired": True,
                     "capabilities": {
                         "restartSupported": self.monitor_server.restart is not None,
                     },
-                    "endpoints": sorted(_TRACKED_DASHBOARD_PATHS)
-                    + ["/api/events", "/api/inventory", "/api/topology"],
+                    "endpoints": [
+                        {"method": "GET", "path": path, "access": "listener"}
+                        for path in sorted(_TRACKED_DASHBOARD_PATHS)
+                    ],
                     # Fixture-only diagnostics; extra keys are allowed by the
                     # defensive client parser.
                     "fixture": {
                         "unmarkedDashboardReads": (
                             self.monitor_server.unmarked_dashboard_reads
                         ),
+                        "unauthenticatedPrivateRequests": (
+                            self.monitor_server.unauthenticated_private_requests
+                        ),
                     },
                 }
             )
             return
         super()._respond_to_read_request()
+
+    def _require_authentication(self, path: str) -> bool:
+        if path not in {"/healthz", "/readyz", "/api/meta"} and (
+            path.startswith("/api/") or path == "/metrics"
+        ):
+            expected = f"Bearer {_BROWSER_ACCESS_TOKEN}"
+            if self.headers.get("Authorization") != expected:
+                self.monitor_server.unauthenticated_private_requests += 1
+        return super()._require_authentication(path)
 
     def _change_collector_settings(self, payload: object) -> None:
         # New contract: a strict subset of the collector fields is accepted;
@@ -570,9 +594,13 @@ def main() -> int:
         daemon=True,
     ).start()
     server = MonitorHttpServer(
-        ("127.0.0.1", int(sys.argv[1])), state, DemoInventory(state)
+        ("127.0.0.1", int(sys.argv[1])),
+        state,
+        DemoInventory(state),
+        access_token=_BROWSER_ACCESS_TOKEN,
     )
     server.unmarked_dashboard_reads = 0
+    server.unauthenticated_private_requests = 0
     server.RequestHandlerClass = DemoRequestHandler
     try:
         server.serve_forever()

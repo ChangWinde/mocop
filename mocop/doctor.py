@@ -17,16 +17,19 @@ import stat
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import TextIO
 
 from .config import MonitorConfig, is_safe_alias
+from .discovery import OpenSshConfigHostSource
 from .lifecycle import user_unit_path
 from .probe import (
     OpenSshLinuxResourceProbe,
     ResourceProbe,
+    _ActiveProcessRegistry,
     _BoundedProcessResult,
+    _ProcessCancelled,
     _ProcessOutputLimitExceeded,
     _run_bounded_process,
     _safe_ssh_failure,
@@ -55,22 +58,25 @@ _QUERY_KEYS = frozenset(
 # Doctor-owned, self-contained profiling script. It reproduces the fixed
 # collection script's non-NVIDIA passes (same files and external commands,
 # output discarded) and the combined NVIDIA telemetry query, bracketing each
-# stage with remote nanosecond timestamps. The stages are mutually exclusive,
+# stage with Linux monotonic timestamps. The stages are mutually exclusive,
 # so the transport share is the locally measured total minus the remote time.
 _PROFILE_SCRIPT = r"""
 LC_ALL=C
 export LC_ALL
-t0=$(date +%s%N)
+monotonic_ns() {
+  awk '{ printf "%.0f\n", $1 * 1000000000; exit }' /proc/uptime
+}
+t0=$(monotonic_ns)
 awk '{ next }' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/net/dev /sys/block/*/stat >/dev/null 2>&1
 df -PTk 2>/dev/null | awk 'NR > 1 { next }' >/dev/null 2>&1
-t1=$(date +%s%N)
+t1=$(monotonic_ns)
 if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi --query-gpu=__COMBINED_QUERY__ --format=csv,noheader,nounits >/dev/null 2>&1
   nvidia_status=$?
 else
   nvidia_status=127
 fi
-t2=$(date +%s%N)
+t2=$(monotonic_ns)
 printf '__MARKER__\t%s\t%s\t%s\t%s\n' "$t0" "$t1" "$t2" "$nvidia_status"
 """.replace("__COMBINED_QUERY__", ",".join(_COMBINED_QUERY_FIELDS)).replace(
     "__MARKER__", _PROFILE_MARKER
@@ -132,6 +138,7 @@ def _resolved_options(
     config: MonitorConfig,
     *,
     timeout_seconds: float = _SSH_G_TIMEOUT_SECONDS,
+    process_registry: _ActiveProcessRegistry | None = None,
 ) -> dict[str, str] | None:
     """Return the lowercase OpenSSH options `ssh -G` resolves for the alias."""
     try:
@@ -141,8 +148,14 @@ def _resolved_options(
             timeout_seconds=timeout_seconds,
             max_output_bytes=_SSH_G_MAX_OUTPUT_BYTES,
             environment=_environment(),
+            process_registry=process_registry,
         )
-    except (OSError, subprocess.TimeoutExpired, _ProcessOutputLimitExceeded):
+    except (
+        OSError,
+        subprocess.TimeoutExpired,
+        _ProcessOutputLimitExceeded,
+        _ProcessCancelled,
+    ):
         return None
     if completed.returncode != 0:
         return None
@@ -164,6 +177,7 @@ def _run_remote(
     input_text: str = "",
     reuse: bool = True,
     max_output_bytes: int = _PROBE_MAX_OUTPUT_BYTES,
+    process_registry: _ActiveProcessRegistry | None = None,
 ) -> tuple[float | None, _BoundedProcessResult | None, str | None]:
     """Run one bounded remote command under the production transport options.
 
@@ -203,11 +217,14 @@ def _run_remote(
             timeout_seconds=timeout_seconds,
             max_output_bytes=max_output_bytes,
             environment=_environment(),
+            process_registry=process_registry,
         )
     except subprocess.TimeoutExpired:
         return None, None, "SSH connection attempt timed out"
     except _ProcessOutputLimitExceeded:
         return None, None, "remote output exceeded the configured limit"
+    except _ProcessCancelled:
+        return None, None, "host diagnosis was cancelled"
     except OSError:
         return None, None, "Local SSH client could not be started"
     return round((time.monotonic() - started) * 1000, 1), completed, None
@@ -235,6 +252,7 @@ def _timed_remote(
     input_text: str = "",
     reuse: bool = True,
     max_output_bytes: int = _PROBE_MAX_OUTPUT_BYTES,
+    process_registry: _ActiveProcessRegistry | None = None,
 ) -> tuple[float | None, str | None]:
     """Run one bounded remote command; return (latency_ms, failure_reason)."""
     latency_ms, completed, failure = _run_remote(
@@ -245,6 +263,7 @@ def _timed_remote(
         input_text=input_text,
         reuse=reuse,
         max_output_bytes=max_output_bytes,
+        process_registry=process_registry,
     )
     if failure is not None or completed is None:
         return None, failure
@@ -255,11 +274,21 @@ def _timed_remote(
 
 
 def _timed_probe(
-    alias: str, config: MonitorConfig, *, reuse: bool, timeout_seconds: float
+    alias: str,
+    config: MonitorConfig,
+    *,
+    reuse: bool,
+    timeout_seconds: float,
+    process_registry: _ActiveProcessRegistry | None = None,
 ) -> tuple[float | None, str | None]:
     """Run one bounded `true` over SSH; return (latency_ms, failure_reason)."""
     return _timed_remote(
-        alias, config, ("true",), reuse=reuse, timeout_seconds=timeout_seconds
+        alias,
+        config,
+        ("true",),
+        reuse=reuse,
+        timeout_seconds=timeout_seconds,
+        process_registry=process_registry,
     )
 
 
@@ -279,7 +308,11 @@ def _parse_profile_marker(stdout: str) -> tuple[float, float, int] | None:
 
 
 def _profile_host(
-    alias: str, config: MonitorConfig, *, timeout_seconds: float
+    alias: str,
+    config: MonitorConfig,
+    *,
+    timeout_seconds: float,
+    process_registry: _ActiveProcessRegistry | None = None,
 ) -> dict[str, object]:
     """Decompose one alias's collection latency into exclusive stages.
 
@@ -295,6 +328,7 @@ def _profile_host(
         ("sh", "-s"),
         timeout_seconds=timeout_seconds,
         input_text=_PROFILE_SCRIPT,
+        process_registry=process_registry,
     )
     profile: dict[str, object] = {"totalMs": total_ms}
     if failure is None and completed is not None:
@@ -447,6 +481,7 @@ def _diagnose_host(
     profile: bool = False,
     collection_probe: ResourceProbe | None = None,
     budget_seconds: float | None = None,
+    process_registry: _ActiveProcessRegistry | None = None,
 ) -> dict[str, object]:
     if budget_seconds is None:
         budget_seconds = _host_budget_seconds(
@@ -466,7 +501,12 @@ def _diagnose_host(
         report["reachable"] = False
         warnings.append(_BUDGET_EXHAUSTED)
         return report
-    options = _resolved_options(alias, config, timeout_seconds=resolve_timeout)
+    options = _resolved_options(
+        alias,
+        config,
+        timeout_seconds=resolve_timeout,
+        process_registry=process_registry,
+    )
     if options is None:
         report["reachable"] = False
         warnings.append("ssh -G could not resolve the alias")
@@ -493,7 +533,11 @@ def _diagnose_host(
             if stage is None:
                 return None, _BUDGET_EXHAUSTED
             return _timed_probe(
-                alias, config, reuse=reuse_connection, timeout_seconds=stage
+                alias,
+                config,
+                reuse=reuse_connection,
+                timeout_seconds=stage,
+                process_registry=process_registry,
             )
 
         cold_ms, cold_failure = timed_probe(reuse_connection=False)
@@ -515,7 +559,10 @@ def _diagnose_host(
                 report["profile"] = {"failure": _BUDGET_EXHAUSTED}
             else:
                 report["profile"] = _profile_host(
-                    alias, config, timeout_seconds=profile_timeout
+                    alias,
+                    config,
+                    timeout_seconds=profile_timeout,
+                    process_registry=process_registry,
                 )
         if collection_probe is not None and report["reachable"]:
             # The production probe bounds itself by the host's effective
@@ -717,16 +764,26 @@ def run_doctor(
     if collect and not probe_connection:
         print("--probe requires live connection tests", file=sys.stderr)
         return 2
-    remote_hosts = tuple(host for host in config.hosts if host != config.local_host)
+    try:
+        monitored_hosts = OpenSshConfigHostSource().hosts(config)
+    except (OSError, ValueError) as exc:
+        print(f"host discovery failed: {exc}", file=sys.stderr)
+        return 2
     if host_filter:
-        unknown = tuple(host for host in host_filter if host not in remote_hosts)
+        unknown = tuple(host for host in host_filter if host not in monitored_hosts)
         if unknown:
             print(
                 f"unknown monitored aliases: {', '.join(sorted(unknown))}",
                 file=sys.stderr,
             )
             return 2
-        remote_hosts = tuple(host for host in remote_hosts if host in host_filter)
+        selected_hosts = tuple(host for host in monitored_hosts if host in host_filter)
+    else:
+        selected_hosts = monitored_hosts
+    selected_local_host = (
+        config.local_host if config.local_host in selected_hosts else None
+    )
+    remote_hosts = tuple(host for host in selected_hosts if host != selected_local_host)
 
     keepalive_interval = _keepalive_interval_seconds(config)
     transport = {
@@ -739,25 +796,51 @@ def run_doctor(
     # One shared probe instance is the production arrangement: the monitor
     # service drives every host through a single probe as well.
     collection_probe = OpenSshLinuxResourceProbe() if collect and remote_hosts else None
+    process_registry = _ActiveProcessRegistry()
+    executor: ThreadPoolExecutor | None = None
+    futures = []
     try:
         if remote_hosts:
             workers = max(1, min(config.max_workers, len(remote_hosts)))
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                reports = list(
-                    executor.map(
-                        lambda alias: _diagnose_host(
-                            alias,
-                            config,
-                            probe_connection=probe_connection,
-                            profile=profile,
-                            collection_probe=collection_probe,
-                        ),
-                        remote_hosts,
-                    )
+            executor = ThreadPoolExecutor(max_workers=workers)
+            futures = [
+                executor.submit(
+                    _diagnose_host,
+                    alias,
+                    config,
+                    probe_connection=probe_connection,
+                    profile=profile,
+                    collection_probe=collection_probe,
+                    process_registry=process_registry,
                 )
+                for alias in remote_hosts
+            ]
+            indexed = {future: index for index, future in enumerate(futures)}
+            ordered_reports: list[dict[str, object] | None] = [None] * len(futures)
+            pending = set(futures)
+            while pending:
+                done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                for future in done:
+                    ordered_reports[indexed[future]] = future.result()
+            reports = [report for report in ordered_reports if report is not None]
+    except BaseException:
+        process_registry.cancel()
+        if collection_probe is not None:
+            cancel_probe = getattr(collection_probe, "cancel", None)
+            if callable(cancel_probe):
+                cancel_probe()
+        for future in futures:
+            future.cancel()
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+            executor = None
+        raise
     finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
         if collection_probe is not None:
             collection_probe.close()
+        process_registry.close()
     _warn_on_shared_control_paths(reports)
     failed = tuple(report["alias"] for report in reports if _report_failed(report))
     service = _service_staleness()
@@ -765,7 +848,7 @@ def run_doctor(
     if as_json:
         document: dict[str, object] = {
             "transportDiscipline": transport,
-            "localHost": config.local_host,
+            "localHost": selected_local_host,
             "hosts": reports,
             "status": "ok" if not failed else "failed",
         }
@@ -780,11 +863,11 @@ def run_doctor(
             f"ServerAlive={keepalive_interval}sx{_SERVER_ALIVE_COUNT_MAX} "
             f"probe timeout {transport['probeTimeoutSeconds']}s\n"
         )
-        if config.local_host:
-            stdout.write(f"{config.local_host}: local target, SSH not used\n")
+        if selected_local_host:
+            stdout.write(f"{selected_local_host}: local target, SSH not used\n")
         for report in reports:
             _write_text_report(report, stdout)
-        if not remote_hosts:
+        if not remote_hosts and selected_local_host is None:
             stdout.write("no remote SSH aliases are configured\n")
         if service is not None:
             source_note = (
@@ -817,8 +900,8 @@ def _report_failed(report: dict[str, object]) -> bool:
     if isinstance(probe_data, dict):
         if "failure" in probe_data:
             return True
-        # no_nvidia_smi is a collected, reachable host without NVIDIA tools;
-        # only transport and collection errors fail the diagnosis.
+        # A missing NVIDIA tool is represented as an online host with zero
+        # GPUs; only transport and collection errors fail the diagnosis.
         if probe_data.get("status") in ("unreachable", "error"):
             return True
     return False

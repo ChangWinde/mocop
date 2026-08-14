@@ -32,15 +32,19 @@ Mocop 是面向 NVIDIA GPU 集群的本地网页监控工具。它复用已有 O
 
 这里的 **AI-native** 是指界面围绕 GPU 容量、任务放置和故障定位设计。Mocop 不调用 AI 服务，也不上传遥测数据。
 
+当前发布的控制台界面固定为简体中文，尚未提供语言切换；中英文 README
+以及 API、运维和工程文档均持续维护。
+
 ## 功能
 
 - GPU 利用率、显存、温度、功耗、型号、驱动、硬件健康和每卡进程
 - GPU 算力匹配、调度热力图、连接拓扑、搜索、筛选和 CSV 导出
-- CPU、Load、内存、Swap、磁盘容量与 I/O、网络速率和运行时间
+- CPU、Load、内存、Swap、磁盘容量与 I/O、网络速率、运行时间和内核压力失速（PSI）遥测
 - 带诊断、确认/静默、分级阈值、防抖处理和定时维护的告警
 - 节点级独立调度、可能的共享链路聚合和可选 HTTPS Webhook
 - 基于配置的节点资产、预期 GPU 数、本机采集和节点分组
-- 单卡趋势和进程时间线，以及可选的有界 SQLite 留存与只读 Slurm/Kubernetes 上下文
+- 单卡趋势和进程时间线，以及可选的有界 SQLite 留存与只读 Slurm/Kubernetes/Docker/Podman 上下文
+- 按使用者聚合的 GPU 占用与闲置占比账单（`GET /api/usage` 与使用者面板，窗口可选）
 - 六种视觉风格、六种独立主题色、紧凑模式、排序记忆和经过校验的本地背景
 - 可供 Prometheus 和 Grafana 使用的 OpenMetrics 1.0 端点
 
@@ -107,7 +111,12 @@ mocop doctor
 mocop service install
 ```
 
-打开 <http://127.0.0.1:8787>。该命令会安装、启用并立即启动用户级 systemd 服务，但不会修改系统的 linger 策略。
+打开命令打印的完整 `Dashboard:` 能力 URL，例如
+`http://127.0.0.1:8787/#access_token=...`。URL 片段不会随 HTTP 请求发送；
+页面会立即清除它，并把能力保存在当前标签页的 `sessionStorage` 中，刷新和
+服务重启流程仍可继续认证；关闭标签页或新开独立标签页后，需要再次使用
+打印的完整 URL。该命令会安装、启用、启动并验证用户级
+systemd 服务，但不会修改系统的 linger 策略。
 
 直接运行 `mocop` 可使用前台模式。后台服务可通过以下命令管理：
 
@@ -116,9 +125,16 @@ mocop service status
 mocop service uninstall
 ```
 
+卸载只会停止/禁用服务并删除生成的 unit；配置、Bearer token、可选环境
+文件、SQLite 状态、浏览器数据、journal、SSH 文件/控制套接字、已安装包和
+linger 策略都会保留。升级、回滚、token 轮换或手动清理前，请阅读
+[运维手册](docs/OPERATIONS.md)。
+
 ## 配置
 
-初始化生成的文件已经包含全部字段。只有在网页未提供对应设置时才需要直接编辑。下面只展示主要资产字段：
+初始化生成的文件已经包含全部字段。只有在网页未提供对应设置时才需要
+直接编辑。[配置字段与边界参考](docs/CONFIGURATION.md) 是所有字段、默认值、
+关联约束和硬限制的权威说明。下面只展示主要资产字段：
 
 ```json
 {
@@ -157,12 +173,13 @@ mocop service uninstall
 - `gpu_process_poll_interval_seconds` 单独控制带时间戳的 GPU 任务刷新；默认 15 秒，核心 GPU 数据仍保持正常采集周期。
 - `incident_overrides` 可按节点或分组覆盖有界阈值，并精确排除磁盘挂载点；节点配置优先。
 - `thresholds.disk_min_free_gib`（默认 5）：文件系统在超过 `disk_warning_pct` 之后，若绝对剩余空间低于该 GiB 数即升级为 critical——这样"快满的 50 GiB 根分区"会排在"同样占比的 10 TiB 卷"之前。未超过百分比阈值的分区一律不升级，因此 `/boot/efi` 这类小分区不会误报。
+- `thresholds.psi_memory_some_pct`（默认 20）与 `thresholds.psi_io_some_pct`（默认 30）：当内核压力失速信息（PSI）显示最近一分钟内任务因内存或 I/O 阻塞的时间占比达到该值时告警——这类"利用率看起来正常但节点已在失速"的状态（如内存回收、checkpoint 写入）只有 PSI 能暴露。达到阈值两倍即升级为 critical。内核不支持 PSI（低于 4.20）时不产生压力数据。
 - `incident_actions` 保存网页中的告警确认与静默及其 UTC 失效时间，通常由网页维护。
 - `manual_probe_cooldown_seconds` 限制同一节点的手动探测频率；默认 5 秒。
 - `retry_jitter_pct` 分散共享 SSH 路径故障后的重试；默认值为 15%。
 - `topology` 描述连接树；其中的安全别名只有同时进入有效 `hosts` 清单时才会被采集。
 - `persistence.enabled` 使用 SQLite 保留有界趋势和告警上下文；默认关闭。
-- `workloads.mode: "identity"` 通过有界 `/proc` 读取补充进程属主（真实 UID 经 passwd 解析）、完整命令行与真实启动时间，成本约为 `"auto"` 的三分之一；`"auto"` 在此之上再识别 Slurm/Kubernetes 身份（cgroup 与环境读取）。两者默认均关闭；即使关闭，GPU 弹窗仍会显示每个进程"自监控观测起"的运行时长下限。工作负载身份采集每次样本最多覆盖前 512 个不同的 GPU 进程 PID。
+- `workloads.mode: "identity"` 通过有界 `/proc` 读取补充进程属主（真实 UID 经 passwd 解析）、完整命令行与真实启动时间，成本约为 `"auto"` 的三分之一；`"auto"` 在此之上再识别 Slurm/Kubernetes 调度身份与 Docker/Podman 容器（12 位短 ID，cgroup 与环境读取）。两者默认均关闭；即使关闭，GPU 弹窗仍会显示每个进程"自监控观测起"的运行时长下限。工作负载身份采集每次样本最多覆盖前 512 个不同的 GPU 进程 PID。
 
 Webhook 地址和签名密钥不写入 JSON。配置中只保存环境变量名：
 
@@ -213,13 +230,19 @@ mocop service install
 - 使用“匹配算力”查找同一主机、同一型号且剩余显存足够的 GPU。结果不代表资源预留。
 - 设置维护窗口后，采集继续进行，但对应问题不会进入待处理告警。
 - 在“设置 → 监控节点”中扫描 SSH 别名，添加或删除符合条件的计算节点。
-- 升级后可使用“设置 → 监控服务状态 → 重启服务”；该按钮只在用户级服务模式下可用，恢复后页面会自动刷新。
+- 按照[升级与回滚手册](docs/OPERATIONS.md)操作。验证软件包升级后，可使用
+  “设置 → 监控服务状态 → 重启服务”；该按钮只在用户级服务模式下可用，
+  恢复后页面会自动刷新。
 - 可上传最大 32 MiB 的 PNG、JPEG、WebP 或 AVIF 背景；超过 8 MiB 时只在浏览器内压缩，不会上传。
 - 使用 `mocop --once > snapshot.json` 导出一次当前快照。脚本与定时任务可加 `--strict`：只要有任意配置主机未产生在线采样即退出码 `1`，并在 stderr 列出失败主机。
 
 ## HTTP API
 
-网页展示的一切也都可以通过一套小型 JSON API 获取：稳定的机器可读错误 code、自描述的 `GET /api/meta` 端点，以及面向自动化的访问分级。全部端点、字段表和 agent 操作剧本见 [API 参考](docs/API.md)——其中也解释了为什么非观众型自动化不应发送 `X-Monitor-Request: dashboard` 标记头。
+网页展示的一切也都可以通过一套小型 JSON API 获取：稳定的机器可读错误
+code、公开且自描述的 `GET /api/meta` 端点，以及 P/A/R/W 访问分级。遥测、
+SSE 和 OpenMetrics 均要求安装级 Bearer 能力；只有 API 发现、存活和就绪
+检查公开。带认证的 curl 示例、全部端点与字段表，以及非观众型自动化不应
+发送 `X-Monitor-Request: dashboard` 标记头的原因见 [API 参考](docs/API.md)。
 
 ## Prometheus
 
@@ -228,11 +251,16 @@ mocop service install
 ```yaml
 scrape_configs:
   - job_name: mocop
+    authorization:
+      type: Bearer
+      credentials_file: /home/alice/.config/mocop/access-token
     static_configs:
       - targets: ["127.0.0.1:8787"]
 ```
 
-该端点包含采集与后台子系统健康、节点可用性、告警、系统资源和当前 GPU 指标。陈旧资源值、进程名称和 PID 不会被导出。
+请使用绝对路径；Prometheus 必须以有权读取该私密文件的身份运行，或使用
+单独受保护的凭据副本。该端点包含采集与后台子系统健康、节点可用性、告警、
+系统资源和当前 GPU 指标。陈旧资源值、进程名称和 PID 不会被导出。
 
 ## 故障行为
 
@@ -298,7 +326,10 @@ mocop doctor --probe                       # 对每个别名执行一次真实�
 
 Mocop 只接受明确列出的 SSH 别名，并执行固定的只读探针。它强制启用主机密钥校验、BatchMode、超时、输出上限、并发上限、私有原子配置写入和远端文本安全渲染。
 
-服务没有内置用户系统，默认只监听 `127.0.0.1`。如需远程开放控制台或 `/metrics`，必须放在带身份认证的 TLS 反向代理或私有 VPN 后面。
+服务没有内置用户系统，默认只监听 `127.0.0.1`。私密的安装级 Bearer 能力
+保护遥测、指标、SSE 和写操作不被无关本地用户访问，但它代表一个完整的
+操作员角色。如需远程开放 Mocop，请使用带身份认证的 TLS 反向代理或私有
+VPN；明文 HTTP 上的 Bearer 头不提供网络机密性或服务端身份认证。
 
 修改信任边界前，请阅读[威胁模型](docs/SECURITY.md)和[安全策略](.github/SECURITY.md)。
 
@@ -311,7 +342,10 @@ uvx --from ruff==0.12.11 ruff format --check .
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-更多信息见[贡献指南](.github/CONTRIBUTING.md)、[架构](docs/ARCHITECTURE.md)、[API 参考](docs/API.md)、[性能说明](docs/PERFORMANCE.md)和[更新日志](docs/CHANGELOG.md)。
+更多信息见[贡献指南](.github/CONTRIBUTING.md)、
+[架构](docs/ARCHITECTURE.md)、[配置参考](docs/CONFIGURATION.md)、
+[运维手册](docs/OPERATIONS.md)、[API 参考](docs/API.md)、
+[性能说明](docs/PERFORMANCE.md)和[更新日志](docs/CHANGELOG.md)。
 
 ## 许可证
 

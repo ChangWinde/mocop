@@ -69,3 +69,29 @@ jobs:
           python -c 'import json; data=json.load(open("/tmp/snapshot.json")); assert data["stats"]["servers"] == 0'
       - name: Browser smoke test
         run: MOCOP_BROWSER_WARMUP_MS=8000 node --experimental-websocket tests/browser_smoke.mjs
+
+  wheel-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build wheel
+        run: python -m pip wheel --no-deps --wheel-dir /tmp/mocop-dist .
+      - name: Verify isolated wheel install
+        run: |
+          python -m venv /tmp/mocop-wheel-venv
+          /tmp/mocop-wheel-venv/bin/python -m pip install --no-deps /tmp/mocop-dist/mocop-*.whl
+          cd /tmp
+          /tmp/mocop-wheel-venv/bin/mocop --help
+          /tmp/mocop-wheel-venv/bin/mocop init --config /tmp/mocop-wheel-config.json
+          /tmp/mocop-wheel-venv/bin/mocop --config /tmp/mocop-wheel-config.json --once > /tmp/mocop-wheel-snapshot.json
+          /tmp/mocop-wheel-venv/bin/python -c 'import json; data=json.load(open("/tmp/mocop-wheel-snapshot.json")); assert data["stats"]["servers"] == 0'

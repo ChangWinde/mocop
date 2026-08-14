@@ -6,6 +6,19 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Added a private per-install Bearer capability for every telemetry, SSE,
+  OpenMetrics, and write route; service and foreground startup print a fragment
+  capability URL that the dashboard scrubs immediately and retains in tab-scoped
+  session storage for reload-safe operation.
+- Added explicit P/A/R/W API access tiers, authenticated curl/SSE/OpenMetrics
+  examples, ADR-0017's authentication trade-off, a complete configuration-boundary
+  reference, and an upgrade/rollback/uninstall operations runbook.
+- Added documentation contract tests for the exact route/tier manifest, stable error
+  codes, Bearer examples, configuration fields, and current collection protocol, plus
+  an installed-wheel smoke job in CI.
+- Added pressure stall telemetry (kernel PSI): the collector reads `/proc/pressure/{cpu,memory,io}` in the existing awk pass, the snapshot carries per-resource `some`/`full` averages under `system.pressure`, the dashboard shows a PSI tile, and `/metrics` exports `mocop_host_pressure_some_ratio` / `mocop_host_pressure_full_ratio`. New `pressure` incidents fire on the memory and I/O `some avg60` windows (`thresholds.psi_memory_some_pct` default 20, `thresholds.psi_io_some_pct` default 30; twice the threshold escalates to critical), catching nodes that stall while utilization still looks normal. Kernels without PSI degrade silently. Protocol bumps to `MONITOR_V8`.
+- Added Docker and Podman container attribution to the `auto` workload tier: anchored cgroup segments (`docker-<hex>.scope`, `/docker/<hex>`, `libpod-<hex>.scope`) map GPU processes to `kind: "docker"`/`"podman"` with the runtime's 12-character short container ID, so a busy device points at the container occupying it.
+- Added `GET /api/usage`: a per-owner GPU occupancy rollup over a bounded window (1–720 hours) pairing the process timeline with utilization samples — occupancy seconds, classified idle seconds and idle share, hosts, GPUs, and workload kinds per owner, with explicit coverage (`earliestDataAt`) and dropped-record reporting. The workload owners dialog gains a matching usage-window section with a selectable window.
 - Added `mocop config check`, which parses and validates the configuration without starting the web server or opening SSH connections and reports the resolved path, host count, subsystem state, and each webhook's environment-variable names with their set/unset status (exit 0 valid, 2 invalid).
 - Added `mocop doctor --probe`, which runs one real production collection per alias and reports probe status, latency, GPU and process counts, and workload coverage; it requires live connection tests and conflicts with `--no-connect`.
 - Added `mocop --once --strict` for scripts and cron jobs: it exits 1 unless every configured host produced an online sample and lists the failing hosts on stderr.
@@ -59,6 +72,9 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Replaced the authenticated dashboard's native `EventSource` connection with
+  incremental fetch-based SSE parsing so every stream carries the explicit Bearer
+  header; the named heartbeat and reconnect/fallback behavior remain unchanged.
 - Accepted any non-empty subset of the collector settings on `POST /api/settings/collector`, exposed the read-only `connectTimeoutSeconds` floor in the inventory's collector settings, and deprecated `POST /api/settings/poll-interval` and `GET /api/service` (their responses now carry `Deprecation: true`).
 - Restricted the workload owners view to online nodes; a footnote reports how many offline nodes were excluded and when the shown data was captured.
 - Marked every dashboard read with the viewer header so any open dashboard view — not only the event stream — keeps probes on the attended process cadence.
@@ -81,7 +97,10 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Adopted Forge commit subjects with repository-owned hook and CI enforcement.
 - Removed the heatmap legend and reduced redundant SSE snapshot publication at poll start.
 - Made backend incident conditions authoritative for both the attention queue and transition history.
-- Expanded the user-service write sandbox only to the selected Mocop configuration directory so atomic dashboard inventory updates work under `ProtectSystem=strict`.
+- Limited generated user-service hardening claims to directives enforceable across the
+  supported user-manager baseline: private state/modes, `NoNewPrivileges`, restricted
+  address families, and `UMask=0077`. Filesystem access relies on validated operator
+  ownership/modes so required SSH agent and ControlMaster paths remain available.
 - Routed the header cadence control through validated atomic configuration persistence while preserving immediate scheduler updates.
 - Refined the system and monospace font stacks and applied tabular typography consistently to live metrics.
 - Combined base GPU and hardware-health fields into one `nvidia-smi` query with a base-metrics fallback, reducing measured local collection median by 27.5%.
@@ -134,7 +153,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Removed
 
-- Removed read compatibility for the V4 through V6 collection protocol payloads; the parser accepts only the current `MONITOR_V7`, because the fixed script and its parser ship in one process and no emitter of an older version can exist.
+- Removed read compatibility for the V4 through V7 collection protocol payloads; the parser accepts only the current `MONITOR_V8`, because the fixed script and its parser ship in one process and no emitter of an older version can exist.
 - Removed the legacy probe aliases and registry names (`GpuProbe`, `OpenSshNvidiaSmiProbe`, `openssh-nvidia-smi`, and `openssh-linux-v1` through `openssh-linux-v5`).
 - Removed the probe and host-source registry indirection entirely; the entrypoint constructs the single OpenSSH collector and host source directly.
 - Removed the unused `--config` option from `mocop service status` and `mocop service uninstall`, which operate on the fixed user unit.
@@ -143,6 +162,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Security
 
+- Required exactly one valid Bearer capability on all non-public API routes and
+  `/metrics`; only `/api/meta`, `/healthz`, and `/readyz` remain unauthenticated.
 - Required a trusted `Host` header (loopback, the non-wildcard `listen_host`, or `trusted_web_hosts`) for dashboard writes and protected reads, closing a DNS-rebinding path; added connection and SSE concurrency caps with socket timeouts, rejected request bodies on bodyless methods, and answered `HEAD` without leaking handler tracebacks on malformed input.
 - Derived GPU workload ownership from the real process UID resolved through the root-owned passwd database instead of attacker-controlled environment variables, and anchored Slurm/Kubernetes classification to real scheduler cgroup segments so `job_1.scope` or `podcast.service` are no longer misidentified.
 

@@ -8,15 +8,19 @@ import threading
 import time
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from mocop.config import WebhookConfig
 from mocop.incidents import IncidentCondition, IncidentEvent
 from mocop.notifications import (
     DeliveryResult,
+    NotificationEnvelope,
     NotificationError,
     PinnedHttpsWebhookSender,
+    WebhookNotificationSink,
     _Endpoint,
+    _WebhookWorker,
     create_notification_sink,
 )
 
@@ -77,6 +81,21 @@ class _AlwaysRetryableSender:
     def send(self, endpoint, body, headers):
         self.calls.append((endpoint, body, headers))
         return DeliveryResult(False, True)
+
+
+class _GateSender:
+    def __init__(self) -> None:
+        self.calls = []
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def send(self, endpoint, body, headers):
+        del endpoint, body
+        self.calls.append(headers["X-Mocop-Event-ID"])
+        self.started.set()
+        if len(self.calls) == 1:
+            self.release.wait(2)
+        return DeliveryResult(True, False)
 
 
 class _DrippingBody(io.RawIOBase):
@@ -158,6 +177,16 @@ class _ScriptedTlsContext:
         return self._tls_socket
 
 
+class _PassThroughTlsContext:
+    verify_mode = ssl.CERT_REQUIRED
+    post_handshake_auth = None
+    check_hostname = True
+
+    def wrap_socket(self, sock, server_hostname=None):
+        del server_hostname
+        return sock
+
+
 class _ScriptedRawSocket:
     def __init__(self) -> None:
         self.closed = False
@@ -213,6 +242,30 @@ class NotificationTests(unittest.TestCase):
             ):
                 create_notification_sink(
                     (self.config(),), environ=environment, resolver=resolver
+                )
+
+    def test_rejects_non_utf8_webhook_environment_without_leaking_unicode_errors(
+        self,
+    ) -> None:
+        cases = (
+            {
+                "MOCOP_WEBHOOK_URL": "https://\udcff.example.test/events",
+                "MOCOP_WEBHOOK_SECRET": "secret",
+            },
+            {
+                "MOCOP_WEBHOOK_URL": "https://hooks.example.test/events",
+                "MOCOP_WEBHOOK_SECRET": "\udcff",
+            },
+        )
+        for environment in cases:
+            with (
+                self.subTest(environment=environment),
+                self.assertRaises(NotificationError),
+            ):
+                create_notification_sink(
+                    (self.config(),),
+                    environ=environment,
+                    resolver=resolver_for("8.8.8.8"),
                 )
 
     def test_retries_signs_deduplicates_and_includes_correlation_context(self) -> None:
@@ -350,6 +403,154 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(status["droppedDeliveries"], 1)
         self.assertIsNone(status["lastError"])
 
+    def test_queue_full_event_can_be_retried_after_capacity_returns(self) -> None:
+        sender = _GateSender()
+        endpoint = _Endpoint(
+            self.config(max_attempts=1),
+            urlsplit("https://hooks.example.test/events"),
+            None,
+        )
+        with patch("mocop.notifications._WEBHOOK_QUEUE_CAPACITY", 1):
+            worker = _WebhookWorker(endpoint, sender)
+        first = incident()
+        second = replace(first, event_id=43)
+        third = replace(first, event_id=44)
+        worker.publish(NotificationEnvelope(first))
+        self.assertTrue(sender.started.wait(1))
+        worker.publish(NotificationEnvelope(second))
+        worker.publish(NotificationEnvelope(third))
+        test_envelope = NotificationEnvelope(replace(first, event_id=0), is_test=True)
+        with worker._status_lock:
+            self.assertFalse(worker._test_available_locked(time.monotonic()))
+
+        sender.release.set()
+        deadline = time.monotonic() + 1
+        while len(sender.calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        with worker._status_lock:
+            now = time.monotonic()
+            self.assertTrue(worker._test_available_locked(now))
+            worker._queue_test_locked(test_envelope, now)
+        while len(sender.calls) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        worker.publish(NotificationEnvelope(third))
+        worker.close(2)
+
+        self.assertEqual(sender.calls, ["42", "43", "0", "44"])
+
+    def test_worker_close_uses_one_deadline_and_reports_a_stuck_sender(self) -> None:
+        sender = _GateSender()
+        endpoint = _Endpoint(
+            self.config(max_attempts=1),
+            urlsplit("https://hooks.example.test/events"),
+            None,
+        )
+        worker = _WebhookWorker(endpoint, sender)
+        worker.publish(NotificationEnvelope(incident()))
+        self.assertTrue(sender.started.wait(1))
+
+        begun = time.monotonic()
+        worker.close(0.1)
+        elapsed = time.monotonic() - begun
+
+        self.assertLess(elapsed, 0.16)
+        self.assertEqual(
+            worker.status()["lastError"],
+            "notification worker did not stop cleanly",
+        )
+        sender.release.set()
+        worker.close(1)
+        self.assertFalse(worker._thread.is_alive())
+
+    def test_multi_endpoint_test_is_queued_atomically(self) -> None:
+        endpoint_a = _Endpoint(
+            self.config(name="a"), urlsplit("https://a.example.test/events"), None
+        )
+        endpoint_b = _Endpoint(
+            self.config(name="b"), urlsplit("https://b.example.test/events"), None
+        )
+        sink = WebhookNotificationSink(
+            (endpoint_a, endpoint_b), sender=_ImmediateSender()
+        )
+        self.addCleanup(sink.close)
+        blocked_worker = sink._workers[1]
+        blocked_worker._last_test_queued_at = time.monotonic()
+
+        self.assertFalse(sink.test())
+
+        self.assertEqual(sink._workers[0]._queue.qsize(), 0)
+        self.assertEqual(sink._workers[0]._last_test_queued_at, float("-inf"))
+
+    def test_dns_timeouts_use_a_fixed_number_of_resolver_threads(self) -> None:
+        release = threading.Event()
+
+        def stuck_resolver(host, port, *, type):
+            del host, type
+            release.wait(2)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
+
+        before = {
+            thread.ident
+            for thread in threading.enumerate()
+            if thread.name.startswith("mocop-webhook-resolver-")
+        }
+        sender = PinnedHttpsWebhookSender(resolver=stuck_resolver)
+        endpoint = _Endpoint(
+            self.config(timeout_seconds=0.02),
+            urlsplit("https://hooks.example.test/events"),
+            None,
+        )
+        try:
+            for _index in range(24):
+                self.assertEqual(
+                    sender.send(endpoint, b"{}", {}),
+                    DeliveryResult(False, True, "dns_resolution_failed"),
+                )
+            active = {
+                thread.ident
+                for thread in threading.enumerate()
+                if thread.name.startswith("mocop-webhook-resolver-")
+            }
+            self.assertLessEqual(len(active - before), 2)
+        finally:
+            release.set()
+            sender.close()
+
+    def test_send_enforces_deadline_while_response_headers_trickle(self) -> None:
+        client, peer = socket.socketpair()
+        self.addCleanup(peer.close)
+
+        def drip_headers() -> None:
+            response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+            for byte in response:
+                try:
+                    peer.sendall(bytes((byte,)))
+                except OSError:
+                    return
+                time.sleep(0.03)
+
+        server = threading.Thread(target=drip_headers, daemon=True)
+        server.start()
+        sender = PinnedHttpsWebhookSender(
+            resolver=resolver_for("8.8.8.8"),
+            tls_context=_PassThroughTlsContext(),
+            connect=lambda address, timeout=None: client,
+        )
+        self.addCleanup(sender.close)
+        endpoint = _Endpoint(
+            self.config(timeout_seconds=0.2),
+            urlsplit("https://hooks.example.test/events"),
+            None,
+        )
+
+        begun = time.monotonic()
+        result = sender.send(endpoint, b"{}", {})
+        elapsed = time.monotonic() - begun
+
+        server.join(1)
+        self.assertEqual(result, DeliveryResult(False, True, "network_or_tls_failure"))
+        self.assertLess(elapsed, 0.8)
+
     def test_set_actionable_check_suppresses_queued_events_but_not_tests(self) -> None:
         sender = _ImmediateSender()
         sink = create_notification_sink(
@@ -382,6 +583,7 @@ class NotificationTests(unittest.TestCase):
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
 
         sender = PinnedHttpsWebhookSender(resolver=stuck_resolver)
+        self.addCleanup(sender.close)
         endpoint = _Endpoint(
             self.config(timeout_seconds=0.2),
             urlsplit("https://hooks.example.test/events"),
@@ -393,7 +595,7 @@ class NotificationTests(unittest.TestCase):
         elapsed = time.monotonic() - begun
 
         self.assertTrue(started.wait(1))
-        self.assertEqual(result, DeliveryResult(False, True))
+        self.assertEqual(result, DeliveryResult(False, True, "dns_resolution_failed"))
         self.assertLess(elapsed, 1.0)
 
     def test_send_bounds_slow_response_bodies_by_the_deadline(self) -> None:
@@ -408,6 +610,7 @@ class NotificationTests(unittest.TestCase):
             tls_context=_ScriptedTlsContext(tls_socket),
             connect=lambda address, timeout=None: _ScriptedRawSocket(),
         )
+        self.addCleanup(sender.close)
         endpoint = _Endpoint(
             self.config(timeout_seconds=0.3),
             urlsplit("https://hooks.example.test/events"),
@@ -446,6 +649,7 @@ class NotificationTests(unittest.TestCase):
         sender = PinnedHttpsWebhookSender(
             resolver=resolver, tls_context=context, connect=connect
         )
+        self.addCleanup(sender.close)
         endpoint = _Endpoint(
             self.config(), urlsplit("https://hooks.example.test/events"), None
         )

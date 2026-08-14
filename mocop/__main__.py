@@ -2,19 +2,22 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import signal
 import sys
 import threading
 from pathlib import Path
 
-from .config import ConfigError, load_config, resolve_config_path
+from .config import ConfigError, load_config, load_private_config, resolve_config_path
 from .discovery import OpenSshConfigHostSource
 from .doctor import run_doctor
 from .inventory import ConfigInventory
 from .lifecycle import (
     LifecycleError,
     UserServiceManager,
+    ensure_access_token,
     initialize_config,
+    read_access_token,
     user_config_path,
     user_unit_path,
 )
@@ -63,13 +66,22 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--access-token-file",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     commands = parser.add_subparsers(dest="command")
 
     init_parser = commands.add_parser(
         "init", help="create a safe user configuration without overwriting one"
     )
     init_parser.add_argument(
-        "--config", type=Path, default=None, help="configuration path to create"
+        "--config",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="configuration path to create",
     )
     init_parser.add_argument(
         "--host",
@@ -92,7 +104,10 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     check_parser.add_argument(
-        "--config", type=Path, default=None, help="configuration path to validate"
+        "--config",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="configuration path to validate",
     )
 
     service_parser = commands.add_parser(
@@ -103,7 +118,7 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     install_parser.add_argument(
         "--config",
         type=Path,
-        default=None,
+        default=argparse.SUPPRESS,
         help="configuration used by the service",
     )
     # status and uninstall operate on the fixed unit; they take no --config.
@@ -115,7 +130,10 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="diagnose SSH reachability and connection reuse for monitored aliases",
     )
     doctor_parser.add_argument(
-        "--config", type=Path, default=None, help="configuration path to diagnose"
+        "--config",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="configuration path to diagnose",
     )
     doctor_parser.add_argument(
         "--host",
@@ -153,12 +171,47 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _run_monitor(args: argparse.Namespace) -> int:
-    config_path = resolve_config_path(args.config)
+    if args.managed_service and args.config is None:
+        print(
+            "Configuration error: --managed-service requires --config",
+            file=sys.stderr,
+        )
+        return 2
     try:
-        config = load_config(config_path)
-    except ConfigError as exc:
+        config_path = (
+            Path(os.path.abspath(args.config.expanduser()))
+            if args.managed_service
+            else resolve_config_path(args.config)
+        )
+        config = (
+            load_private_config(config_path)
+            if args.managed_service
+            else load_config(config_path)
+        )
+    except (ConfigError, RuntimeError, UnicodeError, OSError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
+    access_token = None
+    token_path = args.access_token_file
+    if args.managed_service and token_path is None:
+        # Units installed before capability authentication was introduced do
+        # not carry --access-token-file. Derive and create the same private
+        # per-install file so a package upgrade cannot crash-loop the service.
+        try:
+            token_path = ensure_access_token(config_path)
+        except LifecycleError as exc:
+            print(f"Configuration error: {exc}", file=sys.stderr)
+            return 2
+    if token_path is not None:
+        try:
+            access_token = read_access_token(token_path)
+        except LifecycleError as exc:
+            print(f"Configuration error: {exc}", file=sys.stderr)
+            return 2
+    elif not args.once:
+        # Foreground servers receive an ephemeral per-process capability. It
+        # is printed only in the operator's terminal and is never persisted.
+        access_token = secrets.token_urlsafe(32)
 
     persistence = DisabledPersistence()
     restored = persistence.load(config.history_points, config.incident_history_points)
@@ -233,9 +286,6 @@ def _run_monitor(args: argparse.Namespace) -> int:
     def stop(_signum: int, _frame: object) -> None:
         stop_event.set()
 
-    signal.signal(signal.SIGINT, stop)
-    signal.signal(signal.SIGTERM, stop)
-
     try:
         inventory = ConfigInventory(config_path, host_source, monitor.update_config)
         server = MonitorHttpServer(
@@ -245,8 +295,9 @@ def _run_monitor(args: argparse.Namespace) -> int:
             restart_event.set if args.managed_service else None,
             monitor,
             trusted_hosts=config.trusted_web_hosts,
+            access_token=access_token,
         )
-    except OSError as exc:
+    except (OSError, ValueError, UnicodeError) as exc:
         print(
             f"Cannot listen on {config.listen_host}:{config.listen_port}: {exc}",
             file=sys.stderr,
@@ -262,11 +313,19 @@ def _run_monitor(args: argparse.Namespace) -> int:
         name="mocop-collector",
         daemon=True,
     )
-    collector.start()
-    print(f"Configuration: {config_path}")
-    print(f"Mocop: http://{config.listen_host}:{config.listen_port}")
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
     collector_failed = False
+    shutdown_failed = False
     try:
+        collector.start()
+        print(f"Configuration: {config_path}")
+        dashboard_url = _http_url(config.listen_host, config.listen_port)
+        if not args.managed_service:
+            dashboard_url += f"#access_token={access_token}"
+        print(f"Mocop: {dashboard_url}")
         while not stop_event.is_set() and not restart_event.is_set():
             server.handle_request()
             if (
@@ -278,6 +337,8 @@ def _run_monitor(args: argparse.Namespace) -> int:
                 collector_failed = True
                 break
     finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
         stop_event.set()
         monitor.stop()
         server.server_close()
@@ -288,16 +349,17 @@ def _run_monitor(args: argparse.Namespace) -> int:
                 "flushing persistence and notifications regardless",
                 file=sys.stderr,
             )
+            shutdown_failed = True
         persistence.close()
         notifications.close()
     if restart_event.is_set():
         return 75  # EX_TEMPFAIL: systemd Restart=on-failure starts the new process.
-    return 1 if collector_failed else 0
+    return 1 if collector_failed or shutdown_failed else 0
 
 
 def _run_doctor(args: argparse.Namespace) -> int:
-    config_path = resolve_config_path(args.config)
     try:
+        config_path = resolve_config_path(args.config)
         config = load_config(config_path)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
@@ -319,8 +381,8 @@ def _environment_state(name: str) -> str:
 
 def _run_config_check(args: argparse.Namespace) -> int:
     """Parse and validate only: no web server, no SSH connections."""
-    config_path = resolve_config_path(args.config)
     try:
+        config_path = resolve_config_path(args.config)
         config = load_config(config_path)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
@@ -353,7 +415,7 @@ def _run_config_check(args: argparse.Namespace) -> int:
 
 def _run_lifecycle(args: argparse.Namespace) -> int:
     if args.command == "init":
-        path = (args.config or user_config_path()).expanduser().resolve()
+        path = args.config or user_config_path()
         created = initialize_config(path, args.hosts)
         print(f"Created configuration: {created}")
         if not args.hosts:
@@ -362,23 +424,48 @@ def _run_lifecycle(args: argparse.Namespace) -> int:
         print("Then: mocop service install")
         return 0
 
-    config_path = (args.config or user_config_path()).expanduser().resolve()
+    config_path = args.config or user_config_path()
     manager = UserServiceManager(
         config_path=config_path,
         unit_path=user_unit_path(),
         python_executable=Path(sys.executable),
     )
     if args.action == "install":
-        manager.install()
-        # install() already validated this exact file, so a second load
-        # only recovers listen_host/listen_port for the dashboard URL.
-        config = load_config(config_path)
-        if manager.wait_until_active():
-            print(f"Installed and started {manager.unit_path}")
-            print(f"Dashboard: http://{config.listen_host}:{config.listen_port}")
-        else:
-            print(f"Installed {manager.unit_path}, but the service is not active yet")
+        config = manager.install()
+        try:
+            active = manager.wait_until_active()
+            token = read_access_token(manager.access_token_path) if active else None
+            healthy = (
+                manager.wait_until_healthy(
+                    config.listen_host,
+                    config.listen_port,
+                    token,
+                )
+                if token is not None
+                else False
+            )
+        except BaseException as verification_error:
+            try:
+                manager.rollback_install()
+            except LifecycleError as rollback_error:
+                raise LifecycleError(
+                    "service verification failed and rollback is incomplete: "
+                    f"{rollback_error}"
+                ) from verification_error
+            raise
+        if not active or not healthy:
+            manager.rollback_install()
+            print("Service did not become healthy; the previous unit was restored")
             print("Inspect it with: systemctl --user status mocop")
+            print("Logs: journalctl --user -u mocop -f")
+            return 1
+        assert token is not None
+        manager.commit_install()
+        print(f"Installed and started {manager.unit_path}")
+        print(
+            f"Dashboard: {_http_url(config.listen_host, config.listen_port)}"
+            f"#access_token={token}"
+        )
         print("Logs: journalctl --user -u mocop -f")
         return 0
     if args.action == "status":
@@ -386,6 +473,11 @@ def _run_lifecycle(args: argparse.Namespace) -> int:
     manager.uninstall()
     print(f"Stopped and removed {manager.unit_path}")
     return 0
+
+
+def _http_url(host: str, port: int) -> str:
+    authority = f"[{host.replace('%', '%25')}]" if ":" in host else host
+    return f"http://{authority}:{port}/"
 
 
 def main(argv: list[str] | None = None) -> int:

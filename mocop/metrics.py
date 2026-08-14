@@ -5,13 +5,27 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 
 OPENMETRICS_CONTENT_TYPE = "application/openmetrics-text; version=1.0.0; charset=utf-8"
+OPENMETRICS_MAX_SERIES = 100_000
 
 Labels = Sequence[tuple[str, str]]
 Sample = tuple[Labels, int | float]
 
 
+class OpenMetricsLimitError(ValueError):
+    """Raised when one snapshot would exceed the bounded exposition budget."""
+
+
 def _escape_label(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+    # OpenMetrics permits ``\\n`` inside quoted labels but forbids raw CR.
+    # Normalize every line ending before applying the format's three escapes
+    # so one malformed remote label cannot invalidate the whole exposition.
+    return (
+        value.replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\\", "\\\\")
+        .replace("\n", "\\n")
+        .replace('"', '\\"')
+    )
 
 
 def _label_set(labels: Labels) -> str:
@@ -117,6 +131,20 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
     stats = stats if isinstance(stats, Mapping) else {}
     servers_value = snapshot.get("servers")
     servers = servers_value if isinstance(servers_value, list) else []
+    gpu_count = sum(
+        len(gpus)
+        for server in servers
+        if isinstance(server, Mapping)
+        and isinstance((gpus := server.get("gpus")), list)
+    )
+    # A current host contributes fewer than 40 series and a GPU fewer than 20.
+    # Reject before allocating the much larger sample and line collections.
+    estimated_series = 80 + len(servers) * 40 + gpu_count * 20
+    if estimated_series > OPENMETRICS_MAX_SERIES:
+        raise OpenMetricsLimitError(
+            "snapshot exceeds the OpenMetrics series budget "
+            f"({estimated_series} > {OPENMETRICS_MAX_SERIES})"
+        )
 
     version = snapshot.get("appVersion")
     _family(
@@ -346,6 +374,8 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         "network_tx": [],
         "disk_read": [],
         "disk_write": [],
+        "pressure_some": [],
+        "pressure_full": [],
     }
     gpu_samples: dict[str, list[Sample]] = {
         "info": [],
@@ -443,6 +473,25 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
                 _append_optional(
                     host_samples[sample_key], host_labels, system.get(field)
                 )
+            pressure = system.get("pressure")
+            if isinstance(pressure, Mapping):
+                # The 10-second averages are the freshest windows the kernel
+                # publishes and behave well under typical scrape intervals.
+                for psi_resource in ("cpu", "memory", "io"):
+                    sample = pressure.get(psi_resource)
+                    if not isinstance(sample, Mapping):
+                        continue
+                    psi_labels = (("host", host), ("resource", psi_resource))
+                    _append_ratio(
+                        host_samples["pressure_some"],
+                        psi_labels,
+                        sample.get("some_avg10"),
+                    )
+                    _append_ratio(
+                        host_samples["pressure_full"],
+                        psi_labels,
+                        sample.get("full_avg10"),
+                    )
 
         raw_gpus = raw_server.get("gpus")
         if not isinstance(raw_gpus, list):
@@ -488,7 +537,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
             ):
                 _append_optional(gpu_samples[sample_key], labels, gpu.get(field))
             processes = gpu.get("processes")
-            if isinstance(processes, list):
+            if gpu.get("processes_available") is True and isinstance(processes, list):
                 gpu_samples["processes"].append((labels, len(processes)))
             gpu_samples["processes_available"].append(
                 (labels, int(gpu.get("processes_available") is True))
@@ -629,6 +678,20 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
             "Current aggregate disk write rate.",
             "bytes_per_second",
         ),
+        (
+            "pressure_some",
+            "mocop_host_pressure_some_ratio",
+            "Share of the last 10 seconds with at least one task stalled"
+            " on the resource (kernel PSI some avg10).",
+            None,
+        ),
+        (
+            "pressure_full",
+            "mocop_host_pressure_full_ratio",
+            "Share of the last 10 seconds with all tasks stalled"
+            " on the resource (kernel PSI full avg10).",
+            None,
+        ),
     )
     for key, name, help_text, unit in host_definitions:
         _family(lines, name, help_text, host_samples[key], unit=unit)
@@ -677,7 +740,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         (
             "processes_sampled",
             "mocop_gpu_process_telemetry_sampled",
-            "Whether the latest GPU sample refreshed process telemetry.",
+            "Whether the latest GPU sample attempted process telemetry.",
             None,
         ),
         (

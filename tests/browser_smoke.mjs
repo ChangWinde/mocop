@@ -171,6 +171,7 @@ class CdpClient {
 }
 
 const temporary = await mkdtemp(path.join(os.tmpdir(), "mocop-browser-"));
+const browserAccessToken = "B".repeat(43);
 let monitor;
 let chrome;
 let monitorOutput = () => "";
@@ -218,7 +219,7 @@ try {
   await waitFor(`http://127.0.0.1:${debugPort}/json/version`, 30_000);
 
   const targetResponse = await fetch(
-    `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent(`http://127.0.0.1:${monitorPort}/`)}`,
+    `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent("about:blank")}`,
     { method: "PUT" },
   );
   assert(targetResponse.ok, `Chrome target creation failed: ${targetResponse.status}`);
@@ -226,23 +227,22 @@ try {
   cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
+  await cdp.send("Network.enable");
   await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-    source: `const NativeEventSource = window.EventSource;
-    window.EventSource = class MocopObservedEventSource extends NativeEventSource {
-      constructor(...arguments_) {
-        super(...arguments_);
-        window.__mocopEventSource = this;
-      }
-    };
-    window.addEventListener("DOMContentLoaded", () => {
+    source: `window.addEventListener("DOMContentLoaded", () => {
       const select = document.querySelector("#refresh-interval");
       select.value = "2";
       select.dispatchEvent(new Event("change", { bubbles: true }));
       window.__mocopEarlyCadenceChange = true;
     });`,
   });
-  const loaded = cdp.waitFor("Page.loadEventFired");
-  await cdp.send("Page.navigate", { url: `http://127.0.0.1:${monitorPort}/` });
+  // Chrome can be CPU-starved while the Python version matrix runs on the
+  // same hosted-runner fleet. Keep the wait finite, but give navigation the
+  // same 30-second startup budget as the DevTools endpoint.
+  const loaded = cdp.waitFor("Page.loadEventFired", 30_000);
+  await cdp.send("Page.navigate", {
+    url: `http://127.0.0.1:${monitorPort}/#access_token=${browserAccessToken}`,
+  });
   await loaded;
 
   const initial = await cdp.evaluate(`({
@@ -258,6 +258,11 @@ try {
   assert.equal(initial.earlyCadenceChange, true);
   assert.equal(initial.gpuMemoryCard, true);
   assert.equal(initial.overflow, false);
+  assert.equal(await cdp.evaluate("window.location.hash"), "");
+  assert.equal(
+    await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"),
+    browserAccessToken,
+  );
 
   await new Promise((resolve) => setTimeout(resolve, 4_000));
 
@@ -376,33 +381,22 @@ try {
     await writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
   }
 
-  const transientConnection = await cdp.evaluate(`(async () => {
-    window.__mocopEventSource.dispatchEvent(new Event("error"));
-    const immediate = document.querySelector("#connection-text")?.textContent;
-    await new Promise((resolve) => setTimeout(resolve, 1600));
-    return {
-      immediate,
-      settled: document.querySelector("#connection-text")?.textContent,
-      className: document.querySelector("#connection")?.className,
-    };
-  })()`, true);
-  assert.notEqual(transientConnection.immediate, "正在重连");
-  assert.match(transientConnection.className, /live/);
-
-  // Named SSE heartbeats (newer service) must refresh the liveness clock so
-  // the 15s staleness fallback stops issuing redundant snapshot polls.
+  // Authenticated fetch-stream heartbeats refresh liveness, and its parser
+  // accepts a CRLF delimiter split at an arbitrary network chunk boundary.
   const heartbeat = await cdp.evaluate(`(() => {
     view.lastEventAt = 0;
-    window.__mocopEventSource.dispatchEvent(
-      new MessageEvent("heartbeat", { data: "{}" }),
-    );
+    acceptStreamFrame("event: heartbeat\\ndata: {}", () => setConnection("live", "实时连接"));
+    const partial = appendStreamChunk("", "event: heartbeat\\r");
+    const complete = appendStreamChunk(partial, "\\ndata: {}\\r\\n\\r\\n");
     return {
       updated: view.lastEventAt > 0,
       connectionClass: document.querySelector("#connection")?.className || "",
+      splitFrame: complete === "event: heartbeat\\ndata: {}\\n\\n",
     };
   })()`);
   assert.equal(heartbeat.updated, true, "named heartbeat refreshes lastEventAt");
   assert.match(heartbeat.connectionClass, /live/);
+  assert.equal(heartbeat.splitFrame, true, "CRLF split parser produces one frame");
 
   const topology = await cdp.evaluate(`(async () => {
     for (let attempt = 0; attempt < 40 && !document.querySelector("#topology-toggle"); attempt += 1) {
@@ -637,6 +631,33 @@ try {
   // Unattributed card hints at the opt-in identity layer (title only).
   assert.match(owners.unattributed.cardTitle, /workloads\.mode=identity/);
 
+  const ownersUsage = await cdp.evaluate(`(async () => {
+    document.querySelector("#owners-toggle").click();
+    const deadline = Date.now() + 3000;
+    while (
+      !document.querySelectorAll("#owners-usage-results .capacity-candidate").length
+      && Date.now() < deadline
+    ) await new Promise((resolve) => setTimeout(resolve, 25));
+    const rows = [...document.querySelectorAll(
+      "#owners-usage-results .capacity-candidate",
+    )];
+    const result = {
+      summary: document.querySelector("#owners-usage-summary")?.textContent || "",
+      owners: rows.map((row) => row.querySelector("strong")?.textContent),
+      gpuHours: rows.map((row) => row.querySelector("em")?.textContent),
+      idleLabels: rows.map((row) =>
+        [...row.querySelectorAll(".capacity-candidate-metrics span")]
+          .at(-1)?.textContent,
+      ),
+    };
+    document.querySelector("#owners-dialog").close();
+    return result;
+  })()`, true);
+  assert.deepEqual(ownersUsage.owners, ["researcher", "未归属"]);
+  assert.match(ownersUsage.summary, /2 个归属方/);
+  assert(ownersUsage.gpuHours.every((label) => /卡·时/.test(label)));
+  assert(ownersUsage.idleLabels.every((label) => /闲置占比/.test(label)));
+
   // Owner host chips drill down into the fleet view: clicking closes the
   // dialog and selects the host through the regular selection path.
   const ownersDrilldown = await cdp.evaluate(`(() => {
@@ -783,7 +804,7 @@ try {
       groups: [...document.querySelectorAll(".server-group-badge")].map(
         (item) => item.textContent,
       ),
-      order: [...document.querySelectorAll(".server-item[data-host]")].map(
+      order: [...document.querySelectorAll(".server-item[data-host]:not([data-host='all'])")].map(
         (item) => item.dataset.host,
       ),
     };
@@ -849,7 +870,7 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 200));
 
   const personalization = await cdp.evaluate(`(async () => {
-    const serverItems = [...document.querySelectorAll(".server-item[data-host]")];
+    const serverItems = [...document.querySelectorAll(".server-item[data-host]:not([data-host='all'])")];
     const utilizationVisible = serverItems.every(
       (item) => item.textContent.includes("GPU") && item.textContent.includes("CPU"),
     );
@@ -860,9 +881,20 @@ try {
     target.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
     target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
     source.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer: transfer }));
-    const reordered = [...document.querySelectorAll(".server-item[data-host]")].map(
+    const reordered = [...document.querySelectorAll(".server-item[data-host]:not([data-host='all'])")].map(
       (item) => item.dataset.host,
     );
+    document.querySelector(".server-item[data-host='atlas-02']").focus();
+    document.querySelector(".server-item[data-host='atlas-02']").dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowDown", altKey: true, bubbles: true, cancelable: true,
+      }),
+    );
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const keyboardOrder = [...document.querySelectorAll(".server-item[data-host]:not([data-host='all'])")].map(
+      (item) => item.dataset.host,
+    );
+    const keyboardFocus = document.activeElement?.dataset.host || "";
 
     document.querySelector("#settings-toggle").click();
     for (let attempt = 0; attempt < 20 && document.querySelector("#configured-host-count").textContent !== "3"; attempt += 1) {
@@ -1192,13 +1224,15 @@ try {
     const taskDialogRect = taskDialog.getBoundingClientRect();
     const result = {
       utilizationVisible,
-      reordered,
+      reordered, keyboardOrder, keyboardFocus,
       savedServerSort: JSON.parse(localStorage.getItem("mocop.preferences.v1")).serverSort,
       savedVisualStyle: JSON.parse(localStorage.getItem("mocop.preferences.v1")).visualStyle,
       savedAccent: JSON.parse(localStorage.getItem("mocop.preferences.v1")).accent,
       savedDensity: JSON.parse(localStorage.getItem("mocop.preferences.v1")).density,
       savedBackgroundVisibility: JSON.parse(localStorage.getItem("mocop.preferences.v1")).backgroundVisibility,
       savedServerFilter: JSON.parse(localStorage.getItem("mocop.preferences.v1")).serverFilter,
+      pressedFleetFilters: [...document.querySelectorAll(".fleet-filter[aria-pressed='true']")]
+        .map((button) => button.dataset.serverFilter),
       activeVisualStyle: document.documentElement.dataset.style,
       activeAccent: document.documentElement.dataset.accent,
       activeDensity: document.documentElement.dataset.density,
@@ -1290,12 +1324,15 @@ try {
   })()`, true);
   assert.equal(personalization.utilizationVisible, true);
   assert.equal(personalization.reordered[0], "atlas-02");
+  assert.equal(personalization.keyboardOrder[1], "atlas-02");
+  assert.equal(personalization.keyboardFocus, "atlas-02");
   assert.equal(personalization.savedServerSort, "custom");
   assert.equal(personalization.savedVisualStyle, "glass");
   assert.equal(personalization.savedAccent, "rose");
   assert.equal(personalization.savedDensity, "compact");
   assert.equal(personalization.savedBackgroundVisibility, 52);
   assert.equal(personalization.savedServerFilter, "busy");
+  assert.deepEqual(personalization.pressedFleetFilters, ["busy"]);
   assert.equal(personalization.activeVisualStyle, "glass");
   assert.equal(personalization.activeAccent, "rose");
   assert.equal(personalization.activeDensity, "compact");
@@ -1595,7 +1632,7 @@ try {
     "selected-host resource panel skips rebuild without a data change",
   );
 
-  const reloaded = cdp.waitFor("Page.loadEventFired");
+  const reloaded = cdp.waitFor("Page.loadEventFired", 30_000);
   await cdp.send("Page.reload");
   await reloaded;
   await new Promise((resolve) => setTimeout(resolve, 300));
@@ -1795,21 +1832,28 @@ try {
   const meta = await (
     await fetch(`http://127.0.0.1:${monitorPort}/api/meta`)
   ).json();
-  assert.equal(meta.apiVersion, 1);
+  assert.equal(meta.apiVersion, "2");
   assert.equal(typeof meta.appVersion, "string");
   assert.equal(typeof meta.schemaVersion, "number");
   assert.equal(meta.capabilities.restartSupported, false);
-  assert(Array.isArray(meta.endpoints) && meta.endpoints.includes("/api/snapshot"));
+  assert(Array.isArray(meta.endpoints)
+    && meta.endpoints.some((endpoint) => endpoint.path === "/api/snapshot"));
   assert.equal(
     meta.fixture.unmarkedDashboardReads,
     0,
     "all dashboard reads carry the X-Monitor-Request marker",
   );
+  assert.equal(
+    meta.fixture.unauthenticatedPrivateRequests,
+    0,
+    "every private dashboard request carries the Bearer capability",
+  );
+  assert.deepEqual(await cdp.send("Network.getAllCookies"), { cookies: [] });
   assert.deepEqual(cdp.errors, []);
 
   console.log(JSON.stringify({
-    browser: "chrome", initial, final, failureMappings, transientConnection,
-    heartbeat, topologyBenchmark, capacity, owners, ownersDrilldown,
+    browser: "chrome", initial, final, failureMappings,
+    heartbeat, topologyBenchmark, capacity, owners, ownersUsage, ownersDrilldown,
     incidentMaintenance, grouping, emptyFleet,
     personalization, gpuTasks, resilience,
     persistedAppearance, persistedTaskSort, mobile, removedBackground, meta,
