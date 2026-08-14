@@ -185,14 +185,28 @@
                 <button id="toggle-groups" class="group-toggle" type="button" hidden>全部展开</button>
                 <label class="search-box">
                   <span class="search-symbol" aria-hidden="true"></span>
-                  <span class="sr-only">搜索主机、型号或 UUID</span>
-                  <input id="search" type="search" placeholder="搜索主机、GPU 型号或 UUID" autocomplete="off">
+                  <span class="sr-only">搜索服务器、GPU 或程序</span>
+                  <input id="search" type="search" placeholder="搜索服务器、GPU 或程序" maxlength="120" autocomplete="off">
                   <kbd class="search-shortcut" aria-hidden="true">/</kbd>
                 </label>
               </div>
             </div>
 
             <div id="node-notice" class="node-notice" role="status" hidden></div>
+            <section id="program-search-panel" class="program-search-panel" aria-labelledby="program-search-title" hidden>
+              <div class="program-search-heading">
+                <div>
+                  <span class="section-kicker">PROGRAM SEARCH</span>
+                  <h3 id="program-search-title">活跃程序</h3>
+                </div>
+                <div class="program-search-status">
+                  <span id="program-search-scope">全局</span>
+                  <span id="program-search-count" class="count-badge">0</span>
+                </div>
+              </div>
+              <p id="program-search-summary" class="program-search-summary" aria-live="polite"></p>
+              <div id="program-search-results" class="program-search-results" role="list"></div>
+            </section>
             <section id="gpu-heatmap" class="gpu-heatmap" aria-label="GPU 调度热力图" hidden>
               <div class="heatmap-heading">
                 <div>
@@ -601,7 +615,13 @@
               <span class="section-kicker">GPU PROCESSES</span>
               <h3>活跃计算进程</h3>
             </div>
-            <span id="gpu-task-count" class="count-badge">0</span>
+            <div id="gpu-task-heading-tools" class="gpu-task-heading-tools">
+              <label class="gpu-task-search-box">
+                <span class="sr-only">筛选当前 GPU 的程序</span>
+                <input id="gpu-task-search" type="search" placeholder="筛选程序" maxlength="120" autocomplete="off">
+              </label>
+              <span id="gpu-task-count" class="count-badge">0</span>
+            </div>
           </div>
           <div id="gpu-task-overview" class="gpu-task-overview">
             <div><span>进程显存总计</span><strong id="gpu-task-memory-total">—</strong></div>

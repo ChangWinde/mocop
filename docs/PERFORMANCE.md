@@ -71,6 +71,13 @@ This document defines reproducible measurement conditions and architecture thres
 - GPU groups start collapsed, which bounds initial table rendering in the cluster-wide view.
 - Maintenance evaluation is an in-memory pass over the configured host-window map during snapshot publication; it starts no timer, process, probe, or database write.
 - Capacity matching scans the existing browser snapshot only while its dialog is open; it starts no request and groups devices by host and model in linear time before sorting the bounded candidate set.
+- Program search scans the authenticated browser snapshot only while a literal
+  query is present. Each immutable process/GPU object normalizes its fields once
+  as one boundary-delimited NFKC search projection and caches that projection in
+  a weak map, so repeated terms and the inventory predicate reuse it without
+  pinning an old snapshot. A fixed 200-record max-heap reports the full match
+  count without retaining or sorting every matched wrapper, and only those 200
+  keyed result nodes can enter the DOM.
 - Host-group metadata adds one constant-time lookup per server snapshot; grouped fleet headers and host rows reuse cached DOM signatures across SSE updates.
 - The connection map builds its bounded static tree only when topology changes; live snapshots update existing node state and unmapped-host controls in place.
 - Topology correlation is a bounded in-memory tree pass only when incidents are read or
@@ -151,6 +158,30 @@ MOCOP_TOPOLOGY_BENCHMARK=1 node --experimental-websocket tests/browser_smoke.mjs
 
 The output reports 20 warmed-up samples with median, P95, and maximum durations. It is
 diagnostic evidence rather than a timing gate because runner hardware is not stable.
+
+To measure the program-search projection and compare its bounded selector with a
+collect-all-and-sort reference over the same 65,536-process snapshot, run:
+
+```bash
+MOCOP_PROGRAM_SEARCH_BENCHMARK=1 \
+  node --experimental-websocket tests/browser_smoke.mjs
+```
+
+The output includes `programSearchBenchmark`. It reports the first bounded query
+over a fresh snapshot, then runs three warm-up pairs before ten measurements per
+implementation. Correctness assertions require the same full count and first
+result while the production selector retains exactly 200 rows. Warm and cold
+figures are separate because every parsed SSE snapshot contains new objects.
+
+Reference measurement on 2026-08-14 used Chrome 151 on an AMD Ryzen 9 9950X.
+With 128 hosts, eight GPUs per host, and 64 matching processes per GPU, weak-map
+projection caching first reduced the warmed bounded-search median from 1,538.8
+ms to 33.9 ms. Normalizing all fields in one boundary-delimited pass then reduced
+the measured cold query from 628.5 ms to 116.0 ms (5.4x); the resulting warmed
+bounded selector measured 24.8 ms median (4.69 ms standard deviation), while the
+collect-all reference measured 23.8 ms median (0.91 ms standard deviation). The
+bounded selector retained 200 rather than 65,536 result wrappers. The primary
+benefit of the heap is bounded allocation, not a claimed sorting speedup.
 
 Reference measurement on 2026-08-10 used Chrome 149 on an AMD Ryzen 9 9950X with a
 513-node synthetic tree, three warm-up pairs, and 20 measured pairs. A forced rebuild

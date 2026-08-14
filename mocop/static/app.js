@@ -11,7 +11,11 @@ const MAX_BACKGROUND_PIXELS = 32_000_000;
 const MAX_COMPRESSED_BACKGROUND_DIMENSION = 4096;
 const MAX_COMPRESSED_BACKGROUND_PIXELS = 12_000_000;
 const MAX_GPU_DETAIL_PROCESSES = 100;
+const MAX_PROGRAM_SEARCH_RESULTS = 200;
+const MAX_SEARCH_QUERY_LENGTH = 120;
 const GPU_PROCESS_FRESHNESS_WARNING_MS = 90_000;
+const processSearchProjectionCache = new WeakMap();
+const gpuSearchProjectionCache = new WeakMap();
 const BACKGROUND_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
 const DEFAULT_PREFERENCES = Object.freeze({
   serverSort: "custom",
@@ -29,7 +33,7 @@ const DEFAULT_PREFERENCES = Object.freeze({
 });
 const SERVER_SORT_VALUES = new Set(["custom", "group", "host", "status", "gpu", "cpu"]);
 const GPU_SORT_VALUES = new Set(["host", "utilization", "memory", "temperature", "power"]);
-const GPU_TASK_SORT_VALUES = new Set(["memory", "duration"]);
+const GPU_TASK_SORT_VALUES = new Set(["memory", "duration", "name"]);
 const HEAT_METRIC_VALUES = new Set(["utilization", "memory", "temperature"]);
 const VISUAL_STYLE_VALUES = new Set([
   "precision", "glass", "terminal", "ledger", "blueprint", "studio",
@@ -241,12 +245,15 @@ const view = {
   gpuHistoryRetryTimer: null,
   gpuHistoryRetryKey: "",
   gpuHistoryRetryDelayMs: 0,
+  gpuTaskQuery: "",
+  selectedProcessKey: "",
   ownersUsage: null,
   ownersUsageHours: 24,
   ownersUsageLoading: false,
   ownersUsageError: "",
   ownersUsageRequest: 0,
   gpuTaskRowCache: new Map(),
+  programSearchRowCache: new Map(),
   selectedIncident: null,
   incidentActionPending: false,
   manualProbePending: false,
@@ -420,6 +427,11 @@ const elements = {
   groupToggle: $("#toggle-groups"),
   gpuGroups: $("#gpu-groups"),
   emptyState: $("#empty-state"),
+  programSearchPanel: $("#program-search-panel"),
+  programSearchScope: $("#program-search-scope"),
+  programSearchCount: $("#program-search-count"),
+  programSearchSummary: $("#program-search-summary"),
+  programSearchResults: $("#program-search-results"),
   pollInfo: $("#poll-info"),
   gpuDetailDialog: $("#gpu-detail-dialog"),
   gpuDetailHost: $("#gpu-detail-host"),
@@ -434,6 +446,8 @@ const elements = {
   gpuTaskMemoryTotal: $("#gpu-task-memory-total"),
   gpuTaskMemoryBar: $("#gpu-task-memory-bar"),
   gpuTaskNote: $("#gpu-task-note"),
+  gpuTaskHeadingTools: $("#gpu-task-heading-tools"),
+  gpuTaskSearch: $("#gpu-task-search"),
   gpuTaskList: $("#gpu-task-list"),
   incidentDetailDialog: $("#incident-detail-dialog"),
   incidentDetailHost: $("#incident-detail-host"),
@@ -4832,11 +4846,323 @@ function gpuProcessMemoryRank(a, b) {
     || numeric(a.pid) - numeric(b.pid);
 }
 
+function normalizedSearchTerms(value) {
+  const normalized = String(value ?? "")
+    .slice(0, MAX_SEARCH_QUERY_LENGTH)
+    .normalize("NFKC")
+    .toLowerCase()
+    .trim();
+  return normalized ? normalized.split(/\s+/u) : [];
+}
+
+function normalizedSearchProjection(values) {
+  const text = values
+    .filter((value) => value != null && String(value) !== "")
+    .map(String)
+    .join("\u0000")
+    .normalize("NFKC")
+    .toLowerCase();
+  return { text, boundaryText: `\u0000${text}\u0000` };
+}
+
+function processSearchProjection(process) {
+  const cached = processSearchProjectionCache.get(process);
+  if (cached) return cached;
+  const workload = process.workload || {};
+  const projection = normalizedSearchProjection([
+    process.pid,
+    process.name,
+    gpuProcessName(process),
+    workload.kind,
+    Object.hasOwn(WORKLOAD_KIND_LABELS, workload.kind)
+      ? WORKLOAD_KIND_LABELS[workload.kind] : null,
+    workload.workload_id,
+    workload.name,
+    workload.owner,
+    workload.queue,
+    workload.namespace,
+    workload.command,
+  ]);
+  processSearchProjectionCache.set(process, projection);
+  return projection;
+}
+
+function gpuSearchProjection(server, gpu) {
+  const cached = gpuSearchProjectionCache.get(gpu);
+  if (cached) return cached;
+  const projection = normalizedSearchProjection([
+    server.host, gpu.index, gpu.uuid, gpu.name,
+  ]);
+  gpuSearchProjectionCache.set(gpu, projection);
+  return projection;
+}
+
+function processMatchesSearch(process, terms, server = null, gpu = null) {
+  if (!terms.length) return true;
+  const processText = processSearchProjection(process).text;
+  const placementText = server && gpu ? gpuSearchProjection(server, gpu).text : "";
+  return terms.every(
+    (term) => processText.includes(term) || placementText.includes(term),
+  );
+}
+
+function processSearchRank(record, terms) {
+  const query = terms.join(" ");
+  const projections = [
+    gpuSearchProjection(record.server, record.gpu),
+    processSearchProjection(record.process),
+  ];
+  if (projections.some(
+    (projection) => projection.boundaryText.includes(`\u0000${query}\u0000`),
+  )) return 0;
+  if (projections.some(
+    (projection) => projection.boundaryText.includes(`\u0000${query}`),
+  )) return 1;
+  return 2;
+}
+
+function compareProcessSearchRecords(a, b) {
+  return a.rank - b.rank
+    || a.server.host.localeCompare(b.server.host)
+    || numeric(a.gpu.index) - numeric(b.gpu.index)
+    || gpuProcessMemoryRank(a.process, b.process)
+    || String(a.process.name || "").localeCompare(String(b.process.name || ""));
+}
+
+// A max-heap keeps the worst retained match at index zero. This lets search
+// report the full count while holding at most the DOM result budget in memory.
+function retainProcessSearchRecord(heap, record) {
+  if (heap.length < MAX_PROGRAM_SEARCH_RESULTS) {
+    heap.push(record);
+    let index = heap.length - 1;
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (compareProcessSearchRecords(heap[parent], heap[index]) >= 0) break;
+      [heap[parent], heap[index]] = [heap[index], heap[parent]];
+      index = parent;
+    }
+    return;
+  }
+  if (compareProcessSearchRecords(record, heap[0]) >= 0) return;
+  heap[0] = record;
+  let index = 0;
+  for (;;) {
+    const left = index * 2 + 1;
+    if (left >= heap.length) break;
+    const right = left + 1;
+    const worse = right < heap.length
+      && compareProcessSearchRecords(heap[right], heap[left]) > 0 ? right : left;
+    if (compareProcessSearchRecords(heap[index], heap[worse]) >= 0) break;
+    [heap[index], heap[worse]] = [heap[worse], heap[index]];
+    index = worse;
+  }
+}
+
+function searchProcessRecords(snapshot, query, host = "all") {
+  const terms = normalizedSearchTerms(query);
+  if (!snapshot || !terms.length) {
+    return { matches: [], total: 0, unavailableGpuCount: 0, staleCount: 0 };
+  }
+  const matches = [];
+  let total = 0;
+  let unavailableGpuCount = 0;
+  let staleCount = 0;
+  snapshot.servers.forEach((server) => {
+    if (host !== "all" && server.host !== host) return;
+    server.gpus.forEach((gpu) => {
+      if (gpu.processes_available === false) unavailableGpuCount += 1;
+      const processes = Array.isArray(gpu.processes) ? gpu.processes : [];
+      processes.forEach((process) => {
+        if (processMatchesSearch(process, terms, server, gpu)) {
+          total += 1;
+          if (server.stale) staleCount += 1;
+          const record = { server, gpu, process, rank: 0 };
+          record.rank = processSearchRank(record, terms);
+          retainProcessSearchRecord(matches, record);
+        }
+      });
+    });
+  });
+  matches.sort(compareProcessSearchRecords);
+  return {
+    matches,
+    total,
+    unavailableGpuCount,
+    staleCount,
+  };
+}
+
+function gpuRecordMatchesSearch(server, gpu, terms) {
+  if (!terms.length) return true;
+  const resourceText = gpuSearchProjection(server, gpu).text;
+  if (terms.every((term) => resourceText.includes(term))) return true;
+  const processes = Array.isArray(gpu.processes) ? gpu.processes : [];
+  return processes.some((process) => processMatchesSearch(process, terms, server, gpu));
+}
+
+function programSearchKey({ server, gpu, process }) {
+  return [
+    server.host,
+    String(gpu.uuid || gpu.index),
+    String(process.pid),
+    String(process.name || ""),
+  ].join("\u0000");
+}
+
+function programSearchRow() {
+  const item = create("article", "program-search-result");
+  item.setAttribute("role", "listitem");
+  const button = create("button", "program-search-open");
+  button.type = "button";
+  const identity = create("span", "program-search-identity");
+  const name = create("strong", "program-search-name");
+  const command = create("small", "program-search-command");
+  identity.append(name, command);
+  const placement = create("span", "program-search-placement");
+  const location = create("strong");
+  const context = create("small");
+  placement.append(location, context);
+  const workload = create("span", "program-search-workload");
+  workload.hidden = true;
+  const memorySummary = create("span", "program-search-memory");
+  const memoryValue = create("strong");
+  const memoryShare = create("small");
+  memorySummary.append(memoryValue, memoryShare);
+  button.append(identity, placement, workload, memorySummary);
+  item.append(button);
+  return {
+    item,
+    button,
+    name,
+    command,
+    location,
+    context,
+    workload,
+    memoryValue,
+    memoryShare,
+  };
+}
+
+function updateProgramSearchRow(row, record) {
+  const { server, gpu, process } = record;
+  const shortName = gpuProcessName(process);
+  const fullName = String(process.name || "");
+  const command = process.workload?.command
+    || (fullName && fullName !== shortName ? fullName : "");
+  row.name.textContent = shortName;
+  row.name.title = fullName || "unknown process";
+  row.command.textContent = command || "命令行未采集";
+  if (command) row.command.title = command;
+  else row.command.removeAttribute("title");
+  row.location.textContent = `${server.host} · GPU ${gpu.index} · PID ${process.pid}`;
+  const freshness = gpu.processes_observed_at
+    ? `任务数据 ${age(gpu.processes_observed_at)}` : "等待任务数据";
+  row.context.textContent = `${server.stale ? "历史样本" : "当前样本"} · ${freshness}`;
+  row.context.classList.toggle("stale", server.stale);
+
+  const workload = process.workload;
+  if (workload && Object.hasOwn(WORKLOAD_KIND_LABELS, workload.kind)) {
+    const kind = WORKLOAD_KIND_LABELS[workload.kind];
+    const identity = workload.name || workload.workload_id;
+    row.workload.textContent = [
+      identity ? `${kind} · ${identity}` : kind,
+      workload.owner ? `用户 ${workload.owner}` : "",
+      workload.queue ? `队列 ${workload.queue}` : "",
+      workload.namespace ? `命名空间 ${workload.namespace}` : "",
+    ].filter(Boolean).join(" · ");
+    row.workload.hidden = false;
+  } else {
+    row.workload.textContent = "";
+    row.workload.hidden = true;
+  }
+
+  const usage = ratio(process.used_memory_mib, gpu.memory_total_mib);
+  row.memoryValue.textContent = process.used_memory_mib == null
+    ? "显存未知" : memory(process.used_memory_mib);
+  row.memoryShare.textContent = process.used_memory_mib == null
+    ? "占比未知" : `${format(usage, 1)}% GPU 显存`;
+  row.item.dataset.host = server.host;
+  row.item.dataset.gpuId = String(gpu.uuid || gpu.index);
+  row.button.setAttribute(
+    "aria-label",
+    `打开 ${server.host} GPU ${gpu.index} 上的 ${shortName}，PID ${process.pid}`,
+  );
+  row.button.onclick = () => {
+    const key = `${process.pid}|${process.name || ""}`;
+    openGpuDetail(server, gpu, { processQuery: view.query, processKey: key });
+  };
+}
+
+function renderProgramSearch() {
+  const terms = normalizedSearchTerms(view.query);
+  const scope = view.selectedHost === "all" ? "全局" : view.selectedHost;
+  elements.programSearchScope.textContent = scope;
+  elements.search.setAttribute("aria-label", `在${scope}搜索服务器、GPU 或程序`);
+  elements.search.placeholder = view.selectedHost === "all"
+    ? "搜索服务器、GPU 或程序"
+    : `在 ${view.selectedHost} 搜索 GPU 或程序`;
+  elements.programSearchPanel.hidden = !terms.length;
+  if (!terms.length) {
+    view.programSearchRowCache.clear();
+    elements.programSearchResults.replaceChildren();
+    elements.programSearchCount.textContent = "0";
+    elements.programSearchSummary.textContent = "";
+    elements.programSearchResults.setAttribute("role", "list");
+    return;
+  }
+
+  const result = searchProcessRecords(view.snapshot, view.query, view.selectedHost);
+  elements.programSearchCount.textContent = String(result.total);
+  const notes = [];
+  if (!result.total) notes.push(`${scope}没有匹配的活跃程序`);
+  else if (result.total > result.matches.length) {
+    notes.push(`找到 ${result.total} 条，显示相关度最高的 ${result.matches.length} 条`);
+  } else {
+    notes.push(`找到 ${result.total} 条 GPU 进程记录`);
+  }
+  if (result.staleCount) notes.push(`含 ${result.staleCount} 条历史样本`);
+  if (result.unavailableGpuCount) {
+    notes.push(`${result.unavailableGpuCount} 张 GPU 的任务数据不可用`);
+  }
+  const summary = notes.join(" · ");
+  if (elements.programSearchSummary.textContent !== summary) {
+    elements.programSearchSummary.textContent = summary;
+  }
+
+  if (!result.matches.length) {
+    view.programSearchRowCache.clear();
+    elements.programSearchResults.setAttribute("role", "status");
+    elements.programSearchResults.replaceChildren(
+      create("div", "program-search-empty", "换一个名称、PID、用户或 workload 关键词重试"),
+    );
+    return;
+  }
+
+  elements.programSearchResults.setAttribute("role", "list");
+  const seenKeys = new Set();
+  const desiredRows = result.matches.map((record) => {
+    const key = programSearchKey(record);
+    seenKeys.add(key);
+    let row = view.programSearchRowCache.get(key);
+    if (!row) {
+      row = programSearchRow();
+      view.programSearchRowCache.set(key, row);
+    }
+    updateProgramSearchRow(row, record);
+    return row.item;
+  });
+  [...view.programSearchRowCache.keys()].forEach((key) => {
+    if (!seenKeys.has(key)) view.programSearchRowCache.delete(key);
+  });
+  reconcileChildren(elements.programSearchResults, desiredRows);
+}
+
 // Rows are keyed by pid|name so snapshot refreshes update fields in place
 // instead of rebuilding the list, keeping scroll position and bar widths.
 function gpuTaskRow() {
   const item = create("article", "gpu-task");
   item.setAttribute("role", "listitem");
+  item.tabIndex = -1;
   const identity = create("div", "gpu-task-identity");
   const name = create("strong", "gpu-task-name");
   const command = create("small", "gpu-task-command");
@@ -5076,14 +5402,35 @@ function renderGpuDetail() {
   const memoryPct = ratio(gpu.memory_used_mib, gpu.memory_total_mib);
   const [healthState, healthDetail] = gpuHealthSummary(gpu.health);
   const processes = Array.isArray(gpu.processes) ? gpu.processes.slice() : [];
+  const taskTerms = normalizedSearchTerms(view.gpuTaskQuery);
+  const matchingProcesses = taskTerms.length
+    ? processes.filter((process) => processMatchesSearch(process, taskTerms, server, gpu))
+    : processes.slice();
   const sortByDuration = preferences.gpuTaskSort === "duration";
+  const sortByName = preferences.gpuTaskSort === "name";
   if (sortByDuration) {
-    processes.sort((a, b) => gpuProcessStartMs(a) - gpuProcessStartMs(b)
+    matchingProcesses.sort((a, b) => gpuProcessStartMs(a) - gpuProcessStartMs(b)
       || gpuProcessMemoryRank(a, b));
+  } else if (sortByName) {
+    matchingProcesses.sort((a, b) => gpuProcessName(a).localeCompare(gpuProcessName(b))
+      || numeric(a.pid) - numeric(b.pid));
   } else {
-    processes.sort(gpuProcessMemoryRank);
+    matchingProcesses.sort(gpuProcessMemoryRank);
   }
-  const visibleProcesses = processes.slice(0, MAX_GPU_DETAIL_PROCESSES);
+  let visibleProcesses = matchingProcesses.slice(0, MAX_GPU_DETAIL_PROCESSES);
+  const selectedProcess = view.selectedProcessKey
+    ? matchingProcesses.find(
+      (process) => `${process.pid}|${process.name || ""}` === view.selectedProcessKey,
+    )
+    : null;
+  const selectedProcessPinned = selectedProcess != null
+    && !visibleProcesses.includes(selectedProcess);
+  if (selectedProcessPinned) {
+    visibleProcesses = [
+      selectedProcess,
+      ...visibleProcesses.slice(0, MAX_GPU_DETAIL_PROCESSES - 1),
+    ];
+  }
   const knownProcessMemory = processes.filter(
     (process) => process.used_memory_mib != null
       && Number.isFinite(Number(process.used_memory_mib)),
@@ -5124,10 +5471,12 @@ function renderGpuDetail() {
   syncGpuHistory(record);
   syncGpuTaskSortButtons();
   elements.gpuTaskCount.textContent = gpu.processes_available === false
-    ? "—" : String(processes.length);
+    ? "—"
+    : taskTerms.length ? `${matchingProcesses.length} / ${processes.length}` : String(processes.length);
   if (gpu.processes_available === false) {
     elements.gpuTaskOverview.hidden = true;
     view.gpuTaskRowCache.clear();
+    elements.gpuTaskList.setAttribute("role", "status");
     elements.gpuTaskList.replaceChildren(
       create("div", "gpu-task-empty", "任务数据暂不可用；GPU 指标仍会继续刷新。"),
     );
@@ -5147,16 +5496,26 @@ function renderGpuDetail() {
   elements.gpuTaskNote.title = identityOff
     ? `${freshnessHint}；启用 workloads.mode=identity 可显示属主与完整命令行`
     : freshnessHint;
-  if (processes.length > visibleProcesses.length) {
-    const truncationLabel = sortByDuration ? "运行最久" : "显存占用最高";
-    elements.gpuTaskNote.textContent = `共 ${processes.length} 个进程，仅展示${truncationLabel}的 ${visibleProcesses.length} 个 · ${processFreshness}`;
+  const sortLabel = sortByDuration
+    ? "按运行时长从长到短排列"
+    : sortByName ? "按程序名排列" : "按显存占用从高到低排列";
+  if (matchingProcesses.length > visibleProcesses.length) {
+    const truncationLabel = sortByDuration
+      ? "运行最久"
+      : sortByName ? "名称靠前" : "显存占用最高";
+    const matchLabel = taskTerms.length ? "匹配进程" : "进程";
+    const selectedLabel = selectedProcessPinned ? "，并优先显示所选程序" : "";
+    elements.gpuTaskNote.textContent = `共 ${matchingProcesses.length} 个${matchLabel}，仅展示${truncationLabel}的 ${visibleProcesses.length} 个${selectedLabel} · ${processFreshness}`;
   } else if (knownProcessMemory.length < processes.length) {
-    elements.gpuTaskNote.textContent = `${processes.length - knownProcessMemory.length} 个进程未返回显存占用 · ${processFreshness}`;
+    const matched = taskTerms.length ? `${matchingProcesses.length} / ${processes.length} 个匹配 · ` : "";
+    elements.gpuTaskNote.textContent = `${matched}${processes.length - knownProcessMemory.length} 个进程未返回显存占用 · ${processFreshness}`;
   } else {
-    elements.gpuTaskNote.textContent = `${sortByDuration ? "按运行时长从长到短排列" : "按显存占用从高到低排列"} · ${processFreshness}`;
+    const matched = taskTerms.length ? `${matchingProcesses.length} / ${processes.length} 个匹配 · ` : "";
+    elements.gpuTaskNote.textContent = `${matched}${sortLabel} · ${processFreshness}`;
   }
   if (!processes.length) {
     view.gpuTaskRowCache.clear();
+    elements.gpuTaskList.setAttribute("role", "status");
     const emptyCard = create(
       "div",
       emptyCardClass,
@@ -5166,6 +5525,19 @@ function renderGpuDetail() {
     elements.gpuTaskList.replaceChildren(emptyCard);
     return;
   }
+  if (!matchingProcesses.length) {
+    view.gpuTaskRowCache.clear();
+    elements.gpuTaskList.setAttribute("role", "status");
+    const emptyCard = create(
+      "div",
+      emptyCardClass,
+      `没有匹配“${view.gpuTaskQuery}”的程序 · ${processFreshness}`,
+    );
+    emptyCard.title = freshnessHint;
+    elements.gpuTaskList.replaceChildren(emptyCard);
+    return;
+  }
+  elements.gpuTaskList.setAttribute("role", "list");
   const seenKeys = new Set();
   const desiredRows = visibleProcesses.map((process) => {
     const key = `${process.pid}|${process.name || ""}`;
@@ -5176,6 +5548,7 @@ function renderGpuDetail() {
       row.item.dataset.processKey = key;
       view.gpuTaskRowCache.set(key, row);
     }
+    row.item.classList.toggle("search-target", key === view.selectedProcessKey);
     updateGpuTaskRow(row, process, gpu);
     return row.item;
   });
@@ -5185,11 +5558,14 @@ function renderGpuDetail() {
   reconcileChildren(elements.gpuTaskList, desiredRows);
 }
 
-function openGpuDetail(server, gpu) {
+function openGpuDetail(server, gpu, { processQuery = "", processKey = "" } = {}) {
   view.selectedGpu = {
     host: server.host,
     key: String(gpu.uuid || gpu.index),
   };
+  view.gpuTaskQuery = String(processQuery).slice(0, MAX_SEARCH_QUERY_LENGTH);
+  view.selectedProcessKey = String(processKey);
+  elements.gpuTaskSearch.value = view.gpuTaskQuery;
   view.gpuHistory = null;
   view.gpuHistoryKey = "";
   view.gpuHistoryFetchKey = null;
@@ -5203,6 +5579,12 @@ function openGpuDetail(server, gpu) {
   if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
   if (!elements.gpuDetailDialog.open) elements.gpuDetailDialog.showModal();
   renderGpuDetail();
+  const target = view.selectedProcessKey
+    ? view.gpuTaskRowCache.get(view.selectedProcessKey)?.item : null;
+  if (target) {
+    target.focus({ preventScroll: true });
+    target.scrollIntoView({ block: "nearest" });
+  }
 }
 
 function tableRow(record, grouped = false) {
@@ -5272,7 +5654,7 @@ function tableRow(record, grouped = false) {
 }
 
 function filteredRecords() {
-  const query = view.query.trim().toLocaleLowerCase("zh-CN");
+  const terms = normalizedSearchTerms(view.query);
   return allGpuRecords().filter(({ server, gpu }) => {
     if (view.selectedHost !== "all" && server.host !== view.selectedHost) return false;
     const utilization = numeric(gpu.utilization_gpu_pct);
@@ -5281,10 +5663,7 @@ function filteredRecords() {
     if (view.filter === "busy" && utilization < threshold.gpu_busy_pct) return false;
     if (view.filter === "idle" && utilization >= threshold.gpu_busy_pct) return false;
     if (view.filter === "hot" && temperature < threshold.gpu_temperature_warning_c) return false;
-    if (!query) return true;
-    return `${server.host} ${gpu.name || ""} ${gpu.uuid || ""}`
-      .toLocaleLowerCase("zh-CN")
-      .includes(query);
+    return gpuRecordMatchesSearch(server, gpu, terms);
   });
 }
 
@@ -5595,6 +5974,7 @@ function render() {
     renderNodeNotice();
     renderResources();
   }
+  renderProgramSearch();
   renderHeatmap();
   renderTrends();
   renderTable();
@@ -5874,7 +6254,9 @@ document.querySelectorAll(".heatmap-mode").forEach((button) => {
 });
 
 elements.search.addEventListener("input", () => {
-  view.query = elements.search.value;
+  const query = elements.search.value.slice(0, MAX_SEARCH_QUERY_LENGTH);
+  if (elements.search.value !== query) elements.search.value = query;
+  view.query = query;
   render();
 });
 
@@ -5994,6 +6376,9 @@ document.querySelectorAll("dialog.side-dialog").forEach((dialog) => {
 
 elements.gpuDetailDialog.addEventListener("close", () => {
   view.selectedGpu = null;
+  view.gpuTaskQuery = "";
+  view.selectedProcessKey = "";
+  elements.gpuTaskSearch.value = "";
   // Nothing polls a closed dialog, and the cached rows / history DOM would
   // only keep stale nodes (and their per-second duration scans) alive.
   clearGpuHistoryRetry();
@@ -6010,7 +6395,11 @@ elements.gpuDetailDialog.addEventListener("close", () => {
 
 // The sort toggle lives next to the task count badge; both move into a
 // shared wrapper so the heading keeps its two-side flex layout.
-const gpuTaskSortButtons = [["memory", "按显存"], ["duration", "按时长"]].map(
+const gpuTaskSortButtons = [
+  ["memory", "按显存"],
+  ["duration", "按时长"],
+  ["name", "按名称"],
+].map(
   ([value, label]) => {
     const button = create("button", "gpu-task-sort-choice", label);
     button.type = "button";
@@ -6038,11 +6427,26 @@ function syncGpuTaskSortButtons() {
   sortGroup.setAttribute("role", "group");
   sortGroup.setAttribute("aria-label", "任务排序方式");
   sortGroup.append(...gpuTaskSortButtons);
-  const tools = create("div", "gpu-task-heading-tools");
-  elements.gpuTaskCount.before(tools);
-  tools.append(sortGroup, elements.gpuTaskCount);
+  elements.gpuTaskHeadingTools.prepend(sortGroup);
   syncGpuTaskSortButtons();
 }
+
+elements.gpuTaskSearch.addEventListener("input", () => {
+  const query = elements.gpuTaskSearch.value.slice(0, MAX_SEARCH_QUERY_LENGTH);
+  if (elements.gpuTaskSearch.value !== query) elements.gpuTaskSearch.value = query;
+  view.gpuTaskQuery = query;
+  view.selectedProcessKey = "";
+  renderGpuDetail();
+});
+
+elements.gpuTaskSearch.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !elements.gpuTaskSearch.value) return;
+  event.preventDefault();
+  elements.gpuTaskSearch.value = "";
+  view.gpuTaskQuery = "";
+  view.selectedProcessKey = "";
+  renderGpuDetail();
+});
 
 elements.serverSort.addEventListener("change", () => {
   view.serverSort = elements.serverSort.value;

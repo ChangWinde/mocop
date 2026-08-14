@@ -618,6 +618,29 @@ html[data-style="glass"] .metric-card.primary {
 .node-notice.info { color: var(--blue); }
 .notice-retry { font-weight: 650; }
 
+.program-search-panel { padding: 15px 18px 17px; border-bottom: 1px solid var(--line-soft); background: linear-gradient(180deg, var(--surface), var(--panel-deep)); }
+.program-search-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; }
+.program-search-heading h3 { margin: 4px 0 0; font-size: 12px; }
+.program-search-status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-family: var(--font-mono); font-size: 8px; }
+.program-search-summary { margin: 8px 0 11px; color: var(--muted-2); font-size: 8px; line-height: 1.5; }
+.program-search-results { max-height: 360px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; overflow-y: auto; }
+.program-search-result { min-width: 0; }
+.program-search-open { width: 100%; min-height: 92px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 7px 14px; padding: 12px; outline: 0; border: 1px solid var(--line-soft); border-radius: 10px; color: var(--text); background: var(--panel-solid); text-align: left; cursor: pointer; }
+.program-search-open:hover { border-color: color-mix(in srgb, var(--blue) 38%, var(--line)); background: var(--surface-hover); }
+.program-search-open:focus-visible { border-color: color-mix(in srgb, var(--blue) 58%, var(--line)); box-shadow: var(--focus); }
+.program-search-identity, .program-search-placement, .program-search-memory { min-width: 0; display: grid; gap: 4px; }
+.program-search-name { overflow: hidden; font-family: var(--font-mono); font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.program-search-command { overflow: hidden; color: var(--muted-2); font-family: var(--font-mono); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+.program-search-placement { grid-column: 1 / -1; }
+.program-search-placement strong { color: var(--muted); font-family: var(--font-mono); font-size: 8px; font-weight: 620; }
+.program-search-placement small { color: var(--muted-2); font-size: 7px; }
+.program-search-placement small.stale { color: var(--amber); }
+.program-search-workload { grid-column: 1 / -1; overflow: hidden; color: var(--blue); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.program-search-memory { grid-column: 2; grid-row: 1; text-align: right; }
+.program-search-memory strong { color: var(--accent-2); font-family: var(--font-mono); font-size: 9px; font-weight: 620; white-space: nowrap; }
+.program-search-memory small { color: var(--muted-2); font-size: 7px; white-space: nowrap; }
+.program-search-empty { grid-column: 1 / -1; min-height: 72px; display: grid; place-items: center; padding: 14px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); font-size: 9px; text-align: center; }
+
 .resource-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; border-bottom: 1px solid var(--line-soft); background: var(--line-soft); }
 .resource-tile { min-width: 0; padding: 17px 16px 15px; background: var(--surface); }
 .resource-tile-label { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
@@ -1204,6 +1227,8 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
 .gpu-task-overview small { color: var(--muted-2); font-size: 8px; line-height: 1.45; }
 .gpu-task-list { display: grid; gap: 8px; }
 .gpu-task { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px 16px; padding: 13px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--panel-solid); }
+.gpu-task.search-target { border-color: color-mix(in srgb, var(--blue) 58%, var(--line)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 12%, transparent); }
+.gpu-task:focus-visible { outline: 0; border-color: color-mix(in srgb, var(--blue) 64%, var(--line)); box-shadow: var(--focus); }
 .gpu-task-identity { min-width: 0; display: grid; align-content: start; gap: 4px; }
 .gpu-task-name { min-width: 0; overflow: hidden; color: var(--text); font-family: var(--font-mono); font-size: 9px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
 .gpu-task-command { overflow: hidden; color: var(--muted-2); font-family: var(--font-mono); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
@@ -1217,7 +1242,11 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
 .gpu-task-meta { grid-column: 1 / -1; display: flex; justify-content: space-between; color: var(--muted-2); font-size: 8px; }
 .gpu-task-meta .mini-track { width: min(68%, 240px); }
 .gpu-task-empty { padding: 22px 14px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); text-align: center; font-size: 9px; line-height: 1.6; }
-.gpu-task-heading-tools { display: flex; align-items: center; gap: 9px; }
+.gpu-task-heading-tools { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+.gpu-task-search-box { min-width: 92px; width: min(150px, 22vw); }
+.gpu-task-search-box input { width: 100%; height: 26px; padding: 0 9px; outline: 0; border: 1px solid var(--line-soft); border-radius: 8px; color: var(--text); background: var(--panel-deep); font-size: 8px; }
+.gpu-task-search-box input::placeholder { color: var(--muted-2); }
+.gpu-task-search-box input:focus { border-color: color-mix(in srgb, var(--blue) 48%, transparent); box-shadow: var(--focus); }
 .gpu-task-sort { display: flex; gap: 3px; padding: 2px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--panel-deep); }
 .gpu-task-sort-choice { height: 20px; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; font-size: 8px; }
 .gpu-task-sort-choice:hover { color: var(--text); background: var(--surface-hover); }
@@ -1338,6 +1367,8 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
   .search-box { width: 100%; flex-basis: 100%; order: 2; }
   .sort-control { flex: 1; }
   .inventory-header { gap: 14px; }
+  .program-search-panel { padding-right: 13px; padding-left: 13px; }
+  .program-search-results { max-height: 320px; grid-template-columns: 1fr; }
   .resource-tile { padding: 15px 13px 14px; }
   .gpu-heatmap { padding: 13px; }
   .heatmap-heading { align-items: flex-start; flex-direction: column; }
@@ -1351,6 +1382,9 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
   .gpu-detail-dialog { width: calc(100% - 20px); max-height: calc(100vh - 32px); margin: auto; border-radius: 17px; }
   .incident-detail-dialog { width: calc(100% - 20px); max-height: calc(100vh - 32px); margin: auto; border-radius: 17px; }
   .gpu-detail-content { max-height: calc(100vh - 102px); }
+  .gpu-task-heading { align-items: flex-start; flex-direction: column; }
+  .gpu-task-heading-tools { width: 100%; flex-wrap: wrap; justify-content: flex-start; }
+  .gpu-task-search-box { width: auto; flex: 1; }
   .topology-scroll { margin-right: 10px; margin-left: 10px; padding: 14px; }
   .topology-summary, .topology-unmapped { margin-right: 10px; margin-left: 10px; }
   .capacity-form { grid-template-columns: 1fr; }

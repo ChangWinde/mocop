@@ -10,6 +10,10 @@ from mocop.remote_script import _PROTOCOL_VERSION
 from mocop.web import _API_VERSION, API_ROUTES
 
 ROOT = Path(__file__).resolve().parents[1]
+ENGLISH_README = ROOT / "README.md"
+CHINESE_README = ROOT / "docs" / "locales" / "zh-CN" / "README.md"
+DOCUMENTATION_PORTAL = ROOT / "docs" / "README.md"
+ADR_INDEX = ROOT / "docs" / "adr" / "README.md"
 MARKDOWN_TARGET = re.compile(r"\[[^]]*]\(([^)]+)\)")
 HTML_TARGET = re.compile(r'(?:href|src)="([^"]+)"')
 HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
@@ -120,19 +124,18 @@ class ConfigurationReferenceDriftTests(unittest.TestCase):
                 self.assertNotIn(directive, content, f"stale guarantee in {relative}")
 
     def test_readmes_point_to_capability_and_retention_contracts(self) -> None:
-        for relative in ("README.md", "README.zh-CN.md"):
-            content = (ROOT / relative).read_text(encoding="utf-8")
+        for document in (ENGLISH_README, CHINESE_README):
+            content = document.read_text(encoding="utf-8")
             self.assertIn("#access_token=...", content)
-            self.assertIn("docs/CONFIGURATION.md", content)
-            self.assertIn("docs/OPERATIONS.md", content)
+            self.assertIn("CONFIGURATION.md", content)
+            self.assertIn("OPERATIONS.md", content)
             self.assertIn("SQLite", content)
 
 
 class DocumentationTests(unittest.TestCase):
     def test_local_links_resolve_inside_the_repository(self) -> None:
         documents = [
-            ROOT / "README.md",
-            ROOT / "README.zh-CN.md",
+            ENGLISH_README,
             *sorted((ROOT / "docs").rglob("*.md")),
             *sorted((ROOT / ".github").glob("*.md")),
         ]
@@ -169,6 +172,44 @@ class DocumentationTests(unittest.TestCase):
                     resolved.exists(),
                     f"broken local link in {document}: {target}",
                 )
+
+    def test_documentation_portal_indexes_every_canonical_document(self) -> None:
+        content = DOCUMENTATION_PORTAL.read_text(encoding="utf-8")
+        expected_targets = {
+            path.name
+            for path in (ROOT / "docs").glob("*.md")
+            if path != DOCUMENTATION_PORTAL
+        } | {
+            "../README.md",
+            "locales/zh-CN/README.md",
+            "../examples/mocop.example.json",
+            "adr/README.md",
+            "../.github/CONTRIBUTING.md",
+            "../.github/CODE_OF_CONDUCT.md",
+            "../.github/SECURITY.md",
+        }
+        indexed_targets = {
+            urlsplit(target).path for target in MARKDOWN_TARGET.findall(content)
+        }
+        self.assertLessEqual(expected_targets, indexed_targets)
+
+    def test_adr_index_lists_every_numbered_decision(self) -> None:
+        expected = {
+            path.name
+            for path in (ROOT / "docs" / "adr").glob("[0-9][0-9][0-9][0-9]-*.md")
+        }
+        indexed = {
+            Path(urlsplit(target).path).name
+            for target in MARKDOWN_TARGET.findall(ADR_INDEX.read_text(encoding="utf-8"))
+            if re.fullmatch(r"[0-9]{4}-[^/]+\.md", Path(urlsplit(target).path).name)
+        }
+        self.assertEqual(expected, indexed)
+
+    def test_localized_readme_has_one_governed_location(self) -> None:
+        self.assertTrue(CHINESE_README.is_file())
+        self.assertFalse((ROOT / "README.zh-CN.md").exists())
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+        self.assertIn("recursive-include docs *.md *.png", manifest)
 
 
 if __name__ == "__main__":

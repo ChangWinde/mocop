@@ -25,8 +25,9 @@ git config core.hooksPath .githooks
 
 - Add focused regression coverage for behavior changes and negative coverage for security boundaries.
 - Keep remote commands fixed and versioned; browser and configuration values must never become shell code.
-- Keep `README.md` and `README.zh-CN.md` structurally and factually synchronized; English is canonical.
-- Update `docs/ARCHITECTURE.md` when structural boundaries change; avoid per-feature design documents.
+- Keep `README.md` and `docs/locales/zh-CN/README.md` factually synchronized for the onboarding sections they share; English is canonical.
+- Use the [documentation portal](../docs/README.md) to identify the canonical owner and update trigger for each contract.
+- Update `docs/ARCHITECTURE.md` when structural boundaries change; record consequential alternatives in an ADR and add it to `docs/adr/README.md`.
 - Never commit a real `config/mocop.json`, SSH address, username, key, inventory name or telemetry export. Use `examples/mocop.example.json` with fictional aliases.
 - Preserve the dependency-free runtime unless measurements and an ADR justify a new dependency.
 

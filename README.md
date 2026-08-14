@@ -7,7 +7,7 @@
 <p align="center">AI-native GPU cluster monitoring over OpenSSH</p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
+  <a href="README.md">English</a> · <a href="docs/locales/zh-CN/README.md">简体中文</a>
 </p>
 
 <p align="center">
@@ -19,8 +19,8 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
-  <a href="#configuration">Configuration</a> ·
-  <a href="#failure-behavior">Troubleshooting</a> ·
+  <a href="#daily-use">Daily use</a> ·
+  <a href="#documentation">Documentation</a> ·
   <a href="#security">Security</a>
 </p>
 
@@ -36,10 +36,22 @@ The shipped dashboard UI is currently Simplified Chinese and has no locale
 switch yet. The English README, API, operations, and engineering references are
 fully maintained.
 
-## Features
+## At a glance
+
+| Property | Current behavior |
+|---|---|
+| Deployment | One Python process or a generated user-level systemd service |
+| Remote footprint | No agent or open monitoring port; fixed read-only collection over existing OpenSSH aliases |
+| Runtime dependencies | Python standard library plus the system `ssh` client |
+| Access | Private per-install Bearer capability; loopback by default |
+| Update model | Independent per-host collection streamed to the browser over authenticated SSE |
+| Retention | In-memory by default; optional bounded private SQLite history |
+| Primary workflow | Find a host, GPU, program, owner, workload, incident, or capacity match from one dashboard |
+
+## What you get
 
 - GPU utilization, VRAM, temperature, power, model, driver, hardware health, and per-GPU processes
-- GPU capacity matching, scheduling heatmap, connection map, search, filters, and CSV export
+- GPU capacity matching, scheduling heatmap, connection map, global/selected-host program search, filters, and CSV export
 - CPU, load, memory, swap, disk capacity and I/O, network rate, uptime, and kernel pressure stall (PSI) telemetry
 - Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, and timed maintenance
 - Independent per-host scheduling, possible shared-path grouping, and optional HTTPS webhooks
@@ -157,61 +169,24 @@ This excerpt shows the main inventory fields:
 }
 ```
 
-- `hosts` is the explicit allowlist. `exclude_hosts` always wins.
-- `local_host` names one entry in `hosts` that should be probed without SSH.
-- `expected_gpu_counts` reports missing devices.
-- `host_groups` provides shared navigation groups.
-- `host_overrides` changes cadence or timeout for a measured slow node, and its optional `display_name` gives an alias a human-readable fleet label without changing collection identity.
-- `maintenance_windows` entries define either a one-shot `until` or a weekly `recurrence` (`{"weekday": 0-6, "start": "HH:MM", "duration_minutes": N}`, all in UTC, Monday is 0); recurring windows silence actionable alerts during every instance while collection continues. A complete weekly window that silences `gpu-node-02` every Sunday from 02:00 to 04:00 UTC:
+The inventory is explicit: `hosts` allows collection, `exclude_hosts` always
+wins, and `local_host` selects at most one allowlisted target for the same fixed
+probe without SSH. Expected GPU counts, display groups, per-host cadence, scoped
+incident thresholds, maintenance windows, and the display-only connection tree
+all remain configuration data rather than remote discovery side effects.
 
-```json
-{
-  "maintenance_windows": {
-    "gpu-node-02": {
-      "reason": "weekly firmware maintenance",
-      "recurrence": {"weekday": 6, "start": "02:00", "duration_minutes": 120}
-    }
-  }
-}
-```
-- `gpu_process_poll_interval_seconds` controls timestamped GPU task refresh independently; the 15-second default reduces NVIDIA command overhead while core GPU data keeps the normal cadence.
-- `incident_overrides` applies bounded host/group thresholds and exact disk-mount exclusions; host settings take precedence.
-- `thresholds.disk_min_free_gib` (default 5) escalates a filesystem that is already over `disk_warning_pct` to critical once its absolute free space falls below that many GiB, so a nearly full 50 GiB root outranks a 10 TiB volume sitting at the same percentage. A partition below the percentage threshold is never escalated, so small ones such as `/boot/efi` stay quiet.
-- `thresholds.psi_memory_some_pct` (default 20) and `thresholds.psi_io_some_pct` (default 30) alert when the kernel's pressure stall information reports tasks stalled on memory or I/O for that share of the last minute — the signal that catches a node stuck in reclaim or checkpoint I/O while CPU and memory percentages still look normal. Twice the threshold escalates to critical. Kernels without PSI (pre-4.20) simply report no pressure data.
-- `incident_actions` stores dashboard acknowledgements and silences with UTC expiry. It is maintained by the UI in normal use.
-- `manual_probe_cooldown_seconds` bounds repeated on-demand probes of one node; the default is 5 seconds.
-- `retry_jitter_pct` disperses retries after a shared SSH path fails; the default is 15%.
-- `topology` describes the connection tree. Its safe aliases are display-only unless they also appear in the active `hosts` inventory.
-- `persistence.enabled` retains bounded trends and incident context in SQLite; it is off by default.
-- `workloads.mode: "identity"` adds the process owner (real UID via passwd), full command line, and true start time from bounded `/proc` reads at roughly a third of the cost of `"auto"`; `"auto"` additionally recognizes Slurm/Kubernetes scheduler identity and Docker/Podman containers (12-character short ID) from cgroup and environment reads. Both are off by default; without them the GPU dialog still shows a monitor-observed runtime lower bound per process. Workload identity covers at most the first 512 distinct GPU process PIDs per sample.
+Optional `workloads.mode` values add bounded process ownership, command, start
+time, and supported scheduler/container identity. Optional persistence retains
+bounded trends and incident context in a private SQLite database; it is disabled
+by default. Webhook JSON contains environment-variable names, never destinations
+or signing secrets. The [configuration reference](docs/CONFIGURATION.md) owns
+all defaults and bounds; the [complete safe example](examples/mocop.example.json)
+shows the entire schema, and the [operations runbook](docs/OPERATIONS.md) owns
+secret-file setup and restart procedures.
 
-Webhook destinations and signing secrets stay out of JSON. A minimal endpoint uses
-environment-variable names:
-
-```json
-{
-  "webhooks": [{
-    "name": "operations",
-    "url_env": "MOCOP_OPS_WEBHOOK_URL",
-    "secret_env": "MOCOP_OPS_WEBHOOK_SECRET"
-  }]
-}
-```
-
-For `mocop service install`, create a private `environment` file beside `config.json`:
-
-```bash
-install -m 600 /dev/null ~/.config/mocop/environment
-${EDITOR:-vi} ~/.config/mocop/environment
-mocop service install
-```
-
-Add `MOCOP_OPS_WEBHOOK_URL=...` and `MOCOP_OPS_WEBHOOK_SECRET=...` as separate
-lines. Use a real secret and protect this file. HTTPS is required; private-network targets
-must be explicitly allowed in the endpoint configuration. Delivery covers open,
-recovery, severity changes, deduplication, throttling, and bounded retries.
-
-See the [complete example](examples/mocop.example.json) for all fields and safe bounds. Restart the service after editing JSON manually. Changes made in the dashboard are validated, written atomically, and applied without a restart.
+Dashboard changes pass the same strict validator, use private atomic writes, and
+apply without a restart. After a manual JSON edit, run `mocop config check` and
+reinstall/restart the managed service as described in the operations runbook.
 
 ### What is persisted
 
@@ -229,7 +204,13 @@ The dashboard allows a 2–60 second interval, a 2–300 second probe timeout th
 
 ## Daily use
 
+- Search by process name, command, PID, owner, workload, queue, host, GPU model,
+  or UUID. Search from **All servers** for a fleet-wide result, or select one
+  server first to scope results; selecting a process opens its exact GPU and
+  carries the query into the per-GPU process filter.
 - Select a GPU row or heatmap cell to inspect current processes, recent utilization/VRAM/temperature/power, and process start/stop events.
+- Filter a busy GPU before its 100-row display limit, and sort the remaining
+  processes by VRAM, runtime, or program name.
 - Open an incident for evidence-based guidance, then acknowledge it or silence only that condition for a fixed period.
 - Use **Probe now** on the selected node to advance one bounded collection without changing the global interval.
 - Use **Match capacity** to find same-host, same-model GPUs with enough free VRAM. The result is not a reservation.
@@ -285,34 +266,17 @@ Diagnose the SSH path with the bundled read-only check before changing timeouts:
 
 ```bash
 mocop doctor
+mocop doctor --profile
+mocop doctor --probe
 ```
 
-It verifies non-interactive reachability for every monitored alias, measures cold
-versus multiplexed connection latency, flags missing connection reuse, a missing
-or group-accessible control-socket directory, and an ineffective `ControlPersist`,
-and warns when the installed package is newer than the running service. Add
-`--profile` to decompose a slow host into transport, fixed-script, and NVIDIA-query
-stages. The same checks are possible manually:
-
-```bash
-ssh -o BatchMode=yes gpu-node-01 true
-ssh -G gpu-node-01 | grep -E '^(controlmaster|controlpath|controlpersist) '
-```
-
-Enabling OpenSSH connection reuse removes most per-probe connection cost on remote
-routes (measured 76.6% behind a jump host; see
-[docs/PERFORMANCE.md](docs/PERFORMANCE.md)):
-
-```sshconfig
-Host gpu-node-01
-    ControlMaster auto
-    ControlPath ~/.ssh/sockets/%r@%h:%p
-    ControlPersist 600
-```
-
-Create `~/.ssh/sockets` yourself with mode `0700`; Mocop never edits SSH configuration.
-
-If several nodes that share one `ProxyJump`, VPN, or FRP route fail together, inspect that shared route first. Restarting Mocop does not repair an unavailable tunnel or remote SSH service.
+The default command verifies non-interactive reachability and connection reuse;
+`--profile` separates transport, fixed-script, and NVIDIA-query time; `--probe`
+runs one real bounded production collection. Mocop never edits SSH configuration.
+See the [performance reference](docs/PERFORMANCE.md) for measured OpenSSH reuse
+and the [operations runbook](docs/OPERATIONS.md) for service diagnosis. If several
+nodes sharing a jump host, VPN, or FRP route fail together, inspect that route
+before restarting Mocop.
 
 ### Troubleshooting
 
@@ -325,7 +289,9 @@ curl -s http://127.0.0.1:8787/readyz       # readiness; 503 with a reason until 
 mocop doctor --probe                       # one real production collection per alias
 ```
 
-`mocop doctor --probe` runs the exact production collection path end to end and reports, per alias, the probe status, latency, GPU count, process count, and workload coverage. It needs live connection tests, so it cannot be combined with `--no-connect`.
+`mocop doctor --probe` reports probe status, latency, GPU/process counts, and
+workload coverage per alias. It needs live connection tests and cannot be
+combined with `--no-connect`.
 
 ### CLI exit codes
 
@@ -347,6 +313,21 @@ over plain HTTP has no network confidentiality or server authentication.
 
 Read the [threat model](docs/SECURITY.md) and [security policy](.github/SECURITY.md) before changing a trust boundary.
 
+## Documentation
+
+Use the [documentation portal](docs/README.md) for the complete audience map,
+canonical ownership, update triggers, language policy, and ADR lifecycle.
+
+| Task | Document |
+|---|---|
+| Configure a fleet | [Configuration reference](docs/CONFIGURATION.md) |
+| Operate, upgrade, back up, roll back, or uninstall | [Operations runbook](docs/OPERATIONS.md) |
+| Build an API client or Prometheus integration | [HTTP API](docs/API.md) |
+| Review trust and deployment boundaries | [Security model](docs/SECURITY.md) |
+| Understand components and decisions | [Architecture](docs/ARCHITECTURE.md) and [ADR index](docs/adr/README.md) |
+| Reproduce performance claims | [Performance](docs/PERFORMANCE.md) |
+| Review user-visible changes | [Changelog](docs/CHANGELOG.md) |
+
 ## Development
 
 ```bash
@@ -356,10 +337,8 @@ uvx --from ruff==0.12.11 ruff format --check .
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-See [CONTRIBUTING.md](.github/CONTRIBUTING.md),
-[architecture](docs/ARCHITECTURE.md), [configuration](docs/CONFIGURATION.md),
-[operations](docs/OPERATIONS.md), [API reference](docs/API.md),
-[performance](docs/PERFORMANCE.md), and the [changelog](docs/CHANGELOG.md).
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md) before changing code, tests,
+documentation, or public contracts.
 
 ## License
 

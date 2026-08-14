@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="mocop/static/favicon.svg" width="88" height="88" alt="Mocop 标志">
+  <img src="../../../mocop/static/favicon.svg" width="88" height="88" alt="Mocop 标志">
 </p>
 
 <h1 align="center">Mocop</h1>
@@ -7,24 +7,24 @@
 <p align="center">基于 OpenSSH 的 AI-native GPU 集群监控</p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
+  <a href="../../../README.md">English</a> · <a href="README.md">简体中文</a>
 </p>
 
 <p align="center">
   <a href="https://github.com/ChangWinde/mocop/actions/workflows/ci.yml"><img src="https://github.com/ChangWinde/mocop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-6d8cff" alt="MIT 许可证"></a>
+  <a href="../../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-6d8cff" alt="MIT 许可证"></a>
   <img src="https://img.shields.io/badge/runtime_dependencies-0-55d6a5" alt="零运行时依赖">
 </p>
 
 <p align="center">
   <a href="#快速开始">快速开始</a> ·
-  <a href="#配置">配置</a> ·
-  <a href="#故障行为">故障排查</a> ·
+  <a href="#日常使用">日常使用</a> ·
+  <a href="#文档">文档</a> ·
   <a href="#安全">安全</a>
 </p>
 
-![使用虚构集群数据的 Mocop 控制台](docs/assets/dashboard.png)
+![使用虚构集群数据的 Mocop 控制台](../../assets/dashboard.png)
 
 Mocop 是面向 NVIDIA GPU 集群的本地网页监控工具。它复用已有 OpenSSH 别名，采集 GPU、CPU、内存、Swap、磁盘和网络数据，并在每台主机完成采集后立即将结果推送到浏览器。
 
@@ -35,10 +35,22 @@ Mocop 是面向 NVIDIA GPU 集群的本地网页监控工具。它复用已有 O
 当前发布的控制台界面固定为简体中文，尚未提供语言切换；中英文 README
 以及 API、运维和工程文档均持续维护。
 
-## 功能
+## 一览
+
+| 属性 | 当前行为 |
+|---|---|
+| 部署 | 单个 Python 进程，或自动生成的用户级 systemd 服务 |
+| 远端占用 | 不安装 Agent、不开放监控端口；通过已有 OpenSSH 别名执行固定只读采集 |
+| 运行时依赖 | Python 标准库和系统 `ssh` 客户端 |
+| 访问控制 | 每次安装独立的私有 Bearer capability；默认只监听 loopback |
+| 更新模型 | 各节点独立采集，通过已认证 SSE 持续推送到浏览器 |
+| 历史保留 | 默认仅内存；可选私有、限额的 SQLite 历史 |
+| 核心路径 | 在一个控制台查服务器、GPU、程序、用户、workload、告警和可用容量 |
+
+## 主要能力
 
 - GPU 利用率、显存、温度、功耗、型号、驱动、硬件健康和每卡进程
-- GPU 算力匹配、调度热力图、连接拓扑、搜索、筛选和 CSV 导出
+- GPU 算力匹配、调度热力图、连接拓扑、全局/单服务器程序搜索、筛选和 CSV 导出
 - CPU、Load、内存、Swap、磁盘容量与 I/O、网络速率、运行时间和内核压力失速（PSI）遥测
 - 带诊断、确认/静默、分级阈值、防抖处理和定时维护的告警
 - 节点级独立调度、可能的共享链路聚合和可选 HTTPS Webhook
@@ -128,12 +140,12 @@ mocop service uninstall
 卸载只会停止/禁用服务并删除生成的 unit；配置、Bearer token、可选环境
 文件、SQLite 状态、浏览器数据、journal、SSH 文件/控制套接字、已安装包和
 linger 策略都会保留。升级、回滚、token 轮换或手动清理前，请阅读
-[运维手册](docs/OPERATIONS.md)。
+[运维手册](../../OPERATIONS.md)。
 
 ## 配置
 
 初始化生成的文件已经包含全部字段。只有在网页未提供对应设置时才需要
-直接编辑。[配置字段与边界参考](docs/CONFIGURATION.md) 是所有字段、默认值、
+直接编辑。[配置字段与边界参考](../../CONFIGURATION.md) 是所有字段、默认值、
 关联约束和硬限制的权威说明。下面只展示主要资产字段：
 
 ```json
@@ -153,60 +165,20 @@ linger 策略都会保留。升级、回滚、token 轮换或手动清理前，�
 }
 ```
 
-- `hosts` 是明确的监控白名单，`exclude_hosts` 的排除优先级更高。
-- `local_host` 指定 `hosts` 中唯一一台绕过 SSH、直接在本机采集的节点。
-- `expected_gpu_counts` 用于发现 GPU 缺失。
-- `host_groups` 用于共享节点分组。
-- `host_overrides` 只用于调整经过测量的慢节点的采集周期或超时；可选的 `display_name` 为别名提供可读的列表显示名，不改变采集身份。
-- `maintenance_windows` 每条要么给出一次性的 `until`，要么给出每周 `recurrence`（`{"weekday": 0-6, "start": "HH:MM", "duration_minutes": N}`，全部为 UTC，周一为 0）；周期窗口在每个实例期间静默可执行告警，采集持续进行。下面是一个完整示例：每周日 02:00–04:00 UTC 静默 `gpu-node-02`：
+资产清单是明确的：`hosts` 允许采集，`exclude_hosts` 始终优先，
+`local_host` 最多指定一台白名单节点使用同一固定探针而不经过 SSH。预期
+GPU 数、显示分组、单节点周期、分级告警阈值、维护窗口和只用于展示的连接树
+都属于配置，不会变成远端发现副作用。
 
-```json
-{
-  "maintenance_windows": {
-    "gpu-node-02": {
-      "reason": "weekly firmware maintenance",
-      "recurrence": {"weekday": 6, "start": "02:00", "duration_minutes": 120}
-    }
-  }
-}
-```
-- `gpu_process_poll_interval_seconds` 单独控制带时间戳的 GPU 任务刷新；默认 15 秒，核心 GPU 数据仍保持正常采集周期。
-- `incident_overrides` 可按节点或分组覆盖有界阈值，并精确排除磁盘挂载点；节点配置优先。
-- `thresholds.disk_min_free_gib`（默认 5）：文件系统在超过 `disk_warning_pct` 之后，若绝对剩余空间低于该 GiB 数即升级为 critical——这样"快满的 50 GiB 根分区"会排在"同样占比的 10 TiB 卷"之前。未超过百分比阈值的分区一律不升级，因此 `/boot/efi` 这类小分区不会误报。
-- `thresholds.psi_memory_some_pct`（默认 20）与 `thresholds.psi_io_some_pct`（默认 30）：当内核压力失速信息（PSI）显示最近一分钟内任务因内存或 I/O 阻塞的时间占比达到该值时告警——这类"利用率看起来正常但节点已在失速"的状态（如内存回收、checkpoint 写入）只有 PSI 能暴露。达到阈值两倍即升级为 critical。内核不支持 PSI（低于 4.20）时不产生压力数据。
-- `incident_actions` 保存网页中的告警确认与静默及其 UTC 失效时间，通常由网页维护。
-- `manual_probe_cooldown_seconds` 限制同一节点的手动探测频率；默认 5 秒。
-- `retry_jitter_pct` 分散共享 SSH 路径故障后的重试；默认值为 15%。
-- `topology` 描述连接树；其中的安全别名只有同时进入有效 `hosts` 清单时才会被采集。
-- `persistence.enabled` 使用 SQLite 保留有界趋势和告警上下文；默认关闭。
-- `workloads.mode: "identity"` 通过有界 `/proc` 读取补充进程属主（真实 UID 经 passwd 解析）、完整命令行与真实启动时间，成本约为 `"auto"` 的三分之一；`"auto"` 在此之上再识别 Slurm/Kubernetes 调度身份与 Docker/Podman 容器（12 位短 ID，cgroup 与环境读取）。两者默认均关闭；即使关闭，GPU 弹窗仍会显示每个进程"自监控观测起"的运行时长下限。工作负载身份采集每次样本最多覆盖前 512 个不同的 GPU 进程 PID。
+可选的 `workloads.mode` 通过有界读取补充进程属主、命令、启动时间及支持的
+调度器/容器身份。可选 persistence 使用私有且限额的 SQLite 保存趋势和告警
+上下文，默认关闭。Webhook JSON 只保存环境变量名，不保存地址或签名密钥。
+[配置参考](../../CONFIGURATION.md)负责全部默认值与边界；
+[完整安全示例](../../../examples/mocop.example.json)展示完整 schema；
+[运维手册](../../OPERATIONS.md)负责密钥文件、重启和回滚流程。
 
-Webhook 地址和签名密钥不写入 JSON。配置中只保存环境变量名：
-
-```json
-{
-  "webhooks": [{
-    "name": "operations",
-    "url_env": "MOCOP_OPS_WEBHOOK_URL",
-    "secret_env": "MOCOP_OPS_WEBHOOK_SECRET"
-  }]
-}
-```
-
-使用 `mocop service install` 时，在 `config.json` 同目录创建私有
-`environment` 文件：
-
-```bash
-install -m 600 /dev/null ~/.config/mocop/environment
-${EDITOR:-vi} ~/.config/mocop/environment
-mocop service install
-```
-
-分别写入 `MOCOP_OPS_WEBHOOK_URL=...` 和 `MOCOP_OPS_WEBHOOK_SECRET=...`。
-请使用真实密钥并保护该文件。Webhook 强制使用 HTTPS；访问私有网络需在
-端点配置中明确允许。它支持故障开启、恢复、严重性变化、去重、节流和有界重试。
-
-全部字段和安全范围见[完整配置示例](examples/mocop.example.json)。直接修改 JSON 后需要重启服务；网页中的修改会先校验，再原子写入，并立即生效。
+网页修改会经过同一严格校验，以私有原子写入保存并立即生效。手工修改 JSON
+后，先运行 `mocop config check`，再按运维手册重新安装/重启托管服务。
 
 ### 哪些设置会保留
 
@@ -224,13 +196,17 @@ mocop service install
 
 ## 日常使用
 
+- 可按程序名、命令、PID、用户、workload、队列、服务器、GPU 型号或 UUID
+  搜索。在“全部服务器”中搜索得到全局结果；先选择一台服务器则只搜索该节点。
+  点击程序结果会直接打开所在 GPU，并把关键词带入单卡程序筛选。
 - 点击 GPU 行或热力图单元格，查看当前进程、近期利用率/显存/温度/功耗趋势及进程进出记录。
+- 忙碌 GPU 可先筛程序再应用 100 行显示上限，并可按显存、运行时长或程序名排序。
 - 打开告警查看基于证据的处理建议，再按固定时长确认或仅静默该条件。
 - 在选中节点上使用“立即探测”，提前执行一次有界采集，不改变全局刷新周期。
 - 使用“匹配算力”查找同一主机、同一型号且剩余显存足够的 GPU。结果不代表资源预留。
 - 设置维护窗口后，采集继续进行，但对应问题不会进入待处理告警。
 - 在“设置 → 监控节点”中扫描 SSH 别名，添加或删除符合条件的计算节点。
-- 按照[升级与回滚手册](docs/OPERATIONS.md)操作。验证软件包升级后，可使用
+- 按照[升级与回滚手册](../../OPERATIONS.md)操作。验证软件包升级后，可使用
   “设置 → 监控服务状态 → 重启服务”；该按钮只在用户级服务模式下可用，
   恢复后页面会自动刷新。
 - 可上传最大 32 MiB 的 PNG、JPEG、WebP 或 AVIF 背景；超过 8 MiB 时只在浏览器内压缩，不会上传。
@@ -242,7 +218,7 @@ mocop service install
 code、公开且自描述的 `GET /api/meta` 端点，以及 P/A/R/W 访问分级。遥测、
 SSE 和 OpenMetrics 均要求安装级 Bearer 能力；只有 API 发现、存活和就绪
 检查公开。带认证的 curl 示例、全部端点与字段表，以及非观众型自动化不应
-发送 `X-Monitor-Request: dashboard` 标记头的原因见 [API 参考](docs/API.md)。
+发送 `X-Monitor-Request: dashboard` 标记头的原因见 [API 参考](../../API.md)。
 
 ## Prometheus
 
@@ -275,31 +251,15 @@ Mocop 按节点独立调度，同一节点不会重叠采集。只要仍有 work
 
 ```bash
 mocop doctor
+mocop doctor --profile
+mocop doctor --probe
 ```
 
-它会验证每个受监控别名的非交互可达性，测量冷连接与复用连接的延迟，指出未启用
-连接复用、控制套接字目录缺失或权限过宽、以及 `ControlPersist` 失效等问题，并在
-已安装版本新于运行中服务时给出重启提醒。加 `--profile` 可以把慢节点的采集延迟
-分解为传输、固定脚本与 NVIDIA 查询三段。也可以手动执行同样的检查：
-
-```bash
-ssh -o BatchMode=yes gpu-node-01 true
-ssh -G gpu-node-01 | grep -E '^(controlmaster|controlpath|controlpersist) '
-```
-
-启用 OpenSSH 连接复用可以消除远端路径上大部分的每次探测连接开销（经跳板机的
-实测降幅为 76.6%，见 [docs/PERFORMANCE.md](docs/PERFORMANCE.md)）：
-
-```sshconfig
-Host gpu-node-01
-    ControlMaster auto
-    ControlPath ~/.ssh/sockets/%r@%h:%p
-    ControlPersist 600
-```
-
-`~/.ssh/sockets` 目录需要操作员自行以 `0700` 权限创建；Mocop 不会修改 SSH 配置。
-
-如果多台节点共同依赖一个 `ProxyJump`、VPN 或 FRP 路径并同时离线，应先检查这条共享路径。重启 Mocop 无法修复不可用的隧道或远端 SSH 服务。
+默认命令检查非交互可达性和连接复用；`--profile` 将耗时拆分为传输、固定
+脚本和 NVIDIA 查询；`--probe` 执行一次真实、有界的生产采集。Mocop 不会
+修改 SSH 配置。OpenSSH 复用的实测数据见[性能说明](../../PERFORMANCE.md)，
+服务诊断流程见[运维手册](../../OPERATIONS.md)。如果多台节点共同依赖一个
+跳板机、VPN 或 FRP 路径并同时离线，应先检查共享路径，再考虑重启 Mocop。
 
 ### 故障排查
 
@@ -312,7 +272,8 @@ curl -s http://127.0.0.1:8787/readyz       # 就绪状态；首次成功采集�
 mocop doctor --probe                       # 对每个别名执行一次真实生产采集
 ```
 
-`mocop doctor --probe` 端到端运行与生产完全一致的采集链路，并按别名报告探测状态、延迟、GPU 数、进程数与工作负载覆盖率。它依赖真实连接测试，因此不能与 `--no-connect` 同时使用。
+`mocop doctor --probe` 按别名报告探测状态、延迟、GPU/进程数和 workload
+覆盖率。它依赖真实连接测试，因此不能与 `--no-connect` 同时使用。
 
 ### CLI 退出码
 
@@ -331,7 +292,22 @@ Mocop 只接受明确列出的 SSH 别名，并执行固定的只读探针。它
 操作员角色。如需远程开放 Mocop，请使用带身份认证的 TLS 反向代理或私有
 VPN；明文 HTTP 上的 Bearer 头不提供网络机密性或服务端身份认证。
 
-修改信任边界前，请阅读[威胁模型](docs/SECURITY.md)和[安全策略](.github/SECURITY.md)。
+修改信任边界前，请阅读[威胁模型](../../SECURITY.md)和[安全策略](../../../.github/SECURITY.md)。
+
+## 文档
+
+[文档导航](../../README.md)提供完整的读者地图、权威文档归属、更新触发条件、
+语言策略和 ADR 生命周期。
+
+| 任务 | 文档 |
+|---|---|
+| 配置集群 | [配置参考](../../CONFIGURATION.md) |
+| 运维、升级、备份、回滚或卸载 | [运维手册](../../OPERATIONS.md) |
+| 编写 API 客户端或 Prometheus 集成 | [HTTP API](../../API.md) |
+| 审查信任与部署边界 | [安全模型](../../SECURITY.md) |
+| 理解组件和设计决策 | [架构](../../ARCHITECTURE.md)与 [ADR 索引](../../adr/README.md) |
+| 复现性能结论 | [性能说明](../../PERFORMANCE.md) |
+| 查看用户可见变更 | [更新日志](../../CHANGELOG.md) |
 
 ## 开发
 
@@ -342,11 +318,8 @@ uvx --from ruff==0.12.11 ruff format --check .
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-更多信息见[贡献指南](.github/CONTRIBUTING.md)、
-[架构](docs/ARCHITECTURE.md)、[配置参考](docs/CONFIGURATION.md)、
-[运维手册](docs/OPERATIONS.md)、[API 参考](docs/API.md)、
-[性能说明](docs/PERFORMANCE.md)和[更新日志](docs/CHANGELOG.md)。
+修改代码、测试、文档或公开契约前，请阅读[贡献指南](../../../.github/CONTRIBUTING.md)。
 
 ## 许可证
 
-[MIT](LICENSE)
+[MIT](../../../LICENSE)
