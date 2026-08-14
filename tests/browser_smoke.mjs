@@ -236,7 +236,10 @@ try {
       window.__mocopEarlyCadenceChange = true;
     });`,
   });
-  const loaded = cdp.waitFor("Page.loadEventFired");
+  // Chrome can be CPU-starved while the Python version matrix runs on the
+  // same hosted-runner fleet. Keep the wait finite, but give navigation the
+  // same 30-second startup budget as the DevTools endpoint.
+  const loaded = cdp.waitFor("Page.loadEventFired", 30_000);
   await cdp.send("Page.navigate", {
     url: `http://127.0.0.1:${monitorPort}/#access_token=${browserAccessToken}`,
   });
@@ -1629,7 +1632,7 @@ try {
     "selected-host resource panel skips rebuild without a data change",
   );
 
-  const reloaded = cdp.waitFor("Page.loadEventFired");
+  const reloaded = cdp.waitFor("Page.loadEventFired", 30_000);
   await cdp.send("Page.reload");
   await reloaded;
   await new Promise((resolve) => setTimeout(resolve, 300));
