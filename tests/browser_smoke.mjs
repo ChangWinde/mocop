@@ -219,7 +219,7 @@ try {
   await waitFor(`http://127.0.0.1:${debugPort}/json/version`, 30_000);
 
   const targetResponse = await fetch(
-    `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent(`http://127.0.0.1:${monitorPort}/#access_token=${browserAccessToken}`)}`,
+    `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent("about:blank")}`,
     { method: "PUT" },
   );
   assert(targetResponse.ok, `Chrome target creation failed: ${targetResponse.status}`);
