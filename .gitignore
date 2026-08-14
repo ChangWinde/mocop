@@ -31,3 +31,8 @@ Thumbs.db
 
 # Local runtime configuration
 config/mocop.json
+
+# Local development agents and dependency solver state
+/.claude/
+/.mcp.json
+/uv.lock

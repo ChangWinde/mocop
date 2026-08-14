@@ -176,7 +176,18 @@ after this overlay and may include the current correlation context.
 
 GPU count, busy devices, and cluster VRAM form the first summary layer. The capacity matcher ranks same-node, same-model groups from the current snapshot by requested device count, per-device free VRAM, health, utilization, and CPU context; it excludes stale and maintained nodes and never triggers collection. The fleet rail can render config-backed host sections without changing telemetry order or collection. The scheduling heatmap follows, then system resources and native per-host GPU groups. GPU groups are collapsed by default. Search and status filters temporarily expand matching groups without losing the user's explicit expansion state.
 
-SSE updates are coalesced with `requestAnimationFrame`. GPU groups, host rows, attention items, incidents, and heatmap cells reuse DOM when their input signature is unchanged. A successful SSE snapshot is authoritative for connection state; transient errors are debounced, and snapshot fetches provide bounded degraded-mode synchronization during recovery. Capacity matching and compute, VRAM, and temperature heatmap modes transform the in-memory snapshot without another request. CSV export is generated from visible rows in the browser.
+The unified inventory query also builds a bounded process result projection from
+the authenticated in-memory snapshot. Its scope follows the selected host, so
+the same control searches the fleet or one server without a new API request or
+remote command. Literal NFKC-normalized terms match process identity, command,
+PID, owner, workload, queue, and namespace; result DOM is capped while the full
+match count remains visible. Results reuse keyed nodes across snapshots and open
+the exact GPU with a dialog-local filter that runs before the 100-row display
+limit. Stale cached process records and unavailable task telemetry remain
+explicit. [ADR-0018](adr/0018-browser-process-search.md) records the rejected
+GPU-row-only and server-side search alternatives.
+
+SSE updates are coalesced with `requestAnimationFrame`. GPU groups, host rows, attention items, incidents, and heatmap cells reuse DOM when their input signature is unchanged. A successful SSE snapshot is authoritative for connection state; transient errors are debounced, and snapshot fetches provide bounded degraded-mode synchronization during recovery. Capacity matching, process search, and compute, VRAM, and temperature heatmap modes transform the in-memory snapshot without another request. CSV export is generated from visible rows in the browser.
 
 Display-only preferences use a versioned, validated browser-local record. They control one curated visual style, one independent palette, background visibility, information density, fleet focus, server order, GPU sort, heatmap metric, and optional columns. Six style families change layout, spacing, typography, geometry, and material; six palettes change emphasis, ambient, surface, line, and interaction colors without changing component structure. A separately bounded raster background may be retained as one IndexedDB `Blob`; it is decoded before storage, rendered through a revocable object URL and never uploaded. These values never enter the server configuration or overwrite another viewer's choices. Cluster inventory and the narrow collector-policy projection cross the serialized configuration controller. The attention view consumes backend incident conditions and only groups them for presentation; threshold decisions are never duplicated in JavaScript. [ADR-0009](adr/0009-orthogonal-visual-style-and-accent.md) records the visual model and rejected custom-CSS alternative. [ADR-0002](adr/0002-local-targets-and-dashboard-preferences.md) records the rejected server-persisted presentation and on-demand remote-query alternatives. [ADR-0004](adr/0004-dashboard-managed-ssh-inventory.md) records the constrained inventory boundary; [ADR-0005](adr/0005-dashboard-persisted-collector-settings.md) records the collector-settings allowlist and rejected general editor; [ADR-0006](adr/0006-browser-local-visual-assets.md) records the local visual-asset boundary and rejected server upload.
 
@@ -250,10 +261,16 @@ rollback procedures live in [OPERATIONS.md](OPERATIONS.md).
 
 ```text
 .github/   contribution, conduct, security, and CI policy
-docs/      architecture, decisions, performance, security, and release history
+docs/      governed references, decision records, assets, and localized onboarding
 examples/  publication-safe operator examples
 mocop/     runtime package and embedded dashboard
 tests/     unit, contract, fixture, and browser coverage
 ```
 
-The package remains at the repository root to preserve direct, dependency-free test execution. [ADR-0001](adr/0001-repository-layout.md) records the rejected `src/` alternative and the removal of duplicate packaging and service artifacts.
+The package remains at the repository root to preserve direct, dependency-free
+test execution. Standard build and project entry files stay at the root; local
+agent configuration, caches, build output, and dependency-solver state are not
+repository structure. [The documentation portal](README.md) owns the audience
+map and update triggers. [ADR-0019](adr/0019-repository-and-documentation-governance.md)
+records the stable-path decision and supersedes the earlier layout decision in
+[ADR-0001](adr/0001-repository-layout.md).

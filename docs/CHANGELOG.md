@@ -6,6 +6,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Added global and selected-server GPU process search over the authenticated
+  snapshot, including literal matching for command, PID, owner, workload,
+  queue, and namespace; results open the exact GPU, preserve focus across live
+  refreshes, report stale/unavailable coverage, and remain bounded to 200 DOM
+  rows. The per-GPU dialog now filters before its 100-row display cap and adds
+  program-name sorting alongside VRAM and runtime.
 - Added a private per-install Bearer capability for every telemetry, SSE,
   OpenMetrics, and write route; service and foreground startup print a fragment
   capability URL that the dashboard scrubs immediately and retains in tab-scoped
@@ -72,6 +78,10 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Established a governed documentation portal and complete ADR index, moved the
+  Simplified Chinese onboarding README under `docs/locales/zh-CN/`, kept stable
+  reference URLs intact, and classified local agent/solver files as non-project
+  workspace state.
 - Replaced the authenticated dashboard's native `EventSource` connection with
   incremental fetch-based SSE parsing so every stream carries the explicit Bearer
   header; the named heartbeat and reconnect/fallback behavior remain unchanged.
