@@ -115,10 +115,10 @@
               <strong id="attention-summary">需要关注</strong>
             </div>
             <div class="attention-filters" role="group" aria-label="问题类型筛选">
-              <button class="attention-filter active" data-attention-filter="all" type="button">全部 <span>0</span></button>
-              <button class="attention-filter" data-attention-filter="connection" type="button">连接 <span>0</span></button>
-              <button class="attention-filter" data-attention-filter="storage" type="button">存储 <span>0</span></button>
-              <button class="attention-filter" data-attention-filter="compute" type="button">算力 <span>0</span></button>
+              <button class="attention-filter active" data-attention-filter="all" type="button" aria-pressed="true">全部 <span>0</span></button>
+              <button class="attention-filter" data-attention-filter="connection" type="button" aria-pressed="false">连接 <span>0</span></button>
+              <button class="attention-filter" data-attention-filter="storage" type="button" aria-pressed="false">存储 <span>0</span></button>
+              <button class="attention-filter" data-attention-filter="compute" type="button" aria-pressed="false">算力 <span>0</span></button>
             </div>
             <span>点击问题可定位服务器</span>
           </div>
@@ -146,13 +146,14 @@
               <span id="server-count" class="count-badge">0</span>
             </div>
             <div class="fleet-filters" role="group" aria-label="服务器快速筛选">
-              <button class="fleet-filter active" data-server-filter="all" type="button">全部</button>
-              <button class="fleet-filter" data-server-filter="issues" type="button">异常</button>
-              <button class="fleet-filter" data-server-filter="busy" type="button">计算中</button>
-              <button class="fleet-filter" data-server-filter="available" type="button">有空闲卡</button>
-              <button class="fleet-filter" data-server-filter="stale" type="button">陈旧</button>
+              <button class="fleet-filter active" data-server-filter="all" type="button" aria-pressed="true">全部</button>
+              <button class="fleet-filter" data-server-filter="issues" type="button" aria-pressed="false">异常</button>
+              <button class="fleet-filter" data-server-filter="busy" type="button" aria-pressed="false">计算中</button>
+              <button class="fleet-filter" data-server-filter="available" type="button" aria-pressed="false">有空闲卡</button>
+              <button class="fleet-filter" data-server-filter="stale" type="button" aria-pressed="false">陈旧</button>
             </div>
-            <div id="server-list" class="server-list" role="listbox" aria-label="服务器列表"></div>
+            <nav id="server-list" class="server-list" aria-label="服务器列表"></nav>
+            <span id="server-order-status" class="sr-only" aria-live="polite"></span>
           </aside>
 
           <section class="inventory-panel panel">
@@ -199,9 +200,9 @@
                   <h3>GPU 调度热力图</h3>
                 </div>
                 <div class="heatmap-modes" role="group" aria-label="热力图指标">
-                  <button class="heatmap-mode active" data-heat-metric="utilization" type="button">计算</button>
-                  <button class="heatmap-mode" data-heat-metric="memory" type="button">显存</button>
-                  <button class="heatmap-mode" data-heat-metric="temperature" type="button">温度</button>
+                  <button class="heatmap-mode active" data-heat-metric="utilization" type="button" aria-pressed="true">计算</button>
+                  <button class="heatmap-mode" data-heat-metric="memory" type="button" aria-pressed="false">显存</button>
+                  <button class="heatmap-mode" data-heat-metric="temperature" type="button" aria-pressed="false">温度</button>
                 </div>
               </div>
               <div class="heatmap-scroll">
@@ -223,14 +224,14 @@
 
             <div class="filter-row" role="group" aria-label="GPU 状态筛选">
               <span class="filter-label">GPU 设备</span>
-              <button class="filter active" data-filter="all" type="button">全部</button>
-              <button class="filter" data-filter="busy" type="button"><i class="dot busy"></i>运行中</button>
-              <button class="filter" data-filter="idle" type="button"><i class="dot idle"></i>空闲</button>
-              <button class="filter" data-filter="hot" type="button"><i class="dot hot"></i>高温</button>
+              <button class="filter active" data-filter="all" type="button" aria-pressed="true">全部</button>
+              <button class="filter" data-filter="busy" type="button" aria-pressed="false"><i class="dot busy"></i>运行中</button>
+              <button class="filter" data-filter="idle" type="button" aria-pressed="false"><i class="dot idle"></i>空闲</button>
+              <button class="filter" data-filter="hot" type="button" aria-pressed="false"><i class="dot hot"></i>高温</button>
             </div>
 
             <div class="table-scroll">
-              <table class="gpu-table gpu-table-head" aria-label="GPU 设备列标题">
+              <table class="gpu-table gpu-table-head" aria-hidden="true">
                 <thead>
                   <tr>
                     <th>设备</th>

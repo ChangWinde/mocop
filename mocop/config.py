@@ -4,6 +4,7 @@ import ipaddress
 import json
 import os
 import re
+import stat
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
@@ -27,6 +28,8 @@ TOPOLOGY_LABEL_MAX_LENGTH = 64
 TOPOLOGY_MAX_LINKS = 512
 TOPOLOGY_TRANSPORTS = frozenset({"ssh", "frp-stcp", "frp-xtcp", "vpn"})
 TRUSTED_WEB_HOSTS_MAX_ENTRIES = 32
+CONFIG_MAX_BYTES = 1_048_576
+CONFIG_MAX_HOST_ALIASES = 1_024
 
 
 class ConfigError(ValueError):
@@ -71,17 +74,19 @@ class IncidentActionConfig:
     action: str
     until: datetime
     reason: str = ""
+    incident_started_at: str | None = None
 
     def is_active(self, at: datetime | None = None) -> bool:
         return self.until > (at or datetime.now(timezone.utc))
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, str | None]:
         return {
             "host": self.host,
             "condition_key": self.condition_key,
             "action": self.action,
             "until": self.until.isoformat(timespec="seconds").replace("+00:00", "Z"),
             "reason": self.reason,
+            "incident_started_at": self.incident_started_at,
         }
 
 
@@ -356,6 +361,7 @@ _MAINTENANCE_RECURRENCE_KEYS = {"weekday", "start", "duration_minutes"}
 _RECURRENCE_START = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 DISPLAY_NAME_MAX_LENGTH = 64
 _INCIDENT_ACTION_KEYS = {"host", "condition_key", "action", "until", "reason"}
+_INCIDENT_ACTION_V2_KEYS = _INCIDENT_ACTION_KEYS | {"incident_started_at"}
 _INCIDENT_ACTIONS = frozenset({"acknowledged", "silenced"})
 _INCIDENT_OVERRIDE_SCOPES = {"hosts", "groups"}
 _INCIDENT_SCOPE_OVERRIDE_KEYS = {"thresholds", "exclude_disk_mounts"}
@@ -444,7 +450,13 @@ def normalize_web_hostname(value: object, *, allow_port: bool = False) -> str | 
     if not isinstance(value, str):
         return None
     candidate = value.strip()
-    if not candidate or len(candidate) > 260:
+    if (
+        not candidate
+        or len(candidate) > 260
+        or any(
+            unicodedata.category(character).startswith("C") for character in candidate
+        )
+    ):
         return None
     if candidate.count(":") >= 2 and not candidate.startswith("["):
         candidate = f"[{candidate}]"  # bare IPv6 literal
@@ -471,6 +483,20 @@ def normalize_web_hostname(value: object, *, allow_port: bool = False) -> str | 
             ipaddress.ip_address(hostname)
         except ValueError:
             return None
+    else:
+        try:
+            ipaddress.ip_address(hostname)
+        except ValueError:
+            if len(hostname) > 253 or not hostname.isascii():
+                return None
+            labels = hostname.removesuffix(".").split(".")
+            if any(
+                not label
+                or len(label) > 63
+                or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?", label)
+                for label in labels
+            ):
+                return None
     return hostname
 
 
@@ -806,24 +832,27 @@ def resolve_config_path(
     cwd: Path | None = None,
 ) -> Path:
     """Resolve configuration without depending on the source checkout layout."""
-    if explicit is not None:
-        return Path(explicit).expanduser().resolve()
+    try:
+        if explicit is not None:
+            return Path(explicit).expanduser().resolve()
 
-    values = os.environ if environ is None else environ
-    configured = values.get(CONFIG_ENV_VAR, "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
+        values = os.environ if environ is None else environ
+        configured = values.get(CONFIG_ENV_VAR, "").strip()
+        if configured:
+            return Path(configured).expanduser().resolve()
 
-    xdg_root = values.get("XDG_CONFIG_HOME", "").strip()
-    user_root = Path(xdg_root).expanduser() if xdg_root else Path.home() / ".config"
-    user_config = (user_root / USER_CONFIG_RELATIVE_PATH).resolve()
-    if user_config.is_file():
-        return user_config
+        xdg_root = values.get("XDG_CONFIG_HOME", "").strip()
+        user_root = Path(xdg_root).expanduser() if xdg_root else Path.home() / ".config"
+        user_config = (user_root / USER_CONFIG_RELATIVE_PATH).resolve()
+        if user_config.is_file():
+            return user_config
 
-    project_config = ((cwd or Path.cwd()) / LOCAL_CONFIG_PATH).resolve()
-    if project_config.is_file():
-        return project_config
-    return BUNDLED_CONFIG_PATH.resolve()
+        project_config = ((cwd or Path.cwd()) / LOCAL_CONFIG_PATH).resolve()
+        if project_config.is_file():
+            return project_config
+        return BUNDLED_CONFIG_PATH.resolve()
+    except (RuntimeError, UnicodeError, OSError) as exc:
+        raise ConfigError("configuration path is invalid") from exc
 
 
 class _JsonObjectPairs:
@@ -853,12 +882,91 @@ def _resolve_json_objects(node: Any, path: str, source: Path) -> Any:
     return node
 
 
-def load_config(path: Path | str | None = None) -> MonitorConfig:
-    config_path = resolve_config_path(path)
+def _read_config_bytes(descriptor: int, config_path: Path) -> bytes:
+    """Read one regular config file without allowing unbounded allocation."""
     try:
-        raw = config_path.read_bytes().decode("utf-8")
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ConfigError(f"config file is not a regular file: {config_path}")
+        if metadata.st_size > CONFIG_MAX_BYTES:
+            raise ConfigError(
+                f"config file exceeds the {CONFIG_MAX_BYTES}-byte limit: {config_path}"
+            )
+        content = bytearray()
+        while len(content) <= CONFIG_MAX_BYTES:
+            chunk = os.read(
+                descriptor, min(65_536, CONFIG_MAX_BYTES + 1 - len(content))
+            )
+            if not chunk:
+                return bytes(content)
+            content.extend(chunk)
     except OSError as exc:
         raise ConfigError(f"cannot read config: {config_path}") from exc
+    raise ConfigError(
+        f"config file exceeds the {CONFIG_MAX_BYTES}-byte limit: {config_path}"
+    )
+
+
+def _read_config_path(config_path: Path) -> bytes:
+    try:
+        descriptor = os.open(config_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise ConfigError(f"cannot read config: {config_path}") from exc
+    try:
+        return _read_config_bytes(descriptor, config_path)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_private_metadata(
+    metadata: os.stat_result, path: Path, *, directory: bool
+) -> None:
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected_type(metadata.st_mode) or metadata.st_uid != os.getuid():
+        kind = "directory" if directory else "regular file"
+        raise ConfigError(f"managed config {path} must be an owned {kind}")
+    forbidden = 0o022 if directory else 0o077
+    if metadata.st_mode & forbidden:
+        requirement = "not be group/other-writable" if directory else "be private"
+        raise ConfigError(f"managed config {path} must {requirement}")
+
+
+def _read_private_config_path(config_path: Path) -> bytes:
+    """Open a managed config through a trusted parent and parse that same file."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
+    try:
+        parent_descriptor = os.open(config_path.parent, directory_flags)
+    except OSError as exc:
+        raise ConfigError(
+            f"cannot open managed config directory: {config_path.parent}"
+        ) from exc
+    try:
+        _validate_private_metadata(
+            os.fstat(parent_descriptor), config_path.parent, directory=True
+        )
+        try:
+            descriptor = os.open(
+                config_path.name,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | nofollow,
+                dir_fd=parent_descriptor,
+            )
+        except OSError as exc:
+            raise ConfigError(f"cannot open managed config: {config_path}") from exc
+        try:
+            _validate_private_metadata(
+                os.fstat(descriptor), config_path, directory=False
+            )
+            return _read_config_bytes(descriptor, config_path)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_descriptor)
+
+
+def _parse_config_bytes(content: bytes, config_path: Path) -> MonitorConfig:
+    try:
+        raw = content.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ConfigError(
             f"config file {config_path} is not valid UTF-8 "
@@ -869,7 +977,14 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         parsed = json.loads(raw, object_pairs_hook=_JsonObjectPairs)
     except json.JSONDecodeError as exc:
         raise ConfigError(f"invalid JSON in {config_path}: {exc.msg}") from exc
-    data = _resolve_json_objects(parsed, "", config_path)
+    except ValueError as exc:
+        raise ConfigError(f"invalid JSON value in {config_path}") from exc
+    except RecursionError as exc:
+        raise ConfigError(f"JSON nesting is too deep in {config_path}") from exc
+    try:
+        data = _resolve_json_objects(parsed, "", config_path)
+    except RecursionError as exc:
+        raise ConfigError(f"JSON nesting is too deep in {config_path}") from exc
 
     if not isinstance(data, dict):
         raise ConfigError("config root must be a JSON object")
@@ -884,11 +999,23 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         raise ConfigError("ssh_config must be a non-empty path")
     if not isinstance(data["auto_discover"], bool):
         raise ConfigError("auto_discover must be true or false")
-    if not isinstance(data["listen_host"], str) or not data["listen_host"].strip():
-        raise ConfigError("listen_host must be a non-empty string")
+    if (
+        not isinstance(data["listen_host"], str)
+        or normalize_web_hostname(data["listen_host"]) is None
+    ):
+        raise ConfigError("listen_host must be a valid hostname or IP literal")
 
     hosts = _string_list(data, "hosts")
     excludes = frozenset(_string_list(data, "exclude_hosts"))
+    if len(hosts) > CONFIG_MAX_HOST_ALIASES:
+        raise ConfigError(
+            f"hosts must contain at most {CONFIG_MAX_HOST_ALIASES} unique aliases"
+        )
+    if len(excludes) > CONFIG_MAX_HOST_ALIASES:
+        raise ConfigError(
+            "exclude_hosts must contain at most "
+            f"{CONFIG_MAX_HOST_ALIASES} unique aliases"
+        )
     invalid_aliases = sorted(
         alias for alias in (*hosts, *excludes) if not is_safe_alias(alias)
     )
@@ -1294,12 +1421,16 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
     action_keys: set[tuple[str, str]] = set()
     for index, raw_action in enumerate(raw_actions):
         label = f"incident_actions[{index}]"
-        if not isinstance(raw_action, dict) or set(raw_action) != _INCIDENT_ACTION_KEYS:
+        if not isinstance(raw_action, dict) or frozenset(raw_action) not in {
+            frozenset(_INCIDENT_ACTION_KEYS),
+            frozenset(_INCIDENT_ACTION_V2_KEYS),
+        }:
             raise ConfigError(f"{label} has an invalid schema")
         host = raw_action.get("host")
         condition_key = raw_action.get("condition_key")
         action = raw_action.get("action")
         reason = raw_action.get("reason")
+        incident_started_at = raw_action.get("incident_started_at")
         if not isinstance(host, str) or not is_safe_alias(host):
             raise ConfigError(f"{label}.host must be a safe host alias")
         if host not in hosts or host in excludes:
@@ -1314,9 +1445,12 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
                 f"{INCIDENT_ACTION_REASON_MAX_LENGTH} visible characters"
             )
         until = _utc_timestamp(raw_action.get("until"), f"{label}.until")
+        if incident_started_at is not None:
+            _utc_timestamp(incident_started_at, f"{label}.incident_started_at")
         assert isinstance(condition_key, str)
         assert isinstance(action, str)
         assert isinstance(reason, str)
+        assert incident_started_at is None or isinstance(incident_started_at, str)
         key = (host, condition_key)
         if key in action_keys:
             raise ConfigError(f"{label} duplicates an incident action")
@@ -1328,15 +1462,25 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
                 action=action,
                 until=until,
                 reason=reason.strip(),
+                incident_started_at=incident_started_at,
             )
         )
 
-    ssh_config = Path(data["ssh_config"]).expanduser()
-    if not ssh_config.is_absolute():
-        ssh_config = config_path.parent / ssh_config
+    raw_ssh_config = data["ssh_config"]
+    if any(
+        unicodedata.category(character) in {"Cc", "Cs"} for character in raw_ssh_config
+    ):
+        raise ConfigError("ssh_config must not contain control or surrogate characters")
+    try:
+        ssh_config = Path(raw_ssh_config).expanduser()
+        if not ssh_config.is_absolute():
+            ssh_config = config_path.parent / ssh_config
+        ssh_config = ssh_config.resolve()
+    except (RuntimeError, UnicodeError, OSError) as exc:
+        raise ConfigError("ssh_config is not a valid filesystem path") from exc
 
     return MonitorConfig(
-        ssh_config=ssh_config.resolve(),
+        ssh_config=ssh_config,
         auto_discover=data["auto_discover"],
         hosts=hosts,
         exclude_hosts=excludes,
@@ -1369,3 +1513,23 @@ def load_config(path: Path | str | None = None) -> MonitorConfig:
         workloads=workloads,
         webhooks=webhooks,
     )
+
+
+def load_config(path: Path | str | None = None) -> MonitorConfig:
+    """Load a bounded configuration for an operator-controlled foreground run."""
+    config_path = resolve_config_path(path)
+    return _parse_config_bytes(_read_config_path(config_path), config_path)
+
+
+def load_private_config(path: Path | str) -> MonitorConfig:
+    """Load the private regular file required by a managed user service.
+
+    The parent directory and file are opened without following their final
+    symlink components. Validation and parsing use those same descriptors so
+    an attacker cannot exchange the checked file before it is read.
+    """
+    try:
+        config_path = Path(os.path.abspath(Path(path).expanduser()))
+    except (RuntimeError, UnicodeError, OSError) as exc:
+        raise ConfigError("managed config path is invalid") from exc
+    return _parse_config_bytes(_read_private_config_path(config_path), config_path)

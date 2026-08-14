@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import shlex
-from glob import glob
+import stat
+from glob import iglob
 from pathlib import Path
 from typing import Protocol
 
@@ -49,7 +51,12 @@ class OpenSshConfigHostSource:
     def _read_aliases(self, root: Path) -> set[str]:
         aliases: set[str] = set()
         visited: set[Path] = set()
-        pending = [root.expanduser().resolve()]
+        try:
+            root_path = root.expanduser().resolve()
+        except (RuntimeError, UnicodeError, OSError) as exc:
+            raise ValueError("SSH config path is invalid") from exc
+        pending = [root_path]
+        total_bytes = 0
 
         while pending:
             path = pending.pop()
@@ -60,19 +67,20 @@ class OpenSshConfigHostSource:
             visited.add(path)
 
             try:
-                if path.stat().st_size > _MAX_CONFIG_BYTES:
-                    raise ValueError(f"SSH config is too large: {path}")
-                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                content = self._read_regular_file(path, _MAX_CONFIG_BYTES - total_bytes)
+                total_bytes += len(content)
+                lines = content.decode("utf-8", errors="replace").splitlines()
             except FileNotFoundError:
-                if path == root:
+                if path == root_path:
                     return aliases
                 continue
             except OSError as exc:
                 raise ValueError(f"cannot read SSH config: {path}") from exc
 
+            include_allowed = True
             for line in lines:
                 try:
-                    tokens = shlex.split(line, comments=True, posix=True)
+                    tokens = self._tokenize_option(line)
                 except ValueError:
                     continue
                 if not tokens:
@@ -84,18 +92,103 @@ class OpenSshConfigHostSource:
                             marker in token for marker in "*?"
                         ):
                             aliases.add(token)
+                    # Includes in a specific Host block are conditional on the
+                    # queried destination. Enumerating their declarations as
+                    # global aliases would authorize names OpenSSH never uses.
+                    include_allowed = tokens[1:] == ["*"]
+                elif keyword == "match":
+                    include_allowed = [token.lower() for token in tokens[1:]] == ["all"]
                 elif keyword == "include":
+                    if not include_allowed:
+                        continue
                     for pattern in tokens[1:]:
-                        expanded = self._expand_include(pattern, root.parent)
+                        expanded = self._expand_include(pattern, Path.home() / ".ssh")
+                        if (
+                            len(visited) + len(pending) + len(expanded)
+                            > _MAX_CONFIG_FILES
+                        ):
+                            raise ValueError("SSH config includes too many files")
                         pending.extend(reversed(expanded))
         return aliases
 
     @staticmethod
+    def _read_regular_file(path: Path, remaining_bytes: int) -> bytes:
+        """Read one stable regular file under the aggregate byte budget."""
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError(f"SSH config is not a regular file: {path}")
+            if remaining_bytes < 0 or metadata.st_size > remaining_bytes:
+                raise ValueError(f"SSH config is too large: {path}")
+            chunks: list[bytes] = []
+            consumed = 0
+            while True:
+                chunk = os.read(descriptor, min(65_536, remaining_bytes - consumed + 1))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                consumed += len(chunk)
+                if consumed > remaining_bytes:
+                    raise ValueError(f"SSH config is too large: {path}")
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _tokenize_option(line: str) -> list[str]:
+        """Tokenize one ssh_config option using OpenSSH's option grammar."""
+        quote: str | None = None
+        escaped = False
+        end = len(line)
+        for index, character in enumerate(line):
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                continue
+            if quote is not None:
+                if character == quote:
+                    quote = None
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                continue
+            if character == "#" and (index == 0 or line[index - 1].isspace()):
+                end = index
+                break
+        content = line[:end].strip()
+        if not content:
+            return []
+        match = re.match(r"([^\s=]+)(.*)", content, flags=re.DOTALL)
+        if match is None:
+            return []
+        keyword, arguments = match.groups()
+        arguments = arguments.lstrip()
+        if arguments.startswith("="):
+            arguments = arguments[1:].lstrip()
+        if not arguments:
+            return [keyword]
+        return [keyword, *shlex.split(arguments, comments=False, posix=True)]
+
+    @staticmethod
     def _expand_include(pattern: str, ssh_directory: Path) -> list[Path]:
-        candidate = Path(pattern).expanduser()
-        if not candidate.is_absolute():
-            candidate = ssh_directory / candidate
-        return [Path(match).resolve() for match in sorted(glob(str(candidate)))]
+        try:
+            candidate = Path(pattern).expanduser()
+            if not candidate.is_absolute():
+                candidate = ssh_directory / candidate
+            matches: list[Path] = []
+            for match in iglob(str(candidate)):
+                matches.append(Path(match).resolve())
+                if len(matches) > _MAX_CONFIG_FILES:
+                    raise ValueError("SSH config includes too many files")
+            return sorted(matches)
+        except (RuntimeError, UnicodeError, OSError) as exc:
+            raise ValueError("SSH Include path is invalid") from exc
 
 
 _CODE_HOST_ALIAS = re.compile(

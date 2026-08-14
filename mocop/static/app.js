@@ -111,13 +111,55 @@ document.documentElement.style.setProperty(
 // Every dashboard-originated request must carry the viewer marker: the
 // service treats marked reads as "someone is watching" and keeps process
 // sampling on the attended cadence even when SSE falls back to polling.
-// Shadowing the script-scope fetch keeps that guarantee uniform for all
-// call sites (EventSource cannot attach headers and is marked server-side).
+// The managed-service capability is delivered in the URL fragment, which is
+// never sent by HTTP. Keep it in tab-scoped session storage so an intentional
+// reload (including the managed restart workflow) remains usable, while never
+// turning it into an ambient cookie or persistent cross-session credential.
+const DASHBOARD_TOKEN_STORAGE_KEY = "mocop.dashboardAccessToken.v1";
+const fragmentParameters = new URLSearchParams(window.location.hash.slice(1));
+const fragmentToken = fragmentParameters.get("access_token");
+const validFragmentToken = fragmentToken != null
+  && /^[A-Za-z0-9_-]{32,192}$/.test(fragmentToken) ? fragmentToken : "";
+let storedDashboardAccessToken = "";
+try {
+  if (validFragmentToken) {
+    window.sessionStorage.setItem(DASHBOARD_TOKEN_STORAGE_KEY, validFragmentToken);
+  } else if (fragmentToken == null) {
+    storedDashboardAccessToken = window.sessionStorage.getItem(
+      DASHBOARD_TOKEN_STORAGE_KEY,
+    ) || "";
+  } else {
+    window.sessionStorage.removeItem(DASHBOARD_TOKEN_STORAGE_KEY);
+  }
+} catch (_error) {
+  // Privacy modes may disable sessionStorage. The fragment still works for
+  // this document; a later reload will then require reopening the install URL.
+}
+const dashboardAccessToken = validFragmentToken
+  || (/^[A-Za-z0-9_-]{32,192}$/.test(storedDashboardAccessToken)
+    ? storedDashboardAccessToken : "");
+const invalidDashboardAccessToken = fragmentToken != null && !validFragmentToken;
+if (fragmentToken != null) {
+  fragmentParameters.delete("access_token");
+  const retainedFragment = fragmentParameters.toString();
+  window.history.replaceState(
+    null,
+    "",
+    `${window.location.pathname}${window.location.search}${retainedFragment ? `#${retainedFragment}` : ""}`,
+  );
+}
+// Shadowing the script-scope fetch keeps the viewer marker and explicit
+// capability uniform for all call sites.
 const nativeFetch = window.fetch.bind(window);
 const fetch = (url, options = {}) => nativeFetch(url, {
   cache: "no-store",
   ...options,
-  headers: { "X-Monitor-Request": "dashboard", ...(options.headers || {}) },
+  headers: {
+    "X-Monitor-Request": "dashboard",
+    ...(options.headers || {}),
+    ...(dashboardAccessToken
+      ? { Authorization: `Bearer ${dashboardAccessToken}` } : {}),
+  },
 });
 
 const WORKLOAD_KIND_LABELS = {
@@ -129,6 +171,7 @@ const WORKLOAD_KIND_LABELS = {
 };
 
 const view = {
+  dashboardStarted: false,
   snapshot: null,
   topology: null,
   topologyLoading: false,
@@ -232,6 +275,8 @@ const view = {
   serviceRestarting: false,
   backgroundObjectUrl: null,
   backgroundRequestId: 0,
+  backgroundStorageTail: Promise.resolve(),
+  authenticationFailed: false,
 };
 
 try {
@@ -356,6 +401,7 @@ const elements = {
   incidentToggle: $("#toggle-incidents"),
   serverCount: $("#server-count"),
   serverList: $("#server-list"),
+  serverOrderStatus: $("#server-order-status"),
   inventoryTitle: $("#inventory-title"),
   visibleCount: $("#visible-count"),
   nodeFreshness: $("#node-freshness"),
@@ -805,15 +851,17 @@ async function selectBackgroundImage() {
   if (!file) return;
   const requestId = ++view.backgroundRequestId;
   elements.backgroundImageInput.disabled = true;
+  elements.removeBackgroundImage.disabled = true;
   setBackgroundStatus(
     file.size > MAX_BACKGROUND_BYTES ? "正在浏览器本地优化图片…" : "正在安全读取图片…",
   );
   try {
     const prepared = await prepareBackgroundBlob(file);
     if (requestId !== view.backgroundRequestId) return;
-    renderBackground(prepared.blob);
     try {
-      await writeStoredBackground(prepared.blob);
+      await runBackgroundStorage(() => writeStoredBackground(prepared.blob));
+      if (requestId !== view.backgroundRequestId) return;
+      renderBackground(prepared.blob);
       const prefix = prepared.compressed
         ? `已压缩至 ${backgroundSize(prepared.blob)} 并保存在当前浏览器`
         : "已保存在当前浏览器";
@@ -822,6 +870,8 @@ async function selectBackgroundImage() {
         "success",
       );
     } catch (_error) {
+      if (requestId !== view.backgroundRequestId) return;
+      renderBackground(prepared.blob);
       const prefix = prepared.compressed
         ? `已压缩至 ${backgroundSize(prepared.blob)}；`
         : "";
@@ -832,21 +882,44 @@ async function selectBackgroundImage() {
       setBackgroundStatus(error instanceof Error ? error.message : "无法使用这张图片", "error");
     }
   } finally {
-    if (requestId === view.backgroundRequestId) elements.backgroundImageInput.disabled = false;
+    if (requestId === view.backgroundRequestId) {
+      elements.backgroundImageInput.disabled = false;
+      elements.removeBackgroundImage.disabled = !view.backgroundObjectUrl;
+    }
   }
 }
 
 async function removeBackgroundImage() {
+  const requestId = ++view.backgroundRequestId;
+  elements.backgroundImageInput.disabled = true;
   elements.removeBackgroundImage.disabled = true;
   setBackgroundStatus("正在移除背景…");
   try {
-    await deleteStoredBackground();
-    view.backgroundRequestId += 1;
+    await runBackgroundStorage(deleteStoredBackground);
+    if (requestId !== view.backgroundRequestId) return;
     clearRenderedBackground();
     setBackgroundStatus("背景已从当前浏览器移除", "success");
   } catch (_error) {
-    elements.removeBackgroundImage.disabled = !view.backgroundObjectUrl;
-    setBackgroundStatus("无法更新浏览器存储，背景未移除", "error");
+    if (requestId === view.backgroundRequestId) {
+      setBackgroundStatus("无法更新浏览器存储，背景未移除", "error");
+    }
+  } finally {
+    if (requestId === view.backgroundRequestId) {
+      elements.backgroundImageInput.disabled = false;
+      elements.removeBackgroundImage.disabled = !view.backgroundObjectUrl;
+    }
+  }
+}
+
+async function runBackgroundStorage(operation) {
+  const previous = view.backgroundStorageTail;
+  let release;
+  view.backgroundStorageTail = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
   }
 }
 
@@ -891,7 +964,9 @@ function syncPreferenceControls() {
     String(preferences.backgroundVisibility / 100),
   );
   document.querySelectorAll(".fleet-filter").forEach((button) => {
-    button.classList.toggle("active", button.dataset.serverFilter === view.serverFilter);
+    const selected = button.dataset.serverFilter === view.serverFilter;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
   });
   styleChoiceButtons.forEach((button) => {
     const selected = button.dataset.styleChoice === preferences.visualStyle;
@@ -2195,7 +2270,6 @@ function serverStatus(server) {
   const states = {
     online: ["在线", "online"],
     unreachable: ["SSH 不可达", "issue"],
-    no_nvidia_smi: ["无 nvidia-smi", "issue"],
     error: ["采集错误", "issue"],
     pending: ["等待探测", "pending"],
   };
@@ -2962,7 +3036,9 @@ function renderAttention() {
   };
   document.querySelectorAll(".attention-filter").forEach((button) => {
     const count = counts[button.dataset.attentionFilter];
-    button.classList.toggle("active", button.dataset.attentionFilter === view.attentionFilter);
+    const selected = button.dataset.attentionFilter === view.attentionFilter;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
     button.disabled = count === 0;
     button.querySelector("span").textContent = count;
   });
@@ -3202,6 +3278,8 @@ async function updateIncidentAction(action) {
       body: JSON.stringify({
         host: condition.host,
         conditionKey: condition.conditionKey,
+        incidentStartedAt: action === "clear"
+          ? null : (condition.firstObservedAt || condition.observedAt),
         action,
         durationSeconds: duration,
         reason: action === "clear" ? "" : elements.incidentActionReason.value,
@@ -3423,9 +3501,33 @@ function reorderServer(source, target) {
   renderServers();
 }
 
+function moveServerByKeyboard(host, direction) {
+  if (!view.snapshot || ![-1, 1].includes(direction)) return;
+  const order = syncServerOrder(view.snapshot.servers);
+  const currentIndex = order.indexOf(host);
+  const nextIndex = currentIndex + direction;
+  if (currentIndex < 0 || nextIndex < 0 || nextIndex >= order.length) return;
+  [order[currentIndex], order[nextIndex]] = [order[nextIndex], order[currentIndex]];
+  view.serverOrder = order;
+  view.serverSort = "custom";
+  elements.serverSort.value = "custom";
+  savePreferences();
+  renderServers();
+  elements.serverOrderStatus.textContent = `${host} 已${direction < 0 ? "上移" : "下移"}至第 ${nextIndex + 1} 位`;
+  requestAnimationFrame(() => {
+    elements.serverList.querySelector(`[data-host="${CSS.escape(host)}"]`)?.focus();
+  });
+}
+
 function enableServerDrag(item, host) {
   item.draggable = true;
   item.dataset.host = host;
+  item.setAttribute("aria-keyshortcuts", "Alt+ArrowUp Alt+ArrowDown");
+  item.addEventListener("keydown", (event) => {
+    if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    moveServerByKeyboard(host, event.key === "ArrowUp" ? -1 : 1);
+  });
   item.addEventListener("dragstart", (event) => {
     view.draggedHost = host;
     item.classList.add("dragging");
@@ -3883,8 +3985,7 @@ function serverItem(server, selectedHost) {
   const resources = serverResources(server);
   const item = create("button", `server-item${selectedHost === server.host ? " selected" : ""}`);
   item.type = "button";
-  item.setAttribute("role", "option");
-  item.setAttribute("aria-selected", String(selectedHost === server.host));
+  if (selectedHost === server.host) item.setAttribute("aria-current", "true");
   item.title = [
     `${server.host} · ${label}`,
     server.lastSuccessAt ? `上次成功 ${age(server.lastSuccessAt)}` : "尚无成功样本",
@@ -3990,8 +4091,8 @@ function fleetAllItem(label, gpuCount) {
   if (view.fleetAllCache?.signature === signature) return view.fleetAllCache.node;
   const item = create("button", `server-item${view.selectedHost === "all" ? " selected" : ""}`);
   item.type = "button";
-  item.setAttribute("role", "option");
-  item.setAttribute("aria-selected", String(view.selectedHost === "all"));
+  item.dataset.host = "all";
+  if (view.selectedHost === "all") item.setAttribute("aria-current", "true");
   item.addEventListener("click", () => selectHost("all"));
   const main = create("div", "server-main");
   const identity = create("div", "server-main");
@@ -4060,7 +4161,13 @@ function renderServers() {
   [...view.fleetGroupCache.keys()].forEach((group) => {
     if (!visibleGroupKeys.has(group)) view.fleetGroupCache.delete(group);
   });
+  const focusedHost = document.activeElement?.closest?.(".server-item")?.dataset.host;
   reconcileChildren(elements.serverList, desired);
+  if (focusedHost && !document.activeElement?.isConnected) {
+    [...elements.serverList.querySelectorAll(".server-item")]
+      .find((item) => item.dataset.host === focusedHost)
+      ?.focus({ preventScroll: true });
+  }
 }
 
 function resourceTile(label, value, meta, usage = null, threshold = 101) {
@@ -4314,7 +4421,9 @@ function renderHeatmap() {
     if (!activeHosts.has(host)) view.heatmapCache.delete(host);
   });
   document.querySelectorAll(".heatmap-mode").forEach((button) => {
-    button.classList.toggle("active", button.dataset.heatMetric === view.heatMetric);
+    const selected = button.dataset.heatMetric === view.heatMetric;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
   });
   reconcileChildren(elements.heatmapGrid, [
     heatmapAxis(columns),
@@ -5099,6 +5208,8 @@ function openGpuDetail(server, gpu) {
 function tableRow(record, grouped = false) {
   const { server, gpu } = record;
   const row = document.createElement("tr");
+  row.dataset.host = server.host;
+  row.dataset.gpuId = String(gpu.uuid || gpu.index);
   const deviceCell = document.createElement("td");
   const device = create("div", "device-cell");
   device.append(create("span", "gpu-index", String(gpu.index)));
@@ -5147,17 +5258,16 @@ function tableRow(record, grouped = false) {
   const [status, statusClass] = gpuState(gpu, server);
   const pill = create("span", `state-pill ${statusClass}`);
   pill.append(create("i"), create("span", "", status));
-  statusCell.append(pill);
-  row.append(deviceCell, modelCell, utilCell, memoryCell, temperatureCell, powerCell, statusCell);
-  row.tabIndex = 0;
-  row.setAttribute("role", "button");
-  row.setAttribute("aria-label", `查看 ${server.host} GPU ${gpu.index} 的任务详情`);
-  row.addEventListener("click", () => openGpuDetail(server, gpu));
-  row.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    event.preventDefault();
+  const details = create("button", "gpu-detail-trigger", "详情");
+  details.type = "button";
+  details.setAttribute("aria-label", `查看 ${server.host} GPU ${gpu.index} 的任务详情`);
+  details.addEventListener("click", (event) => {
+    event.stopPropagation();
     openGpuDetail(server, gpu);
   });
+  statusCell.append(pill, details);
+  row.append(deviceCell, modelCell, utilCell, memoryCell, temperatureCell, powerCell, statusCell);
+  row.addEventListener("click", () => openGpuDetail(server, gpu));
   return row;
 }
 
@@ -5271,9 +5381,16 @@ function groupedRecords(records) {
 
 function gpuTable(records, grouped = false) {
   const table = create("table", "gpu-table gpu-table-body");
+  table.setAttribute("aria-label", grouped ? "主机 GPU 设备" : "GPU 设备");
+  const head = document.createElement("thead");
+  head.className = "sr-only";
+  const headingRow = document.createElement("tr");
+  ["设备", "型号 / 驱动", "GPU 负载", "显存", "温度", "功耗", "状态与操作"]
+    .forEach((label) => headingRow.append(create("th", "", label)));
+  head.append(headingRow);
   const body = document.createElement("tbody");
   body.replaceChildren(...records.map((record) => tableRow(record, grouped)));
-  table.append(body);
+  table.append(head, body);
   return table;
 }
 
@@ -5402,6 +5519,10 @@ function updateGroupToggle() {
 }
 
 function renderTable() {
+  const focusedRow = document.activeElement?.closest?.("tr[data-gpu-id]");
+  const focusedGpu = focusedRow
+    ? [focusedRow.dataset.host, focusedRow.dataset.gpuId]
+    : null;
   const records = filteredRecords();
   const selected = view.selectedHost === "all"
     ? null
@@ -5429,6 +5550,13 @@ function renderTable() {
       if (!activeHosts.has(host)) view.groupCache.delete(host);
     });
     reconcileChildren(elements.gpuGroups, groups.map(cachedGpuGroup));
+  }
+  if (focusedGpu && !document.activeElement?.isConnected) {
+    [...elements.gpuGroups.querySelectorAll("tr[data-gpu-id]")]
+      .find((row) => row.dataset.host === focusedGpu[0]
+        && row.dataset.gpuId === focusedGpu[1])
+      ?.querySelector(".gpu-detail-trigger")
+      ?.focus({ preventScroll: true });
   }
   updateGroupToggle();
   elements.emptyState.hidden = records.length !== 0;
@@ -5492,6 +5620,12 @@ async function fetchSnapshot() {
   const request = (async () => {
     try {
       const response = await fetch("/api/snapshot", { cache: "no-store" });
+      if (response.status === 403) {
+        view.authenticationFailed = true;
+        view.dashboardStarted = false;
+        setConnection("offline", "认证失败，请重新打开安装命令输出的链接");
+        return false;
+      }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const snapshot = await response.json();
       if (!acceptSnapshot(snapshot)) return true;
@@ -5579,7 +5713,81 @@ async function syncIncidents() {
   }
 }
 
+function acceptStreamFrame(frame, markLive) {
+  let eventName = "message";
+  const data = [];
+  frame.replaceAll("\r", "").split("\n").forEach((line) => {
+    if (line.startsWith("event:")) eventName = line.slice(6).trim();
+    else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  });
+  if (eventName === "heartbeat") {
+    view.lastEventAt = Date.now();
+    markLive();
+    return;
+  }
+  if (eventName !== "snapshot") return;
+  try {
+    if (!acceptSnapshot(JSON.parse(data.join("\n")))) return;
+    view.lastEventAt = Date.now();
+    markLive();
+    normalizeSelection();
+    scheduleRender();
+    syncIncidents();
+  } catch (_error) {
+    setConnection("offline", "数据异常");
+  }
+}
+
+function appendStreamChunk(buffer, chunk) {
+  // Normalize complete CRLF and lone-CR line endings while retaining a final
+  // CR until the next chunk arrives. This prevents a CR/LF split across two
+  // reads from becoming a false blank line or an unbounded partial frame.
+  return `${buffer}${chunk}`.replaceAll("\r\n", "\n").replace(/\r(?!$)/g, "\n");
+}
+
+async function connectAuthenticatedStream() {
+  while (view.dashboardStarted) {
+    try {
+      const response = await fetch("/api/events", {
+        headers: { Accept: "text/event-stream" },
+      });
+      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+      setConnection("live", "实时连接");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (view.dashboardStarted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer = appendStreamChunk(
+          buffer,
+          decoder.decode(value, { stream: true }),
+        );
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary >= 0) {
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          acceptStreamFrame(frame, () => setConnection("live", "实时连接"));
+          boundary = buffer.indexOf("\n\n");
+        }
+      }
+    } catch (_error) {
+      const reachable = await fetchSnapshot();
+      if (view.authenticationFailed) return;
+      setConnection(
+        reachable ? "delayed" : "offline",
+        reachable ? "轮询同步" : "服务不可达",
+      );
+    }
+    if (view.dashboardStarted) await wait(1200);
+  }
+}
+
 function connect() {
+  if (dashboardAccessToken) {
+    connectAuthenticatedStream();
+    return;
+  }
   const events = new EventSource("/api/events");
   const markLive = () => {
     if (view.connectionErrorTimer != null) {
@@ -5628,8 +5836,11 @@ function connect() {
 
 document.querySelectorAll(".filter").forEach((button) => {
   button.addEventListener("click", () => {
-    document.querySelectorAll(".filter").forEach((item) => item.classList.remove("active"));
-    button.classList.add("active");
+    document.querySelectorAll(".filter").forEach((item) => {
+      const selected = item === button;
+      item.classList.toggle("active", selected);
+      item.setAttribute("aria-pressed", String(selected));
+    });
     view.filter = button.dataset.filter;
     render();
   });
@@ -5995,6 +6206,7 @@ elements.groupToggle.addEventListener("click", () => {
 });
 
 setInterval(() => {
+  if (!view.dashboardStarted) return;
   if (view.snapshot) elements.lastSync.textContent = age(view.snapshot.lastPollCompletedAt);
   refreshRelativeTimes();
   renderConnectionStatus();
@@ -6009,7 +6221,31 @@ setInterval(() => {
 
 syncPreferenceControls();
 renderInventory();
-loadStoredBackground();
-fetchSnapshot();
-fetchTopology();
-connect();
+
+async function startDashboard() {
+  loadStoredBackground();
+  if (invalidDashboardAccessToken) {
+    setConnection("offline", "认证失败");
+    return;
+  }
+  try {
+    const response = await fetch("/api/meta", { cache: "no-store" });
+    if (response.ok) {
+      const meta = await response.json();
+      if (meta.authenticationRequired === true && !dashboardAccessToken) {
+        view.authenticationFailed = true;
+        setConnection("offline", "认证失败，请重新打开安装命令输出的链接");
+        return;
+      }
+    }
+  } catch (_error) {
+    // Snapshot/SSE reconnect logic owns transient reachability handling.
+  }
+  view.dashboardStarted = true;
+  await fetchSnapshot();
+  if (view.authenticationFailed) return;
+  fetchTopology();
+  connect();
+}
+
+startDashboard();

@@ -684,8 +684,9 @@ html[data-style="glass"] .metric-card.primary {
 .gpu-table td { height: 66px; padding: 10px 13px; border-top: 1px solid var(--line-soft); color: var(--text); font-size: 10px; vertical-align: middle; }
 .gpu-table tbody tr { transition: background 120ms ease; }
 .gpu-table tbody tr:hover { background: var(--surface-hover); }
-.gpu-table tbody tr[role="button"] { cursor: pointer; }
-.gpu-table tbody tr[role="button"]:focus-visible { outline: 1px solid rgba(120,148,255,.65); outline-offset: -2px; background: rgba(120,148,255,.06); }
+.gpu-table tbody tr { cursor: pointer; }
+.gpu-detail-trigger { margin-left: 8px; border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; color: var(--muted); background: transparent; font: inherit; cursor: pointer; }
+.gpu-detail-trigger:hover, .gpu-detail-trigger:focus-visible { color: var(--text); border-color: rgba(120,148,255,.55); outline: none; }
 body.hide-gpu-temperature .gpu-col-temperature,
 body.hide-gpu-power .gpu-col-power { display: none !important; }
 .gpu-groups { min-width: 900px; padding: 10px; }

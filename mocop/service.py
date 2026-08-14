@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import copy
+import logging
 import math
 import sys
 import threading
 import time
+import traceback
 import zlib
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -55,8 +57,48 @@ _MAX_RUNTIME_POLL_INTERVAL_SECONDS = 3600.0
 # identities (UUID churn) cannot grow per-identity telemetry without bound,
 # while briefly absent GPUs keep their displayable history.
 _MAX_GPU_IDENTITIES_PER_HOST = 256
+# Usage is intentionally conservative: a longer sample gap is not classified
+# as measured GPU activity.  This bound is independent of the *current* poll
+# setting so a later configuration change cannot rewrite historical rollups.
+_MAX_USAGE_SAMPLE_GAP_SECONDS = 60.0
 _HOST_HISTORY_VALUES = Struct("<12d")
 _GPU_HISTORY_VALUES = Struct("<i5d")
+_LOGGER = logging.getLogger(__name__)
+
+
+def _log_unexpected_collector_exception(scope: str, exc: BaseException) -> None:
+    """Log type and stack without echoing potentially secret exception text."""
+    stack = "\n".join(
+        f"{frame.filename}:{frame.lineno} in {frame.name}"
+        for frame in traceback.extract_tb(exc.__traceback__)
+    )
+    _LOGGER.error(
+        "Unexpected collector exception in %s (%s)\n%s",
+        scope,
+        type(exc).__name__,
+        stack,
+    )
+
+
+def _bounded_restored_gpu_keys(restored: LoadedTelemetry) -> set[tuple[str, str]]:
+    """Keep the most recently observed GPU identities for each restored host."""
+    latest: dict[tuple[str, str], str] = {}
+    for records in (restored.gpu_history, restored.process_events):
+        for key, points in records.items():
+            observed_at = max(
+                (str(point.get("observedAt", "")) for point in points), default=""
+            )
+            latest[key] = max(latest.get(key, ""), observed_at)
+    retained: set[tuple[str, str]] = set()
+    hosts = {host for host, _gpu_id in latest}
+    for host in hosts:
+        candidates = sorted(
+            (key for key in latest if key[0] == host),
+            key=lambda key: (latest[key], key[1]),
+            reverse=True,
+        )
+        retained.update(candidates[:_MAX_GPU_IDENTITIES_PER_HOST])
+    return retained
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +106,7 @@ class _ScheduledProbe:
     host: str
     started_at: float
     batch_id: int
+    incarnation: int
 
 
 @dataclass(slots=True)
@@ -233,6 +276,7 @@ class _GpuProcessTransition:
     name: str
     used_memory_mib: float | None
     workload: dict[str, object] | None
+    visible: bool = True
 
     @classmethod
     def from_dict(cls, event: dict[str, object]) -> _GpuProcessTransition:
@@ -246,6 +290,7 @@ class _GpuProcessTransition:
             name=str(event["name"]),
             used_memory_mib=_optional_float(event.get("usedMemoryMiB")),
             workload=dict(workload) if isinstance(workload, dict) else None,
+            visible=event.get("_visible") is not False,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -259,6 +304,11 @@ class _GpuProcessTransition:
             "usedMemoryMiB": self.used_memory_mib,
             "workload": dict(self.workload) if self.workload is not None else None,
         }
+
+    def persistence_dict(self) -> dict[str, object]:
+        value = self.to_dict()
+        value["_visible"] = self.visible
+        return value
 
 
 def _optional_float(value: object) -> float | None:
@@ -342,12 +392,15 @@ class StateStore:
     ) -> None:
         self._condition = threading.Condition()
         self._servers: dict[str, ServerState] = {}
+        self._host_incarnations: dict[str, int] = {}
+        self._next_host_incarnation = 1
         self._history: dict[str, deque[_HostHistoryPoint]] = {}
         self._gpu_history: dict[tuple[str, str], deque[_GpuHistoryPoint]] = {}
         self._process_events: dict[tuple[str, str], deque[_GpuProcessTransition]] = {}
         self._active_gpu_processes: dict[
             tuple[str, str], dict[tuple[int, str], GpuProcess]
         ] = {}
+        self._process_last_observed_at: dict[tuple[str, str], str] = {}
         # Per-host insertion-ordered map of GPU identities, oldest observation
         # first; bounds identity churn without dropping recent history.
         self._gpu_identities: dict[str, dict[str, None]] = {}
@@ -380,6 +433,7 @@ class StateStore:
         self._persistence = persistence or DisabledPersistence()
         self._persistence_enabled = self._persistence.is_enabled()
         restored_telemetry = restored or LoadedTelemetry({}, ())
+        retained_gpu_keys = _bounded_restored_gpu_keys(restored_telemetry)
         self._restored_history = dict(restored_telemetry.history)
         self._gpu_history = {
             key: deque(
@@ -387,6 +441,7 @@ class StateStore:
                 maxlen=history_points,
             )
             for key, points in restored_telemetry.gpu_history.items()
+            if key in retained_gpu_keys
         }
         self._process_events = {
             key: deque(
@@ -394,7 +449,27 @@ class StateStore:
                 maxlen=incident_history_points,
             )
             for key, points in restored_telemetry.process_events.items()
+            if key in retained_gpu_keys
         }
+        self._process_reconciliation_pending = set(self._process_events)
+        restored_latest = {
+            key: max(
+                (
+                    str(point.get("observedAt", ""))
+                    for point in (
+                        *restored_telemetry.gpu_history.get(key, ()),
+                        *restored_telemetry.process_events.get(key, ()),
+                    )
+                ),
+                default="",
+            )
+            for key in retained_gpu_keys
+        }
+        for host, gpu_id in sorted(
+            retained_gpu_keys,
+            key=lambda key: (key[0], restored_latest[key], key[1]),
+        ):
+            self._gpu_identities.setdefault(host, {})[gpu_id] = None
         self._process_event_points = incident_history_points
         self._incidents = IncidentTracker(
             selected_policy,
@@ -406,6 +481,16 @@ class StateStore:
         self._incident_actions = {
             (action.host, action.condition_key): action for action in incident_actions
         }
+        # Active incident state is intentionally not restored. A durable,
+        # generation-scoped action may nevertheless bind once to the first
+        # matching live condition after startup. Recovery consumes that
+        # allowance, so a later recurrence cannot inherit the old action.
+        self._startup_action_candidates = {
+            key
+            for key, action in self._incident_actions.items()
+            if action.incident_started_at is not None
+        }
+        self._startup_action_bindings: dict[tuple[str, str], str] = {}
         self._host_groups = dict(host_groups)
         self._display_names = dict(host_display_names)
         self._host_incident_overrides = host_incident_overrides
@@ -413,11 +498,41 @@ class StateStore:
         self._topology = topology
         self._incident_correlator = create_incident_correlator(topology)
         self._notifications = notifications or DisabledNotificationSink()
+        initial_persistence_status = self._persistence.status()
+        initial_notification_status = self._notifications.status()
+        self._adapter_statuses = (
+            initial_persistence_status,
+            initial_notification_status,
+        )
+        self._adapter_status_signature = (
+            repr(initial_persistence_status),
+            repr(initial_notification_status),
+        )
+        self._notification_event_incarnations: dict[int, int] = {}
+        self._notification_event_order: deque[int] = deque()
+        self._notification_event_capacity = max(1_024, incident_history_points * 4)
 
         def _notification_event_actionable(event) -> bool:
             with self._condition:
-                return event.host not in self._active_maintenance_locked() and not (
-                    self._condition_is_silenced_locked(event.host, event.condition.key)
+                if event.state == "resolved":
+                    # The worker independently requires a successfully delivered
+                    # open before sending a resolve, so preserve that pairing.
+                    return True
+                expected_incarnation = self._notification_event_incarnations.get(
+                    event.event_id
+                )
+                return (
+                    expected_incarnation is not None
+                    and self._host_incarnations.get(event.host) == expected_incarnation
+                    and self._incidents.has_active_condition(
+                        event.host, event.condition.key
+                    )
+                    and event.host not in self._active_maintenance_locked()
+                    and not (
+                        self._condition_is_silenced_locked(
+                            event.host, event.condition.key
+                        )
+                    )
                 )
 
         set_actionable_check = getattr(
@@ -443,6 +558,7 @@ class StateStore:
             removed_hosts = set(self._servers) - desired
             for host in removed_hosts:
                 del self._servers[host]
+                self._host_incarnations.pop(host, None)
                 self._history.pop(host, None)
                 changed = True
             if initial_inventory or removed_hosts:
@@ -458,6 +574,7 @@ class StateStore:
                     self._gpu_history,
                     self._process_events,
                     self._active_gpu_processes,
+                    self._process_last_observed_at,
                 ):
                     for key in tuple(records):
                         if stale(key[0]):
@@ -472,6 +589,11 @@ class StateStore:
                     for host, gpu_ids in self._process_inventory_initialized.items()
                     if not stale(host)
                 }
+                self._process_reconciliation_pending = {
+                    key
+                    for key in self._process_reconciliation_pending
+                    if not stale(key[0])
+                }
             if initial_inventory:
                 self._restored_history = {
                     host: points
@@ -482,6 +604,8 @@ class StateStore:
             for host in hosts:
                 if host not in self._servers:
                     self._servers[host] = ServerState(host=host)
+                    self._host_incarnations[host] = self._next_host_incarnation
+                    self._next_host_incarnation += 1
                     self._history[host] = deque(
                         (
                             _HostHistoryPoint.from_dict(point)
@@ -496,6 +620,10 @@ class StateStore:
             self._sync_tracker_revision_locked()
             if changed:
                 self._publish_locked()
+
+    def host_incarnation(self, host: str) -> int | None:
+        with self._condition:
+            return self._host_incarnations.get(host)
 
     def set_collector_error(self, message: str | None) -> None:
         with self._condition:
@@ -565,7 +693,17 @@ class StateStore:
             }
             if updated == self._incident_actions:
                 return
+            previous = self._incident_actions
             self._incident_actions = updated
+            retained = {
+                key for key, action in updated.items() if previous.get(key) == action
+            }
+            self._startup_action_candidates.intersection_update(retained)
+            self._startup_action_bindings = {
+                key: started_at
+                for key, started_at in self._startup_action_bindings.items()
+                if key in retained
+            }
             self._active_action_signature = self._incident_action_signature_locked()
             self._incident_revision += 1
             self._publish_locked()
@@ -624,6 +762,24 @@ class StateStore:
             self._incident_revision += 1
             self._publish_locked()
 
+    def reconfigure(self, config: MonitorConfig, hosts: tuple[str, ...] | None) -> None:
+        """Install one immutable config generation as an atomic state change."""
+        with self._condition:
+            self.set_poll_interval_seconds(config.poll_interval_seconds)
+            self.update_expected_gpu_counts(config.expected_gpu_counts)
+            self.set_maintenance_windows(config.maintenance_windows)
+            self.set_incident_actions(config.incident_actions)
+            self.set_incident_overrides(
+                config.host_incident_overrides,
+                config.group_incident_overrides,
+                config.host_groups,
+            )
+            self.set_host_groups(config.host_groups)
+            self.set_host_display_names(config.host_display_names())
+            self.set_topology(config.topology)
+            if hosts is not None:
+                self.set_hosts(hosts)
+
     def wait_for_schedule_change(self, timeout_seconds: float) -> bool:
         changed = self._schedule_changed.wait(max(0.0, timeout_seconds))
         if changed:
@@ -639,14 +795,15 @@ class StateStore:
                     state.polling = True
                     changed = True
             if changed:
-                self._snapshot_cache_key = None
+                self._publish_locked()
 
     def apply(
         self,
         result: ProbeResult,
         retry_after_seconds: float | None = None,
         poll_cycle_duration_seconds: float | None = None,
-    ) -> None:
+        expected_incarnation: int | None = None,
+    ) -> bool:
         history_point: _HostHistoryPoint | None = None
         gpu_history_points: tuple[tuple[str, _GpuHistoryPoint], ...] = ()
         process_events: tuple[_GpuProcessTransition, ...] = ()
@@ -659,12 +816,16 @@ class StateStore:
             if poll_cycle_duration_seconds is not None:
                 self._record_poll_cycle_locked(poll_cycle_duration_seconds)
             state = self._servers.get(result.host)
-            if state is None:
+            if state is None or (
+                expected_incarnation is not None
+                and self._host_incarnations.get(result.host) != expected_incarnation
+            ):
                 if poll_cycle_duration_seconds is not None:
                     self._publish_locked()
-                return
+                return False
             previous_incident_signature = self._incidents.active_signature(result.host)
             incident_events = self._incidents.update(result)
+            self._refresh_startup_action_bindings_locked(result)
             self._sync_tracker_revision_locked()
             if (
                 previous_incident_signature
@@ -687,7 +848,7 @@ class StateStore:
                 )
                 result = self._first_seen_annotated_locked(result)
             else:
-                self._invalidate_process_inventory_locked(result.host)
+                process_events = self._invalidate_process_inventory_locked(result.host)
             state.apply(result, next_retry_at=next_retry_at)
             if result.status == "online" and result.system is not None:
                 history_point = self._history_point(result)
@@ -704,6 +865,16 @@ class StateStore:
                     )
                 )
             if notification_events:
+                incarnation = self._host_incarnations[result.host]
+                for event in notification_events:
+                    self._notification_event_incarnations[event.event_id] = incarnation
+                    self._notification_event_order.append(event.event_id)
+                while (
+                    len(self._notification_event_order)
+                    > self._notification_event_capacity
+                ):
+                    expired_id = self._notification_event_order.popleft()
+                    self._notification_event_incarnations.pop(expired_id, None)
                 # The correlator consumes only actionable conditions, so this
                 # list carries the same maintenance/silence/acknowledge
                 # decoration as the incident views.
@@ -729,10 +900,11 @@ class StateStore:
             self._persistence.record_gpu_telemetry(
                 result.host,
                 tuple(point.to_dict(gpu_id) for gpu_id, point in gpu_history_points),
-                tuple(event.to_dict() for event in process_events),
+                tuple(event.persistence_dict() for event in process_events),
             )
         if notification_events:
             self._notifications.publish(notification_events, correlations)
+        return True
 
     def reschedule_retry(self, host: str, retry_after_seconds: float) -> None:
         """Publish a rebased retry deadline after the runtime cadence changes."""
@@ -794,7 +966,9 @@ class StateStore:
                 "pollIntervalSeconds": self._poll_interval_seconds,
                 "maxPoints": self._history_points,
                 "points": [point.to_dict(gpu_id) for point in list(points)[-limit:]],
-                "processEvents": [event.to_dict() for event in list(events)[-limit:]],
+                "processEvents": [event.to_dict() for event in events if event.visible][
+                    -limit:
+                ],
             }
 
     def usage(self, window_hours: int, owner_limit: int) -> dict[str, object]:
@@ -820,7 +994,6 @@ class StateStore:
                 key: list(points) for key, points in self._gpu_history.items()
             }
             busy_pct = self._thresholds.gpu_busy_pct
-            poll_interval = self._poll_interval_seconds
 
         now_epoch = now.timestamp()
         window_start = now_epoch - window_hours * 3600
@@ -859,22 +1032,27 @@ class StateStore:
                 earliest_data is None or point_epochs[0] < earliest_data
             ):
                 earliest_data = point_epochs[0]
-            self._classify_usage_intervals(
-                intervals, point_epochs, point_idle, poll_interval
-            )
             host = key[0]
+            by_owner: dict[str | None, list[_UsageInterval]] = {}
             for interval in intervals:
                 usage = owners.get(interval.owner)
                 if usage is None:
                     usage = _OwnerUsage()
                     owners[interval.owner] = usage
-                usage.gpu_seconds += interval.end - interval.start
-                usage.sampled_seconds += interval.sampled_seconds
-                usage.idle_seconds += interval.idle_seconds
                 usage.processes += 1
                 usage.hosts.add(host)
                 usage.gpus.add(key)
                 usage.kinds[interval.kind] = usage.kinds.get(interval.kind, 0) + 1
+                by_owner.setdefault(interval.owner, []).append(interval)
+            # Concurrent processes owned by the same principal on one GPU are
+            # one device-occupancy interval, not multiple billable GPU-hours.
+            for owner, owner_intervals in by_owner.items():
+                merged = self._merge_usage_intervals(owner_intervals)
+                self._classify_usage_intervals(merged, point_epochs, point_idle)
+                usage = owners[owner]
+                usage.gpu_seconds += sum(item.end - item.start for item in merged)
+                usage.sampled_seconds += sum(item.sampled_seconds for item in merged)
+                usage.idle_seconds += sum(item.idle_seconds for item in merged)
 
         ranked = sorted(
             owners.items(),
@@ -942,11 +1120,6 @@ class StateStore:
                 kind if isinstance(kind, str) and kind else "process",
             )
 
-        def workload_start(workload: dict[str, object] | None) -> float | None:
-            if not isinstance(workload, dict):
-                return None
-            return _epoch_seconds(workload.get("started_at"))
-
         intervals: list[_UsageInterval] = []
         dropped = 0
         earliest: float | None = None
@@ -985,14 +1158,9 @@ class StateStore:
             if opened is not None:
                 close(opened[0], observed, opened[1] or event.workload)
                 continue
-            # A stop without a visible start: the workload's own start time is
-            # the only trustworthy anchor; without one the record is dropped
-            # rather than guessed.
-            anchored_start = workload_start(event.workload)
-            if anchored_start is None:
-                dropped += 1
-                continue
-            close(anchored_start, observed, event.workload)
+            # Process start time is not a GPU-occupancy observation.  An
+            # unmatched stop therefore has no safe accounting anchor.
+            dropped += 1
 
         for process_key, (started, workload) in open_processes.items():
             # Only the live process table proves that an unmatched start is
@@ -1011,9 +1179,7 @@ class StateStore:
             if process_key in open_processes:
                 continue
             workload_dict = process.workload.to_dict() if process.workload else None
-            anchored_start = workload_start(workload_dict)
-            if anchored_start is None:
-                anchored_start = _epoch_seconds(process.first_seen_at)
+            anchored_start = _epoch_seconds(process.first_seen_at)
             if anchored_start is None:
                 dropped += 1
                 continue
@@ -1022,41 +1188,92 @@ class StateStore:
         return intervals, dropped, earliest
 
     @staticmethod
+    def _merge_usage_intervals(
+        intervals: list[_UsageInterval],
+    ) -> list[_UsageInterval]:
+        """Return the wall-clock union of one owner's intervals on one GPU."""
+        if not intervals:
+            return []
+        ordered = sorted(intervals, key=lambda item: (item.start, item.end))
+        merged = [
+            _UsageInterval(
+                ordered[0].start,
+                ordered[0].end,
+                ordered[0].owner,
+                ordered[0].kind,
+            )
+        ]
+        for interval in ordered[1:]:
+            previous = merged[-1]
+            if interval.start <= previous.end:
+                previous.end = max(previous.end, interval.end)
+                continue
+            merged.append(
+                _UsageInterval(
+                    interval.start,
+                    interval.end,
+                    interval.owner,
+                    interval.kind,
+                )
+            )
+        return merged
+
+    @staticmethod
     def _classify_usage_intervals(
         intervals: list[_UsageInterval],
         point_epochs: list[float],
         point_idle: list[bool | None],
-        poll_interval: float,
     ) -> None:
         """Split each interval into sampled idle/active seconds.
 
         Each consecutive utilization sample pair classifies the segment it
-        spans; gaps beyond four poll cycles (or one minute) stay unclassified
-        so an offline stretch cannot masquerade as measured activity.
+        spans. Gaps beyond one minute stay unclassified, independent of later
+        poll-setting changes. Prefix sums make each interval query logarithmic.
         """
         if len(point_epochs) < 2 or not intervals:
             return
-        max_segment = max(poll_interval * 4, 60.0)
+        # Sorting also makes live behavior match SQLite restoration after an
+        # NTP wall-clock correction.  Duplicate timestamps carry no duration.
+        samples = sorted(zip(point_epochs, point_idle, strict=True))
+        segment_starts: list[float] = []
+        segment_ends: list[float] = []
+        segment_idle: list[bool] = []
+        for position in range(len(samples) - 1):
+            segment_start, classification = samples[position]
+            segment_end = samples[position + 1][0]
+            if (
+                classification is None
+                or segment_end <= segment_start
+                or segment_end - segment_start > _MAX_USAGE_SAMPLE_GAP_SECONDS
+            ):
+                continue
+            segment_starts.append(segment_start)
+            segment_ends.append(segment_end)
+            segment_idle.append(classification)
+        sampled_prefix = [0.0]
+        idle_prefix = [0.0]
+        for start, end, idle in zip(
+            segment_starts, segment_ends, segment_idle, strict=True
+        ):
+            duration = end - start
+            sampled_prefix.append(sampled_prefix[-1] + duration)
+            idle_prefix.append(idle_prefix[-1] + (duration if idle else 0.0))
         for interval in intervals:
-            index = max(0, bisect_left(point_epochs, interval.start) - 1)
-            for position in range(index, len(point_epochs) - 1):
-                segment_start = point_epochs[position]
-                segment_end = point_epochs[position + 1]
-                if segment_start >= interval.end:
-                    break
-                if segment_end - segment_start > max_segment:
-                    continue
-                overlap_start = max(segment_start, interval.start)
-                overlap_end = min(segment_end, interval.end)
-                if overlap_end <= overlap_start:
-                    continue
-                classification = point_idle[position]
-                if classification is None:
-                    continue
-                duration = overlap_end - overlap_start
-                interval.sampled_seconds += duration
-                if classification:
-                    interval.idle_seconds += duration
+            start = bisect_right(segment_ends, interval.start)
+            end = bisect_left(segment_starts, interval.end)
+            if start >= end:
+                continue
+            sampled = sampled_prefix[end] - sampled_prefix[start]
+            idle = idle_prefix[end] - idle_prefix[start]
+            left_trim = max(0.0, interval.start - segment_starts[start])
+            right_trim = max(0.0, segment_ends[end - 1] - interval.end)
+            sampled -= left_trim + right_trim
+            if segment_idle[start]:
+                idle -= left_trim
+            if segment_idle[end - 1]:
+                idle -= right_trim
+            interval.sampled_seconds = max(0.0, sampled)
+            interval.idle_seconds = max(0.0, idle)
 
     def incidents(self, limit: int) -> dict[str, object]:
         with self._condition:
@@ -1094,6 +1311,16 @@ class StateStore:
             snapshot["version"] = self._incident_revision
             return copy.deepcopy(snapshot)
 
+    def has_active_incident(self, host: str, condition_key: str) -> bool:
+        """Return whether an action can bind to a currently active condition."""
+        with self._condition:
+            return self._incidents.has_active_condition(host, condition_key)
+
+    def active_incident_started_at(self, host: str, condition_key: str) -> str | None:
+        """Return the stable identity of the currently active condition."""
+        with self._condition:
+            return self._incidents.active_started_at(host, condition_key)
+
     def diagnostic_bundle(self, host: str | None = None) -> dict[str, object] | None:
         with self._condition:
             if host is not None and host not in self._servers:
@@ -1127,7 +1354,11 @@ class StateStore:
             if ready:
                 reason = None
             elif self._collector_error:
-                reason = "host discovery failed"
+                reason = (
+                    "host discovery failed"
+                    if self._collector_error.startswith("SSH host discovery")
+                    else "collector failed unexpectedly"
+                )
             elif discovered == 0:
                 reason = "no monitoring targets discovered"
             else:
@@ -1170,10 +1401,20 @@ class StateStore:
         self, after_version: int, timeout_seconds: float
     ) -> dict[str, object] | None:
         with self._condition:
-            if self._version <= after_version:
-                self._condition.wait_for(
-                    lambda: self._version > after_version, timeout=timeout_seconds
-                )
+            self._refresh_maintenance_expiry_locked()
+            self._refresh_incident_action_expiry_locked()
+            deadline = time.monotonic() + max(0.0, timeout_seconds)
+            while self._version <= after_version:
+                self._refresh_adapter_status_locked()
+                if self._version > after_version:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                # Adapters are deliberately decoupled from collection and do
+                # not call into StateStore. A short bounded poll still gives
+                # their queue/health transitions a revision and wakes SSE.
+                self._condition.wait(min(remaining, 0.25))
             if self._version <= after_version:
                 return None
             return self._snapshot_locked()
@@ -1217,6 +1458,8 @@ class StateStore:
             return
         self._active_maintenance_signature = signature
         self._incident_revision += 1
+        self._version += 1
+        self._condition.notify_all()
 
     def _active_incident_actions_locked(
         self, at: datetime | None = None
@@ -1232,13 +1475,14 @@ class StateStore:
 
     def _incident_action_signature_locked(
         self,
-    ) -> tuple[tuple[str, str, str, str], ...]:
+    ) -> tuple[tuple[str, str, str, str, str | None], ...]:
         return tuple(
             (
                 host,
                 condition_key,
                 action.action,
                 action.to_dict()["until"],
+                action.incident_started_at,
             )
             for (host, condition_key), action in sorted(
                 self._active_incident_actions_locked().items()
@@ -1253,10 +1497,63 @@ class StateStore:
             return
         self._active_action_signature = signature
         self._incident_revision += 1
+        self._version += 1
+        self._condition.notify_all()
 
     def _condition_is_silenced_locked(self, host: str, condition_key: str) -> bool:
         action = self._active_incident_actions_locked().get((host, condition_key))
-        return action is not None and action.action == "silenced"
+        return (
+            action is not None
+            and action.action == "silenced"
+            and self._incident_action_matches_locked(action, host, condition_key)
+        )
+
+    def _incident_action_matches_locked(
+        self, action: IncidentActionConfig, host: str, condition_key: str
+    ) -> bool:
+        if action.incident_started_at is None:
+            return True
+        key = (host, condition_key)
+        expected = self._startup_action_bindings.get(key, action.incident_started_at)
+        return expected == self._incidents.active_started_at(host, condition_key)
+
+    def _refresh_startup_action_bindings_locked(self, result: ProbeResult) -> None:
+        host = result.host
+        keys = {
+            key
+            for key in (
+                *self._startup_action_candidates,
+                *self._startup_action_bindings,
+            )
+            if key[0] == host
+        }
+        active_actions = self._active_incident_actions_locked()
+        for key in keys:
+            action = active_actions.get(key)
+            started_at = self._incidents.active_started_at(*key)
+            if action is None:
+                self._startup_action_candidates.discard(key)
+                self._startup_action_bindings.pop(key, None)
+            elif key in self._startup_action_candidates and started_at is not None:
+                self._startup_action_candidates.discard(key)
+                self._startup_action_bindings[key] = started_at
+            elif (
+                key in self._startup_action_candidates
+                and not self._incidents.has_pending_condition(*key)
+                and self._startup_action_condition_observed(result, key[1])
+            ):
+                # The first authoritative live sample was healthy for this
+                # condition. Fail open: do not let an action from before the
+                # restart suppress a later recurrence.
+                self._startup_action_candidates.discard(key)
+            elif key in self._startup_action_bindings and started_at is None:
+                self._startup_action_bindings.pop(key, None)
+
+    def _startup_action_condition_observed(
+        self, result: ProbeResult, condition_key: str
+    ) -> bool:
+        observed = getattr(self._incident_policy, "condition_observed", None)
+        return bool(observed is not None and observed(result, condition_key))
 
     def _decorate_incident_locked(
         self,
@@ -1280,6 +1577,10 @@ class StateStore:
         )
         window = maintenance.get(host)
         action = actions.get((host, condition_key))
+        if action is not None and not self._incident_action_matches_locked(
+            action, host, condition_key
+        ):
+            action = None
         item["maintenanceSilenced"] = window is not None
         item["silenced"] = window is not None or (
             action is not None and action.action == "silenced"
@@ -1329,6 +1630,9 @@ class StateStore:
                 gpu.power_draw_w,
             )
             gpu_history = self._gpu_history.get(key)
+            previous_gpu_observed_at = (
+                gpu_history[-1].observed_at if gpu_history else None
+            )
             if gpu_history is None:
                 gpu_history = deque(maxlen=self._history_points)
                 self._gpu_history[key] = gpu_history
@@ -1338,12 +1642,47 @@ class StateStore:
             if not gpu.processes_sampled:
                 continue
             if not gpu.processes_available:
+                unavailable_transitions = self._close_process_inventory_locked(
+                    key,
+                    gpu.index,
+                    self._process_last_observed_at.get(key),
+                )
+                if unavailable_transitions:
+                    unavailable_transitions = tuple(
+                        replace(event, visible=False)
+                        for event in unavailable_transitions
+                    )
+                    event_history = self._process_events.setdefault(
+                        key, deque(maxlen=self._process_event_points)
+                    )
+                    event_history.extend(unavailable_transitions)
+                    if captured_transitions is not None:
+                        captured_transitions.extend(unavailable_transitions)
                 initialized_gpu_ids.discard(gpu_id)
-                self._active_gpu_processes.pop(key, None)
                 continue
+            self._process_last_observed_at[key] = result.observed_at
             if not gpu.processes:
                 if gpu_id not in initialized_gpu_ids:
                     initialized_gpu_ids.add(gpu_id)
+                    initial_transitions = (
+                        self._reconcile_initial_processes_locked(
+                            key,
+                            gpu.index,
+                            {},
+                            result.observed_at,
+                            previous_gpu_observed_at,
+                        )
+                        if key in self._process_reconciliation_pending
+                        else ()
+                    )
+                    self._process_reconciliation_pending.discard(key)
+                    if initial_transitions:
+                        event_history = self._process_events.setdefault(
+                            key, deque(maxlen=self._process_event_points)
+                        )
+                        event_history.extend(initial_transitions)
+                        if captured_transitions is not None:
+                            captured_transitions.extend(initial_transitions)
                     continue
                 previous = self._active_gpu_processes.pop(key, None)
                 if not previous:
@@ -1386,6 +1725,34 @@ class StateStore:
             if gpu_id not in initialized_gpu_ids:
                 self._active_gpu_processes[key] = current
                 initialized_gpu_ids.add(gpu_id)
+                if key in self._process_reconciliation_pending:
+                    initial_transitions = self._reconcile_initial_processes_locked(
+                        key,
+                        gpu.index,
+                        current,
+                        result.observed_at,
+                        previous_gpu_observed_at,
+                    )
+                    self._process_reconciliation_pending.discard(key)
+                else:
+                    initial_transitions = tuple(
+                        self._process_transition(
+                            result.observed_at,
+                            gpu_id,
+                            gpu.index,
+                            "started",
+                            current[process_key],
+                            visible=False,
+                        )
+                        for process_key in sorted(current)
+                    )
+                if initial_transitions:
+                    event_history = self._process_events.setdefault(
+                        key, deque(maxlen=self._process_event_points)
+                    )
+                    event_history.extend(initial_transitions)
+                    if captured_transitions is not None:
+                        captured_transitions.extend(initial_transitions)
                 continue
             if not replaced_instances and current.keys() == previous.keys():
                 self._active_gpu_processes[key] = current
@@ -1445,9 +1812,11 @@ class StateStore:
             self._gpu_history.pop(evicted_key, None)
             self._process_events.pop(evicted_key, None)
             self._active_gpu_processes.pop(evicted_key, None)
+            self._process_last_observed_at.pop(evicted_key, None)
             initialized_gpu_ids.discard(evicted_gpu_id)
         for gpu_id in initialized_gpu_ids - observed_gpu_ids:
             self._active_gpu_processes.pop((result.host, gpu_id), None)
+            self._process_last_observed_at.pop((result.host, gpu_id), None)
         initialized_gpu_ids.intersection_update(observed_gpu_ids)
         if not initialized_gpu_ids:
             self._process_inventory_initialized.pop(result.host, None)
@@ -1455,9 +1824,93 @@ class StateStore:
             return (), ()
         return tuple(captured_points), tuple(captured_transitions or ())
 
-    def _invalidate_process_inventory_locked(self, host: str) -> None:
+    def _invalidate_process_inventory_locked(
+        self, host: str
+    ) -> tuple[_GpuProcessTransition, ...]:
+        """Close confirmed occupancy at its last successful process sample."""
+        transitions: list[_GpuProcessTransition] = []
         for gpu_id in self._process_inventory_initialized.pop(host, ()):
-            self._active_gpu_processes.pop((host, gpu_id), None)
+            key = (host, gpu_id)
+            history = self._gpu_history.get(key)
+            index = _GPU_HISTORY_VALUES.unpack(history[-1].values)[0] if history else 0
+            closed = self._close_process_inventory_locked(
+                key, int(index), self._process_last_observed_at.pop(key, None)
+            )
+            if closed:
+                closed = tuple(replace(event, visible=False) for event in closed)
+                self._process_events.setdefault(
+                    key, deque(maxlen=self._process_event_points)
+                ).extend(closed)
+                transitions.extend(closed)
+        return tuple(transitions)
+
+    def _close_process_inventory_locked(
+        self,
+        key: tuple[str, str],
+        gpu_index: int,
+        observed_at: str | None,
+    ) -> tuple[_GpuProcessTransition, ...]:
+        previous = self._active_gpu_processes.pop(key, None)
+        if not previous or observed_at is None:
+            return ()
+        return tuple(
+            self._process_transition(
+                observed_at,
+                key[1],
+                gpu_index,
+                "stopped",
+                previous[process_key],
+            )
+            for process_key in sorted(previous)
+        )
+
+    def _reconcile_initial_processes_locked(
+        self,
+        key: tuple[str, str],
+        gpu_index: int,
+        current: dict[tuple[int, str], GpuProcess],
+        observed_at: str,
+        previous_gpu_observed_at: str | None,
+    ) -> tuple[_GpuProcessTransition, ...]:
+        """Reconcile restored open transitions with the first live sample."""
+        open_events: dict[tuple[int, str], _GpuProcessTransition] = {}
+        for event in self._process_events.get(key, ()):
+            process_key = (event.pid, event.name)
+            if event.event == "started":
+                open_events[process_key] = event
+            else:
+                open_events.pop(process_key, None)
+
+        transitions: list[_GpuProcessTransition] = []
+        close_at = previous_gpu_observed_at or observed_at
+        for process_key, event in sorted(open_events.items()):
+            process = current.get(process_key)
+            if process is not None and self._transition_matches_process(event, process):
+                current[process_key] = replace(process, first_seen_at=event.observed_at)
+                continue
+            transitions.append(replace(event, observed_at=close_at, event="stopped"))
+        for process_key, process in sorted(current.items()):
+            event = open_events.get(process_key)
+            if event is not None and self._transition_matches_process(event, process):
+                continue
+            transitions.append(
+                self._process_transition(
+                    observed_at, key[1], gpu_index, "started", process
+                )
+            )
+        return tuple(transitions)
+
+    @staticmethod
+    def _transition_matches_process(
+        event: _GpuProcessTransition, process: GpuProcess
+    ) -> bool:
+        event_start = (
+            event.workload.get("started_at")
+            if isinstance(event.workload, dict)
+            else None
+        )
+        process_start = process.workload.started_at if process.workload else None
+        return not event_start or not process_start or event_start == process_start
 
     def _first_seen_annotated_locked(self, result: ProbeResult) -> ProbeResult:
         """Return the result with processes carrying their first-seen stamp."""
@@ -1505,6 +1958,8 @@ class StateStore:
         gpu_index: int,
         event: str,
         process: GpuProcess,
+        *,
+        visible: bool = True,
     ) -> _GpuProcessTransition:
         return _GpuProcessTransition(
             observed_at=observed_at,
@@ -1515,6 +1970,7 @@ class StateStore:
             name=process.name,
             used_memory_mib=process.used_memory_mib,
             workload=process.workload.to_dict() if process.workload else None,
+            visible=visible,
         )
 
     @staticmethod
@@ -1562,13 +2018,10 @@ class StateStore:
         )
 
     def _snapshot_locked(self) -> dict[str, object]:
-        persistence_status = self._persistence.status()
-        notification_status = self._notifications.status()
+        persistence_status, notification_status = self._refresh_adapter_status_locked()
         cache_key = (
             self._version,
             self._incident_revision,
-            repr(persistence_status),
-            repr(notification_status),
         )
         if cache_key == self._snapshot_cache_key and self._snapshot_cache is not None:
             return self._snapshot_cache
@@ -1723,6 +2176,21 @@ class StateStore:
         self._snapshot_cache = snapshot
         return snapshot
 
+    def _refresh_adapter_status_locked(
+        self,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        persistence_status = self._persistence.status()
+        notification_status = self._notifications.status()
+        signature = (repr(persistence_status), repr(notification_status))
+        if signature != self._adapter_status_signature:
+            self._adapter_status_signature = signature
+            self._adapter_statuses = (persistence_status, notification_status)
+            self._version += 1
+            self._snapshot_cache_key = None
+            self._snapshot_cache = None
+            self._condition.notify_all()
+        return self._adapter_statuses
+
 
 class MonitorService:
     def __init__(
@@ -1794,37 +2262,20 @@ class MonitorService:
     def update_config(self, config: MonitorConfig) -> None:
         """Atomically replace configuration used by future probes."""
         with self._config_update_lock:
+            try:
+                hosts: tuple[str, ...] | None = self._host_source.hosts(config)
+            except (OSError, ValueError):
+                hosts = None
             with self._config_lock:
+                self._state.reconfigure(config, hosts)
                 self._config = config
                 self._config_generation += 1
-            self._state.set_poll_interval_seconds(config.poll_interval_seconds)
-            self._state.update_expected_gpu_counts(config.expected_gpu_counts)
-            self._state.set_maintenance_windows(config.maintenance_windows)
-            self._state.set_incident_actions(config.incident_actions)
-            self._state.set_incident_overrides(
-                config.host_incident_overrides,
-                config.group_incident_overrides,
-                config.host_groups,
-            )
-            self._state.set_host_groups(config.host_groups)
-            self._state.set_host_display_names(config.host_display_names())
-            self._state.set_topology(config.topology)
-            try:
-                hosts = self._host_source.hosts(config)
-            except (OSError, ValueError):
-                pass
-            else:
-                self._state.set_hosts(hosts)
             self._state.notify_inventory_changed()
             self._scheduler_wakeup.set()
 
     def _config_snapshot(self) -> tuple[MonitorConfig, int]:
         with self._config_lock:
             return self._config, self._config_generation
-
-    def _config_is_current(self, generation: int) -> bool:
-        with self._config_lock:
-            return generation == self._config_generation
 
     def shutdown_timeout_seconds(self) -> float:
         """Return a bounded wait that covers every currently configured probe."""
@@ -1882,9 +2333,6 @@ class MonitorService:
                 "SSH host discovery failed; check the monitor configuration"
             )
             return
-        if not self._config_is_current(generation):
-            return
-
         if isinstance(self._probe, InventoryAwareResourceProbe):
             self._probe.retain_hosts(set(hosts))
         self._state.set_collector_error(None)
@@ -1910,7 +2358,6 @@ class MonitorService:
         due_hosts = tuple(
             host for host in hosts if self._next_probe_at.get(host, 0) <= now
         )
-        self._state.begin_poll(due_hosts)
         if not due_hosts:
             return
 
@@ -1918,20 +2365,38 @@ class MonitorService:
             max_workers=min(config.max_workers, len(due_hosts)),
             thread_name_prefix="gpu-probe",
         ) as pool:
-            futures = {
-                pool.submit(self._probe.probe, host, config): host for host in due_hosts
-            }
+            with self._config_lock:
+                if generation != self._config_generation:
+                    return
+                self._state.begin_poll(due_hosts)
+                futures = {
+                    pool.submit(self._probe.probe, host, config): (
+                        host,
+                        self._state.host_incarnation(host),
+                    )
+                    for host in due_hosts
+                }
             for future in as_completed(futures):
-                host = futures[future]
+                host, incarnation = futures[future]
                 try:
                     result = future.result()
-                except Exception:
+                except Exception as exc:
+                    _log_unexpected_collector_exception(host, exc)
+                    self._state.set_collector_error(
+                        "Resource collector encountered an internal probe failure; "
+                        "inspect service logs"
+                    )
                     result = ProbeResult(
                         host=host,
                         status="error",
                         latency_ms=0,
                         message="Unexpected collector error",
                     )
+                if (
+                    incarnation is None
+                    or self._state.host_incarnation(host) != incarnation
+                ):
+                    continue
                 if result.status == "online":
                     self._failure_counts.pop(host, None)
                     self._backoff_policies.pop(host, None)
@@ -1957,7 +2422,11 @@ class MonitorService:
                         config.retry_jitter_pct,
                     )
                     retry_after_seconds = delay
-                self._state.apply(result, retry_after_seconds=retry_after_seconds)
+                self._state.apply(
+                    result,
+                    retry_after_seconds=retry_after_seconds,
+                    expected_incarnation=incarnation,
+                )
 
     def run(self, stop_event: threading.Event) -> None:
         """Run independently paced host probes on one bounded worker pool."""
@@ -2056,7 +2525,12 @@ class MonitorService:
                     completed_at = time.monotonic()
                     try:
                         result = future.result()
-                    except Exception:
+                    except Exception as exc:
+                        _log_unexpected_collector_exception(scheduled.host, exc)
+                        self._state.set_collector_error(
+                            "Resource collector encountered an internal probe failure; "
+                            "inspect service logs"
+                        )
                         result = ProbeResult(
                             host=scheduled.host,
                             status="error",
@@ -2074,7 +2548,11 @@ class MonitorService:
                                 last_completed_batch_id = scheduled.batch_id
                             del batches[scheduled.batch_id]
 
-                    if scheduled.host in active_host_set:
+                    if (
+                        scheduled.host in active_host_set
+                        and self._state.host_incarnation(scheduled.host)
+                        == scheduled.incarnation
+                    ):
                         current_config, _ = self._config_snapshot()
                         if result.status == "online":
                             self._failure_counts.pop(scheduled.host, None)
@@ -2113,6 +2591,7 @@ class MonitorService:
                             result,
                             retry_after_seconds=retry_after_seconds,
                             poll_cycle_duration_seconds=batch_duration_seconds,
+                            expected_incarnation=scheduled.incarnation,
                         )
                     else:
                         if isinstance(self._probe, InventoryAwareResourceProbe):
@@ -2127,50 +2606,59 @@ class MonitorService:
                 # snapshot; drop this round's submissions and restart the loop,
                 # where the update's wakeup re-snapshots the config and the
                 # inventory branch rebuilds the active host set before probing.
-                if not self._config_is_current(generation):
-                    continue
-
-                available_workers = max(0, config.max_workers - len(in_flight))
-                if available_workers:
-                    due_hosts = tuple(
-                        item[2]
-                        for item in nsmallest(
-                            available_workers,
-                            (
-                                (self._next_probe_at.get(host, 0.0), order, host)
-                                for order, host in enumerate(active_hosts)
-                                if host not in in_flight_hosts
-                                and self._next_probe_at.get(host, 0.0) <= now
-                            ),
-                        )
-                    )
-                    if due_hosts:
-                        batch_id = next_batch_id
-                        next_batch_id += 1
-                        batch_started_at = time.monotonic()
-                        batches[batch_id] = _ProbeBatch(
-                            started_at=batch_started_at,
-                            remaining=len(due_hosts),
-                        )
-                        self._state.begin_poll(due_hosts)
-                        for host in due_hosts:
-                            in_flight_hosts.add(host)
-                            with self._probe_control_lock:
-                                self._runtime_in_flight.add(host)
-                                self._manual_probe_requests.discard(host)
-                            try:
-                                future = pool.submit(self._probe.probe, host, config)
-                            except Exception:
-                                in_flight_hosts.discard(host)
-                                with self._probe_control_lock:
-                                    self._runtime_in_flight.discard(host)
-                                raise
-                            in_flight[future] = _ScheduledProbe(
-                                host=host,
-                                started_at=batch_started_at,
-                                batch_id=batch_id,
+                with self._config_lock:
+                    if generation != self._config_generation:
+                        continue
+                    available_workers = max(0, config.max_workers - len(in_flight))
+                    if available_workers:
+                        due_hosts = tuple(
+                            item[2]
+                            for item in nsmallest(
+                                available_workers,
+                                (
+                                    (
+                                        self._next_probe_at.get(host, 0.0),
+                                        order,
+                                        host,
+                                    )
+                                    for order, host in enumerate(active_hosts)
+                                    if host not in in_flight_hosts
+                                    and self._next_probe_at.get(host, 0.0) <= now
+                                ),
                             )
-                            future.add_done_callback(self._wake_scheduler)
+                        )
+                        if due_hosts:
+                            batch_id = next_batch_id
+                            next_batch_id += 1
+                            batch_started_at = time.monotonic()
+                            batches[batch_id] = _ProbeBatch(
+                                started_at=batch_started_at,
+                                remaining=len(due_hosts),
+                            )
+                            self._state.begin_poll(due_hosts)
+                            for host in due_hosts:
+                                in_flight_hosts.add(host)
+                                with self._probe_control_lock:
+                                    self._runtime_in_flight.add(host)
+                                    self._manual_probe_requests.discard(host)
+                                try:
+                                    future = pool.submit(
+                                        self._probe.probe, host, config
+                                    )
+                                except Exception:
+                                    in_flight_hosts.discard(host)
+                                    with self._probe_control_lock:
+                                        self._runtime_in_flight.discard(host)
+                                    raise
+                                incarnation = self._state.host_incarnation(host)
+                                assert incarnation is not None
+                                in_flight[future] = _ScheduledProbe(
+                                    host=host,
+                                    started_at=batch_started_at,
+                                    batch_id=batch_id,
+                                    incarnation=incarnation,
+                                )
+                                future.add_done_callback(self._wake_scheduler)
 
                 wait_until = inventory_refresh_at
                 if len(in_flight) < config.max_workers:
@@ -2189,7 +2677,8 @@ class MonitorService:
                 if stop_event.is_set():
                     break
                 self._scheduler_wakeup.wait(wait_seconds)
-        except Exception:
+        except Exception as exc:
+            _log_unexpected_collector_exception("scheduler", exc)
             print("Unexpected collector scheduler failure", file=sys.stderr)
             self._state.set_collector_error(
                 "Resource collector failed unexpectedly; restart required"

@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 import unittest
+from contextlib import suppress
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -108,7 +109,13 @@ class _Inventory:
         return self.snapshot()
 
     def update_incident_action(
-        self, host, condition_key, action, duration_seconds, reason
+        self,
+        host,
+        condition_key,
+        action,
+        duration_seconds,
+        reason,
+        incident_started_at=None,
     ):
         self.incident_actions = [
             item
@@ -123,6 +130,7 @@ class _Inventory:
                     "action": action,
                     "until": "2030-08-10T00:00:00Z",
                     "reason": reason,
+                    "incident_started_at": incident_started_at,
                 }
             )
         return self.snapshot()
@@ -246,6 +254,78 @@ class WebTests(unittest.TestCase):
             time.sleep(0.02)
         self.assertTrue(fresh.state.dashboard_attended())
 
+    def test_bearer_capability_protects_private_api_without_ambient_cookie(
+        self,
+    ) -> None:
+        token = "A" * 43
+        protected = self.standalone_server(access_token=token)
+        base = f"http://127.0.0.1:{protected.server_port}"
+
+        # Static bootstrap and liveness stay available, while telemetry and
+        # operational surfaces are inaccessible to another local UID.
+        for path in ("/", "/healthz", "/readyz"):
+            with self.subTest(path=path):
+                self.assertIn(self.request_status(f"{base}{path}"), {200, 503})
+        for path in ("/api/snapshot", "/api/events", "/metrics"):
+            with self.subTest(path=path):
+                self.assert_json_error(
+                    Request(f"{base}{path}"), 403, "AUTHENTICATION_REQUIRED"
+                )
+        protected_fallbacks = (
+            ("POST", "/api/snapshot", b"{}"),
+            ("POST", "/api/unknown", b"{}"),
+            ("PUT", "/api/snapshot", None),
+            ("PATCH", "/api/snapshot", None),
+            ("DELETE", "/api/snapshot", None),
+            ("TRACE", "/api/snapshot", None),
+            ("CONNECT", "/api/snapshot", None),
+            ("PROPFIND", "/api/snapshot", None),
+            ("COPY", "/api/snapshot", None),
+            ("FOO", "/api/snapshot", None),
+        )
+        for method, path, data in protected_fallbacks:
+            with self.subTest(method=method, path=path):
+                self.assert_json_error(
+                    Request(f"{base}{path}", data=data, method=method),
+                    403,
+                    "AUTHENTICATION_REQUIRED",
+                )
+        marked = Request(
+            f"{base}/api/snapshot",
+            headers={"X-Monitor-Request": "dashboard"},
+        )
+        self.assert_json_error(marked, 403, "AUTHENTICATION_REQUIRED")
+        self.assertFalse(protected.state.dashboard_attended())
+
+        wrong = Request(
+            f"{base}/api/snapshot",
+            headers={"Authorization": "Bearer wrong-token-value-that-is-long-enough"},
+        )
+        self.assert_json_error(wrong, 403, "AUTHENTICATION_REQUIRED")
+
+        authenticated = Request(
+            f"{base}/api/snapshot",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Monitor-Request": "dashboard",
+            },
+        )
+        with urlopen(authenticated, timeout=2) as response:
+            self.assertEqual(response.status, 200)
+            self.assertIsNone(response.headers.get("Set-Cookie"))
+            self.assertIn("version", json.load(response))
+        self.assertTrue(protected.state.dashboard_attended())
+
+        authenticated_fallback = Request(
+            f"{base}/api/snapshot",
+            method="FOO",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        headers, _ = self.assert_json_error(
+            authenticated_fallback, 405, "METHOD_NOT_ALLOWED"
+        )
+        self.assertEqual(headers["Allow"], "GET, HEAD")
+
     def standalone_server(self, **kwargs) -> MonitorHttpServer:
         server, thread = serve_in_thread("127.0.0.1", 0, StateStore(5), **kwargs)
         self.addCleanup(thread.join, 2)
@@ -315,6 +395,15 @@ class WebTests(unittest.TestCase):
         self.assertIsNot(first, changed)
         self.assertNotEqual(first, changed)
 
+    def test_metrics_serialization_is_reused_per_state_revision(self) -> None:
+        first = self.server.metrics_payload(self.state.snapshot())
+        repeated = self.server.metrics_payload(self.state.snapshot())
+
+        self.assertIs(first, repeated)
+        self.state.set_hosts(("gpu-01",))
+        changed = self.server.metrics_payload(self.state.snapshot())
+        self.assertIsNot(first, changed)
+
     def test_sse_frames_are_cached_per_state_revision(self) -> None:
         frame = self.server.snapshot_frame(self.state.snapshot())
         payload = self.server.snapshot_payload(self.state.snapshot())
@@ -329,8 +418,7 @@ class WebTests(unittest.TestCase):
         self.assertNotEqual(frame, changed)
 
     def test_pure_read_paths_prefer_the_state_snapshot_view(self) -> None:
-        # snapshot_view() is being introduced by the service layer in
-        # parallel; web must pick it up when present and fall back otherwise.
+        # Web serialization must use the cached read-only projection.
         calls = []
         baseline = self.state.snapshot
 
@@ -571,7 +659,7 @@ class WebTests(unittest.TestCase):
             meta = json.load(response)
 
         self.assertEqual(response.status, 200)
-        self.assertEqual(meta["apiVersion"], "1")
+        self.assertEqual(meta["apiVersion"], "2")
         self.assertEqual(meta["appVersion"], "0.8.0")
         self.assertEqual(meta["schemaVersion"], 1)
         self.assertEqual(
@@ -828,11 +916,24 @@ class WebTests(unittest.TestCase):
     def test_condition_action_and_manual_probe_are_same_origin_bounded_writes(
         self,
     ) -> None:
+        self.state.set_hosts(("gpu-01",))
+        self.state.apply(
+            ProbeResult(
+                "gpu-01",
+                "unreachable",
+                1,
+                (),
+                message="SSH failed",
+            )
+        )
         action_request = self.poll_interval_request(
             json.dumps(
                 {
                     "host": "gpu-01",
                     "conditionKey": "connectivity",
+                    "incidentStartedAt": self.state.active_incident_started_at(
+                        "gpu-01", "connectivity"
+                    ),
                     "action": "acknowledged",
                     "durationSeconds": 3600,
                     "reason": "owner notified",
@@ -860,6 +961,25 @@ class WebTests(unittest.TestCase):
             fetch_site="cross-site",
         )
         self.assert_http_error(cross_origin, 403)
+
+    def test_rejects_incident_actions_for_future_inactive_conditions(self) -> None:
+        request = self.poll_interval_request(
+            json.dumps(
+                {
+                    "host": "gpu-01",
+                    "conditionKey": "gpu_temperature:GPU-future",
+                    "incidentStartedAt": "2026-08-14T00:00:00Z",
+                    "action": "silenced",
+                    "durationSeconds": 604800,
+                    "reason": "future maintenance",
+                }
+            ).encode(),
+            origin=self.base,
+            path="/api/settings/incident-action",
+        )
+
+        self.assert_json_error(request, 409, "INCIDENT_NOT_ACTIVE")
+        self.assertEqual(self.inventory.incident_actions, [])
 
     def test_rate_limited_probe_reports_retry_after_and_code(self) -> None:
         self.probe_control.responses["gpu-01"] = {
@@ -1465,6 +1585,28 @@ class WebTests(unittest.TestCase):
             retried = json.load(response)
         self.assertEqual(retried["transportRetries"], 3)
 
+    def test_ipv6_literal_binds_and_serves_health_when_available(self) -> None:
+        capability = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            capability.bind(("::1", 0))
+        except OSError as exc:
+            self.skipTest(f"IPv6 loopback is unavailable: {exc}")
+        finally:
+            capability.close()
+
+        server, thread = serve_in_thread("::1", 0, StateStore(5))
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        connection = http.client.HTTPConnection("::1", server.server_port, timeout=2)
+        self.addCleanup(connection.close)
+        connection.request("GET", "/healthz")
+        response = connection.getresponse()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.read())["status"], "ok")
+
     def test_sse_clients_beyond_the_limit_get_503(self) -> None:
         with patch.object(MonitorHttpServer, "max_sse_clients", 1):
             server = self.standalone_server()
@@ -1476,6 +1618,20 @@ class WebTests(unittest.TestCase):
             second = self.open_event_stream(server.server_port)
             rejected = self.read_until(second, b"too many event stream clients")
             self.assertIn(b"503", rejected.split(b"\r\n", 1)[0])
+
+    def test_sse_emits_one_consistent_connection_header(self) -> None:
+        sock = socket.create_connection(
+            ("127.0.0.1", self.server.server_port), timeout=5
+        )
+        self.addCleanup(sock.close)
+        sock.sendall(
+            b"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+
+        headers = self.read_until(sock, b"\r\n\r\n").split(b"\r\n\r\n", 1)[0]
+
+        self.assertEqual(headers.lower().count(b"\r\nconnection:"), 1)
+        self.assertIn(b"\r\nConnection: close\r\n", headers + b"\r\n")
 
     def test_connections_beyond_the_limit_get_503(self) -> None:
         with patch.object(MonitorHttpServer, "max_concurrent_connections", 1):
@@ -1518,6 +1674,123 @@ class WebTests(unittest.TestCase):
 
             # The idle keep-alive socket must be dropped by the read timeout.
             self.read_to_eof(sock)
+
+    def test_request_headers_have_an_absolute_deadline(self) -> None:
+        with patch.object(MonitorRequestHandler, "request_deadline_seconds", 0.2):
+            server = self.standalone_server()
+            sock = socket.create_connection(
+                ("127.0.0.1", server.server_port), timeout=2
+            )
+            self.addCleanup(sock.close)
+            fragments = (
+                b"GET /healthz HTTP/1.1\r\n",
+                b"Host: 127.0.0.1\r\n",
+                b"X-Slow: one",
+                b" two",
+                b" three\r\n\r\n",
+            )
+            for fragment in fragments:
+                with suppress(OSError):
+                    sock.sendall(fragment)
+                time.sleep(0.07)
+
+            response = self.read_to_eof(sock)
+            self.assertNotIn(b"200 OK", response)
+
+    def test_http11_requires_one_valid_host_and_origin_form(self) -> None:
+        cases = (
+            b"GET /healthz HTTP/1.1\r\n\r\n",
+            b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nHost: localhost\r\n\r\n",
+            b"GET /healthz HTTP/1.1\r\nHost: bad/path\r\n\r\n",
+            b"GET http://attacker.example/healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )
+        for request in cases:
+            with self.subTest(request=request):
+                sock = socket.create_connection(
+                    ("127.0.0.1", self.server.server_port), timeout=2
+                )
+                self.addCleanup(sock.close)
+                sock.sendall(request)
+                response = self.read_until(sock, b"\r\n\r\n")
+                self.assertIn(b"400", response.split(b"\r\n", 1)[0])
+
+    def test_posts_reject_ambiguous_http_framing(self) -> None:
+        headers = b"Host: 127.0.0.1\r\nContent-Type: application/json\r\n"
+        cases = (
+            headers + b"Transfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n{}",
+            headers + b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
+            headers + b"Content-Length: +2\r\n\r\n{}",
+        )
+        for framing in cases:
+            with self.subTest(framing=framing):
+                sock = socket.create_connection(
+                    ("127.0.0.1", self.server.server_port), timeout=2
+                )
+                self.addCleanup(sock.close)
+                sock.sendall(b"POST /api/notifications/test HTTP/1.1\r\n" + framing)
+                response = self.read_until(sock, b"INVALID_REQUEST_FRAMING")
+                self.assertIn(b"400", response.split(b"\r\n", 1)[0])
+                self.assertIn(b"INVALID_REQUEST_FRAMING", response)
+
+    def test_extreme_content_length_is_rejected_without_integer_conversion(
+        self,
+    ) -> None:
+        huge = b"9" * 5000
+        for request, status in (
+            (
+                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                + b"Content-Length: "
+                + huge
+                + b"\r\n\r\n",
+                b"400",
+            ),
+            (
+                b"POST /api/notifications/test HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\nContent-Type: application/json\r\n"
+                b"Origin: http://127.0.0.1\r\nX-Monitor-Request: dashboard\r\n"
+                b"Content-Length: " + huge + b"\r\n\r\n",
+                b"413",
+            ),
+        ):
+            with self.subTest(status=status):
+                sock = socket.create_connection(
+                    ("127.0.0.1", self.server.server_port), timeout=2
+                )
+                self.addCleanup(sock.close)
+                sock.sendall(request)
+                response = self.read_until(sock, b"\r\n\r\n")
+                self.assertIn(status, response.split(b"\r\n", 1)[0])
+
+    def test_unsupported_api_methods_use_the_json_405_contract(self) -> None:
+        for method in (
+            "PUT",
+            "PATCH",
+            "DELETE",
+            "TRACE",
+            "CONNECT",
+            "PROPFIND",
+            "COPY",
+            "FOO",
+        ):
+            with self.subTest(method=method):
+                connection = self.open_connection(self.server.server_port)
+                connection.request(method, "/api/snapshot")
+                response = connection.getresponse()
+                payload = json.load(response)
+                self.assertEqual(response.status, 405)
+                self.assertEqual(
+                    response.getheader("Content-Type"),
+                    "application/json; charset=utf-8",
+                )
+                self.assertEqual(response.getheader("Allow"), "GET, HEAD")
+                self.assertEqual(payload["code"], "METHOD_NOT_ALLOWED")
+
+        connection = self.open_connection(self.server.server_port)
+        connection.request("FOO", "/api/unknown")
+        response = connection.getresponse()
+        payload = json.load(response)
+        self.assertEqual(response.status, 404)
+        self.assertEqual(payload["code"], "NOT_FOUND")
 
     def test_rejects_request_bodies_on_bodyless_methods(self) -> None:
         port = self.server.server_port
@@ -1590,6 +1863,7 @@ class WebTests(unittest.TestCase):
                 {
                     "host": "gpu-01",
                     "conditionKey": "connectivity",
+                    "incidentStartedAt": None,
                     "action": ["acknowledged"],
                     "durationSeconds": 3600,
                     "reason": "",
@@ -1652,6 +1926,30 @@ class WebTests(unittest.TestCase):
         missing = conn.getresponse()
         self.assertEqual(missing.status, 404)
         self.assertEqual(missing.read(), b"")
+
+    def test_head_state_does_not_suppress_a_later_post_response(self) -> None:
+        connection = self.open_connection(self.server.server_port)
+        connection.request("HEAD", "/healthz")
+        head = connection.getresponse()
+        self.assertEqual(head.status, 200)
+        self.assertEqual(head.read(), b"")
+
+        body = b'{"pollIntervalSeconds":10}'
+        connection.request(
+            "POST",
+            "/api/settings/poll-interval",
+            body=body,
+            headers={
+                "Content-Type": "application/json",
+                "Origin": self.base,
+                "X-Monitor-Request": "dashboard",
+            },
+        )
+        response = connection.getresponse()
+        payload = json.load(response)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["pollIntervalSeconds"], 10)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mocop.__main__ import _arguments, main
+from mocop.config import load_config
 from mocop.lifecycle import LifecycleError
 from mocop.models import ProbeResult
 
@@ -60,6 +61,31 @@ class CliTests(unittest.TestCase):
         args = _arguments(["--managed-service"])
 
         self.assertTrue(args.managed_service)
+
+    def test_foreground_http_server_receives_an_ephemeral_access_token(self) -> None:
+        config_path = write_config(self.root / "config.json")
+        observed = {}
+
+        def refuse_bind(*_args, **kwargs):
+            observed["token"] = kwargs.get("access_token")
+            raise OSError("test bind stop")
+
+        with (
+            patch("mocop.__main__.MonitorHttpServer", side_effect=refuse_bind),
+            redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(main(["--config", str(config_path)]), 1)
+
+        token = observed["token"]
+        self.assertIsInstance(token, str)
+        self.assertGreaterEqual(len(token), 32)
+
+    def test_global_config_is_not_overwritten_by_subcommand_defaults(self) -> None:
+        before = _arguments(["--config", "/tmp/global.json", "doctor"])
+        after = _arguments(["doctor", "--config", "/tmp/local.json"])
+
+        self.assertEqual(before.config, Path("/tmp/global.json"))
+        self.assertEqual(after.config, Path("/tmp/local.json"))
 
     def test_strict_requires_once(self) -> None:
         stderr = io.StringIO()
@@ -237,13 +263,16 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIn("Configuration error", stderr.getvalue())
 
+    @patch("mocop.__main__.read_access_token", return_value="A" * 43)
     @patch("mocop.__main__.UserServiceManager")
     def test_install_verifies_activation_and_prints_dashboard(
-        self, manager_cls
+        self, manager_cls, _read_token
     ) -> None:
         config_path = write_config(self.root / "config.json")
         manager = manager_cls.return_value
+        manager.install.return_value = load_config(config_path)
         manager.wait_until_active.return_value = True
+        manager.wait_until_healthy.return_value = True
         manager.unit_path = Path("/tmp/systemd/mocop.service")
 
         stdout = io.StringIO()
@@ -253,6 +282,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         manager.install.assert_called_once()
         manager.wait_until_active.assert_called_once()
+        manager.wait_until_healthy.assert_called_once()
         output = stdout.getvalue()
         self.assertIn("Installed and started /tmp/systemd/mocop.service", output)
         self.assertIn("Dashboard: http://127.0.0.1:8787", output)
@@ -262,6 +292,7 @@ class CliTests(unittest.TestCase):
     def test_install_timeout_prints_status_hint_not_success(self, manager_cls) -> None:
         config_path = write_config(self.root / "config.json")
         manager = manager_cls.return_value
+        manager.install.return_value = load_config(config_path)
         manager.wait_until_active.return_value = False
         manager.unit_path = Path("/tmp/systemd/mocop.service")
 
@@ -269,13 +300,32 @@ class CliTests(unittest.TestCase):
         with redirect_stdout(stdout):
             result = main(["service", "install", "--config", str(config_path)])
 
-        self.assertEqual(result, 0)
+        self.assertEqual(result, 1)
         output = stdout.getvalue()
         self.assertNotIn("Installed and started", output)
         self.assertNotIn("Dashboard:", output)
-        self.assertIn("not active yet", output)
+        manager.rollback_install.assert_called_once()
+        self.assertIn("previous unit was restored", output)
         self.assertIn("systemctl --user status mocop", output)
         self.assertIn("Logs: journalctl --user -u mocop -f", output)
+
+    @patch("mocop.__main__.read_access_token")
+    @patch("mocop.__main__.UserServiceManager")
+    def test_install_verification_failure_rolls_back_before_commit(
+        self, manager_cls, read_token
+    ) -> None:
+        config_path = write_config(self.root / "config.json")
+        manager = manager_cls.return_value
+        manager.install.return_value = load_config(config_path)
+        manager.wait_until_active.return_value = True
+        read_token.side_effect = LifecycleError("token disappeared")
+
+        with redirect_stderr(io.StringIO()):
+            result = main(["service", "install", "--config", str(config_path)])
+
+        self.assertEqual(result, 2)
+        manager.rollback_install.assert_called_once()
+        manager.commit_install.assert_not_called()
 
 
 if __name__ == "__main__":

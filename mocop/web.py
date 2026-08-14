@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import socket
@@ -30,7 +31,11 @@ from .inventory import (
     InventoryError,
     InventoryRequestError,
 )
-from .metrics import OPENMETRICS_CONTENT_TYPE, render_openmetrics
+from .metrics import (
+    OPENMETRICS_CONTENT_TYPE,
+    OpenMetricsLimitError,
+    render_openmetrics,
+)
 from .service import ProbeControl, StateStore
 
 _STATIC_ROOT = Path(__file__).with_name("static")
@@ -55,24 +60,24 @@ _COLLECTOR_SETTINGS_KEYS = {
     "probeTimeoutSeconds",
     "maxWorkers",
 }
-_API_VERSION = "1"
+_API_VERSION = "2"
 _API_SCHEMA_VERSION = 1
 # Single source of truth for the HTTP API surface. `/api/meta` serializes this
 # manifest and the JSON 404/405 fallbacks consult it, so a route change must
 # land here to stay visible; tests compare it against live routing behavior.
-# Access levels: listener = open read, reader = dashboard-marked read,
-# writer = same-origin dashboard write.
+# Access levels: public = unauthenticated health, authenticated = bearer read,
+# reader = bearer plus dashboard marker, writer = bearer same-origin write.
 API_ROUTES: tuple[tuple[str, str, str], ...] = (
-    ("GET", "/api/snapshot", "listener"),
-    ("GET", "/api/events", "listener"),
-    ("GET", "/api/history", "listener"),
-    ("GET", "/api/usage", "listener"),
-    ("GET", "/api/incidents", "listener"),
-    ("GET", "/api/meta", "listener"),
-    ("GET", "/api/service", "listener"),
-    ("GET", "/healthz", "listener"),
-    ("GET", "/readyz", "listener"),
-    ("GET", "/metrics", "listener"),
+    ("GET", "/api/snapshot", "authenticated"),
+    ("GET", "/api/events", "authenticated"),
+    ("GET", "/api/history", "authenticated"),
+    ("GET", "/api/usage", "authenticated"),
+    ("GET", "/api/incidents", "authenticated"),
+    ("GET", "/api/meta", "public"),
+    ("GET", "/api/service", "authenticated"),
+    ("GET", "/healthz", "public"),
+    ("GET", "/readyz", "public"),
+    ("GET", "/metrics", "authenticated"),
     ("GET", "/api/gpu-history", "reader"),
     ("GET", "/api/diagnostics", "reader"),
     ("GET", "/api/inventory", "reader"),
@@ -194,12 +199,20 @@ class MonitorHttpServer(ThreadingHTTPServer):
         probe_control: ProbeControl | None = None,
         *,
         trusted_hosts: Iterable[str] | None = None,
+        access_token: str | None = None,
     ) -> None:
+        try:
+            socket.inet_pton(socket.AF_INET6, address[0].split("%", 1)[0])
+        except OSError:
+            self.address_family = socket.AF_INET
+        else:
+            self.address_family = socket.AF_INET6
         self.state = state
         self.inventory = inventory
         self.restart = restart
         self.probe_control = probe_control
         self.trusted_hostnames = _trusted_hostnames(address[0], trusted_hosts)
+        self.access_token = access_token
         self.shutdown_event = threading.Event()
         self._connection_slots = threading.BoundedSemaphore(
             self.max_concurrent_connections
@@ -209,6 +222,8 @@ class MonitorHttpServer(ThreadingHTTPServer):
         self._snapshot_cache_key: tuple[object, ...] | None = None
         self._snapshot_cache_payload = b""
         self._snapshot_cache_frame = b""
+        self._metrics_cache_key: tuple[object, ...] | None = None
+        self._metrics_cache_payload = b""
         super().__init__(address, MonitorRequestHandler)
 
     def process_request(
@@ -270,6 +285,19 @@ class MonitorHttpServer(ThreadingHTTPServer):
     def snapshot_frame(self, snapshot: dict[str, object]) -> bytes:
         return self._snapshot_cache(snapshot)[1]
 
+    def metrics_payload(self, snapshot: dict[str, object]) -> bytes:
+        key = (
+            snapshot.get("version"),
+            snapshot.get("incidentVersion"),
+            repr(snapshot.get("persistence")),
+            repr(snapshot.get("notifications")),
+        )
+        with self._snapshot_cache_lock:
+            if key != self._metrics_cache_key:
+                self._metrics_cache_payload = render_openmetrics(snapshot)
+                self._metrics_cache_key = key
+            return self._metrics_cache_payload
+
     def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
         """Ignore expected client disconnects while preserving real server errors."""
         error = sys.exc_info()[1]
@@ -289,7 +317,85 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     # Socket read/write deadline: stalled or half-open clients must release
     # their worker thread instead of holding it forever.
     timeout = 60.0
+    # Unlike the socket's inactivity timeout, this deadline cannot be reset by
+    # a slow client sending one byte at a time.
+    request_deadline_seconds = 15.0
     _head_only = False
+
+    def send_error(
+        self,
+        code: int,
+        message: str | None = None,
+        explain: str | None = None,
+    ) -> None:
+        """Route every otherwise-unimplemented method through API policy.
+
+        ``BaseHTTPRequestHandler`` normally emits an unauthenticated HTML 501
+        before a ``do_*`` method can run. Intercept only that dispatcher case;
+        the fallback then applies authentication and the stable JSON 404/405
+        contract for API-family paths while retaining HTML for static paths.
+        """
+        if code == HTTPStatus.NOT_IMPLEMENTED and getattr(self, "command", ""):
+            self._unsupported_method(self.command)
+            return
+        super().send_error(code, message, explain)
+
+    def _abort_request_at_deadline(self) -> None:
+        self.close_connection = True
+        with suppress(OSError):
+            self.connection.shutdown(socket.SHUT_RDWR)
+
+    def _cancel_header_deadline(self) -> None:
+        timer = getattr(self, "_header_deadline_timer", None)
+        if timer is not None:
+            timer.cancel()
+            if timer is not threading.current_thread():
+                timer.join()
+            self._header_deadline_timer = None
+
+    def handle_one_request(self) -> None:
+        """Bound request-line and header parsing by one absolute deadline."""
+        self._head_only = False
+        self._request_deadline = time.monotonic() + self.request_deadline_seconds
+        timer = threading.Timer(
+            self.request_deadline_seconds, self._abort_request_at_deadline
+        )
+        timer.daemon = True
+        self._header_deadline_timer = timer
+        timer.start()
+        try:
+            super().handle_one_request()
+        finally:
+            self._cancel_header_deadline()
+
+    def parse_request(self) -> bool:
+        parsed = super().parse_request()
+        if not parsed:
+            self._cancel_header_deadline()
+            return False
+        host_values = self.headers.get_all("Host") or []
+        host_required = self.request_version == "HTTP/1.1"
+        invalid_host = (
+            (host_required and len(host_values) != 1)
+            or len(host_values) > 1
+            or (
+                bool(host_values)
+                and normalize_web_hostname(host_values[0], allow_port=True) is None
+            )
+        )
+        absolute_target = not self.path.startswith("/") and self.path != "*"
+        if invalid_host or absolute_target:
+            self._head_only = self.command == "HEAD"
+            self.close_connection = True
+            self._send_error(
+                "invalid HTTP request authority",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_REQUEST_AUTHORITY",
+            )
+            self._cancel_header_deadline()
+            return False
+        self._cancel_header_deadline()
+        return True
 
     def version_string(self) -> str:
         return self.server_version
@@ -299,14 +405,8 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         return self.server  # type: ignore[return-value]
 
     def _read_only_snapshot(self) -> dict[str, object]:
-        """State projection for pure serialization; never mutated by callers.
-
-        The service layer is introducing StateStore.snapshot_view() (a
-        read-only reference to the internal cached projection) in parallel;
-        fall back to the deep-copying snapshot() until it exists.
-        """
-        state = self.monitor_server.state
-        return getattr(state, "snapshot_view", state.snapshot)()
+        """Return the cached read-only state projection for serialization."""
+        return self.monitor_server.state.snapshot_view()
 
     def _split_request_target(self) -> SplitResult | None:
         """Parse the request target, mapping malformed URLs to a JSON 400."""
@@ -321,6 +421,34 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             )
             return None
 
+    def _has_bearer_token(self) -> bool:
+        """Authenticate a bootstrap request without accepting ambiguity."""
+        expected = self.monitor_server.access_token
+        if expected is None:
+            return True
+        values = self.headers.get_all("Authorization") or []
+        if len(values) != 1 or not values[0].startswith("Bearer "):
+            return False
+        candidate = values[0][len("Bearer ") :]
+        return hmac.compare_digest(candidate, expected)
+
+    def _require_authentication(self, path: str) -> bool:
+        """Protect every non-health API surface from other local users."""
+        if self.monitor_server.access_token is None:
+            return True
+        if path in {"/healthz", "/readyz", "/api/meta"}:
+            return True
+        if not (_is_api_family_path(path) or path == "/metrics"):
+            return True
+        if self._has_bearer_token():
+            return True
+        self._send_error(
+            "dashboard authentication required",
+            HTTPStatus.FORBIDDEN,
+            code="AUTHENTICATION_REQUIRED",
+        )
+        return False
+
     def _refuse_request_body(self) -> bool:
         """Reject GET/HEAD requests that declare a body.
 
@@ -334,7 +462,12 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         )
         if not ambiguous and declared:
             length = declared[0].strip()
-            ambiguous = not (length.isascii() and length.isdigit()) or int(length) != 0
+            ambiguous = not (
+                length
+                and length.isascii()
+                and length.isdigit()
+                and all(character == "0" for character in length)
+            )
         if ambiguous:
             self.close_connection = True
             self._send_error(
@@ -358,12 +491,14 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         request_url = self._split_request_target()
         if request_url is None:
             return
-        # Any dashboard-marked read (snapshot polling included) is a live
-        # viewer; the event stream marks presence separately because
+        path = request_url.path
+        if not self._require_authentication(path):
+            return
+        # Any authenticated dashboard-marked read (snapshot polling included)
+        # is a live viewer; the event stream marks presence separately because
         # EventSource cannot attach the marker header.
         if self.headers.get("X-Monitor-Request") == "dashboard":
             self.monitor_server.state.record_dashboard_activity()
-        path = request_url.path
         if path == "/api/snapshot":
             snapshot = self._read_only_snapshot()
             self._send_json_payload(self.monitor_server.snapshot_payload(snapshot))
@@ -497,6 +632,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "apiVersion": _API_VERSION,
                 "appVersion": __version__,
                 "schemaVersion": _API_SCHEMA_VERSION,
+                "authenticationRequired": server.access_token is not None,
                 "capabilities": {
                     "restartSupported": server.restart is not None,
                     "manualProbeSupported": server.probe_control is not None,
@@ -543,9 +679,25 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         request_url = self._split_request_target()
         if request_url is None:
             return
+        if not self._require_authentication(request_url.path):
+            return
         body_limit = _WRITE_BODY_LIMITS.get(request_url.path)
         if body_limit is None:
             self._send_route_fallback("POST", request_url.path)
+            return
+        declared_lengths = self.headers.get_all("Content-Length") or []
+        transfer_encoding = self.headers.get_all("Transfer-Encoding") or []
+        if (
+            transfer_encoding
+            or len(declared_lengths) != 1
+            or not declared_lengths[0].isascii()
+            or not declared_lengths[0].isdigit()
+        ):
+            self._send_error(
+                "invalid request framing",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_REQUEST_FRAMING",
+            )
             return
         if request_url.query:
             self._send_error(
@@ -571,10 +723,12 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 code="UNSUPPORTED_MEDIA_TYPE",
             )
             return
-        try:
-            content_length = int(self.headers.get("Content-Length", ""))
-        except ValueError:
-            content_length = 0
+        normalized_length = declared_lengths[0].lstrip("0") or "0"
+        content_length = (
+            body_limit + 1
+            if len(normalized_length) > len(str(body_limit))
+            else int(normalized_length)
+        )
         if not 1 <= content_length <= body_limit:
             self._send_error(
                 "invalid request body size",
@@ -583,8 +737,22 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
+            remaining = self._request_deadline - time.monotonic()
+            if remaining <= 0:
+                self._abort_request_at_deadline()
+                return
+            timer = threading.Timer(remaining, self._abort_request_at_deadline)
+            timer.daemon = True
+            timer.start()
+            try:
+                body = self.rfile.read(content_length)
+            finally:
+                timer.cancel()
+                timer.join()
+            if len(body) != content_length:
+                return
             payload = json.loads(
-                self.rfile.read(content_length).decode("utf-8"),
+                body.decode("utf-8"),
                 object_pairs_hook=_unique_json_object,
                 parse_constant=_reject_json_constant,
             )
@@ -618,6 +786,24 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             self._restart_service(payload)
             return
         self._change_poll_interval(payload)
+
+    def _unsupported_method(self, method: str) -> None:
+        self.close_connection = True
+        request_url = self._split_request_target()
+        if request_url is not None and self._require_authentication(request_url.path):
+            self._send_route_fallback(method, request_url.path)
+
+    def do_PUT(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._unsupported_method("PUT")
+
+    def do_PATCH(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._unsupported_method("PATCH")
+
+    def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._unsupported_method("DELETE")
+
+    def do_TRACE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._unsupported_method("TRACE")
 
     def _request_probe(self, payload: object) -> None:
         if (
@@ -686,7 +872,14 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"status": "queued"}, HTTPStatus.ACCEPTED)
 
     def _change_incident_action(self, payload: object) -> None:
-        expected = {"host", "conditionKey", "action", "durationSeconds", "reason"}
+        expected = {
+            "host",
+            "conditionKey",
+            "incidentStartedAt",
+            "action",
+            "durationSeconds",
+            "reason",
+        }
         if not isinstance(payload, dict) or set(payload) != expected:
             self._send_error(
                 "invalid incident action schema",
@@ -697,6 +890,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         host = payload["host"]
         condition_key = payload["conditionKey"]
         action = payload["action"]
+        incident_started_at = payload["incidentStartedAt"]
         duration = payload["durationSeconds"]
         reason = payload["reason"]
         if (
@@ -710,6 +904,13 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             or duration not in DASHBOARD_INCIDENT_ACTION_DURATIONS
             or (action == "clear") != (duration == 0)
             or not is_valid_incident_action_reason(reason)
+            or (
+                action != "clear"
+                and (
+                    not isinstance(incident_started_at, str) or not incident_started_at
+                )
+            )
+            or (action == "clear" and incident_started_at is not None)
         ):
             self._send_error(
                 "invalid incident action settings",
@@ -725,9 +926,27 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 code="SERVICE_UNAVAILABLE",
             )
             return
+        if (
+            action != "clear"
+            and self.monitor_server.state.active_incident_started_at(
+                host, condition_key
+            )
+            != incident_started_at
+        ):
+            self._send_error(
+                "incident condition is no longer active",
+                HTTPStatus.CONFLICT,
+                code="INCIDENT_NOT_ACTIVE",
+            )
+            return
         try:
             snapshot = inventory.update_incident_action(
-                host, condition_key, action, duration, reason
+                host,
+                condition_key,
+                action,
+                duration,
+                reason,
+                incident_started_at,
             )
         except InventoryRequestError:
             self._send_error(
@@ -741,6 +960,19 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "incident action could not be saved",
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 code="SERVICE_UNAVAILABLE",
+            )
+            return
+        if (
+            action != "clear"
+            and self.monitor_server.state.active_incident_started_at(
+                host, condition_key
+            )
+            != incident_started_at
+        ):
+            self._send_error(
+                "incident condition changed while the action was saved",
+                HTTPStatus.CONFLICT,
+                code="INCIDENT_NOT_ACTIVE",
             )
             return
         self._send_json(snapshot)
@@ -769,7 +1001,15 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         restart()
 
     def _send_openmetrics(self) -> None:
-        payload = render_openmetrics(self._read_only_snapshot())
+        try:
+            payload = self.monitor_server.metrics_payload(self._read_only_snapshot())
+        except OpenMetricsLimitError:
+            self._send_error(
+                "metrics series budget exceeded",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                code="METRICS_LIMIT_EXCEEDED",
+            )
+            return
         self.send_response(HTTPStatus.OK)
         self._common_headers(OPENMETRICS_CONTENT_TYPE, cache="no-store")
         self.send_header("Content-Length", str(len(payload)))
@@ -1446,7 +1686,6 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         try:
             self.send_response(HTTPStatus.OK)
             self._common_headers("text/event-stream; charset=utf-8", cache="no-store")
-            self.send_header("Connection", "keep-alive")
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
 
@@ -1504,6 +1743,7 @@ def serve_in_thread(
     restart: Callable[[], None] | None = None,
     probe_control: ProbeControl | None = None,
     trusted_hosts: Iterable[str] | None = None,
+    access_token: str | None = None,
 ) -> tuple[MonitorHttpServer, threading.Thread]:
     server = MonitorHttpServer(
         (host, port),
@@ -1512,6 +1752,7 @@ def serve_in_thread(
         restart,
         probe_control,
         trusted_hosts=trusted_hosts,
+        access_token=access_token,
     )
     thread = threading.Thread(
         target=server.serve_forever, name="mocop-http", daemon=True

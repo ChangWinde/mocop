@@ -32,6 +32,10 @@ Remote hosts need no agent, database, Python installation, or monitoring port. T
 
 Here, **AI-native** means that the interface is built around GPU capacity, task placement, and failure diagnosis. Mocop does not call an AI service or upload telemetry.
 
+The shipped dashboard UI is currently Simplified Chinese and has no locale
+switch yet. The English README, API, operations, and engineering references are
+fully maintained.
+
 ## Features
 
 - GPU utilization, VRAM, temperature, power, model, driver, hardware health, and per-GPU processes
@@ -108,7 +112,13 @@ mocop doctor
 mocop service install
 ```
 
-Open <http://127.0.0.1:8787>. The command installs, enables, and starts a user-level systemd service. It does not change the system linger policy.
+Open the exact `Dashboard:` capability URL printed by the command, for example
+`http://127.0.0.1:8787/#access_token=...`. The fragment is not sent over HTTP;
+the page removes it immediately and keeps the capability in tab-scoped
+`sessionStorage`, so reloads and the managed restart flow remain authenticated.
+Closing the tab or opening an independent tab requires the printed URL again. The command installs,
+enables, starts, and verifies a user-level systemd service. It does not change
+the system linger policy.
 
 Run `mocop` for a foreground process, or manage the service with:
 
@@ -117,9 +127,18 @@ mocop service status
 mocop service uninstall
 ```
 
+Uninstall stops/disables the service and removes only its generated unit. It
+retains the configuration, Bearer token, optional environment file, SQLite
+state, browser data, journal, SSH files/control sockets, installed package, and
+linger policy. See the [operations runbook](docs/OPERATIONS.md) before upgrade,
+rollback, token rotation, or manual cleanup.
+
 ## Configuration
 
-The generated file is complete. Edit it directly only when you need fields not exposed in the dashboard. This excerpt shows the main inventory fields:
+The generated file is complete. Edit it directly only when you need fields not
+exposed in the dashboard. The [configuration reference](docs/CONFIGURATION.md)
+is authoritative for every field, default, relationship, and hard boundary.
+This excerpt shows the main inventory fields:
 
 ```json
 {
@@ -216,14 +235,21 @@ The dashboard allows a 2–60 second interval, a 2–300 second probe timeout th
 - Use **Match capacity** to find same-host, same-model GPUs with enough free VRAM. The result is not a reservation.
 - Set a maintenance window to silence actionable alerts while collection continues.
 - Scan SSH aliases in **Settings → Monitored nodes** to add or remove eligible compute nodes.
-- After an upgrade, use **Settings → Service status → Restart service**. This action is
-  available only for the installed user service and reloads the page after recovery.
+- Follow the [upgrade and rollback runbook](docs/OPERATIONS.md). After a verified
+  package upgrade, **Settings → Service status → Restart service** is available only
+  for the installed user service and reloads the page after recovery.
 - Upload a PNG, JPEG, WebP, or AVIF background up to 32 MiB. Sources above 8 MiB are compressed locally; no image is uploaded.
 - Export one current snapshot with `mocop --once > snapshot.json`. Add `--strict` in scripts and cron jobs: it exits `1` unless every configured host produced an online sample, and lists the failing hosts on stderr.
 
 ## HTTP API
 
-Everything the dashboard shows is also a small JSON API with stable machine-readable error codes, a self-describing `GET /api/meta` endpoint, and documented access tiers for automation. See the [API reference](docs/API.md) for every endpoint, field table, and agent playbook — including why non-viewer automation must not send the `X-Monitor-Request: dashboard` header.
+Everything the dashboard shows is also a small JSON API with stable
+machine-readable error codes, a public self-describing `GET /api/meta` endpoint,
+and P/A/R/W access tiers. Telemetry, SSE, and OpenMetrics require the
+per-install Bearer capability; only API discovery and health/readiness are
+public. See the [API reference](docs/API.md) for authenticated curl examples,
+every endpoint and field, and why non-viewer automation must not send the
+`X-Monitor-Request: dashboard` header.
 
 ## Prometheus
 
@@ -232,11 +258,18 @@ Everything the dashboard shows is also a small JSON API with stable machine-read
 ```yaml
 scrape_configs:
   - job_name: mocop
+    authorization:
+      type: Bearer
+      credentials_file: /home/alice/.config/mocop/access-token
     static_configs:
       - targets: ["127.0.0.1:8787"]
 ```
 
-The endpoint includes collection and background-subsystem health, host availability, incidents, system resources, and current GPU metrics. Stale resource values, process names, and PIDs are not exported.
+Use an absolute credential path; Prometheus must run as an identity permitted to
+read that private file, or receive a separately protected copy. The endpoint
+includes collection and background-subsystem health, host availability,
+incidents, system resources, and current GPU metrics. Stale resource values,
+process names, and PIDs are not exported.
 
 ## Failure behavior
 
@@ -306,7 +339,11 @@ mocop doctor --probe                       # one real production collection per 
 
 Mocop accepts only explicit SSH aliases and runs one fixed, read-only probe. It enforces host-key checking, batch mode, timeouts, output limits, bounded concurrency, private atomic configuration writes, and safe rendering of remote text.
 
-The service has no built-in user accounts and listens on `127.0.0.1` by default. If you expose the dashboard or `/metrics` remotely, place it behind authenticated TLS or a private VPN.
+The service has no built-in user accounts and listens on `127.0.0.1` by default.
+A private per-install Bearer capability protects telemetry, metrics, SSE, and
+writes from unrelated local users, but grants one complete operator role. If you
+expose Mocop remotely, use authenticated TLS or a private VPN: a Bearer header
+over plain HTTP has no network confidentiality or server authentication.
 
 Read the [threat model](docs/SECURITY.md) and [security policy](.github/SECURITY.md) before changing a trust boundary.
 
@@ -319,7 +356,10 @@ uvx --from ruff==0.12.11 ruff format --check .
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-See [CONTRIBUTING.md](.github/CONTRIBUTING.md), [architecture](docs/ARCHITECTURE.md), [API reference](docs/API.md), [performance](docs/PERFORMANCE.md), and the [changelog](docs/CHANGELOG.md).
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md),
+[architecture](docs/ARCHITECTURE.md), [configuration](docs/CONFIGURATION.md),
+[operations](docs/OPERATIONS.md), [API reference](docs/API.md),
+[performance](docs/PERFORMANCE.md), and the [changelog](docs/CHANGELOG.md).
 
 ## License
 

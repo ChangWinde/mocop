@@ -5,13 +5,27 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 
 OPENMETRICS_CONTENT_TYPE = "application/openmetrics-text; version=1.0.0; charset=utf-8"
+OPENMETRICS_MAX_SERIES = 100_000
 
 Labels = Sequence[tuple[str, str]]
 Sample = tuple[Labels, int | float]
 
 
+class OpenMetricsLimitError(ValueError):
+    """Raised when one snapshot would exceed the bounded exposition budget."""
+
+
 def _escape_label(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+    # OpenMetrics permits ``\\n`` inside quoted labels but forbids raw CR.
+    # Normalize every line ending before applying the format's three escapes
+    # so one malformed remote label cannot invalidate the whole exposition.
+    return (
+        value.replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\\", "\\\\")
+        .replace("\n", "\\n")
+        .replace('"', '\\"')
+    )
 
 
 def _label_set(labels: Labels) -> str:
@@ -117,6 +131,20 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
     stats = stats if isinstance(stats, Mapping) else {}
     servers_value = snapshot.get("servers")
     servers = servers_value if isinstance(servers_value, list) else []
+    gpu_count = sum(
+        len(gpus)
+        for server in servers
+        if isinstance(server, Mapping)
+        and isinstance((gpus := server.get("gpus")), list)
+    )
+    # A current host contributes fewer than 40 series and a GPU fewer than 20.
+    # Reject before allocating the much larger sample and line collections.
+    estimated_series = 80 + len(servers) * 40 + gpu_count * 20
+    if estimated_series > OPENMETRICS_MAX_SERIES:
+        raise OpenMetricsLimitError(
+            "snapshot exceeds the OpenMetrics series budget "
+            f"({estimated_series} > {OPENMETRICS_MAX_SERIES})"
+        )
 
     version = snapshot.get("appVersion")
     _family(
@@ -509,7 +537,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
             ):
                 _append_optional(gpu_samples[sample_key], labels, gpu.get(field))
             processes = gpu.get("processes")
-            if isinstance(processes, list):
+            if gpu.get("processes_available") is True and isinstance(processes, list):
                 gpu_samples["processes"].append((labels, len(processes)))
             gpu_samples["processes_available"].append(
                 (labels, int(gpu.get("processes_available") is True))
@@ -712,7 +740,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         (
             "processes_sampled",
             "mocop_gpu_process_telemetry_sampled",
-            "Whether the latest GPU sample refreshed process telemetry.",
+            "Whether the latest GPU sample attempted process telemetry.",
             None,
         ),
         (

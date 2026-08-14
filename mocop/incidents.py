@@ -342,11 +342,15 @@ class ThresholdIncidentPolicy:
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
 
-            memory_pct = self._percentage(
-                gpu.memory_used_mib or 0, gpu.memory_total_mib or 0
+            memory_pct = (
+                self._percentage(gpu.memory_used_mib, gpu.memory_total_mib)
+                if gpu.memory_used_mib is not None
+                and gpu.memory_total_mib is not None
+                and gpu.memory_total_mib > 0
+                else None
             )
             memory_threshold = threshold("gpu_memory_warning_pct")
-            if memory_pct >= memory_threshold:
+            if memory_pct is not None and memory_pct >= memory_threshold:
                 key = f"gpu_memory:{identity}"
                 conditions[key] = IncidentCondition(
                     key=key,
@@ -361,7 +365,8 @@ class ThresholdIncidentPolicy:
                 )
             utilization = gpu.utilization_gpu_pct
             if (
-                memory_pct >= threshold("gpu_idle_memory_pct")
+                memory_pct is not None
+                and memory_pct >= threshold("gpu_idle_memory_pct")
                 and utilization is not None
                 and utilization < threshold("gpu_busy_pct")
                 and (gpu.memory_used_mib or 0) > 0
@@ -444,14 +449,45 @@ class ThresholdIncidentPolicy:
         domains: set[str] = set()
         if result.system is not None:
             domains.add("system")
+            if result.system.cpu_usage_pct is not None:
+                domains.add("system_cpu")
+            if result.system.pressure is not None:
+                if result.system.pressure.memory is not None:
+                    domains.add("pressure:memory")
+                if result.system.pressure.io is not None:
+                    domains.add("pressure:io")
         if result.message not in _GPU_QUERY_FAILURE_MESSAGES:
-            domains.add("gpu")
+            domains.add("gpu_query")
+            domains.add("gpu_inventory")
             if all(gpu.processes_sampled for gpu in result.gpus):
                 domains.add("gpu_processes")
             for gpu in result.gpus:
+                identity = gpu.uuid or str(gpu.index)
+                domains.add(f"gpu_present:{identity}")
+                if gpu.temperature_c is not None:
+                    domains.add(f"gpu_temperature:{identity}")
+                if (
+                    gpu.memory_used_mib is not None
+                    and gpu.memory_total_mib is not None
+                    and gpu.memory_total_mib > 0
+                ):
+                    domains.add(f"gpu_memory:{identity}")
+                if gpu.utilization_gpu_pct is not None:
+                    domains.add(f"gpu_utilization:{identity}")
                 if gpu.health is not None:
-                    domains.add(f"gpu_health:{gpu.uuid or str(gpu.index)}")
+                    domains.add(f"gpu_health:{identity}")
         return frozenset(domains)
+
+    def condition_observed(self, result: ProbeResult, key: str) -> bool:
+        """Whether this sample can authoritatively declare ``key`` absent."""
+        if key == "connectivity":
+            return True
+        category = key.partition(":")[0]
+        domains = self.observed_domains(result)
+        return all(
+            domain in domains
+            for domain in _condition_domains_for_category(category, key)
+        )
 
     def _add_percentage(
         self,
@@ -487,15 +523,33 @@ class ThresholdIncidentPolicy:
 
 def _condition_domains(condition: IncidentCondition, key: str) -> tuple[str, ...]:
     """Telemetry domains a condition needs before its recovery may advance."""
-    category = condition.category
+    return _condition_domains_for_category(condition.category, key)
+
+
+def _condition_domains_for_category(category: str, key: str) -> tuple[str, ...]:
+    if category == "cpu":
+        return ("system", "system_cpu")
+    if category == "pressure":
+        return ("system", key)
     if category in _SYSTEM_CATEGORIES:
         return ("system",)
+    if category in {"gpu_availability", "gpu_count"}:
+        return ("gpu_query",)
+    identity = key.partition(":")[2]
     if category in _GPU_HEALTH_CATEGORIES:
-        return ("gpu", f"gpu_health:{key.partition(':')[2]}")
+        return (f"gpu_present:{identity}", f"gpu_health:{identity}")
     if category == "gpu_processes":
-        return ("gpu", "gpu_processes")
-    if category.startswith("gpu"):
-        return ("gpu",)
+        return ("gpu_processes",)
+    if category == "gpu_temperature":
+        return (f"gpu_present:{identity}", f"gpu_temperature:{identity}")
+    if category == "gpu_memory":
+        return (f"gpu_present:{identity}", f"gpu_memory:{identity}")
+    if category == "gpu_idle_memory":
+        return (
+            f"gpu_present:{identity}",
+            f"gpu_memory:{identity}",
+            f"gpu_utilization:{identity}",
+        )
     return ()
 
 
@@ -741,6 +795,19 @@ class IncidentTracker:
 
     def has_active(self, host: str) -> bool:
         return bool(self._active.get(host))
+
+    def has_active_condition(self, host: str, condition_key: str) -> bool:
+        """Return whether one exact condition is active for the host instance."""
+        return condition_key in self._active.get(host, {})
+
+    def has_pending_condition(self, host: str, condition_key: str) -> bool:
+        """Return whether live telemetry is still confirming this condition."""
+        return condition_key in self._candidates.get(host, {})
+
+    def active_started_at(self, host: str, condition_key: str) -> str | None:
+        if condition_key not in self._active.get(host, {}):
+            return None
+        return self._opened_at.get(host, {}).get(condition_key)
 
     def active_signature(self, host: str) -> tuple[tuple[object, ...], ...]:
         return tuple(

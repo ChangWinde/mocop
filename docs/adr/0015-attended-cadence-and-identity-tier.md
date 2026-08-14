@@ -61,4 +61,4 @@ Three cooperating changes:
 - Presence marking adds one atomic timestamp write per dashboard read or stream
   wake; no new configuration keys and no browser-triggered remote queries.
 
-> **Update:** the "`V6` payloads remain parseable" statement above is superseded by the single-version protocol policy of [ADR-0016](0016-single-version-protocol-and-agent-api.md); the parser now accepts only the current protocol version.
+> **Update:** the "`V6` payloads remain parseable" statement above is superseded by the single-version protocol policy of [ADR-0016](0016-single-version-protocol-and-agent-api.md). `MONITOR_V7` records the historical decision; the parser now accepts only current `MONITOR_V8`.

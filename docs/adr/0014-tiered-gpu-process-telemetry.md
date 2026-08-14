@@ -71,3 +71,7 @@ queries and complete probe failures invalidate its comparison baseline.
 - No browser request can enable a remote query, and all commands retain the existing
   timeout, output limit, cancellation, and host-key policy.
 - `MONITOR_V5` and `MONITOR_V4` payloads remain readable for compatibility.
+
+> **Update:** the compatibility statement above records the historical decision and
+> is superseded by [ADR-0016](0016-single-version-protocol-and-agent-api.md). The
+> parser now accepts only current `MONITOR_V8`.

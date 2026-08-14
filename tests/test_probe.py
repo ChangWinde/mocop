@@ -31,6 +31,7 @@ from mocop.probe import (
     parse_nvidia_smi_csv,
     parse_workload_records,
 )
+from mocop.remote_script import _CONTAINER_IDENTITY_AWK
 
 
 def config() -> MonitorConfig:
@@ -200,6 +201,14 @@ class ProbeTests(unittest.TestCase):
                 "GPU-a, 0, No, No, Not Active, Not Active, Disabled"
             )
 
+        duplicate_index = combined + "\n" + combined.replace("GPU-abc", "GPU-def")
+        with self.assertRaisesRegex(ValueError, "duplicate GPU indices"):
+            parse_nvidia_combined_csv(duplicate_index)
+
+        base_row = combined.rsplit(", ", 6)[0]
+        with self.assertRaisesRegex(ValueError, "duplicate GPU indices"):
+            parse_nvidia_smi_csv(base_row + "\n" + base_row)
+
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
                 health_payload=(
@@ -363,12 +372,15 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "GPU utilization"):
             parse_nvidia_smi_csv(invalid)
 
-        row = (
-            "0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 93, 34, "
-            "81920, 40960, 40960, 287.5, 400"
-        )
+        rows = [
+            (
+                f"{index}, GPU-{index}, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+                "81920, 40960, 40960, 287.5, 400"
+            )
+            for index in range(257)
+        ]
         with self.assertRaisesRegex(ValueError, "too many GPU records"):
-            parse_nvidia_smi_csv("\n".join([row] * 257))
+            parse_nvidia_smi_csv("\n".join(rows))
 
     @patch("mocop.probe._run_bounded_process")
     def test_uses_argv_and_strict_host_key_checking(self, run) -> None:
@@ -416,10 +428,59 @@ class ProbeTests(unittest.TestCase):
         script = run.call_args.kwargs["input_text"]
         self.assertIn("workload_tier=2", script)
         self.assertIn("/proc/$process_pid/environ", script)
-        self.assertIn("docker[-\\/][0-9a-f]{12,64}", script)
-        self.assertIn("libpod-[0-9a-f]{12,64}", script)
+        self.assertIn("od -An -v -tx1", script)
+        self.assertIn("function environment_record", script)
+        self.assertNotIn('RS = "\\0"', script)
+        self.assertNotIn("tr '\\000' '\\n'", script)
+        self.assertIn("function valid_container_id", script)
+        self.assertIn("detect_container(cgroup)", script)
+        self.assertNotIn("{12,64}", script)
         self.assertNotIn("scontrol", script)
         self.assertNotIn("kubectl", script)
+
+    def test_container_detection_is_posix_awk_portable_and_segment_bounded(
+        self,
+    ) -> None:
+        program = (
+            _CONTAINER_IDENTITY_AWK + '\nBEGIN { detect_container(ENVIRON["CGROUP"]); '
+            'printf "%s\\t%s\\n", container_kind, container_id }'
+        )
+
+        def detected(cgroup: str) -> str:
+            environment = os.environ.copy()
+            environment["CGROUP"] = cgroup
+            completed = subprocess.run(
+                ["awk", program],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=2,
+            )
+            return completed.stdout.strip()
+
+        twelve = "0123456789ab"
+        sixty_four = "0123456789abcdef" * 4
+        self.assertEqual(
+            detected(f"0::/system.slice/docker-{twelve}.scope"),
+            f"docker\t{twelve}",
+        )
+        self.assertEqual(
+            detected(f"5:cpu:/docker/{sixty_four}"), f"docker\t{sixty_four}"
+        )
+        self.assertEqual(
+            detected(f"0::/machine.slice/libpod-{twelve}.scope"),
+            f"podman\t{twelve}",
+        )
+        for lookalike in (
+            f"0::/docker/{twelve[:-1]}",
+            f"0::/docker/{sixty_four}0",
+            f"0::/docker/{twelve}z",
+            f"0::/docker-{twelve}xyz.scope",
+            f"0::/prefixdocker-{twelve}.scope",
+            f"0::/libpod-{twelve}.scope-extra",
+        ):
+            self.assertEqual(detected(lookalike), "")
 
     @patch("mocop.probe._run_bounded_process")
     def test_identity_workload_mode_renders_the_light_tier(self, run) -> None:
@@ -862,6 +923,15 @@ class ProbeTests(unittest.TestCase):
             stalled.message, "Remote collection stalled after partial output"
         )
 
+        run.side_effect = subprocess.TimeoutExpired(
+            ["ssh"], 12, output=b"", stderr=b"remote command started\n"
+        )
+        stderr_only = OpenSshLinuxResourceProbe().probe("gpu-1", config())
+        self.assertEqual(stderr_only.status, "error")
+        self.assertEqual(
+            stderr_only.message, "Remote collection stalled after partial output"
+        )
+
     @patch("mocop.probe._run_bounded_process")
     def test_classifies_dead_transport_keepalive_failure(self, run) -> None:
         run.return_value = _BoundedProcessResult(
@@ -974,6 +1044,24 @@ class ProbeTests(unittest.TestCase):
                 environment=os.environ.copy(),
             )
 
+    def test_bounded_process_preserves_stderr_when_it_times_out(self) -> None:
+        with self.assertRaises(subprocess.TimeoutExpired) as context:
+            _run_bounded_process(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys,time; sys.stderr.write('started\\n'); "
+                    "sys.stderr.flush(); time.sleep(2)",
+                ],
+                input_text="",
+                timeout_seconds=0.1,
+                max_output_bytes=65_536,
+                environment=os.environ.copy(),
+            )
+
+        self.assertEqual(context.exception.output, b"")
+        self.assertEqual(context.exception.stderr, b"started\n")
+
     def test_bounded_process_cancels_active_child_promptly(self) -> None:
         cancelled = threading.Event()
         timer = threading.Timer(0.05, cancelled.set)
@@ -997,7 +1085,13 @@ class ProbeTests(unittest.TestCase):
     def test_registry_cancellation_wakes_the_full_deadline_wait(self, _kill) -> None:
         # With the child kill suppressed, only the registry wake-up pipe can
         # interrupt the selector before the five-second deadline. The bounded
-        # one-second reap in the cleanup path is included in the budget.
+        # cleanup still terminates the real child after that behavior is proven
+        # so the test cannot leak a subprocess into the rest of the suite.
+        def kill_only_during_cleanup(process) -> None:
+            if _kill.call_count > 1:
+                process.kill()
+
+        _kill.side_effect = kill_only_during_cleanup
         registry = _ActiveProcessRegistry()
         timer = threading.Timer(0.05, registry.cancel)
         started = time.monotonic()
@@ -1522,6 +1616,9 @@ class ProbeTests(unittest.TestCase):
                 "SLURM_JOB_ID": "777",
                 "SLURM_JOB_NAME": "train-llm",
                 "SLURM_JOB_USER": "spoofed-owner",
+                # Newlines are valid inside an environment value. They must
+                # not manufacture a second NUL-delimited variable record.
+                "MOCOP_UNTRUSTED": "value\nSLURM_JOB_ID=forged",
             },
         )
         try:

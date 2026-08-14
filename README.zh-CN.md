@@ -32,6 +32,9 @@ Mocop 是面向 NVIDIA GPU 集群的本地网页监控工具。它复用已有 O
 
 这里的 **AI-native** 是指界面围绕 GPU 容量、任务放置和故障定位设计。Mocop 不调用 AI 服务，也不上传遥测数据。
 
+当前发布的控制台界面固定为简体中文，尚未提供语言切换；中英文 README
+以及 API、运维和工程文档均持续维护。
+
 ## 功能
 
 - GPU 利用率、显存、温度、功耗、型号、驱动、硬件健康和每卡进程
@@ -108,7 +111,12 @@ mocop doctor
 mocop service install
 ```
 
-打开 <http://127.0.0.1:8787>。该命令会安装、启用并立即启动用户级 systemd 服务，但不会修改系统的 linger 策略。
+打开命令打印的完整 `Dashboard:` 能力 URL，例如
+`http://127.0.0.1:8787/#access_token=...`。URL 片段不会随 HTTP 请求发送；
+页面会立即清除它，并把能力保存在当前标签页的 `sessionStorage` 中，刷新和
+服务重启流程仍可继续认证；关闭标签页或新开独立标签页后，需要再次使用
+打印的完整 URL。该命令会安装、启用、启动并验证用户级
+systemd 服务，但不会修改系统的 linger 策略。
 
 直接运行 `mocop` 可使用前台模式。后台服务可通过以下命令管理：
 
@@ -117,9 +125,16 @@ mocop service status
 mocop service uninstall
 ```
 
+卸载只会停止/禁用服务并删除生成的 unit；配置、Bearer token、可选环境
+文件、SQLite 状态、浏览器数据、journal、SSH 文件/控制套接字、已安装包和
+linger 策略都会保留。升级、回滚、token 轮换或手动清理前，请阅读
+[运维手册](docs/OPERATIONS.md)。
+
 ## 配置
 
-初始化生成的文件已经包含全部字段。只有在网页未提供对应设置时才需要直接编辑。下面只展示主要资产字段：
+初始化生成的文件已经包含全部字段。只有在网页未提供对应设置时才需要
+直接编辑。[配置字段与边界参考](docs/CONFIGURATION.md) 是所有字段、默认值、
+关联约束和硬限制的权威说明。下面只展示主要资产字段：
 
 ```json
 {
@@ -215,13 +230,19 @@ mocop service install
 - 使用“匹配算力”查找同一主机、同一型号且剩余显存足够的 GPU。结果不代表资源预留。
 - 设置维护窗口后，采集继续进行，但对应问题不会进入待处理告警。
 - 在“设置 → 监控节点”中扫描 SSH 别名，添加或删除符合条件的计算节点。
-- 升级后可使用“设置 → 监控服务状态 → 重启服务”；该按钮只在用户级服务模式下可用，恢复后页面会自动刷新。
+- 按照[升级与回滚手册](docs/OPERATIONS.md)操作。验证软件包升级后，可使用
+  “设置 → 监控服务状态 → 重启服务”；该按钮只在用户级服务模式下可用，
+  恢复后页面会自动刷新。
 - 可上传最大 32 MiB 的 PNG、JPEG、WebP 或 AVIF 背景；超过 8 MiB 时只在浏览器内压缩，不会上传。
 - 使用 `mocop --once > snapshot.json` 导出一次当前快照。脚本与定时任务可加 `--strict`：只要有任意配置主机未产生在线采样即退出码 `1`，并在 stderr 列出失败主机。
 
 ## HTTP API
 
-网页展示的一切也都可以通过一套小型 JSON API 获取：稳定的机器可读错误 code、自描述的 `GET /api/meta` 端点，以及面向自动化的访问分级。全部端点、字段表和 agent 操作剧本见 [API 参考](docs/API.md)——其中也解释了为什么非观众型自动化不应发送 `X-Monitor-Request: dashboard` 标记头。
+网页展示的一切也都可以通过一套小型 JSON API 获取：稳定的机器可读错误
+code、公开且自描述的 `GET /api/meta` 端点，以及 P/A/R/W 访问分级。遥测、
+SSE 和 OpenMetrics 均要求安装级 Bearer 能力；只有 API 发现、存活和就绪
+检查公开。带认证的 curl 示例、全部端点与字段表，以及非观众型自动化不应
+发送 `X-Monitor-Request: dashboard` 标记头的原因见 [API 参考](docs/API.md)。
 
 ## Prometheus
 
@@ -230,11 +251,16 @@ mocop service install
 ```yaml
 scrape_configs:
   - job_name: mocop
+    authorization:
+      type: Bearer
+      credentials_file: /home/alice/.config/mocop/access-token
     static_configs:
       - targets: ["127.0.0.1:8787"]
 ```
 
-该端点包含采集与后台子系统健康、节点可用性、告警、系统资源和当前 GPU 指标。陈旧资源值、进程名称和 PID 不会被导出。
+请使用绝对路径；Prometheus 必须以有权读取该私密文件的身份运行，或使用
+单独受保护的凭据副本。该端点包含采集与后台子系统健康、节点可用性、告警、
+系统资源和当前 GPU 指标。陈旧资源值、进程名称和 PID 不会被导出。
 
 ## 故障行为
 
@@ -300,7 +326,10 @@ mocop doctor --probe                       # 对每个别名执行一次真实�
 
 Mocop 只接受明确列出的 SSH 别名，并执行固定的只读探针。它强制启用主机密钥校验、BatchMode、超时、输出上限、并发上限、私有原子配置写入和远端文本安全渲染。
 
-服务没有内置用户系统，默认只监听 `127.0.0.1`。如需远程开放控制台或 `/metrics`，必须放在带身份认证的 TLS 反向代理或私有 VPN 后面。
+服务没有内置用户系统，默认只监听 `127.0.0.1`。私密的安装级 Bearer 能力
+保护遥测、指标、SSE 和写操作不被无关本地用户访问，但它代表一个完整的
+操作员角色。如需远程开放 Mocop，请使用带身份认证的 TLS 反向代理或私有
+VPN；明文 HTTP 上的 Bearer 头不提供网络机密性或服务端身份认证。
 
 修改信任边界前，请阅读[威胁模型](docs/SECURITY.md)和[安全策略](.github/SECURITY.md)。
 
@@ -313,7 +342,10 @@ uvx --from ruff==0.12.11 ruff format --check .
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-更多信息见[贡献指南](.github/CONTRIBUTING.md)、[架构](docs/ARCHITECTURE.md)、[API 参考](docs/API.md)、[性能说明](docs/PERFORMANCE.md)和[更新日志](docs/CHANGELOG.md)。
+更多信息见[贡献指南](.github/CONTRIBUTING.md)、
+[架构](docs/ARCHITECTURE.md)、[配置参考](docs/CONFIGURATION.md)、
+[运维手册](docs/OPERATIONS.md)、[API 参考](docs/API.md)、
+[性能说明](docs/PERFORMANCE.md)和[更新日志](docs/CHANGELOG.md)。
 
 ## 许可证
 

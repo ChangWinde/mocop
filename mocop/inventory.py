@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
@@ -7,6 +8,7 @@ import stat
 import tempfile
 import threading
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
@@ -64,6 +66,7 @@ class DashboardConfigController(Protocol):
         action: str,
         duration_seconds: int,
         reason: str,
+        incident_started_at: str | None = None,
     ) -> dict[str, object]: ...
 
 
@@ -76,7 +79,7 @@ class ConfigInventory:
         host_source: HostSource,
         on_config_changed: Callable[[MonitorConfig], None],
     ) -> None:
-        self._config_path = config_path.expanduser().resolve()
+        self._config_path = Path(os.path.abspath(config_path.expanduser()))
         self._host_source = host_source
         self._on_config_changed = on_config_changed
         self._lock = threading.Lock()
@@ -109,7 +112,7 @@ class ConfigInventory:
         if not isinstance(host, str) or not is_safe_alias(host):
             raise InventoryRequestError("host must be a safe OpenSSH alias")
 
-        with self._lock:
+        with self._mutation_lock():
             self._require_writable()
             config = self._load()
             data = self._read_object()
@@ -161,8 +164,9 @@ class ConfigInventory:
 
             data["hosts"] = configured
             self._prune_incident_overrides(data)
-            updated = self._commit(data)
-            return self._snapshot(updated)
+            _updated, response = self._commit(data, prepare=self._snapshot)
+            assert response is not None
+            return response
 
     @staticmethod
     def _remove_topology_host(data: dict[str, object], host: str) -> None:
@@ -182,6 +186,29 @@ class ConfigInventory:
             and link.get("source") != host
             and link.get("target") != host
         ]
+        root = topology.get("root")
+        if not isinstance(root, str):
+            data.pop("topology", None)
+            return
+        reachable = {root}
+        pending = list(topology["links"])
+        retained: list[dict[str, object]] = []
+        while pending:
+            progressed = False
+            remainder = []
+            for link in pending:
+                source = link.get("source")
+                target = link.get("target")
+                if source in reachable and isinstance(target, str):
+                    reachable.add(target)
+                    retained.append(link)
+                    progressed = True
+                else:
+                    remainder.append(link)
+            if not progressed:
+                break
+            pending = remainder
+        topology["links"] = retained
 
     @staticmethod
     def _prune_incident_overrides(data: dict[str, object]) -> None:
@@ -230,7 +257,7 @@ class ConfigInventory:
         assert isinstance(group, str)
         normalized_group = group.strip()
 
-        with self._lock:
+        with self._mutation_lock():
             self._require_writable()
             config = self._load()
             if host not in config.hosts or host in config.exclude_hosts:
@@ -249,8 +276,9 @@ class ConfigInventory:
                 groups.pop(host, None)
             data["host_groups"] = groups
             self._prune_incident_overrides(data)
-            updated = self._commit(data)
-            return self._snapshot(updated)
+            _updated, response = self._commit(data, prepare=self._snapshot)
+            assert response is not None
+            return response
 
     def update_maintenance(
         self, host: str, duration_seconds: int, reason: str
@@ -269,7 +297,7 @@ class ConfigInventory:
         assert isinstance(reason, str)
         normalized_reason = reason.strip()
 
-        with self._lock:
+        with self._mutation_lock():
             self._require_writable()
             config = self._load()
             if host not in config.hosts or host in config.exclude_hosts:
@@ -291,8 +319,9 @@ class ConfigInventory:
                     "reason": normalized_reason,
                 }
             data["maintenance_windows"] = windows
-            updated = self._commit(data)
-            return self._snapshot(updated)
+            _updated, response = self._commit(data, prepare=self._snapshot)
+            assert response is not None
+            return response
 
     def update_incident_action(
         self,
@@ -301,6 +330,7 @@ class ConfigInventory:
         action: str,
         duration_seconds: int,
         reason: str,
+        incident_started_at: str | None = None,
     ) -> dict[str, object]:
         """Persist one bounded condition-level acknowledgement or silence."""
         if not isinstance(host, str) or not is_safe_alias(host):
@@ -318,8 +348,10 @@ class ConfigInventory:
             raise InventoryRequestError("incident action duration is invalid")
         if not is_valid_incident_action_reason(reason):
             raise InventoryRequestError("incident action reason is invalid")
+        if action != "clear" and not isinstance(incident_started_at, str):
+            raise InventoryRequestError("incident instance is required")
 
-        with self._lock:
+        with self._mutation_lock():
             self._require_writable()
             config = self._load()
             if host not in config.hosts or host in config.exclude_hosts:
@@ -348,11 +380,13 @@ class ConfigInventory:
                         "action": action,
                         "until": utc_after(duration_seconds),
                         "reason": reason.strip(),
+                        "incident_started_at": incident_started_at,
                     }
                 )
             data["incident_actions"] = actions
-            updated = self._commit(data)
-            return self._snapshot(updated)
+            _updated, response = self._commit(data, prepare=self._snapshot)
+            assert response is not None
+            return response
 
     def update_collector_settings(
         self, settings: dict[str, object]
@@ -366,7 +400,7 @@ class ConfigInventory:
         if not settings or set(settings) - fields.keys():
             raise InventoryRequestError("invalid collector settings schema")
 
-        with self._lock:
+        with self._mutation_lock():
             self._require_writable()
             config = self._load()
             normalized: dict[str, float | int] = {}
@@ -407,8 +441,36 @@ class ConfigInventory:
             data = self._read_object()
             for key, value in normalized.items():
                 data[fields[key]] = value
-            updated = self._commit(data)
+            updated, _response = self._commit(data)
             return self._collector_settings(updated)
+
+    @contextmanager
+    def _mutation_lock(self):
+        """Serialize config transactions across threads and Mocop processes."""
+        with self._lock:
+            lock_path = self._config_path.with_name(f".{self._config_path.name}.lock")
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = -1
+            try:
+                descriptor = os.open(lock_path, flags, 0o600)
+                metadata = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.geteuid()
+                    or metadata.st_mode & 0o077
+                ):
+                    raise OSError("configuration lock is not private")
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            except OSError as exc:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                raise InventoryError("configuration lock is unavailable") from exc
+            try:
+                yield
+            finally:
+                os.close(descriptor)
 
     def _load(self) -> MonitorConfig:
         try:
@@ -485,14 +547,30 @@ class ConfigInventory:
         }
 
     def _read_object(self) -> dict[str, object]:
+        descriptor = -1
         try:
-            if self._config_path.stat().st_size > _MAX_CONFIG_BYTES:
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(self._config_path, flags)
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise InventoryError("cluster configuration is not a regular file")
+            if metadata.st_size > _MAX_CONFIG_BYTES:
                 raise InventoryError("cluster configuration is too large")
-            data = json.loads(self._config_path.read_text(encoding="utf-8"))
+            with os.fdopen(descriptor, "rb") as stream:
+                descriptor = -1
+                content = stream.read(_MAX_CONFIG_BYTES + 1)
+            if len(content) > _MAX_CONFIG_BYTES:
+                raise InventoryError("cluster configuration is too large")
+            data = json.loads(content.decode("utf-8"))
         except InventoryError:
             raise
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise InventoryError("cluster configuration could not be read") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         if not isinstance(data, dict):
             raise InventoryError("cluster configuration must be a JSON object")
         return data
@@ -501,11 +579,12 @@ class ConfigInventory:
         if self._config_path == BUNDLED_CONFIG_PATH.resolve():
             return False
         try:
-            metadata = self._config_path.stat()
+            metadata = self._config_path.lstat()
         except OSError:
             return False
         return (
             stat.S_ISREG(metadata.st_mode)
+            and not self._config_path.is_symlink()
             and metadata.st_uid == os.geteuid()
             and os.access(self._config_path, os.W_OK)
             and os.access(self._config_path.parent, os.W_OK)
@@ -515,17 +594,27 @@ class ConfigInventory:
         if not self._is_writable_target():
             raise InventoryError("cluster configuration is not dashboard-writable")
 
-    def _commit(self, data: dict[str, object]) -> MonitorConfig:
-        updated = self._atomic_replace(data)
+    def _commit(
+        self,
+        data: dict[str, object],
+        *,
+        prepare: Callable[[MonitorConfig], dict[str, object]] | None = None,
+    ) -> tuple[MonitorConfig, dict[str, object] | None]:
+        updated, response = self._atomic_replace(data, prepare=prepare)
         try:
             self._on_config_changed(updated)
         except Exception as exc:
             raise InventoryError(
                 "configuration was saved but runtime synchronization failed"
             ) from exc
-        return updated
+        return updated, response
 
-    def _atomic_replace(self, data: dict[str, object]) -> MonitorConfig:
+    def _atomic_replace(
+        self,
+        data: dict[str, object],
+        *,
+        prepare: Callable[[MonitorConfig], dict[str, object]] | None = None,
+    ) -> tuple[MonitorConfig, dict[str, object] | None]:
         payload = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode(
             "utf-8"
         )
@@ -545,6 +634,7 @@ class ConfigInventory:
                 stream.flush()
                 os.fsync(stream.fileno())
             updated = load_config(temporary_path)
+            response = prepare(updated) if prepare is not None else None
             os.replace(temporary_path, self._config_path)
             temporary_path = None
             self._config_path.chmod(0o600)
@@ -553,7 +643,7 @@ class ConfigInventory:
                 os.fsync(directory_descriptor)
             finally:
                 os.close(directory_descriptor)
-            return updated
+            return updated, response
         except (OSError, ConfigError) as exc:
             raise InventoryError("cluster configuration could not be updated") from exc
         finally:

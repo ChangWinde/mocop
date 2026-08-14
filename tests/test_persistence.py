@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import threading
@@ -181,6 +182,7 @@ _LEGACY_VERSION_TABLES = {
     0: (),
     1: ("history", "incident_events"),
     2: ("history", "incident_events", "gpu_history", "process_events"),
+    3: ("history", "incident_events", "gpu_history", "process_events"),
 }
 
 
@@ -193,6 +195,11 @@ def create_legacy_database(
         for table in selected:
             for statement in _LEGACY_TABLES[table]:
                 connection.execute(statement)
+        if version >= 3 and "history" in selected:
+            connection.execute(
+                "ALTER TABLE history"
+                " ADD COLUMN transport_retried INTEGER NOT NULL DEFAULT 0"
+            )
         connection.execute(f"PRAGMA user_version = {version}")
 
 
@@ -291,6 +298,224 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         self.assertEqual([event["event"] for event in events], ["started", "stopped"])
         self.assertEqual(events[0]["workload"]["workload_id"], "7")
         self.assertEqual(store.status()["writtenRecords"], 4)
+
+    def test_preserves_same_timestamp_process_transition_order(self) -> None:
+        observed_at = utc_text(datetime.now(timezone.utc) - timedelta(minutes=5))
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        store.record_gpu_telemetry(
+            "gpu-01",
+            (),
+            (
+                process_event(observed_at, "GPU-1", 42, "stopped"),
+                process_event(observed_at, "GPU-1", 42, "started"),
+            ),
+        )
+        self.assertTrue(store.flush())
+        store.close()
+
+        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(reopened.close)
+        events = reopened.load(10, 10).process_events[("gpu-01", "GPU-1")]
+
+        self.assertEqual([event["event"] for event in events], ["stopped", "started"])
+
+    def test_roundtrips_hidden_usage_anchors_without_exposing_physical_hosts(
+        self,
+    ) -> None:
+        started_at = utc_text(datetime.now(timezone.utc) - timedelta(minutes=10))
+        stopped_at = utc_text(datetime.now(timezone.utc) - timedelta(minutes=5))
+        hidden_start = process_event(started_at, "GPU-1", 42, "started")
+        hidden_start["_visible"] = False
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        store.record_gpu_telemetry(
+            "gpu-01",
+            (),
+            (hidden_start, process_event(stopped_at, "GPU-1", 42, "stopped")),
+        )
+        self.assertTrue(store.flush())
+        store.close()
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            physical_hosts = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT host FROM process_events WHERE event_type = 'started'"
+                )
+            }
+        self.assertNotIn("gpu-01", physical_hosts)
+        self.assertTrue(all(host.startswith("\x00") for host in physical_hosts))
+
+        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(reopened.close)
+        events = reopened.load(10, 10).process_events[("gpu-01", "GPU-1")]
+        self.assertEqual([event["event"] for event in events], ["started", "stopped"])
+        self.assertFalse(events[0]["_visible"])
+        self.assertNotIn("_visible", events[1])
+
+    def test_v3_migration_assigns_deterministic_process_event_sequence(self) -> None:
+        create_legacy_database(self.path, 3)
+        observed_at = utc_text(datetime.now(timezone.utc) - timedelta(minutes=5))
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.executemany(
+                "INSERT INTO process_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    (
+                        "gpu-01",
+                        "GPU-1",
+                        0,
+                        observed_at,
+                        state,
+                        42,
+                        "train.py",
+                        512,
+                        None,
+                    )
+                    for state in ("stopped", "started")
+                ),
+            )
+
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+        events = store.load(10, 10).process_events[("gpu-01", "GPU-1")]
+
+        self.assertEqual([event["event"] for event in events], ["stopped", "started"])
+        with closing(sqlite3.connect(self.path)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(process_events)")
+            }
+        self.assertEqual(version, 3)
+        self.assertNotIn("sequence", columns)
+
+        # Released v3 code uses a positional nine-value insert.  Preserve that
+        # physical contract, not merely the logical column names.
+        store.close()
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO process_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "gpu-01",
+                    "GPU-1",
+                    0,
+                    observed_at,
+                    "started",
+                    43,
+                    "rollback.py",
+                    128,
+                    None,
+                ),
+            )
+            legacy_rows = connection.execute(
+                """
+                SELECT host, gpu_id, observed_at, event_type, pid, name
+                FROM process_events ORDER BY observed_at, event_type, pid, name
+                """
+            ).fetchall()
+        self.assertEqual(len(legacy_rows), 3)
+
+        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(reopened.close)
+        restored = reopened.load(10, 10).process_events[("gpu-01", "GPU-1")]
+        self.assertEqual([event["pid"] for event in restored], [42, 42, 43])
+
+    def test_released_v3_database_at_its_size_cap_needs_no_upgrade_headroom(
+        self,
+    ) -> None:
+        config = PersistenceConfig(enabled=True, retention_hours=24, max_bytes=131_072)
+        create_legacy_database(self.path, 3)
+        with closing(sqlite3.connect(self.path)) as connection:
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+            max_pages = config.max_bytes // page_size
+            connection.execute(f"PRAGMA max_page_count = {max_pages}")
+            index = 0
+            while True:
+                observed_at = utc_text(
+                    datetime.now(timezone.utc) + timedelta(seconds=index)
+                )
+                try:
+                    connection.execute(
+                        "INSERT INTO process_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            "gpu-01",
+                            "GPU-1",
+                            0,
+                            observed_at,
+                            "started",
+                            index,
+                            f"process-{index}",
+                            1,
+                            json.dumps({"padding": "x" * 1024, "index": index}),
+                        ),
+                    )
+                    connection.commit()
+                    index += 1
+                except sqlite3.OperationalError as exc:
+                    connection.rollback()
+                    self.assertIn("full", str(exc).lower())
+                    break
+            page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+        self.assertGreaterEqual(page_count, max_pages - 1)
+
+        store = SqliteTelemetryPersistence(config, self.path)
+        store.close()
+        reopened = SqliteTelemetryPersistence(config, self.path)
+        reopened.close()
+        self.assertLessEqual(self.path.stat().st_size, config.max_bytes)
+
+    def test_removes_transient_companion_triggers_before_retention_pruning(
+        self,
+    ) -> None:
+        create_legacy_database(self.path, 3)
+        stale = "2000-01-01T00:00:00Z"
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute(
+                "CREATE TABLE process_event_order (host TEXT, observed_at TEXT)"
+            )
+            connection.execute(
+                "CREATE TABLE process_usage_events (host TEXT, observed_at TEXT)"
+            )
+            connection.execute(
+                """
+                CREATE TRIGGER process_events_prune_order
+                AFTER DELETE ON process_events BEGIN
+                    DELETE FROM process_event_order WHERE host = OLD.host;
+                END
+                """
+            )
+            connection.execute(
+                """
+                CREATE TRIGGER gpu_history_prune_usage_events
+                AFTER DELETE ON gpu_history BEGIN
+                    DELETE FROM process_usage_events WHERE host = OLD.host;
+                END
+                """
+            )
+            connection.execute(
+                "INSERT INTO gpu_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("gpu-01", "GPU-1", 0, stale, 1, 1, 1, 1, 1),
+            )
+            connection.execute(
+                "INSERT INTO process_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("gpu-01", "GPU-1", 0, stale, "started", 1, "p", 1, None),
+            )
+
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        store.close()
+        with closing(sqlite3.connect(self.path)) as connection:
+            leftovers = connection.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE name IN (
+                    'process_event_order', 'process_usage_events',
+                    'process_events_prune_order',
+                    'gpu_history_prune_usage_events'
+                )
+                """
+            ).fetchall()
+        self.assertEqual(leftovers, [])
 
     def test_roundtrips_the_transport_retried_flag_across_restart(self) -> None:
         now = datetime.now(timezone.utc)
@@ -461,8 +686,13 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
 
         status = store.status()
         self.assertGreater(status["droppedWrites"], 0)
-        self.assertFalse(status["healthy"])
         self.assertLessEqual(self.path.stat().st_size, config.max_bytes)
+        store.close()
+
+        reopened = SqliteTelemetryPersistence(config, self.path)
+        self.addCleanup(reopened.close)
+        retained = reopened.load(10, 10).history.get("gpu-01", ())
+        self.assertGreater(len(retained), 0)
 
     def test_prunes_and_retries_when_the_database_reports_full(self) -> None:
         store = SqliteTelemetryPersistence(self.config, self.path)

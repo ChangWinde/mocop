@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-ProbeStatus = Literal["online", "unreachable", "no_nvidia_smi", "error"]
+ProbeStatus = Literal["online", "unreachable", "error"]
 WorkloadKind = Literal["process", "slurm", "kubernetes", "docker", "podman"]
 
 

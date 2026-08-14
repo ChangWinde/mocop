@@ -322,6 +322,14 @@ def sanitized_bundle(
         )
     persistence = snapshot.get("persistence", {})
     notifications = snapshot.get("notifications", {})
+    notification_error_codes = sorted(
+        {
+            code
+            for endpoint in notifications.get("endpoints", ())
+            if isinstance(endpoint, dict)
+            and isinstance((code := endpoint.get("lastError")), str)
+        }
+    )
     return {
         "schemaVersion": 1,
         "generatedAt": snapshot.get("generatedAt"),
@@ -345,7 +353,8 @@ def sanitized_bundle(
         "notifications": {
             key: notifications.get(key)
             for key in ("enabled", "healthy", "queuedDeliveries", "droppedDeliveries")
-        },
+        }
+        | {"errorCodes": notification_error_codes},
         "stats": snapshot.get("stats"),
         "servers": servers,
         "activeIncidents": active,

@@ -8,12 +8,15 @@ document and the running server cannot drift apart silently.
 
 ## Scope and compatibility
 
-- **API version:** `1` (`apiVersion` in [GET /api/meta](#get-apimeta)). Within
+- **API version:** `2` (`apiVersion` in [GET /api/meta](#get-apimeta)). Within
   one API version, existing fields keep their name, type, and unit; new
   optional fields and new endpoints may appear at any time. Clients must
   ignore unknown fields.
 - **Schema version:** `1` (`schemaVersion` in `GET /api/meta`) tracks the
   shape of the payloads themselves.
+- **Collection protocol:** the bundled remote script and parser accept only
+  current `MONITOR_V8`. It is an internal single-version contract, distinct
+  from the HTTP API/schema versions; see [ADR-0016](adr/0016-single-version-protocol-and-agent-api.md).
 - **Deprecation policy:** a deprecated endpoint keeps working and answers
   with a `Deprecation: true` response header. Deprecations and removals are
   announced in [CHANGELOG.md](CHANGELOG.md). Currently deprecated:
@@ -47,29 +50,43 @@ document and the running server cannot drift apart silently.
 - Unknown paths and wrong methods under the API family (`/api/...`,
   `/healthz`, `/readyz`, `/metrics`) answer with the JSON error envelope:
   `404 NOT_FOUND` or `405 METHOD_NOT_ALLOWED` with an `Allow` header.
-  Non-API paths keep the default HTML error page.
+  Non-API paths keep the default HTML error page. Authentication runs before
+  route fallback, so an unauthenticated request under a protected family may
+  receive `403 AUTHENTICATION_REQUIRED` without revealing whether that route
+  exists.
+- **Authentication:** every API and OpenMetrics route except `/api/meta`,
+  `/healthz`, and `/readyz` requires exactly one `Authorization: Bearer
+  <capability>` header.
+  `mocop service install` creates the capability as a private `0600` file and
+  prints a fragment URL; a foreground `mocop` process creates an ephemeral
+  capability and prints its fragment URL. URL fragments are never sent over
+  HTTP. The dashboard scrubs the fragment immediately and retains it only in
+  tab-scoped `sessionStorage`; it never creates an ambient Cookie or persistent
+  `localStorage`/IndexedDB credential.
 
 ## Access tiers
 
-Every endpoint belongs to one of three tiers (the `access` value in
+Every endpoint belongs to one of four tiers (the `access` value in
 `GET /api/meta`):
 
 | Tier | `access` | Requirements |
 |---|---|---|
-| **L** | `listener` | None. Any client that can reach the listener may read. |
-| **R** | `reader` | A trusted `Host` header **and** `X-Monitor-Request: dashboard`. If the browser sends `Sec-Fetch-Site`, it must be `same-origin` or `none`. |
+| **P** | `public` | No capability; limited to API discovery and process liveness/readiness. |
+| **A** | `authenticated` | Exact Bearer capability. Suitable for non-viewer automation. |
+| **R** | `reader` | Everything in A, a trusted `Host`, and `X-Monitor-Request: dashboard`. If present, `Sec-Fetch-Site` must be `same-origin` or `none`. |
 | **W** | `writer` | Everything in R, **plus** an `Origin` header whose scheme is `http`/`https`, whose hostname is trusted, whose path is empty or `/`, and which carries no credentials, query, or fragment, **plus** `Content-Type: application/json` and a body within the route's byte cap. |
 
 Trusted hostnames are: `localhost`, `127.0.0.1`, `::1`, the configured
 non-wildcard `listen_host`, and every entry of the optional
-`trusted_web_hosts` configuration list. A failed tier check answers
+`trusted_web_hosts` configuration list. A failed bearer check answers
+`403 AUTHENTICATION_REQUIRED`; a failed browser-origin check answers
 `403 UNTRUSTED_ORIGIN`.
 
-There are no accounts or tokens: reachability of the (loopback by default)
-listener is the authorization boundary, and the R/W header checks exist to
-keep browsers from being confused deputies (CSRF, DNS rebinding). A local
-non-browser client can always construct these headers; that is inside the
-existing trust boundary. See [SECURITY.md](SECURITY.md).
+The capability is not an account system and carries one operator role. It
+exists because TCP loopback is shared by every local Unix user. Host/Origin
+checks remain defense in depth against browser confused-deputy attacks; they
+are not authentication. See [SECURITY.md](SECURITY.md) and
+[ADR-0017](adr/0017-per-install-dashboard-capability.md).
 
 ### Viewer side effect of the marker header (important for agents)
 
@@ -88,7 +105,7 @@ is a **presence signal**:
 
 **Non-viewer automation (collectors, cron jobs, inspection agents) must not
 send the marker header.** Every diagnostic read an agent needs is available
-at the L tier without it. Sending the marker from an always-on poller keeps
+at the A tier without it. Sending the marker from an always-on poller keeps
 the whole fleet on the attended process cadence around the clock and defeats
 the unattended power/command savings.
 
@@ -163,6 +180,8 @@ responses carry the probe status body *plus* a `code` field instead of an
 
 | Code | HTTP | Meaning |
 |---|---|---|
+| `INVALID_REQUEST_AUTHORITY` | 400 | Missing/duplicate/invalid HTTP/1.1 `Host`, or an absolute-form request target. |
+| `INVALID_REQUEST_FRAMING` | 400 | Ambiguous `Transfer-Encoding`/`Content-Length`, duplicate length, or non-decimal length. |
 | `INVALID_REQUEST_TARGET` | 400 | The request URL could not be parsed. |
 | `REQUEST_BODY_NOT_ALLOWED` | 400 | A `GET`/`HEAD` request declared a body. |
 | `QUERY_NOT_ALLOWED` | 400 | This route accepts no query parameters. |
@@ -175,17 +194,20 @@ responses carry the probe status body *plus* a `code` field instead of an
 | `INVALID_SCHEMA` | 400 | The JSON body does not match the route's exact schema. |
 | `INVALID_SETTINGS` | 400 | Schema-valid values outside documented bounds or invalid for the current configuration. |
 | `UNTRUSTED_ORIGIN` | 403 | Missing/untrusted `Host`, marker header, `Origin`, or cross-site Fetch Metadata; also every `OPTIONS`. |
+| `AUTHENTICATION_REQUIRED` | 403 | Bearer capability is missing, duplicated, or incorrect. |
 | `NOT_FOUND` | 404 | Unknown API-family path. |
 | `UNKNOWN_HOST` | 404 | The named host is not a current monitoring target. |
 | `UNKNOWN_GPU` | 404 | The named GPU identity has no telemetry on that host. |
 | `METHOD_NOT_ALLOWED` | 405 | Wrong method for a known path; the `Allow` header lists valid methods. |
 | `PROBE_IN_PROGRESS` | 409 | A probe for that host is already running. |
 | `INVENTORY_CHANGED` | 409 | The configuration changed under the request; re-read and retry. |
+| `INCIDENT_NOT_ACTIVE` | 409 | The condition is no longer active or its incident generation changed. |
 | `PAYLOAD_TOO_LARGE` | 413 | Body missing, empty, or beyond the route's byte cap. |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type` is not `application/json`. |
 | `RATE_LIMITED` | 429 | Manual probe cooldown (with `Retry-After` header) or notification-test cooldown. |
 | `INTERNAL_ERROR` | 500 | The host-group change failed unexpectedly. |
 | `SERVICE_UNAVAILABLE` | 503 | The capability is not available (no config controller, restart not supervised, manual probing disabled, SSE slots exhausted, scan/persist failure). |
+| `METRICS_LIMIT_EXCEEDED` | 503 | Rendering would exceed the fixed 100,000-series OpenMetrics budget. |
 | `NOTIFICATIONS_DISABLED` | 503 | Notification test requested but no webhook is configured. |
 
 ### Retries and idempotency
@@ -215,44 +237,68 @@ responses carry the probe status body *plus* a `code` field instead of an
 
 ## Quick start
 
-Five copy-paste examples against a default local deployment.
-
-1. Bare read — no headers needed at the L tier:
+Copy-paste examples against a default managed deployment. The capability file
+is beside the selected configuration; this example uses the default path. Do
+not put the value in logs, shell history, or source control.
 
 ```bash
-curl -s http://127.0.0.1:8787/api/snapshot | jq '.stats.onlineServers'
+MOCOP_TOKEN="$(<"${XDG_CONFIG_HOME:-$HOME/.config}/mocop/access-token")"
 ```
 
-2. R-tier read (inventory). Note: the marker header also flags a live
-   viewer for 30 seconds — use it only when something is actually watching:
+1. Public liveness — no capability required at the P tier:
 
 ```bash
-curl -s -H 'X-Monitor-Request: dashboard' \
+curl -s http://127.0.0.1:8787/healthz | jq '.status'
+```
+
+2. A-tier automation read — authenticate, but do not send the viewer marker:
+
+```bash
+curl -s -H "Authorization: Bearer ${MOCOP_TOKEN}" \
+  http://127.0.0.1:8787/api/snapshot | jq '.stats.onlineServers'
+```
+
+3. R-tier read (inventory). The marker also flags a live viewer for 30
+   seconds, so use it only when someone is actually watching:
+
+```bash
+curl -s -H "Authorization: Bearer ${MOCOP_TOKEN}" \
+  -H 'X-Monitor-Request: dashboard' \
   http://127.0.0.1:8787/api/inventory | jq '.activeHosts'
 ```
 
-3. W-tier write — start a one-hour maintenance window:
+4. W-tier write — start a one-hour maintenance window:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8787/api/settings/maintenance \
+  -H "Authorization: Bearer ${MOCOP_TOKEN}" \
   -H 'Origin: http://127.0.0.1:8787' \
   -H 'X-Monitor-Request: dashboard' \
   -H 'Content-Type: application/json' \
   -d '{"host":"gpu-node-01","durationSeconds":3600,"reason":"kernel upgrade"}'
 ```
 
-4. Server-Sent Events — one `snapshot` event per state revision plus a named
+5. Server-Sent Events — one `snapshot` event per state revision plus a named
    `heartbeat` event every 15 quiet seconds (a connected stream counts as a
    viewer):
 
 ```bash
-curl -N http://127.0.0.1:8787/api/events
+curl -N -H "Authorization: Bearer ${MOCOP_TOKEN}" \
+  http://127.0.0.1:8787/api/events
 ```
 
-5. Error handling — branch on the stable `code`, never on the message:
+6. OpenMetrics is authenticated too:
 
 ```bash
-curl -s 'http://127.0.0.1:8787/api/incidents?limit=0' | jq -r '.code'
+curl -s -H "Authorization: Bearer ${MOCOP_TOKEN}" \
+  http://127.0.0.1:8787/metrics
+```
+
+7. Error handling — branch on the stable `code`, never on the message:
+
+```bash
+curl -s -H "Authorization: Bearer ${MOCOP_TOKEN}" \
+  'http://127.0.0.1:8787/api/incidents?limit=0' | jq -r '.code'
 # INVALID_LIMIT
 ```
 
@@ -262,16 +308,16 @@ This table matches the server's route manifest exactly.
 
 | Method | Path | Tier | Purpose |
 |---|---|---|---|
-| GET | `/api/snapshot` | L | Full current state: hosts, GPUs, processes, stats. |
-| GET | `/api/events` | L | SSE stream of snapshots with named heartbeats. |
-| GET | `/api/history` | L | Per-host resource trend points. |
-| GET | `/api/usage` | L | Per-owner GPU occupancy and idle-occupancy rollup. |
-| GET | `/api/incidents` | L | Active conditions, transition events, correlations. |
-| GET | `/api/meta` | L | API self-description: versions, capabilities, endpoints. |
-| GET | `/api/service` | L | **Deprecated** alias of the `/api/meta` capabilities block. |
-| GET | `/healthz` | L | Liveness plus cumulative transport retries. |
-| GET | `/readyz` | L | Readiness; `503` until the first successful sample. |
-| GET | `/metrics` | L | OpenMetrics 1.0 exposition of the current snapshot. |
+| GET | `/api/snapshot` | A | Full current state: hosts, GPUs, processes, stats. |
+| GET | `/api/events` | A | SSE stream of snapshots with named heartbeats. |
+| GET | `/api/history` | A | Per-host resource trend points. |
+| GET | `/api/usage` | A | Per-owner GPU occupancy and idle-occupancy rollup. |
+| GET | `/api/incidents` | A | Active conditions, transition events, correlations. |
+| GET | `/api/meta` | P | API self-description: versions, capabilities, endpoints. |
+| GET | `/api/service` | A | **Deprecated** alias of the `/api/meta` capabilities block. |
+| GET | `/healthz` | P | Liveness plus cumulative transport retries. |
+| GET | `/readyz` | P | Readiness; `503` until the first successful sample. |
+| GET | `/metrics` | A | OpenMetrics 1.0 exposition of the current snapshot. |
 | GET | `/api/gpu-history` | R | Per-GPU trend points and process events. |
 | GET | `/api/diagnostics` | R | Redacted, alias-anonymized support bundle. |
 | GET | `/api/inventory` | R | Configured/active/available hosts and collector settings. |
@@ -290,7 +336,7 @@ This table matches the server's route manifest exactly.
 
 ### GET /api/snapshot
 
-Full current state. Tier L. Query: ignored. This is the same object carried
+Full current state. Tier A. Query: ignored. This is the same object carried
 by every SSE `snapshot` event.
 
 Top-level fields:
@@ -405,7 +451,7 @@ Errors: none specific (`400 REQUEST_BODY_NOT_ALLOWED` applies as everywhere).
 
 ### GET /api/events
 
-Server-Sent Events stream. Tier L (no marker header required, but a
+Server-Sent Events stream. Tier A (no marker header required, but a
 connected stream **is** a viewer — see the warning above). `HEAD` is
 rejected with `405`.
 
@@ -413,14 +459,19 @@ rejected with `405`.
   `event: snapshot` frame per state revision. `data:` is the exact
   `GET /api/snapshot` object.
 - After 15 seconds without a revision the server sends
-  `event: heartbeat` / `data: {}` — a **named event**, so `EventSource`
-  clients can observe stream liveness and reconnect on stall.
+  `event: heartbeat` / `data: {}` — a **named event**, so streaming clients
+  can observe liveness and reconnect on stall.
 - At most 16 concurrent stream clients; the next connect receives
   `503 SERVICE_UNAVAILABLE`.
 
+The authenticated dashboard uses `fetch()` and incrementally decodes the SSE
+stream because the browser `EventSource` API cannot attach an `Authorization`
+header. Native `EventSource` is used only when the server was explicitly
+started without an access token (for compatibility/testing).
+
 ### GET /api/history
 
-Per-host resource trend. Tier L.
+Per-host resource trend. Tier A.
 
 Query parameters:
 
@@ -440,7 +491,7 @@ Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_LIMIT`,
 
 ### GET /api/usage
 
-Per-owner GPU occupancy rollup over a bounded window. Tier L. Aggregates
+Per-owner GPU occupancy rollup over a bounded window. Tier A. Aggregates
 the in-memory process timeline (started/stopped transitions plus the live
 process table), so coverage is limited to what the monitor observed — the
 response says so explicitly instead of extrapolating.
@@ -491,7 +542,7 @@ Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_HOURS`,
 ### GET /api/incidents
 
 Active conditions, bounded transition history, and shared-path
-correlations. Tier L.
+correlations. Tier A.
 
 Query parameters:
 
@@ -545,11 +596,11 @@ Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_LIMIT`.
 
 ### GET /api/meta
 
-API self-description. Tier L. Query: rejected (`QUERY_NOT_ALLOWED`).
+API self-description. Tier P. Query: rejected (`QUERY_NOT_ALLOWED`).
 
 ```json
 {
-  "apiVersion": "1",
+  "apiVersion": "2",
   "appVersion": "0.8.0",
   "schemaVersion": 1,
   "capabilities": {
@@ -558,13 +609,13 @@ API self-description. Tier L. Query: rejected (`QUERY_NOT_ALLOWED`).
     "configurationWriteSupported": true
   },
   "endpoints": [
-    {"method": "GET", "path": "/api/snapshot", "access": "listener"}
+    {"method": "GET", "path": "/api/snapshot", "access": "authenticated"}
   ]
 }
 ```
 
-`endpoints` lists every route with its access tier (`listener`, `reader`,
-`writer`). `restartSupported` is true only under the supervised user
+`endpoints` lists every route with its access tier (`public`, `authenticated`,
+`reader`, `writer`). `restartSupported` is true only under the supervised user
 service; `manualProbeSupported` requires the live scheduler;
 `configurationWriteSupported` reports whether the active configuration file
 is dashboard-writable (file metadata only, no SSH).
@@ -572,12 +623,12 @@ is dashboard-writable (file metadata only, no SSH).
 ### GET /api/service
 
 **Deprecated** (`Deprecation: true` header) alias of the `/api/meta`
-capabilities block. Tier L. Query: rejected. Returns
+capabilities block. Tier A. Query: rejected. Returns
 `{"restartSupported": bool}`. Use `GET /api/meta` instead.
 
 ### GET /healthz
 
-Liveness. Tier L. Always `200` while the process serves requests.
+Liveness. Tier P. Always `200` while the process serves requests.
 
 ```json
 {"status": "ok", "ready": true, "transportRetries": 4}
@@ -587,7 +638,7 @@ Liveness. Tier L. Always `200` while the process serves requests.
 
 ### GET /readyz
 
-Readiness. Tier L. `200` when at least one target exists and at least one
+Readiness. Tier P. `200` when at least one target exists and at least one
 host has a successful sample; otherwise `503` with the same body shape:
 
 | Field | Type | Description |
@@ -604,7 +655,7 @@ host has a successful sample; otherwise `503` with the same body shape:
 ### GET /metrics
 
 OpenMetrics 1.0 exposition of the current in-memory snapshot
-(`application/openmetrics-text; version=1.0.0; charset=utf-8`). Tier L.
+(`application/openmetrics-text; version=1.0.0; charset=utf-8`). Tier A.
 Query: rejected. Never triggers collection. See the
 [OpenMetrics reference](#openmetrics-reference).
 
@@ -659,7 +710,7 @@ Configuration projection. Tier R. Query: rejected.
 | `excludedHostCount` | int | Scanned aliases skipped by `exclude_hosts`. |
 | `collectorSettings` | object | `{pollIntervalSeconds, probeTimeoutSeconds, connectTimeoutSeconds, maxWorkers}`. **`connectTimeoutSeconds` is read-only context** (the probe timeout must exceed it); the write route rejects it. |
 | `maintenanceWindows` | object | **Every configured window**, keyed by alias: `{until, reason, active}` plus `recurring: true` for weekly windows. `active` says whether the window is silencing the host right now; for recurring windows `until` is the end of the current or next instance. |
-| `incidentActions` | array | Currently active actions: `{host, condition_key, action, until, reason}` (snake_case `condition_key`). |
+| `incidentActions` | array | Currently active actions: `{host, condition_key, action, until, reason, incident_started_at}` (snake_case keys); the last field binds the action to one incident generation. |
 | `hostGroups` | object | Alias → group name. |
 | `writable` | bool | Whether dashboard writes can persist to the configuration file. |
 
@@ -749,19 +800,23 @@ snapshot. Errors: `INVALID_SCHEMA`, `INVALID_SETTINGS`,
 ### POST /api/settings/incident-action
 
 Acknowledge, silence, or clear one active condition. Tier W. Body cap
-1024 bytes. Body: exactly `{"host", "conditionKey", "action",
-"durationSeconds", "reason"}`.
+1024 bytes. Body: exactly `{"host", "conditionKey", "incidentStartedAt",
+"action", "durationSeconds", "reason"}`.
 
 - `action` ∈ {`acknowledged`, `silenced`, `clear`}.
 - `durationSeconds` ∈ {0, 3600, 14400, 86400, 604800}; `0` if and only if
   `action` is `clear`.
+- For acknowledgement/silence, `incidentStartedAt` is the active condition's
+  exact `firstObservedAt`; a mismatch returns `409 INCIDENT_NOT_ACTIVE` so a
+  stale dialog cannot act on a later recurrence. For `clear`, it is `null`.
 - `reason`: at most 120 visible characters (may be empty).
 - Acknowledged conditions stay visible and keep recovery notifications;
   silenced conditions suppress new notifications. Both drop the condition
   from `actionable`.
 
 Response `200`: the full inventory snapshot. Errors: `INVALID_SCHEMA`,
-`INVALID_SETTINGS`, `409 INVENTORY_CHANGED`, `503 SERVICE_UNAVAILABLE`.
+`INVALID_SETTINGS`, `409 INCIDENT_NOT_ACTIVE`, `409 INVENTORY_CHANGED`,
+`503 SERVICE_UNAVAILABLE`.
 
 ### POST /api/probe
 
@@ -806,8 +861,8 @@ only when `GET /api/meta` reports `restartSupported: true`; otherwise
 ## Agent playbooks
 
 Recommended request sequences for common automation tasks. All of them
-honor the viewer semantics: pure diagnostics stay at the L tier without the
-marker header.
+honor the viewer semantics: pure diagnostics stay at the A tier with Bearer
+authentication and without the marker header.
 
 ### 1. Read-only diagnosis (no viewer side effect)
 

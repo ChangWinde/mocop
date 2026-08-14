@@ -41,7 +41,11 @@ local JSON configuration
  display-only topology ── ConfigInventory ── `/api/topology` ── dashboard
 ```
 
-The dependency direction is `web → StateStore ← service → protocols/models/config`. The web layer has no knowledge of the SSH implementation. The scheduler consumes `HostSource` and `ResourceProbe` protocols through registries, which keeps environment-specific collection behind stable interfaces.
+The dependency direction is `web → StateStore ← service → protocols/models/config`.
+The web layer has no knowledge of the SSH implementation. The entrypoint constructs
+the one repository-owned host source and OpenSSH collector behind `HostSource` and
+`ResourceProbe` protocols, keeping environment-specific collection behind stable
+interfaces without a runtime plugin registry.
 
 ## Components
 
@@ -93,7 +97,32 @@ and record counts are bounded. [ADR-0003](adr/0003-gpu-reliability-and-authorita
 and [ADR-0011](adr/0011-bounded-operations-extensions.md) record the health and workload
 decisions. [ADR-0014](adr/0014-tiered-gpu-process-telemetry.md) records process pacing.
 
-The browser receives UTF-8 JSON snapshots through SSE. `/api/snapshot` supports cold start and diagnostics. `/metrics` renders the same current snapshot as OpenMetrics 1.0 with an exact media type and no collection side effect; stale host resources are omitted from current resource series. Host and GPU history queries accept only discovered telemetry identities and at most 300 points. The redacted diagnostic projection requires a dashboard read marker and exposes neither raw connection errors nor process identity. Incident queries accept limits from 1 to 200. The cadence shortcut accepts one finite JSON number from 2 to 60. The collector route accepts exactly cadence, complete-probe timeout, and integer worker concurrency within documented bounds. The inventory route accepts one exact add/remove action and one validated alias. An add must match a fresh, eligible OpenSSH scan; a remove must match the current configuration. The host-group route accepts one explicit host and one bounded visible group or clear action. Maintenance and condition-action routes accept only an explicit host, fixed finite duration or clear action, and bounded reason; the service generates the UTC expiry. A manual-probe route accepts one active alias and only advances that host's existing fixed probe deadline. The notification-test route accepts an empty object and exercises only preconfigured endpoints. All write routes use the same bounded same-origin dashboard-request guard, serialize durable changes through `ConfigInventory`, and hot-apply the validated immutable `MonitorConfig` after atomic persistence.
+The HTTP manifest assigns every route one of four explicit tiers: public API
+discovery/health (P), Bearer-authenticated automation reads (A), authenticated
+same-origin dashboard reads (R), or authenticated same-origin writes (W). The
+per-install capability and browser delivery trade-off are recorded in
+[ADR-0017](adr/0017-per-install-dashboard-capability.md). `/api/snapshot` supports
+cold start and diagnostics. `/metrics` renders the same current snapshot as
+authenticated OpenMetrics 1.0 with an exact media type and no collection side effect;
+stale host resources are omitted from current resource series. Host and GPU history
+queries accept only discovered telemetry identities and at most 300 points. The
+redacted diagnostic projection requires a dashboard read marker and exposes neither
+raw connection errors nor process identity. Incident queries accept limits from 1 to
+200. The cadence shortcut accepts one finite JSON number from 2 to 60. The collector
+route accepts exactly cadence, complete-probe timeout, and integer worker concurrency
+within documented bounds. The inventory route accepts one exact add/remove action and
+one validated alias. An add must match a fresh, eligible OpenSSH scan; a remove must
+match the current configuration. The host-group route accepts one explicit host and
+one bounded visible group or clear action. Maintenance and condition-action routes
+accept only an explicit host, fixed finite duration or clear action, and bounded
+reason; the service generates the UTC expiry. A manual-probe route accepts one active
+alias and only advances that host's existing fixed probe deadline. The
+notification-test route accepts an empty object and exercises only preconfigured
+endpoints. All write routes use the same bounded same-origin dashboard-request guard,
+serialize durable changes through `ConfigInventory`, and hot-apply the validated
+immutable `MonitorConfig` after atomic persistence. The exact endpoint and error
+contracts live in [API.md](API.md); JSON configuration fields and bounds live in
+[CONFIGURATION.md](CONFIGURATION.md).
 
 The optional `local_host` alias must be present in the explicit host allowlist. It executes the same repository-owned script through a local `sh` process; every other target uses a structured OpenSSH argument vector. Stdout and stderr are drained incrementally into buffers that share one configured byte limit. A timeout or limit violation terminates the isolated process group.
 
@@ -130,6 +159,10 @@ retaining recovery delivery; silence suppresses new notifications for that condi
 Snapshots retain raw active and critical counts and add actionable counts that exclude
 maintained, acknowledged, or silenced conditions. Action changes and natural expiry
 advance the incident-view revision without inventing an incident transition.
+Active conditions are rebuilt only from live post-start probes. A durable
+generation-bound action gets one startup rebinding opportunity for a matching
+condition; a healthy observation or subsequent recovery consumes it, preventing
+the action from suppressing a later recurrence.
 [ADR-0007](adr/0007-time-bounded-maintenance-overlay.md) records the rejected
 pause-collection and drop-incident alternatives; [ADR-0013](adr/0013-operational-diagnostics-and-gpu-history.md)
 records the condition-action, GPU-history, manual-probe, and diagnostic boundaries.
@@ -155,15 +188,21 @@ never initiates collection.
 
 ## Process and service model
 
-Package installation and service management are separate operations. `mocop init` creates a non-overwriting `0600` user configuration. `mocop service install` validates that configuration, generates a unit for the active Python environment, enables the user service, and starts it.
+Package installation and service management are separate operations. `mocop init`
+creates a non-overwriting `0600` user configuration. `mocop service install` validates
+that configuration, creates or validates the sibling private Bearer token, generates a
+unit for the active Python environment, enables the user service, starts it, verifies
+active state, and prints a fragment-bearing capability URL.
 
 The user service is intentional because OpenSSH configuration, `known_hosts`, keys,
 and agent sockets belong to that identity. The unit invokes `systemctl --user` without
-a shell and applies `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, restricted
-address families, and `UMask=0077`. `ReadWritePaths` grants write access only to the
-selected configuration directory; `StateDirectory=mocop` grants a private state path
-for optional SQLite. An optional private `environment` file beside `config.json`
-supplies webhook URL and signing-secret variables.
+a shell and applies enforceable, portable controls: `NoNewPrivileges=true`, restricted
+address families, `UMask=0077`, and `StateDirectory=mocop` with mode `0700` for
+optional SQLite. It deliberately does not advertise a user-manager mount-namespace
+filesystem sandbox, which is systemd-version-dependent and can deny required SSH
+agent or ControlMaster paths. Selected configuration files and directories instead
+rely on validated ownership and private Unix modes. An optional private `environment`
+file beside `config.json` supplies webhook URL and signing-secret variables.
 
 The generated unit also marks the process as supervised. Only this mode exposes the
 bounded dashboard restart capability: the HTTP handler acknowledges an exact
@@ -188,7 +227,9 @@ records the alternatives and security boundary.
 - Maintenance windows never change scheduling; their UTC expiry automatically restores active conditions to the actionable view.
 - Raw SSH stderr is classified locally and never crosses the browser boundary.
 - Failed hosts keep their last successful data, marked stale and excluded from current totals.
-- SSE sends a heartbeat every 15 seconds and relies on native `EventSource` reconnection.
+- SSE sends a named heartbeat every 15 seconds. With a capability, the dashboard uses
+  fetch streaming so it can attach Bearer authentication; native `EventSource` is only
+  the no-token compatibility path.
 - `/healthz` reports process liveness; `/readyz` requires a discovered target and one successful sample.
 - The default listener is loopback. Remote access requires external TLS and authenticated authorization.
 - A fatal collector scheduler failure exits the process non-zero so the user service restarts it.
@@ -201,7 +242,9 @@ workload, and notification boundaries.
 
 SSH connection and network wait dominate current collection cost. Existing evidence does not justify a Rust rewrite because it would not remove those round trips. Re-evaluate the language or agent architecture only after profiling a fixed workload that exceeds 200 hosts, requires a sustained interval below 2 seconds, saturates one CPU core, or exceeds 512 MiB resident memory.
 
-The reproducible measurement contract lives in [PERFORMANCE.md](PERFORMANCE.md). Security boundaries live in [SECURITY.md](SECURITY.md).
+The reproducible measurement contract lives in [PERFORMANCE.md](PERFORMANCE.md).
+Security boundaries live in [SECURITY.md](SECURITY.md); deployment, upgrade, and
+rollback procedures live in [OPERATIONS.md](OPERATIONS.md).
 
 ## Repository layout
 

@@ -213,7 +213,10 @@ def _run_bounded_process(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(
-                        command, timeout_seconds, output=bytes(output["stdout"])
+                        command,
+                        timeout_seconds,
+                        output=bytes(output["stdout"]),
+                        stderr=bytes(output["stderr"]),
                     )
                 wait_seconds = (
                     remaining if process_registry is not None else min(remaining, 0.25)
@@ -251,14 +254,20 @@ def _run_bounded_process(
             returncode = process.poll()
             if returncode is None:
                 raise subprocess.TimeoutExpired(
-                    command, timeout_seconds, output=bytes(output["stdout"])
+                    command,
+                    timeout_seconds,
+                    output=bytes(output["stdout"]),
+                    stderr=bytes(output["stderr"]),
                 )
         else:
             try:
                 returncode = process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 raise subprocess.TimeoutExpired(
-                    command, timeout_seconds, output=bytes(output["stdout"])
+                    command,
+                    timeout_seconds,
+                    output=bytes(output["stdout"]),
+                    stderr=bytes(output["stderr"]),
                 ) from None
         return _BoundedProcessResult(
             returncode=returncode,
@@ -383,7 +392,10 @@ def parse_nvidia_smi_csv(payload: str) -> tuple[GpuMetrics, ...]:
             continue
         if len(gpus) >= _MAX_GPUS_PER_HOST:
             raise ValueError("nvidia-smi returned too many GPU records")
-        gpus.append(_parse_nvidia_smi_row(row, row_number))
+        gpu = _parse_nvidia_smi_row(row, row_number)
+        if any(existing.index == gpu.index for existing in gpus):
+            raise ValueError("nvidia-smi returned duplicate GPU indices")
+        gpus.append(gpu)
     return tuple(gpus)
 
 
@@ -612,7 +624,10 @@ def parse_nvidia_combined_csv(
                 f"nvidia-smi returned {len(row)} combined GPU columns on row "
                 f"{row_number}; expected {len(_COMBINED_QUERY_FIELDS)}"
             )
-        gpus.append(_parse_nvidia_smi_row(row[: len(_QUERY_FIELDS)], row_number))
+        gpu = _parse_nvidia_smi_row(row[: len(_QUERY_FIELDS)], row_number)
+        if any(existing.index == gpu.index for existing in gpus):
+            raise ValueError("nvidia-smi returned duplicate GPU indices")
+        gpus.append(gpu)
         if health_valid:
             try:
                 gpu_uuid, metrics = _parse_nvidia_health_row(
@@ -1481,7 +1496,7 @@ class OpenSshLinuxResourceProbe:
             if local:
                 status = "error"
                 message = "Local resource collection timed out"
-            elif exc.output:
+            elif exc.output or exc.stderr:
                 status = "error"
                 message = "Remote collection stalled after partial output"
             else:

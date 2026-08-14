@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from mocop.config import MaintenanceWindowConfig
-from mocop.metrics import render_openmetrics
+from mocop.metrics import OpenMetricsLimitError, render_openmetrics
 from mocop.models import GpuHealthMetrics, GpuMetrics, ProbeResult, SystemMetrics
 from mocop.service import StateStore
 
@@ -35,8 +35,8 @@ def _system() -> SystemMetrics:
 def _gpu() -> GpuMetrics:
     return GpuMetrics(
         index=0,
-        uuid='GPU-quote"slash\\line\nend',
-        name='NVIDIA "Test"\\GPU\nModel',
+        uuid='GPU-quote"slash\\line\ncr\rend',
+        name='NVIDIA "Test"\\GPU\r\nModel',
         driver_version="550.1",
         pstate="P0",
         temperature_c=65,
@@ -143,8 +143,9 @@ class OpenMetricsTests(unittest.TestCase):
     def test_escapes_untrusted_labels_and_omits_stale_gpu_samples(self) -> None:
         body = render_openmetrics(self.store.snapshot()).decode()
 
-        self.assertIn('uuid="GPU-quote\\"slash\\\\line\\nend"', body)
+        self.assertIn('uuid="GPU-quote\\"slash\\\\line\\ncr\\nend"', body)
         self.assertIn('model="NVIDIA \\"Test\\"\\\\GPU\\nModel"', body)
+        self.assertNotIn("\r", body)
         self.store.apply(
             ProbeResult(
                 "gpu-01",
@@ -172,6 +173,41 @@ class OpenMetricsTests(unittest.TestCase):
 
         self.assertNotIn("mocop_collection_poll_interval_seconds", body)
         self.assertTrue(body.endswith("# EOF\n"))
+
+    def test_omits_process_count_when_process_telemetry_failed(self) -> None:
+        snapshot = self.store.snapshot()
+        gpu = snapshot["servers"][0]["gpus"][0]
+        gpu["processes"] = []
+        gpu["processes_available"] = False
+        gpu["processes_sampled"] = True
+
+        body = render_openmetrics(snapshot).decode()
+
+        labels = 'host="gpu-01",index="0"'
+        self.assertNotIn(f"mocop_gpu_processes{{{labels}", body)
+        self.assertIn("mocop_gpu_process_telemetry_available", body)
+        self.assertIn("mocop_gpu_process_telemetry_sampled", body)
+        self.assertIn("attempted process telemetry", body)
+
+    def test_rejects_expositions_above_the_series_budget_before_rendering(self) -> None:
+        snapshot = {
+            "appVersion": "test",
+            "stats": {},
+            "servers": [
+                {
+                    "host": "gpu-01",
+                    "status": "online",
+                    "stale": False,
+                    "gpus": [
+                        {"index": index, "uuid": f"GPU-{index}"}
+                        for index in range(5_001)
+                    ],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(OpenMetricsLimitError, "series budget"):
+            render_openmetrics(snapshot)
 
     def test_exports_gpu_metrics_when_system_metrics_are_missing(self) -> None:
         self.store.apply(

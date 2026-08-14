@@ -41,7 +41,7 @@ signal that changes collection cadence.
 Two related policies:
 
 - **Single-version collection protocol.** The parser accepts exactly the
-  current protocol version (`_SUPPORTED_PROTOCOL_VERSIONS = {MONITOR_V7}`)
+  current protocol version (`MONITOR_V8`)
   and rejects everything else. Because the script and parser ship in one
   process and the script is re-sent on every probe, an older emitter cannot
   exist; read compatibility for the V4 through V6 payloads is removed rather
@@ -58,7 +58,10 @@ Two related policies:
   entry before removal. The viewer side effect of the
   `X-Monitor-Request: dashboard` marker — attended cadence for 30 seconds per
   marked read or stream wake — is documented as a contract: viewer clients
-  send it, non-viewer automation must not.
+  send it, non-viewer automation must not. The route manifest uses the P/A/R/W
+  tiers defined by [ADR-0017](0017-per-install-dashboard-capability.md): public,
+  Bearer-authenticated, authenticated dashboard reader, and authenticated
+  same-origin writer.
 
 ## Impact
 
@@ -71,7 +74,7 @@ Two related policies:
 - Agents can branch on `code`, discover capabilities through `GET /api/meta`
   before acting, and detect deprecations mechanically from response headers.
 - Automation that follows the marker contract keeps unattended fleets on the
-  stretched process cadence; the L-tier read surface is sufficient for
+  stretched process cadence; the A-tier read surface is sufficient for
   diagnosis without ever sending the marker.
 - Legacy probe registry names are gone; `openssh-linux-v6` remains the single
   registered collector implementation name (it names the probe, not the

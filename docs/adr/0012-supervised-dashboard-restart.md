@@ -26,12 +26,11 @@ foreground development process is managed by systemd.
 - Cons: adds a command-execution boundary to the web process, requires systemd access
   inside the request path, and can terminate the response before acknowledgement.
 
-### Option B: Expose an authenticated general lifecycle API
+### Option B: Expose a general lifecycle API
 
 - Pros: could later support stop, reload, upgrade, and logs.
-- Cons: substantially expands scope and privilege for one infrequent operation, and
-  requires an authentication system the loopback-only dashboard does not otherwise
-  need.
+- Cons: substantially expands scope and privilege for one infrequent operation even
+  when the caller has the dashboard's operator capability.
 
 ### Option C: Exit only when explicitly supervised
 
@@ -46,7 +45,8 @@ foreground development process is managed by systemd.
 Choose Option C. The generated user service passes a hidden `--managed-service`
 capability. Only that mode installs a fixed restart callback which sets an in-process
 event. `POST /api/service/restart` accepts exactly an empty JSON object through the
-existing bounded same-origin write guard, acknowledges with `202`, and then requests a
+existing Bearer-authenticated, bounded same-origin write guard, acknowledges with
+`202`, and then requests a
 graceful exit with status 75. systemd starts the replacement process under its existing
 failure policy.
 
@@ -62,4 +62,7 @@ or SSH process groups are terminated during shutdown.
 - Upgrades replace already-open browser assets without a manual hard refresh.
 - Configuration, browser-local preferences, and optional SQLite history are not reset.
 - The expected interruption is bounded by child-process cancellation and systemd's
-  configured restart delay.
+configured restart delay.
+
+The per-install HTTP capability and the P/A/R/W access tiers are defined separately
+by [ADR-0017](0017-per-install-dashboard-capability.md).
