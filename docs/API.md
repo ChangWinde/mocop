@@ -447,6 +447,13 @@ that resource.
 | `workload` | object \| null | Present only with `workloads.mode` `identity`/`auto`: `{kind, workload_id, name, owner, queue, namespace, command, started_at}`; `kind` is `process`, `slurm`, `kubernetes`, `docker`, or `podman`, everything else nullable. `command` and `started_at` (true start time) are populated by both tiers; the container kinds and scheduler identifiers additionally require the `auto` tier's cgroup read. |
 | `first_seen_at` | timestamp \| null | **Monitor-relative lower bound**: when this monitor first observed the `(pid, name)` pair on this device. Resets on monitor restart. When a PID is reused and the workload `started_at` changes, the server treats it as a new instance: a stop/start event pair is emitted and `first_seen_at` restarts. |
 
+The dashboard's global/selected-host program search is a bounded browser-side
+projection of these authenticated snapshot records; it does not define another
+API endpoint or trigger collection. It matches literal normalized terms across
+host/GPU placement, PID, name, command, owner, workload identity, queue, and
+namespace. Results therefore inherit `processes_available`,
+`processes_sampled`, and `processes_observed_at` freshness semantics.
+
 Errors: none specific (`400 REQUEST_BODY_NOT_ALLOWED` applies as everywhere).
 
 ### GET /api/events

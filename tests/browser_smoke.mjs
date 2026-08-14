@@ -302,6 +302,251 @@ try {
   assert.equal(final.attentionVisible, true);
   assert.equal(final.overflow, false);
 
+  const programSearch = await cdp.evaluate(`(() => {
+    const input = document.querySelector("#search");
+    selectHost("all");
+    input.value = "train.py";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const panel = document.querySelector("#program-search-panel");
+    const globalRows = [...document.querySelectorAll(".program-search-result")];
+    const firstRow = globalRows[0];
+    const firstButton = firstRow.querySelector("button");
+    firstButton.focus();
+    render();
+    const rowReused = firstRow === document.querySelector(".program-search-result");
+    const focusPreserved = document.activeElement === firstButton;
+    const global = {
+      hidden: panel.hidden,
+      scope: document.querySelector("#program-search-scope").textContent,
+      count: document.querySelector("#program-search-count").textContent,
+      hosts: globalRows.map((row) => row.dataset.host),
+      names: globalRows.map(
+        (row) => row.querySelector(".program-search-name")?.textContent || "",
+      ),
+      rowReused,
+      focusPreserved,
+    };
+    input.value = "ＴＲＡＩＮ．ＰＹ";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const normalizedCount = document.querySelector("#program-search-count").textContent;
+    input.value = "x".repeat(121);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const boundedQueryLength = input.value.length;
+
+    const server1 = view.snapshot.servers.find((server) => server.host === "atlas-01");
+    const gpu1 = server1.gpus.find((gpu) => gpu.index === 0);
+    const originalProcesses = gpu1.processes;
+    gpu1.processes = Array.from({ length: 205 }, (_, index) => ({
+      pid: 70_000 + index,
+      name: "bulk-search-" + index + ".py",
+      used_memory_mib: index,
+      workload: null,
+    }));
+    input.value = "bulk-search";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const bounded = {
+      count: document.querySelector("#program-search-count").textContent,
+      rows: document.querySelectorAll(".program-search-result").length,
+      summary: document.querySelector("#program-search-summary").textContent,
+      first: document.querySelector(".program-search-name")?.textContent || "",
+    };
+    const lastBoundedResult = document.querySelector(
+      ".program-search-result:last-child button",
+    );
+    lastBoundedResult.click();
+    const pinnedDetail = {
+      visibleRows: [...document.querySelectorAll("#gpu-task-list .gpu-task")]
+        .map((row) => row.dataset.processKey),
+      focusedKey: document.activeElement?.dataset.processKey || "",
+      note: document.querySelector("#gpu-task-note").textContent,
+    };
+    document.querySelector("#gpu-detail-dialog").close();
+
+    window.__mocopSearchXss = false;
+    gpu1.processes = [{
+      pid: 99_999,
+      name: '<img src=x onerror="window.__mocopSearchXss=true">',
+      used_memory_mib: 1,
+      workload: {
+        kind: "process",
+        owner: "<b>root</b>",
+        command: '<svg onload="window.__mocopSearchXss=true">',
+      },
+    }];
+    input.value = "onerror";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const hostile = {
+      rows: document.querySelectorAll(".program-search-result").length,
+      text: document.querySelector(".program-search-result")?.textContent || "",
+      injectedNodes: document.querySelectorAll(
+        ".program-search-result img, .program-search-result svg, .program-search-result b",
+      ).length,
+      executed: window.__mocopSearchXss,
+    };
+    gpu1.processes = originalProcesses;
+    input.value = "atlas-01 researcher";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    selectHost("atlas-01");
+    const scopedRows = [...document.querySelectorAll(".program-search-result")];
+    const scoped = {
+      scope: document.querySelector("#program-search-scope").textContent,
+      count: document.querySelector("#program-search-count").textContent,
+      hosts: scopedRows.map((row) => row.dataset.host),
+    };
+    scopedRows[0].querySelector("button").click();
+    const detail = {
+      open: document.querySelector("#gpu-detail-dialog").open,
+      host: document.querySelector("#gpu-detail-host").textContent,
+      query: document.querySelector("#gpu-task-search").value,
+      visibleRows: [...document.querySelectorAll("#gpu-task-list .gpu-task")]
+        .map((row) => row.dataset.processKey),
+      focusedTarget: document.activeElement?.classList.contains("gpu-task") || false,
+    };
+    document.querySelector("#gpu-detail-dialog").close();
+    selectHost("all");
+    input.value = "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    return {
+      global, normalizedCount, boundedQueryLength, bounded, pinnedDetail,
+      hostile, scoped, detail, maxLength: input.maxLength,
+    };
+  })()`);
+  assert.equal(programSearch.global.hidden, false);
+  assert.equal(programSearch.global.scope, "全局");
+  assert.equal(programSearch.global.count, "5");
+  assert.deepEqual([...new Set(programSearch.global.hosts)], [
+    "atlas-01", "atlas-02", "atlas-03",
+  ]);
+  assert(programSearch.global.names.every((name) => name === "train.py"));
+  assert.equal(programSearch.global.rowReused, true);
+  assert.equal(programSearch.global.focusPreserved, true);
+  assert.equal(programSearch.normalizedCount, "5");
+  assert.equal(programSearch.boundedQueryLength, 120);
+  assert.equal(programSearch.bounded.count, "205");
+  assert.equal(programSearch.bounded.rows, 200);
+  assert.match(programSearch.bounded.summary, /205/);
+  assert.match(programSearch.bounded.summary, /200/);
+  assert.equal(programSearch.bounded.first, "bulk-search-204.py");
+  assert.equal(programSearch.pinnedDetail.visibleRows.length, 100);
+  assert(programSearch.pinnedDetail.visibleRows.includes("70005|bulk-search-5.py"));
+  assert.equal(programSearch.pinnedDetail.focusedKey, "70005|bulk-search-5.py");
+  assert.match(programSearch.pinnedDetail.note, /优先显示所选程序/);
+  assert.equal(programSearch.hostile.rows, 1);
+  assert.match(programSearch.hostile.text, /<img src=x onerror/);
+  assert.equal(programSearch.hostile.injectedNodes, 0);
+  assert.equal(programSearch.hostile.executed, false);
+  assert.equal(programSearch.scoped.scope, "atlas-01");
+  assert.equal(programSearch.scoped.count, "2");
+  assert.deepEqual([...new Set(programSearch.scoped.hosts)], ["atlas-01"]);
+  assert.equal(programSearch.detail.open, true);
+  assert.match(programSearch.detail.host, /atlas-01/);
+  assert.equal(programSearch.detail.query, "atlas-01 researcher");
+  assert.equal(programSearch.detail.visibleRows.length, 1);
+  assert.match(programSearch.detail.visibleRows[0], /^10000\|/);
+  assert.equal(programSearch.detail.focusedTarget, true);
+  assert.equal(programSearch.maxLength, 120);
+
+  let programSearchBenchmark = null;
+  if (process.env.MOCOP_PROGRAM_SEARCH_BENCHMARK === "1") {
+    programSearchBenchmark = await cdp.evaluate(`(() => {
+      const syntheticSnapshot = () => ({
+        servers: Array.from({ length: 128 }, (_, hostIndex) => ({
+          host: "bench-" + String(hostIndex).padStart(3, "0"),
+          stale: false,
+          gpus: Array.from({ length: 8 }, (_, gpuIndex) => ({
+            index: gpuIndex,
+            uuid: "GPU-BENCH-" + hostIndex + "-" + gpuIndex,
+            name: "NVIDIA H100",
+            memory_total_mib: 81920,
+            processes_available: true,
+            processes: Array.from({ length: 64 }, (_, processIndex) => ({
+              pid: hostIndex * 100000 + gpuIndex * 1000 + processIndex,
+              name: "/workspace/train-" + processIndex + ".py",
+              used_memory_mib: 512 + processIndex,
+              workload: {
+                kind: "slurm",
+                name: "llm-train",
+                owner: "researcher",
+                queue: "gpu-long",
+                command: "python train.py --stage sft",
+              },
+            })),
+          })),
+        })),
+      });
+      const synthetic = syntheticSnapshot();
+      const query = "train researcher";
+      const referenceSearch = () => {
+        const terms = normalizedSearchTerms(query);
+        const matches = [];
+        synthetic.servers.forEach((server) => server.gpus.forEach((gpu) => {
+          gpu.processes.forEach((process) => {
+            if (!processMatchesSearch(process, terms, server, gpu)) return;
+            const record = { server, gpu, process, rank: 0 };
+            record.rank = processSearchRank(record, terms);
+            matches.push(record);
+          });
+        }));
+        matches.sort(compareProcessSearchRecords);
+        return { total: matches.length, matches: matches.slice(0, 200) };
+      };
+      const boundedSearch = () => searchProcessRecords(synthetic, query, "all");
+      const coldSnapshot = syntheticSnapshot();
+      const coldStarted = performance.now();
+      const coldResult = searchProcessRecords(coldSnapshot, query, "all");
+      const coldMs = performance.now() - coldStarted;
+      for (let index = 0; index < 3; index += 1) {
+        referenceSearch();
+        boundedSearch();
+      }
+      const measure = (fn) => Array.from({ length: 10 }, () => {
+        const started = performance.now();
+        const result = fn();
+        return { elapsed: performance.now() - started, result };
+      });
+      const reference = measure(referenceSearch);
+      const bounded = measure(boundedSearch);
+      const summarize = (samples) => {
+        const values = samples.map((sample) => sample.elapsed).sort((a, b) => a - b);
+        const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+        const variance = values.reduce(
+          (sum, value) => sum + (value - mean) ** 2,
+          0,
+        ) / (values.length - 1);
+        return {
+          medianMs: values[Math.floor(values.length / 2)],
+          meanMs: mean,
+          stdevMs: Math.sqrt(variance),
+          minMs: values[0],
+          maxMs: values.at(-1),
+        };
+      };
+      const referenceResult = reference[0].result;
+      const boundedResult = bounded[0].result;
+      return {
+        records: 128 * 8 * 64,
+        runs: 10,
+        coldMs,
+        coldTotal: coldResult.total,
+        coldRetained: coldResult.matches.length,
+        reference: summarize(reference),
+        bounded: summarize(bounded),
+        totalsEqual: referenceResult.total === boundedResult.total,
+        firstEqual: programSearchKey(referenceResult.matches[0])
+          === programSearchKey(boundedResult.matches[0]),
+        retained: boundedResult.matches.length,
+      };
+    })()`);
+    assert.equal(programSearchBenchmark.records, 65_536);
+    assert.equal(programSearchBenchmark.runs, 10);
+    assert.equal(programSearchBenchmark.coldTotal, 65_536);
+    assert.equal(programSearchBenchmark.coldRetained, 200);
+    assert.equal(programSearchBenchmark.totalsEqual, true);
+    assert.equal(programSearchBenchmark.firstEqual, true);
+    assert.equal(programSearchBenchmark.retained, 200);
+  }
+
   // Localized transport-failure copy: the fixture's atlas-06 carries a real
   // collector error message, the remaining mappings are checked directly.
   const failureMappings = await cdp.evaluate(`(() => {
@@ -1317,6 +1562,16 @@ try {
     result.boundedTaskRows = document.querySelectorAll("#gpu-task-list .gpu-task").length;
     result.boundedTaskNote = document.querySelector("#gpu-task-note").textContent;
     result.boundedTaskNoteTitle = document.querySelector("#gpu-task-note").title;
+    const taskSearch = document.querySelector("#gpu-task-search");
+    taskSearch.value = "process-100.py";
+    taskSearch.dispatchEvent(new Event("input", { bubbles: true }));
+    result.boundedFilteredCount = document.querySelector("#gpu-task-count").textContent;
+    result.boundedFilteredRows = document.querySelectorAll("#gpu-task-list .gpu-task").length;
+    result.boundedFilteredKey = document.querySelector(
+      "#gpu-task-list .gpu-task",
+    )?.dataset.processKey || "";
+    taskSearch.value = "";
+    taskSearch.dispatchEvent(new Event("input", { bubbles: true }));
     selectedRecord.gpu.processes = originalProcesses;
     renderGpuDetail();
     taskDialog.close();
@@ -1450,6 +1705,9 @@ try {
   assert.match(personalization.boundedTaskNoteTitle, /workloads\.mode=identity/);
   assert.match(personalization.boundedTaskNote, /101 个进程/);
   assert.match(personalization.boundedTaskNote, /最高的 100 个/);
+  assert.equal(personalization.boundedFilteredCount, "1 / 101");
+  assert.equal(personalization.boundedFilteredRows, 1);
+  assert.match(personalization.boundedFilteredKey, /^30100\|/);
   assert.match(personalization.healthMetrics, /硬件健康正常/);
   assert.match(personalization.gpuHistoryRange, /2 个样本/);
   assert.equal(personalization.gpuHistoryCards, 4);
@@ -1487,6 +1745,18 @@ try {
     const firstRowAfter = document.querySelector("#gpu-task-list .gpu-task");
     const rowReused = firstRowBefore === firstRowAfter
       && barBefore === firstRowAfter.querySelector(".mini-track i");
+    const taskSearch = document.querySelector("#gpu-task-search");
+    taskSearch.value = "researcher";
+    taskSearch.dispatchEvent(new Event("input", { bubbles: true }));
+    const ownerSearchOrder = rowKeys();
+    const ownerSearchCount = document.querySelector("#gpu-task-count").textContent;
+    taskSearch.value = "";
+    taskSearch.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector('.gpu-task-sort [data-task-sort="name"]').click();
+    const nameOrder = rowKeys();
+    const nameButtonActive = document.querySelector(
+      '.gpu-task-sort [data-task-sort="name"]',
+    ).classList.contains("active");
     // Only judge the fresh-note styling while the fixture data is still
     // comfortably inside the 90-second freshness window.
     const freshAgeMs = Date.now() - Date.parse(gpu1.processes_observed_at);
@@ -1513,6 +1783,7 @@ try {
     return {
       memoryOrder, trainDuration, workerDuration, workerDurationTitle,
       command, commandTitle, commandHidden, rowReused, freshNoteStale,
+      ownerSearchOrder, ownerSearchCount, nameOrder, nameButtonActive,
       durationOrder, durationButtonActive, savedTaskSort, taskNote,
       staleNote, unavailableCount, unavailableText,
     };
@@ -1535,6 +1806,10 @@ try {
     "python train.py --config configs/llm-70b.yaml --stage sft",
   );
   assert.equal(gpuTasks.rowReused, true);
+  assert.deepEqual(gpuTasks.ownerSearchOrder, ["10000|/workspace/train.py"]);
+  assert.equal(gpuTasks.ownerSearchCount, "1 / 2");
+  assert.equal(gpuTasks.nameOrder[0], "20000|python data_worker.py");
+  assert.equal(gpuTasks.nameButtonActive, true);
   if (gpuTasks.freshNoteStale !== null) {
     assert.equal(gpuTasks.freshNoteStale, false);
   }
@@ -1735,10 +2010,23 @@ try {
   });
   await new Promise((resolve) => setTimeout(resolve, 200));
   const mobile = await cdp.evaluate(`(() => {
+    selectHost("all");
+    const search = document.querySelector("#search");
+    search.value = "train.py";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    const programSearchColumns = getComputedStyle(
+      document.querySelector("#program-search-results"),
+    ).gridTemplateColumns.split(" ").length;
+    const programSearchDocumentOverflow = document.documentElement.scrollWidth
+      > document.documentElement.clientWidth;
+    search.value = "";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
     document.querySelector("#settings-toggle").click();
     const rect = document.querySelector("#settings-dialog").getBoundingClientRect();
     const result = {
       overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      programSearchColumns,
+      programSearchDocumentOverflow,
       gpuMemoryWidth: document.querySelector("#gpu-memory-card")?.getBoundingClientRect().width,
       gridWidth: document.querySelector(".metrics-grid")?.getBoundingClientRect().width,
       settingsCenterDelta: Math.abs(
@@ -1790,6 +2078,8 @@ try {
     return result;
   })()`);
   assert.equal(mobile.overflow, false);
+  assert.equal(mobile.programSearchColumns, 1);
+  assert.equal(mobile.programSearchDocumentOverflow, false);
   assert(mobile.gpuMemoryWidth > mobile.gridWidth * 0.9);
   assert(mobile.settingsCenterDelta < 2);
   assert(mobile.topologyCenterDelta < 2);
@@ -1853,7 +2143,8 @@ try {
 
   console.log(JSON.stringify({
     browser: "chrome", initial, final, failureMappings,
-    heartbeat, topologyBenchmark, capacity, owners, ownersUsage, ownersDrilldown,
+    heartbeat, topologyBenchmark, programSearchBenchmark,
+    capacity, owners, ownersUsage, ownersDrilldown,
     incidentMaintenance, grouping, emptyFleet,
     personalization, gpuTasks, resilience,
     persistedAppearance, persistedTaskSort, mobile, removedBackground, meta,
