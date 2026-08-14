@@ -637,6 +637,33 @@ try {
   // Unattributed card hints at the opt-in identity layer (title only).
   assert.match(owners.unattributed.cardTitle, /workloads\.mode=identity/);
 
+  const ownersUsage = await cdp.evaluate(`(async () => {
+    document.querySelector("#owners-toggle").click();
+    const deadline = Date.now() + 3000;
+    while (
+      !document.querySelectorAll("#owners-usage-results .capacity-candidate").length
+      && Date.now() < deadline
+    ) await new Promise((resolve) => setTimeout(resolve, 25));
+    const rows = [...document.querySelectorAll(
+      "#owners-usage-results .capacity-candidate",
+    )];
+    const result = {
+      summary: document.querySelector("#owners-usage-summary")?.textContent || "",
+      owners: rows.map((row) => row.querySelector("strong")?.textContent),
+      gpuHours: rows.map((row) => row.querySelector("em")?.textContent),
+      idleLabels: rows.map((row) =>
+        [...row.querySelectorAll(".capacity-candidate-metrics span")]
+          .at(-1)?.textContent,
+      ),
+    };
+    document.querySelector("#owners-dialog").close();
+    return result;
+  })()`, true);
+  assert.deepEqual(ownersUsage.owners, ["未归属", "researcher"]);
+  assert.match(ownersUsage.summary, /2 个归属方/);
+  assert(ownersUsage.gpuHours.every((label) => /卡·时/.test(label)));
+  assert(ownersUsage.idleLabels.every((label) => /闲置占比/.test(label)));
+
   // Owner host chips drill down into the fleet view: clicking closes the
   // dialog and selects the host through the regular selection path.
   const ownersDrilldown = await cdp.evaluate(`(() => {
@@ -1809,7 +1836,7 @@ try {
 
   console.log(JSON.stringify({
     browser: "chrome", initial, final, failureMappings, transientConnection,
-    heartbeat, topologyBenchmark, capacity, owners, ownersDrilldown,
+    heartbeat, topologyBenchmark, capacity, owners, ownersUsage, ownersDrilldown,
     incidentMaintenance, grouping, emptyFleet,
     personalization, gpuTasks, resilience,
     persistedAppearance, persistedTaskSort, mobile, removedBackground, meta,

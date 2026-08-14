@@ -84,7 +84,10 @@ All remote values—including shared-storage devices, mountpoints and heatmap la
 Aliases pass a strict grammar; remote aliases follow `--`, while the local target uses the constant `sh -s` argv. Both transports receive the same repository-owned fixed script through stdin. A selector drains stdout and stderr incrementally into buffers sharing the configured 64 KiB–16 MiB hard limit; crossing it kills the isolated process group and returns a finite error. The parser accepts only the current `MONITOR_V8` protocol version and rejects everything else, along with incomplete metric sections, conflicting sampled/skipped process states, missing fields, invalid GPU or health values, duplicate health UUIDs, oversized text and more than 256 GPU or health, 1,024 disk, or 4,096 GPU-process records per host. `MONITOR_V8` can explicitly skip the fixed process query between its bounded deadlines; no browser value controls that decision. Base GPU and health fields share one fixed query, but parsing still treats health as additive: malformed or unsupported health fields cannot suppress valid base telemetry, and an unsupported combined query falls back to the fixed base query. Strict host-key checking and batch mode are mandatory for remote targets; configured timeouts, worker bounds and jittered failure backoff isolate slow targets and disperse shared-path retries; security headers include a same-origin CSP. Network abuse is prevented by the default loopback bind and requires authenticated TLS proxy/VPN controls if the operator changes that default.
 
 Optional workload records are capped at the GPU-process limit, accept only the
-`process`, `slurm`, and `kubernetes` kinds, and bound every field. The fixed script
+`process`, `slurm`, `kubernetes`, `docker`, and `podman` kinds, and bound every
+field. Container IDs are accepted only from anchored Docker/Podman cgroup segments
+with 12–64 lowercase hexadecimal characters and are truncated to the conventional
+12-character display form. The fixed script
 reads at most 16 KiB of cgroup data and 64 KiB of environment data per active GPU PID.
 It selects only workload identity fields and never executes a scheduler client.
 

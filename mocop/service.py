@@ -899,7 +899,7 @@ class StateStore:
             for owner, usage in ranked[:owner_limit]
         ]
         return {
-            "generatedAt": utc_now(),
+            "generatedAt": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
             "sinceAt": (now - timedelta(hours=window_hours))
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z"),
@@ -994,7 +994,15 @@ class StateStore:
                 continue
             close(anchored_start, observed, event.workload)
 
-        for started, workload in open_processes.values():
+        for process_key, (started, workload) in open_processes.items():
+            # Only the live process table proves that an unmatched start is
+            # still occupying the GPU. Collection failures deliberately reset
+            # that table without synthesizing stop events; extending such an
+            # orphan to ``now`` would turn an observation gap into fabricated
+            # billable occupancy.
+            if process_key not in active_processes:
+                dropped += 1
+                continue
             close(started, now_epoch, workload)
 
         # Processes seeded from the first sample of a GPU never emitted a

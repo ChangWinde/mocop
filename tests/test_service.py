@@ -2353,6 +2353,39 @@ class UsageRollupTests(unittest.TestCase):
         # The anchorless stop is dropped and reported, never guessed.
         self.assertEqual(usage["droppedRecords"], 1)
 
+    def test_usage_does_not_extend_orphaned_starts_across_collection_gaps(self) -> None:
+        started = {
+            "observedAt": "2026-08-14T01:30:00Z",
+            "gpuId": "GPU-1",
+            "index": 0,
+            "event": "started",
+            "pid": 9,
+            "name": "finished-during-gap.py",
+            "usedMemoryMiB": 10.0,
+            "workload": {
+                "kind": "process",
+                "owner": "eve",
+                "started_at": "2026-08-14T01:30:00Z",
+            },
+        }
+        restored = LoadedTelemetry(
+            history={},
+            incident_events=(),
+            process_events={("gpu-1", "GPU-1"): (started,)},
+        )
+        store = self._store(restored=restored)
+
+        usage = store.usage(1, 50)
+
+        self.assertEqual(usage["owners"], [])
+        self.assertEqual(usage["totalGpuSeconds"], 0)
+        self.assertEqual(usage["droppedRecords"], 1)
+
+    def test_usage_uses_the_store_clock_for_generated_timestamp(self) -> None:
+        usage = self._store().usage(1, 50)
+
+        self.assertEqual(usage["generatedAt"], "2026-08-14T02:00:00Z")
+
 
 if __name__ == "__main__":
     unittest.main()

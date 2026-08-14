@@ -23,7 +23,13 @@ from mocop.web import MonitorHttpServer, MonitorRequestHandler
 # attended probe cadence; these level-triggered paths accept unmarked reads
 # (curl, scripts) but the dashboard itself must never send one.
 _TRACKED_DASHBOARD_PATHS = frozenset(
-    {"/api/snapshot", "/api/history", "/api/gpu-history", "/api/incidents"}
+    {
+        "/api/snapshot",
+        "/api/history",
+        "/api/gpu-history",
+        "/api/incidents",
+        "/api/usage",
+    }
 )
 _COLLECTOR_SETTINGS_KEYS = frozenset(
     {"pollIntervalSeconds", "probeTimeoutSeconds", "maxWorkers"}
