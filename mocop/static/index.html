@@ -175,6 +175,7 @@
                     <option value="memory">显存占用率</option>
                     <option value="temperature">温度</option>
                     <option value="power">功耗</option>
+                    <option value="processes">进程数</option>
                   </select>
                 </label>
                 <button id="topology-toggle" class="tool-button topology-trigger" type="button" aria-haspopup="dialog">连接拓扑</button>
@@ -242,6 +243,7 @@
               <button class="filter" data-filter="busy" type="button" aria-pressed="false"><i class="dot busy"></i>运行中</button>
               <button class="filter" data-filter="idle" type="button" aria-pressed="false"><i class="dot idle"></i>空闲</button>
               <button class="filter" data-filter="hot" type="button" aria-pressed="false"><i class="dot hot"></i>高温</button>
+              <button class="filter" data-filter="processes" type="button" aria-pressed="false">有进程</button>
             </div>
 
             <div class="table-scroll">
@@ -254,6 +256,7 @@
                     <th>显存</th>
                     <th class="gpu-col-temperature">温度</th>
                     <th class="gpu-col-power">功耗</th>
+                    <th class="gpu-col-process">进程</th>
                     <th>状态</th>
                   </tr>
                 </thead>
@@ -414,6 +417,7 @@
               <option value="memory">显存占用率</option>
               <option value="temperature">温度</option>
               <option value="power">功耗</option>
+              <option value="processes">进程数</option>
             </select>
           </label>
           <label class="settings-field">
@@ -598,6 +602,36 @@
           <div id="gpu-detail-metrics" class="gpu-detail-metrics"></div>
         </div>
         <section class="gpu-task-section">
+          <section class="gpu-task-workspace" aria-labelledby="gpu-task-title">
+            <div class="gpu-task-heading">
+              <div>
+                <span class="section-kicker">GPU PROCESSES</span>
+                <h3 id="gpu-task-title">活跃计算进程</h3>
+              </div>
+              <div id="gpu-task-heading-tools" class="gpu-task-heading-tools">
+                <label class="gpu-task-search-box">
+                  <span class="sr-only">筛选当前 GPU 的程序</span>
+                  <input id="gpu-task-search" type="search" placeholder="筛选程序、用户或 workload" maxlength="120" autocomplete="off">
+                </label>
+                <span id="gpu-task-count" class="count-badge">0</span>
+              </div>
+            </div>
+            <div class="gpu-task-filter-row">
+              <div class="gpu-task-identity-filter" role="group" aria-label="进程归属筛选">
+                <button class="active" data-gpu-task-filter="all" type="button" aria-pressed="true">全部</button>
+                <button data-gpu-task-filter="owned" type="button" aria-pressed="false">已归属</button>
+                <button data-gpu-task-filter="unowned" type="button" aria-pressed="false">未归属</button>
+              </div>
+              <span id="gpu-task-feedback" class="gpu-task-feedback" role="status" aria-live="polite"></span>
+            </div>
+            <div id="gpu-task-insights" class="gpu-task-insights" aria-label="进程摘要"></div>
+            <div id="gpu-task-overview" class="gpu-task-overview">
+              <div><span>已知进程分配显存</span><strong id="gpu-task-memory-total">—</strong></div>
+              <div class="mini-track"><i id="gpu-task-memory-bar"></i></div>
+              <small id="gpu-task-note">按显存占用从高到低排列</small>
+            </div>
+            <div id="gpu-task-list" class="gpu-task-list" role="list"></div>
+          </section>
           <section class="gpu-history-section" aria-label="GPU 近期历史">
             <div class="gpu-task-heading">
               <div>
@@ -610,25 +644,6 @@
             <div class="gpu-timeline-heading"><strong>任务变化</strong><span>仅记录进程进入和退出</span></div>
             <div id="gpu-process-timeline" class="gpu-process-timeline"></div>
           </section>
-          <div class="gpu-task-heading">
-            <div>
-              <span class="section-kicker">GPU PROCESSES</span>
-              <h3>活跃计算进程</h3>
-            </div>
-            <div id="gpu-task-heading-tools" class="gpu-task-heading-tools">
-              <label class="gpu-task-search-box">
-                <span class="sr-only">筛选当前 GPU 的程序</span>
-                <input id="gpu-task-search" type="search" placeholder="筛选程序" maxlength="120" autocomplete="off">
-              </label>
-              <span id="gpu-task-count" class="count-badge">0</span>
-            </div>
-          </div>
-          <div id="gpu-task-overview" class="gpu-task-overview">
-            <div><span>进程显存总计</span><strong id="gpu-task-memory-total">—</strong></div>
-            <div class="mini-track"><i id="gpu-task-memory-bar"></i></div>
-            <small id="gpu-task-note">按显存占用从高到低排列</small>
-          </div>
-          <div id="gpu-task-list" class="gpu-task-list" role="list"></div>
         </section>
       </div>
     </dialog>

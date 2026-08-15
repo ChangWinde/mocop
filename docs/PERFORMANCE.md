@@ -78,6 +78,10 @@ This document defines reproducible measurement conditions and architecture thres
   pinning an old snapshot. A fixed 200-record max-heap reports the full match
   count without retaining or sorting every matched wrapper, and only those 200
   keyed result nodes can enter the DOM.
+- The main GPU process summary and detail insights share one weak-map-cached pure
+  projection per immutable GPU object. The projection scans that GPU's process
+  list once, retains only aggregate counters and the top/oldest records, and
+  creates no request, remote command, or old-snapshot reference.
 - Host-group metadata adds one constant-time lookup per server snapshot; grouped fleet headers and host rows reuse cached DOM signatures across SSE updates.
 - The connection map builds its bounded static tree only when topology changes; live snapshots update existing node state and unmapped-host controls in place.
 - Topology correlation is a bounded in-memory tree pass only when incidents are read or
@@ -149,6 +153,20 @@ node --experimental-websocket tests/browser_smoke.mjs
 
 This test covers collapsed GPU groups, GPU task and health details, capacity matching, shared node grouping, drag ordering, display preferences, the scheduling heatmap, resource cards, authoritative incidents, transient SSE errors, responsive layout, and the runtime-cadence race. CI duration is not a performance benchmark.
 
+To reproduce the backend state, serialization, retention, and HTTP lifecycle
+profile without a GPU or SSH target, run:
+
+```bash
+python3 -m tests.benchmarks.runtime_profile
+```
+
+The JSON output includes its environment and fixture shape. It distinguishes
+cold serialization from revision-cache retrieval, stops allocation tracing
+before latency measurements, and reports thread/file-descriptor counts before,
+during, and after the HTTP lifecycle. It is an opt-in diagnostic, not a timing
+gate. The current cross-dimensional interpretation is in
+[Quality and resource assessment](QUALITY.md).
+
 To compare cached status updates with a forced rebuild of a synthetic 513-node
 connection tree in the same browser process, run:
 
@@ -182,6 +200,14 @@ bounded selector measured 24.8 ms median (4.69 ms standard deviation), while the
 collect-all reference measured 23.8 ms median (0.91 ms standard deviation). The
 bounded selector retained 200 rather than 65,536 result wrappers. The primary
 benefit of the heap is bounded allocation, not a claimed sorting speedup.
+
+Two 2026-08-15 reruns on the same processor, after adding the process-centric GPU
+workspace, measured 90.4–96.0 ms cold search. The warmed bounded-selector medians
+were 26.9–30.6 ms and the collect-all reference medians were 27.9–30.5 ms. Over
+the same 65,536 process records, all GPU summaries took 1.6–1.7 ms cold and at
+most 0.1 ms median after weak-map caching. The correctness checks retained 200
+search rows while preserving the full match and summary counts; these
+single-machine values are diagnostic rather than CI limits.
 
 Reference measurement on 2026-08-10 used Chrome 149 on an AMD Ryzen 9 9950X with a
 513-node synthetic tree, three warm-up pairs, and 20 measured pairs. A forced rebuild

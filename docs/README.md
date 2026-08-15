@@ -17,6 +17,7 @@ detailed contracts and operating procedures.
 | Security reviewer | [Security model](SECURITY.md) | Assets, actors, trust boundaries, abuse cases, enforcement, and deployment requirements |
 | Maintainer | [Architecture](ARCHITECTURE.md) | Components, dependency boundaries, canonical formats, state lifecycle, and repository layout |
 | Performance engineer | [Performance](PERFORMANCE.md) | Hot paths, resource ceilings, benchmarks, and re-evaluation thresholds |
+| Release reviewer | [Quality and resource assessment](QUALITY.md) | Current performance, robustness, stability, resource evidence, and residual boundaries |
 | Release reader | [Changelog](CHANGELOG.md) | User-visible additions, changes, fixes, removals, and security notes |
 | Decision reviewer | [Architecture decision index](adr/README.md) | Accepted, superseded, and proposed structural decisions |
 | Contributor | [Contributing guide](../.github/CONTRIBUTING.md) | Development gates, writing rules, commit policy, and change requirements |
@@ -37,7 +38,8 @@ Avoid copying a detailed contract into several documents. Link to its owner:
 - `API.md` owns HTTP compatibility. Route, access-tier, stable-code, and schema
   changes update it in the same commit.
 - `SECURITY.md`, `ARCHITECTURE.md`, and `PERFORMANCE.md` own their respective
-  cross-cutting contracts. A material boundary decision also gets an ADR.
+  cross-cutting contracts. `QUALITY.md` summarizes current evidence without
+  redefining those contracts. A material boundary decision also gets an ADR.
 - `CHANGELOG.md` records user-visible behavior; it is not a design explanation.
 
 ## Update triggers
