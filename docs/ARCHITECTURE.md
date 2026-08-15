@@ -187,6 +187,16 @@ limit. Stale cached process records and unavailable task telemetry remain
 explicit. [ADR-0018](adr/0018-browser-process-search.md) records the rejected
 GPU-row-only and server-side search alternatives.
 
+The main GPU inventory also derives a weak-map-cached process summary for each
+current GPU object, so active-process count, the largest known allocation, and
+allocated process VRAM are visible without opening a device. The GPU detail dialog
+is process-first: its bounded task workspace exposes attribution coverage, owner and
+workload filtering, stable sorting, copy actions, and a transition back to fleet-wide
+program search before showing historical charts. These are browser-only projections;
+device utilization is never presented as per-process utilization, and no interaction
+adds a remote NVIDIA command. [ADR-0020](adr/0020-process-centric-gpu-inventory.md)
+records the rejected server-query and per-process sampling alternatives.
+
 SSE updates are coalesced with `requestAnimationFrame`. GPU groups, host rows, attention items, incidents, and heatmap cells reuse DOM when their input signature is unchanged. A successful SSE snapshot is authoritative for connection state; transient errors are debounced, and snapshot fetches provide bounded degraded-mode synchronization during recovery. Capacity matching, process search, and compute, VRAM, and temperature heatmap modes transform the in-memory snapshot without another request. CSV export is generated from visible rows in the browser.
 
 Display-only preferences use a versioned, validated browser-local record. They control one curated visual style, one independent palette, background visibility, information density, fleet focus, server order, GPU sort, heatmap metric, and optional columns. Six style families change layout, spacing, typography, geometry, and material; six palettes change emphasis, ambient, surface, line, and interaction colors without changing component structure. A separately bounded raster background may be retained as one IndexedDB `Blob`; it is decoded before storage, rendered through a revocable object URL and never uploaded. These values never enter the server configuration or overwrite another viewer's choices. Cluster inventory and the narrow collector-policy projection cross the serialized configuration controller. The attention view consumes backend incident conditions and only groups them for presentation; threshold decisions are never duplicated in JavaScript. [ADR-0009](adr/0009-orthogonal-visual-style-and-accent.md) records the visual model and rejected custom-CSS alternative. [ADR-0002](adr/0002-local-targets-and-dashboard-preferences.md) records the rejected server-persisted presentation and on-demand remote-query alternatives. [ADR-0004](adr/0004-dashboard-managed-ssh-inventory.md) records the constrained inventory boundary; [ADR-0005](adr/0005-dashboard-persisted-collector-settings.md) records the collector-settings allowlist and rejected general editor; [ADR-0006](adr/0006-browser-local-visual-assets.md) records the local visual-asset boundary and rejected server upload.

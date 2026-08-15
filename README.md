@@ -50,8 +50,10 @@ fully maintained.
 
 ## What you get
 
-- GPU utilization, VRAM, temperature, power, model, driver, hardware health, and per-GPU processes
-- GPU capacity matching, scheduling heatmap, connection map, global/selected-host program search, filters, and CSV export
+- GPU utilization, VRAM, temperature, power, model, driver, hardware health, and
+  scan-friendly per-GPU process summaries
+- GPU capacity matching, scheduling heatmap, connection map, global/selected-host
+  program search, active-process filtering/sorting, attribution filters, and CSV export
 - CPU, load, memory, swap, disk capacity and I/O, network rate, uptime, and kernel pressure stall (PSI) telemetry
 - Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, and timed maintenance
 - Independent per-host scheduling, possible shared-path grouping, and optional HTTPS webhooks
@@ -208,9 +210,13 @@ The dashboard allows a 2–60 second interval, a 2–300 second probe timeout th
   or UUID. Search from **All servers** for a fleet-wide result, or select one
   server first to scope results; selecting a process opens its exact GPU and
   carries the query into the per-GPU process filter.
-- Select a GPU row or heatmap cell to inspect current processes, recent utilization/VRAM/temperature/power, and process start/stop events.
-- Filter a busy GPU before its 100-row display limit, and sort the remaining
-  processes by VRAM, runtime, or program name.
+- Scan the main GPU table for process count, the largest known process, allocated
+  process VRAM, and sample freshness before opening a device.
+- Select a GPU row or heatmap cell to open the process-first workspace. It
+  summarizes attribution and known-memory coverage, filters owned or unattributed
+  work before the 100-row display limit, and sorts by VRAM, runtime, or program
+  name. Owner/workload chips can narrow the device view; quick actions copy a PID
+  or command or continue the term in fleet-wide search.
 - Open an incident for evidence-based guidance, then acknowledge it or silence only that condition for a fixed period.
 - Use **Probe now** on the selected node to advance one bounded collection without changing the global interval.
 - Use **Match capacity** to find same-host, same-model GPUs with enough free VRAM. The result is not a reservation.
@@ -326,6 +332,7 @@ canonical ownership, update triggers, language policy, and ADR lifecycle.
 | Review trust and deployment boundaries | [Security model](docs/SECURITY.md) |
 | Understand components and decisions | [Architecture](docs/ARCHITECTURE.md) and [ADR index](docs/adr/README.md) |
 | Reproduce performance claims | [Performance](docs/PERFORMANCE.md) |
+| Review current quality and resource evidence | [Quality assessment](docs/QUALITY.md) |
 | Review user-visible changes | [Changelog](docs/CHANGELOG.md) |
 
 ## Development

@@ -6,6 +6,17 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Added process occupancy to the main GPU inventory and reorganized GPU detail as
+  a process-first workspace with allocation/attribution/runtime insights,
+  owned/unowned filters, owner/workload drill-down, PID/command copy actions, and
+  a direct transition into fleet-wide search. Current-results CSV now includes
+  aggregate process count, allocation coverage, and freshness without exporting
+  process identity. The shared weak-map summary reuses authenticated snapshot data
+  and adds no remote command or API surface.
+- Added a reproducible synthetic runtime/resource profile and a cross-dimensional
+  quality assessment covering backend/browser performance, bounded retention,
+  lifecycle resources, robustness evidence, scale thresholds, and explicit
+  unmeasured boundaries.
 - Added global and selected-server GPU process search over the authenticated
   snapshot, including literal matching for command, PID, owner, workload,
   queue, and namespace; results open the exact GPU, preserve focus across live

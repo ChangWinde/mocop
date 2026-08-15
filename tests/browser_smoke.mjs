@@ -496,9 +496,24 @@ try {
       const coldStarted = performance.now();
       const coldResult = searchProcessRecords(coldSnapshot, query, "all");
       const coldMs = performance.now() - coldStarted;
+      const summarizeProcesses = (snapshot) => {
+        let count = 0;
+        let knownMemoryMiB = 0;
+        snapshot.servers.forEach((server) => server.gpus.forEach((gpu) => {
+          const summary = gpuProcessSummary(gpu);
+          count += summary.count;
+          knownMemoryMiB += summary.knownMemoryMiB;
+        }));
+        return { count, knownMemoryMiB };
+      };
+      const summaryColdSnapshot = syntheticSnapshot();
+      const summaryColdStarted = performance.now();
+      const summaryColdResult = summarizeProcesses(summaryColdSnapshot);
+      const summaryColdMs = performance.now() - summaryColdStarted;
       for (let index = 0; index < 3; index += 1) {
         referenceSearch();
         boundedSearch();
+        summarizeProcesses(synthetic);
       }
       const measure = (fn) => Array.from({ length: 10 }, () => {
         const started = performance.now();
@@ -507,6 +522,7 @@ try {
       });
       const reference = measure(referenceSearch);
       const bounded = measure(boundedSearch);
+      const summaries = measure(() => summarizeProcesses(synthetic));
       const summarize = (samples) => {
         const values = samples.map((sample) => sample.elapsed).sort((a, b) => a - b);
         const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -530,6 +546,10 @@ try {
         coldMs,
         coldTotal: coldResult.total,
         coldRetained: coldResult.matches.length,
+        summaryColdMs,
+        summaryCount: summaryColdResult.count,
+        summaryKnownMemoryMiB: summaryColdResult.knownMemoryMiB,
+        summaryCached: summarize(summaries),
         reference: summarize(reference),
         bounded: summarize(bounded),
         totalsEqual: referenceResult.total === boundedResult.total,
@@ -542,6 +562,8 @@ try {
     assert.equal(programSearchBenchmark.runs, 10);
     assert.equal(programSearchBenchmark.coldTotal, 65_536);
     assert.equal(programSearchBenchmark.coldRetained, 200);
+    assert.equal(programSearchBenchmark.summaryCount, 65_536);
+    assert(programSearchBenchmark.summaryKnownMemoryMiB > 0);
     assert.equal(programSearchBenchmark.totalsEqual, true);
     assert.equal(programSearchBenchmark.firstEqual, true);
     assert.equal(programSearchBenchmark.retained, 200);
@@ -1718,11 +1740,47 @@ try {
   assert.equal(personalization.restartDisabled, true);
   assert.match(personalization.restartStatus, /不支持网页重启/);
 
-  const gpuTasks = await cdp.evaluate(`(() => {
+  const gpuTasks = await cdp.evaluate(`(async () => {
     const server1 = view.snapshot.servers.find((item) => item.host === "atlas-01");
     const gpu1 = server1.gpus.find((item) => item.index === 0);
+    selectHost("atlas-01");
+    const inventoryProcessText = [...document.querySelectorAll(
+      ".gpu-table-body tr[data-gpu-id]",
+    )].find((row) => row.dataset.gpuId === String(gpu1.uuid || gpu1.index))
+      ?.querySelector(".gpu-process-cell")?.textContent || "";
     openGpuDetail(server1, gpu1);
     const taskDialog = document.querySelector("#gpu-detail-dialog");
+    const processFirst = Boolean(
+      document.querySelector(".gpu-task-workspace")?.compareDocumentPosition(
+        document.querySelector(".gpu-history-section"),
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    const insightText = document.querySelector("#gpu-task-insights")?.textContent || "";
+    const identityFilters = [...document.querySelectorAll("[data-gpu-task-filter]")]
+      .map((button) => button.dataset.gpuTaskFilter);
+    const processCsv = buildCsv([{ server: server1, gpu: gpu1 }]);
+    taskDialog.close();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    selectHost("all");
+    const processSortControl = document.querySelector("#gpu-sort");
+    processSortControl.value = "processes";
+    processSortControl.dispatchEvent(new Event("change", { bubbles: true }));
+    const processSortedFirst = document.querySelector(".gpu-table-body tr[data-gpu-id]");
+    const processSortedPlacement = processSortedFirst
+      ? processSortedFirst.dataset.host + "|" + processSortedFirst.dataset.gpuId : "";
+    document.querySelector('[data-filter="processes"]').click();
+    const processFilterRows = [...document.querySelectorAll(
+      ".gpu-table-body tr[data-gpu-id]",
+    )];
+    const processFilterCount = processFilterRows.length;
+    const processFilterHasZero = processFilterRows.some(
+      (row) => /0 个进程|不可用/.test(row.querySelector(".gpu-process-cell")?.textContent || ""),
+    );
+    document.querySelector('[data-filter="all"]').click();
+    processSortControl.value = "memory";
+    processSortControl.dispatchEvent(new Event("change", { bubbles: true }));
+    selectHost("atlas-01");
+    openGpuDetail(server1, gpu1);
     const rowKeys = () => [...document.querySelectorAll("#gpu-task-list .gpu-task")].map(
       (row) => row.dataset.processKey,
     );
@@ -1745,6 +1803,31 @@ try {
     const firstRowAfter = document.querySelector("#gpu-task-list .gpu-task");
     const rowReused = firstRowBefore === firstRowAfter
       && barBefore === firstRowAfter.querySelector(".mini-track i");
+    document.querySelector('[data-gpu-task-filter="unowned"]').click();
+    const unownedOrder = rowKeys();
+    document.querySelector('[data-gpu-task-filter="owned"]').click();
+    const ownedOrder = rowKeys();
+    document.querySelector('[data-gpu-task-filter="all"]').click();
+    const ownerChip = [...document.querySelectorAll(".gpu-task-workload button")]
+      .find((button) => button.textContent.includes("researcher"));
+    ownerChip.click();
+    const ownerChipQuery = document.querySelector("#gpu-task-search").value;
+    const ownerChipOrder = rowKeys();
+    document.querySelector("#gpu-task-search").value = "";
+    document.querySelector("#gpu-task-search").dispatchEvent(
+      new Event("input", { bubbles: true }),
+    );
+    let copiedText = "";
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (value) => { copiedText = String(value); } },
+    });
+    document.querySelector(
+      '#gpu-task-list .gpu-task[data-process-key^="10000|"] .gpu-task-action:last-child',
+    ).click();
+    await Promise.resolve();
+    await Promise.resolve();
+    const copyFeedback = document.querySelector("#gpu-task-feedback").textContent;
     const taskSearch = document.querySelector("#gpu-task-search");
     taskSearch.value = "researcher";
     taskSearch.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1780,14 +1863,37 @@ try {
     const unavailableCount = document.querySelector("#gpu-task-count").textContent;
     const unavailableText = document.querySelector("#gpu-task-list").textContent;
     taskDialog.close();
+    selectHost("all");
     return {
+      inventoryProcessText, processFirst, insightText, identityFilters,
+      processCsv,
+      processSortedPlacement, processFilterCount, processFilterHasZero,
+      unownedOrder, ownedOrder, ownerChipQuery, ownerChipOrder,
+      copiedText, copyFeedback,
       memoryOrder, trainDuration, workerDuration, workerDurationTitle,
       command, commandTitle, commandHidden, rowReused, freshNoteStale,
       ownerSearchOrder, ownerSearchCount, nameOrder, nameButtonActive,
       durationOrder, durationButtonActive, savedTaskSort, taskNote,
       staleNote, unavailableCount, unavailableText,
     };
-  })()`);
+  })()`, true);
+  assert.match(gpuTasks.inventoryProcessText, /2/);
+  assert.match(gpuTasks.inventoryProcessText, /train\.py/);
+  assert.equal(gpuTasks.processFirst, true);
+  assert.match(gpuTasks.insightText, /2/);
+  assert.deepEqual(gpuTasks.identityFilters, ["all", "owned", "unowned"]);
+  assert.match(gpuTasks.processCsv, /"进程数"/);
+  assert.match(gpuTasks.processCsv, /"进程已知分配显存 MiB"/);
+  assert.match(gpuTasks.processCsv, /"2","72192","2\/2","sampled"/);
+  assert.match(gpuTasks.processSortedPlacement, /^atlas-02\|GPU-DEMO-atlas-02-01$/);
+  assert.equal(gpuTasks.processFilterCount, 4);
+  assert.equal(gpuTasks.processFilterHasZero, false);
+  assert.deepEqual(gpuTasks.unownedOrder, ["20000|python data_worker.py"]);
+  assert.deepEqual(gpuTasks.ownedOrder, ["10000|/workspace/train.py"]);
+  assert.equal(gpuTasks.ownerChipQuery, "researcher");
+  assert.deepEqual(gpuTasks.ownerChipOrder, ["10000|/workspace/train.py"]);
+  assert.match(gpuTasks.copiedText, /python train\.py --config/);
+  assert.match(gpuTasks.copyFeedback, /已复制完整命令/);
   assert.equal(gpuTasks.memoryOrder[0], "10000|/workspace/train.py");
   // "\u8fd0\u884c" = run-prefix, "\u5c0f\u65f6" = hours unit.
   assert.match(gpuTasks.trainDuration, /^\u8fd0\u884c /);
@@ -1822,6 +1928,30 @@ try {
   assert.equal(gpuTasks.unavailableCount, "\u2014");
   // "\u4efb\u52a1\u6570\u636e\u6682\u4e0d\u53ef\u7528" = tasks unavailable notice.
   assert.match(gpuTasks.unavailableText, /\u4efb\u52a1\u6570\u636e\u6682\u4e0d\u53ef\u7528/);
+
+  const gpuTaskFleetSearch = await cdp.evaluate(`(async () => {
+    const server = view.snapshot.servers.find((item) => item.host === "atlas-01");
+    openGpuDetail(server, server.gpus.find((item) => item.index === 0));
+    document.querySelector(
+      '#gpu-task-list .gpu-task[data-process-key^="10000|"] .gpu-task-action',
+    ).click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const result = {
+      dialogOpen: document.querySelector("#gpu-detail-dialog").open,
+      selectedHost: view.selectedHost,
+      query: document.querySelector("#search").value,
+      resultCount: document.querySelector("#program-search-count").textContent,
+      searchFocused: document.activeElement === document.querySelector("#search"),
+    };
+    document.querySelector("#search").value = "";
+    document.querySelector("#search").dispatchEvent(new Event("input", { bubbles: true }));
+    return result;
+  })()`, true);
+  assert.equal(gpuTaskFleetSearch.dialogOpen, false);
+  assert.equal(gpuTaskFleetSearch.selectedHost, "all");
+  assert.equal(gpuTaskFleetSearch.query, "train.py");
+  assert.equal(gpuTaskFleetSearch.resultCount, "5");
+  assert.equal(gpuTaskFleetSearch.searchFocused, true);
 
   const resilience = await cdp.evaluate(`(async () => {
     // Dialog close events fire from queued tasks; flush any close pending

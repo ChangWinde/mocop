@@ -16,6 +16,7 @@ const MAX_SEARCH_QUERY_LENGTH = 120;
 const GPU_PROCESS_FRESHNESS_WARNING_MS = 90_000;
 const processSearchProjectionCache = new WeakMap();
 const gpuSearchProjectionCache = new WeakMap();
+const gpuProcessSummaryCache = new WeakMap();
 const BACKGROUND_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
 const DEFAULT_PREFERENCES = Object.freeze({
   serverSort: "custom",
@@ -32,7 +33,9 @@ const DEFAULT_PREFERENCES = Object.freeze({
   showPower: true,
 });
 const SERVER_SORT_VALUES = new Set(["custom", "group", "host", "status", "gpu", "cpu"]);
-const GPU_SORT_VALUES = new Set(["host", "utilization", "memory", "temperature", "power"]);
+const GPU_SORT_VALUES = new Set([
+  "host", "utilization", "memory", "temperature", "power", "processes",
+]);
 const GPU_TASK_SORT_VALUES = new Set(["memory", "duration", "name"]);
 const HEAT_METRIC_VALUES = new Set(["utilization", "memory", "temperature"]);
 const VISUAL_STYLE_VALUES = new Set([
@@ -246,6 +249,8 @@ const view = {
   gpuHistoryRetryKey: "",
   gpuHistoryRetryDelayMs: 0,
   gpuTaskQuery: "",
+  gpuTaskIdentityFilter: "all",
+  gpuTaskFeedbackTimer: null,
   selectedProcessKey: "",
   ownersUsage: null,
   ownersUsageHours: 24,
@@ -442,6 +447,8 @@ const elements = {
   gpuHistoryGrid: $("#gpu-history-grid"),
   gpuProcessTimeline: $("#gpu-process-timeline"),
   gpuTaskCount: $("#gpu-task-count"),
+  gpuTaskInsights: $("#gpu-task-insights"),
+  gpuTaskFeedback: $("#gpu-task-feedback"),
   gpuTaskOverview: $("#gpu-task-overview"),
   gpuTaskMemoryTotal: $("#gpu-task-memory-total"),
   gpuTaskMemoryBar: $("#gpu-task-memory-bar"),
@@ -4841,6 +4848,80 @@ function gpuProcessStartMs(process) {
   return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
 }
 
+function gpuProcessSummary(gpu) {
+  const cached = gpuProcessSummaryCache.get(gpu);
+  if (cached) return cached;
+  const processes = Array.isArray(gpu.processes) ? gpu.processes : [];
+  let knownMemoryMiB = 0;
+  let knownMemoryCount = 0;
+  let topProcess = null;
+  let topMemoryMiB = -1;
+  let ownedCount = 0;
+  let identifiedCount = 0;
+  let oldestProcess = null;
+  let oldestStartMs = Number.MAX_SAFE_INTEGER;
+  const owners = new Set();
+  processes.forEach((process) => {
+    const processMemory = Number(process.used_memory_mib);
+    if (process.used_memory_mib != null && Number.isFinite(processMemory)) {
+      knownMemoryMiB += processMemory;
+      knownMemoryCount += 1;
+      if (processMemory > topMemoryMiB) {
+        topMemoryMiB = processMemory;
+        topProcess = process;
+      }
+    } else if (!topProcess) {
+      topProcess = process;
+    }
+    if (process.workload) identifiedCount += 1;
+    if (process.workload?.owner) {
+      ownedCount += 1;
+      owners.add(String(process.workload.owner));
+    }
+    const startMs = gpuProcessStartMs(process);
+    if (startMs < oldestStartMs) {
+      oldestStartMs = startMs;
+      oldestProcess = process;
+    }
+  });
+  const summary = {
+    count: processes.length,
+    knownMemoryMiB,
+    knownMemoryCount,
+    topProcess,
+    topMemoryMiB,
+    ownedCount,
+    identifiedCount,
+    ownerCount: owners.size,
+    oldestProcess,
+  };
+  gpuProcessSummaryCache.set(gpu, summary);
+  return summary;
+}
+
+function gpuTaskInsight(label, value, detail) {
+  const item = create("article", "gpu-task-insight");
+  item.append(
+    create("span", "", label),
+    create("strong", "", value),
+    create("small", "", detail),
+  );
+  return item;
+}
+
+function gpuProcessSummarySignature(gpu) {
+  const summary = gpuProcessSummary(gpu);
+  return {
+    count: summary.count,
+    knownMemory: summary.knownMemoryMiB,
+    knownMemoryCount: summary.knownMemoryCount,
+    ownedCount: summary.ownedCount,
+    topPid: summary.topProcess?.pid,
+    topName: summary.topProcess?.name,
+    topMemory: summary.topMemoryMiB,
+  };
+}
+
 function gpuProcessMemoryRank(a, b) {
   return numeric(b.used_memory_mib, -1) - numeric(a.used_memory_mib, -1)
     || numeric(a.pid) - numeric(b.pid);
@@ -5184,8 +5265,71 @@ function gpuTaskRow() {
   const bar = create("i");
   track.append(bar);
   meta.append(metaInfo, track);
-  item.append(identity, memorySummary, workload, meta);
-  return { item, name, command, memoryValue, memoryShare, workload, pid, runtime, bar };
+  const actions = create("div", "gpu-task-actions");
+  const searchFleet = create("button", "gpu-task-action", "全局查找");
+  const copyPid = create("button", "gpu-task-action", "复制 PID");
+  const copyCommand = create("button", "gpu-task-action", "复制命令");
+  [searchFleet, copyPid, copyCommand].forEach((button) => {
+    button.type = "button";
+  });
+  actions.append(searchFleet, copyPid, copyCommand);
+  item.append(identity, memorySummary, workload, meta, actions);
+  return {
+    item,
+    name,
+    command,
+    memoryValue,
+    memoryShare,
+    workload,
+    pid,
+    runtime,
+    bar,
+    searchFleet,
+    copyPid,
+    copyCommand,
+  };
+}
+
+function filterCurrentGpuTasks(value) {
+  const query = String(value || "").slice(0, MAX_SEARCH_QUERY_LENGTH);
+  view.gpuTaskIdentityFilter = "all";
+  view.gpuTaskQuery = query;
+  view.selectedProcessKey = "";
+  elements.gpuTaskSearch.value = query;
+  renderGpuDetail();
+  elements.gpuTaskSearch.focus({ preventScroll: true });
+}
+
+function searchFleetForProcess(process) {
+  const query = gpuProcessName(process).slice(0, MAX_SEARCH_QUERY_LENGTH);
+  view.query = query;
+  elements.search.value = query;
+  elements.gpuDetailDialog.close();
+  if (view.selectedHost !== "all") selectHost("all");
+  else render();
+  elements.search.focus({ preventScroll: true });
+  elements.programSearchPanel.scrollIntoView({ block: "nearest" });
+}
+
+function setGpuTaskFeedback(message, kind = "success") {
+  if (view.gpuTaskFeedbackTimer != null) clearTimeout(view.gpuTaskFeedbackTimer);
+  elements.gpuTaskFeedback.textContent = message;
+  elements.gpuTaskFeedback.className = `gpu-task-feedback ${kind}`;
+  view.gpuTaskFeedbackTimer = setTimeout(() => {
+    view.gpuTaskFeedbackTimer = null;
+    elements.gpuTaskFeedback.textContent = "";
+    elements.gpuTaskFeedback.className = "gpu-task-feedback";
+  }, 3000);
+}
+
+async function copyGpuTaskText(value, successMessage) {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+    await navigator.clipboard.writeText(String(value));
+    setGpuTaskFeedback(successMessage);
+  } catch (_error) {
+    setGpuTaskFeedback("复制失败，请手动选择文本", "error");
+  }
 }
 
 function updateGpuTaskRow(row, process, gpu) {
@@ -5228,23 +5372,45 @@ function updateGpuTaskRow(row, process, gpu) {
   if (workload && Object.hasOwn(WORKLOAD_KIND_LABELS, workload.kind)) {
     const kind = WORKLOAD_KIND_LABELS[workload.kind];
     const workloadIdentity = workload.name || workload.workload_id;
-    const chips = [create(
-      "span",
+    const identityChip = create(
+      workloadIdentity ? "button" : "span",
       "primary",
       workloadIdentity ? `${kind} · ${workloadIdentity}` : kind,
-    )];
+    );
+    if (workloadIdentity) {
+      identityChip.type = "button";
+      identityChip.title = `筛选 ${workloadIdentity}`;
+      identityChip.onclick = () => filterCurrentGpuTasks(workloadIdentity);
+    }
+    const chips = [identityChip];
     if (workload.name && workload.workload_id) {
       chips.push(create("span", "", `ID ${workload.workload_id}`));
     }
-    if (workload.owner) chips.push(create("span", "", `用户 ${workload.owner}`));
-    if (workload.queue) chips.push(create("span", "", `队列 ${workload.queue}`));
-    if (workload.namespace) chips.push(create("span", "", `命名空间 ${workload.namespace}`));
+    [
+      [workload.owner, "用户"],
+      [workload.queue, "队列"],
+      [workload.namespace, "命名空间"],
+    ].forEach(([value, label]) => {
+      if (!value) return;
+      const chip = create("button", "", `${label} ${value}`);
+      chip.type = "button";
+      chip.title = `筛选 ${value}`;
+      chip.onclick = () => filterCurrentGpuTasks(value);
+      chips.push(chip);
+    });
     row.workload.replaceChildren(...chips);
     row.workload.hidden = false;
   } else {
     row.workload.hidden = true;
     row.workload.replaceChildren();
   }
+  row.searchFleet.setAttribute("aria-label", `在全部服务器查找 ${shortName}`);
+  row.searchFleet.onclick = () => searchFleetForProcess(process);
+  row.copyPid.setAttribute("aria-label", `复制 ${shortName} 的 PID ${process.pid}`);
+  row.copyPid.onclick = () => copyGpuTaskText(process.pid, `已复制 PID ${process.pid}`);
+  row.copyCommand.hidden = !command;
+  row.copyCommand.setAttribute("aria-label", `复制 ${shortName} 的完整命令`);
+  row.copyCommand.onclick = () => copyGpuTaskText(command, "已复制完整命令");
 }
 
 function gpuHealthSummary(health) {
@@ -5390,6 +5556,28 @@ async function syncGpuHistory(record) {
   }
 }
 
+function syncGpuTaskIdentityFilters(processes) {
+  const counts = {
+    all: processes.length,
+    owned: processes.filter((process) => Boolean(process.workload?.owner)).length,
+    unowned: processes.filter((process) => !process.workload?.owner).length,
+  };
+  const labels = { all: "全部", owned: "已归属", unowned: "未归属" };
+  document.querySelectorAll("[data-gpu-task-filter]").forEach((button) => {
+    const filter = button.dataset.gpuTaskFilter;
+    const active = filter === view.gpuTaskIdentityFilter;
+    button.textContent = `${labels[filter]} ${counts[filter]}`;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function processMatchesIdentityFilter(process) {
+  if (view.gpuTaskIdentityFilter === "owned") return Boolean(process.workload?.owner);
+  if (view.gpuTaskIdentityFilter === "unowned") return !process.workload?.owner;
+  return true;
+}
+
 function renderGpuDetail() {
   if (!elements.gpuDetailDialog.open) return;
   const record = selectedGpuRecord();
@@ -5402,10 +5590,14 @@ function renderGpuDetail() {
   const memoryPct = ratio(gpu.memory_used_mib, gpu.memory_total_mib);
   const [healthState, healthDetail] = gpuHealthSummary(gpu.health);
   const processes = Array.isArray(gpu.processes) ? gpu.processes.slice() : [];
+  const processSummary = gpuProcessSummary(gpu);
   const taskTerms = normalizedSearchTerms(view.gpuTaskQuery);
+  const scopedProcesses = processes.filter(processMatchesIdentityFilter);
   const matchingProcesses = taskTerms.length
-    ? processes.filter((process) => processMatchesSearch(process, taskTerms, server, gpu))
-    : processes.slice();
+    ? scopedProcesses.filter(
+      (process) => processMatchesSearch(process, taskTerms, server, gpu),
+    )
+    : scopedProcesses.slice();
   const sortByDuration = preferences.gpuTaskSort === "duration";
   const sortByName = preferences.gpuTaskSort === "name";
   if (sortByDuration) {
@@ -5431,14 +5623,7 @@ function renderGpuDetail() {
       ...visibleProcesses.slice(0, MAX_GPU_DETAIL_PROCESSES - 1),
     ];
   }
-  const knownProcessMemory = processes.filter(
-    (process) => process.used_memory_mib != null
-      && Number.isFinite(Number(process.used_memory_mib)),
-  );
-  const processMemoryTotal = knownProcessMemory.reduce(
-    (total, process) => total + Number(process.used_memory_mib),
-    0,
-  );
+  const processMemoryTotal = processSummary.knownMemoryMiB;
   const processMemoryPct = ratio(processMemoryTotal, gpu.memory_total_mib);
   const processFreshness = gpu.processes_observed_at
     ? `任务数据 ${age(gpu.processes_observed_at)}`
@@ -5470,9 +5655,40 @@ function renderGpuDetail() {
   renderGpuHistory();
   syncGpuHistory(record);
   syncGpuTaskSortButtons();
+  syncGpuTaskIdentityFilters(processes);
+  const oldestProcess = processSummary.oldestProcess;
+  const oldestTimestamp = oldestProcess?.workload?.started_at
+    || oldestProcess?.first_seen_at || "";
+  const oldestLabel = oldestTimestamp ? durationSince(oldestTimestamp) : "—";
+  const oldestDetail = oldestProcess?.workload?.started_at
+    ? "按真实启动时间" : oldestProcess?.first_seen_at ? "按监控首次观测" : "缺少时间信号";
+  elements.gpuTaskInsights.replaceChildren(
+    gpuTaskInsight(
+      "活跃进程",
+      gpu.processes_available === false ? "—" : String(processSummary.count),
+      gpu.processes_sampled === false ? "复用上次样本" : "本轮进程样本",
+    ),
+    gpuTaskInsight(
+      "显存覆盖",
+      gpu.processes_available === false
+        ? "—" : `${processSummary.knownMemoryCount} / ${processSummary.count}`,
+      processSummary.knownMemoryCount
+        ? `${memory(processSummary.knownMemoryMiB)} 已知分配` : "没有可用分配值",
+    ),
+    gpuTaskInsight(
+      "身份归属",
+      gpu.processes_available === false
+        ? "—" : `${processSummary.ownedCount} / ${processSummary.count}`,
+      processSummary.count
+        ? `${processSummary.ownerCount} 个使用者 · ${processSummary.identifiedCount} 个含 workload`
+        : "没有活跃进程",
+    ),
+    gpuTaskInsight("最长运行", gpu.processes_available === false ? "—" : oldestLabel, oldestDetail),
+  );
+  const filtered = taskTerms.length || view.gpuTaskIdentityFilter !== "all";
   elements.gpuTaskCount.textContent = gpu.processes_available === false
     ? "—"
-    : taskTerms.length ? `${matchingProcesses.length} / ${processes.length}` : String(processes.length);
+    : filtered ? `${matchingProcesses.length} / ${processes.length}` : String(processes.length);
   if (gpu.processes_available === false) {
     elements.gpuTaskOverview.hidden = true;
     view.gpuTaskRowCache.clear();
@@ -5506,11 +5722,13 @@ function renderGpuDetail() {
     const matchLabel = taskTerms.length ? "匹配进程" : "进程";
     const selectedLabel = selectedProcessPinned ? "，并优先显示所选程序" : "";
     elements.gpuTaskNote.textContent = `共 ${matchingProcesses.length} 个${matchLabel}，仅展示${truncationLabel}的 ${visibleProcesses.length} 个${selectedLabel} · ${processFreshness}`;
-  } else if (knownProcessMemory.length < processes.length) {
-    const matched = taskTerms.length ? `${matchingProcesses.length} / ${processes.length} 个匹配 · ` : "";
-    elements.gpuTaskNote.textContent = `${matched}${processes.length - knownProcessMemory.length} 个进程未返回显存占用 · ${processFreshness}`;
+  } else if (processSummary.knownMemoryCount < processes.length) {
+    const matched = filtered
+      ? `${matchingProcesses.length} / ${processes.length} 个匹配 · ` : "";
+    elements.gpuTaskNote.textContent = `${matched}${processes.length - processSummary.knownMemoryCount} 个进程未返回显存占用 · ${processFreshness}`;
   } else {
-    const matched = taskTerms.length ? `${matchingProcesses.length} / ${processes.length} 个匹配 · ` : "";
+    const matched = filtered
+      ? `${matchingProcesses.length} / ${processes.length} 个匹配 · ` : "";
     elements.gpuTaskNote.textContent = `${matched}${sortLabel} · ${processFreshness}`;
   }
   if (!processes.length) {
@@ -5528,11 +5746,12 @@ function renderGpuDetail() {
   if (!matchingProcesses.length) {
     view.gpuTaskRowCache.clear();
     elements.gpuTaskList.setAttribute("role", "status");
-    const emptyCard = create(
-      "div",
-      emptyCardClass,
-      `没有匹配“${view.gpuTaskQuery}”的程序 · ${processFreshness}`,
-    );
+    const filterDescription = view.gpuTaskIdentityFilter === "owned"
+      ? "已归属" : view.gpuTaskIdentityFilter === "unowned" ? "未归属" : "当前";
+    const emptyMessage = taskTerms.length
+      ? `${filterDescription}范围内没有匹配“${view.gpuTaskQuery}”的程序`
+      : `没有${filterDescription}的活跃程序`;
+    const emptyCard = create("div", emptyCardClass, `${emptyMessage} · ${processFreshness}`);
     emptyCard.title = freshnessHint;
     elements.gpuTaskList.replaceChildren(emptyCard);
     return;
@@ -5564,6 +5783,7 @@ function openGpuDetail(server, gpu, { processQuery = "", processKey = "" } = {})
     key: String(gpu.uuid || gpu.index),
   };
   view.gpuTaskQuery = String(processQuery).slice(0, MAX_SEARCH_QUERY_LENGTH);
+  view.gpuTaskIdentityFilter = "all";
   view.selectedProcessKey = String(processKey);
   elements.gpuTaskSearch.value = view.gpuTaskQuery;
   view.gpuHistory = null;
@@ -5585,6 +5805,42 @@ function openGpuDetail(server, gpu, { processQuery = "", processKey = "" } = {})
     target.focus({ preventScroll: true });
     target.scrollIntoView({ block: "nearest" });
   }
+}
+
+function gpuProcessCell(gpu) {
+  const cell = document.createElement("td");
+  cell.className = "gpu-col-process";
+  const content = create("div", "gpu-process-cell");
+  if (gpu.processes_available === false) {
+    content.append(
+      create("strong", "unavailable", "不可用"),
+      create("small", "", "GPU 指标仍在更新"),
+    );
+    cell.append(content);
+    return cell;
+  }
+  const summary = gpuProcessSummary(gpu);
+  if (!summary.count) {
+    content.append(create("strong", "idle", "0 个进程"), create("small", "", "无计算任务"));
+    cell.append(content);
+    return cell;
+  }
+  const topName = summary.topProcess ? gpuProcessName(summary.topProcess) : "未知程序";
+  const sampleKind = gpu.processes_sampled === false ? "缓存" : "采样";
+  const freshness = gpu.processes_observed_at ? age(gpu.processes_observed_at) : "时间未知";
+  const memorySummary = summary.knownMemoryCount
+    ? `${memory(summary.knownMemoryMiB)} 已知分配` : "进程显存未知";
+  content.append(
+    create("strong", "", `${summary.count} · ${topName}`),
+    create("small", "", `${memorySummary} · ${sampleKind} ${freshness}`),
+  );
+  content.title = [
+    `${summary.count} 个活跃计算进程`,
+    `${summary.knownMemoryCount} 个返回显存，共 ${memory(summary.knownMemoryMiB)}`,
+    `${summary.ownedCount} 个具有使用者归属`,
+  ].join(" · ");
+  cell.append(content);
+  return cell;
 }
 
 function tableRow(record, grouped = false) {
@@ -5648,7 +5904,16 @@ function tableRow(record, grouped = false) {
     openGpuDetail(server, gpu);
   });
   statusCell.append(pill, details);
-  row.append(deviceCell, modelCell, utilCell, memoryCell, temperatureCell, powerCell, statusCell);
+  row.append(
+    deviceCell,
+    modelCell,
+    utilCell,
+    memoryCell,
+    temperatureCell,
+    powerCell,
+    gpuProcessCell(gpu),
+    statusCell,
+  );
   row.addEventListener("click", () => openGpuDetail(server, gpu));
   return row;
 }
@@ -5663,11 +5928,13 @@ function filteredRecords() {
     if (view.filter === "busy" && utilization < threshold.gpu_busy_pct) return false;
     if (view.filter === "idle" && utilization >= threshold.gpu_busy_pct) return false;
     if (view.filter === "hot" && temperature < threshold.gpu_temperature_warning_c) return false;
+    if (view.filter === "processes" && !gpuProcessSummary(gpu).count) return false;
     return gpuRecordMatchesSearch(server, gpu, terms);
   });
 }
 
 function gpuSortValue(gpu) {
+  if (view.sort === "processes") return gpuProcessSummary(gpu).count;
   if (view.sort === "memory") return ratio(gpu.memory_used_mib, gpu.memory_total_mib);
   if (view.sort === "temperature") return numeric(gpu.temperature_c, -1);
   if (view.sort === "power") return numeric(gpu.power_draw_w, -1);
@@ -5709,6 +5976,21 @@ function buildCsv(records) {
     ["温度 °C", ({ gpu }) => gpu.temperature_c],
     ["功耗 W", ({ gpu }) => gpu.power_draw_w],
     ["功耗上限 W", ({ gpu }) => gpu.power_limit_w],
+    ["进程数", ({ gpu }) => gpu.processes_available === false
+      ? null : gpuProcessSummary(gpu).count],
+    ["进程已知分配显存 MiB", ({ gpu }) => {
+      const summary = gpuProcessSummary(gpu);
+      return gpu.processes_available === false || !summary.knownMemoryCount
+        ? null : summary.knownMemoryMiB;
+    }],
+    ["进程显存覆盖", ({ gpu }) => {
+      const summary = gpuProcessSummary(gpu);
+      return gpu.processes_available === false
+        ? null : `${summary.knownMemoryCount}/${summary.count}`;
+    }],
+    ["进程采样状态", ({ gpu }) => gpu.processes_available === false
+      ? "unavailable" : gpu.processes_sampled === false ? "cached" : "sampled"],
+    ["进程采样时间", ({ gpu }) => gpu.processes_observed_at],
     ["CPU 利用率 %", ({ server }) => server.system?.cpu_usage_pct],
     ["系统内存利用率 %", ({ server }) => ratio(server.system?.memory_used_mib, server.system?.memory_total_mib).toFixed(2)],
     ["GPU 状态", ({ server, gpu }) => gpuState(gpu, server)[0]],
@@ -5764,7 +6046,7 @@ function gpuTable(records, grouped = false) {
   const head = document.createElement("thead");
   head.className = "sr-only";
   const headingRow = document.createElement("tr");
-  ["设备", "型号 / 驱动", "GPU 负载", "显存", "温度", "功耗", "状态与操作"]
+  ["设备", "型号 / 驱动", "GPU 负载", "显存", "温度", "功耗", "进程", "状态与操作"]
     .forEach((label) => headingRow.append(create("th", "", label)));
   head.append(headingRow);
   const body = document.createElement("tbody");
@@ -5863,6 +6145,10 @@ function tableSignature(server, records) {
       memoryUsed: gpu.memory_used_mib,
       temperature: gpu.temperature_c,
       power: gpu.power_draw_w,
+      processesAvailable: gpu.processes_available,
+      processesSampled: gpu.processes_sampled,
+      processesObservedAt: gpu.processes_observed_at,
+      processSummary: gpuProcessSummarySignature(gpu),
     })),
     visibleGpuUuids: records.map((record) => record.gpu.uuid),
   });
@@ -6377,8 +6663,13 @@ document.querySelectorAll("dialog.side-dialog").forEach((dialog) => {
 elements.gpuDetailDialog.addEventListener("close", () => {
   view.selectedGpu = null;
   view.gpuTaskQuery = "";
+  view.gpuTaskIdentityFilter = "all";
   view.selectedProcessKey = "";
   elements.gpuTaskSearch.value = "";
+  if (view.gpuTaskFeedbackTimer != null) clearTimeout(view.gpuTaskFeedbackTimer);
+  view.gpuTaskFeedbackTimer = null;
+  elements.gpuTaskFeedback.textContent = "";
+  elements.gpuTaskFeedback.className = "gpu-task-feedback";
   // Nothing polls a closed dialog, and the cached rows / history DOM would
   // only keep stale nodes (and their per-second duration scans) alive.
   clearGpuHistoryRetry();
@@ -6446,6 +6737,16 @@ elements.gpuTaskSearch.addEventListener("keydown", (event) => {
   view.gpuTaskQuery = "";
   view.selectedProcessKey = "";
   renderGpuDetail();
+});
+
+document.querySelectorAll("[data-gpu-task-filter]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const filter = button.dataset.gpuTaskFilter;
+    if (!["all", "owned", "unowned"].includes(filter)) return;
+    view.gpuTaskIdentityFilter = filter;
+    view.selectedProcessKey = "";
+    renderGpuDetail();
+  });
 });
 
 elements.serverSort.addEventListener("change", () => {

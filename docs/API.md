@@ -454,6 +454,18 @@ host/GPU placement, PID, name, command, owner, workload identity, queue, and
 namespace. Results therefore inherit `processes_available`,
 `processes_sampled`, and `processes_observed_at` freshness semantics.
 
+The main GPU inventory derives a cached summary from the same records: process
+count, largest known process, known allocated-VRAM total, and sample freshness;
+operators can filter to occupied devices or sort by active-process count.
+The GPU detail view exposes attribution and known-memory coverage, owned/unowned
+filters, deterministic sorting, safe text-copy actions, and a transition into the
+existing fleet search. Both views remain browser-local and add no HTTP or remote
+collection operation. `used_memory_mib` is allocated framebuffer memory; neither
+it nor the device's utilization percentage is a per-process SM-utilization value.
+The browser's current-results CSV exports only aggregate process count, known
+allocation, memory coverage, sampling state, and observation time; it continues
+to omit process names, PIDs, owners, and commands.
+
 Errors: none specific (`400 REQUEST_BODY_NOT_ALLOWED` applies as everywhere).
 
 ### GET /api/events
