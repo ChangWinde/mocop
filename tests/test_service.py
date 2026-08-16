@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from mocop import __version__
 from mocop.config import (
     ConnectionTopologyConfig,
     HostOverrideConfig,
@@ -1045,7 +1046,7 @@ class StateStoreTests(unittest.TestCase):
 
         snapshot = store.snapshot()
 
-        self.assertEqual(snapshot["appVersion"], "0.8.0")
+        self.assertEqual(snapshot["appVersion"], __version__)
         self.assertEqual(snapshot["stats"]["servers"], 2)
         self.assertEqual(snapshot["stats"]["onlineServers"], 1)
         self.assertEqual(snapshot["stats"]["gpus"], 1)

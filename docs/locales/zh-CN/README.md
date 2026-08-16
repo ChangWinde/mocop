@@ -100,7 +100,7 @@ ssh -o BatchMode=yes gpu-node-01 true
 ### 2. 安装并初始化
 
 ```bash
-uv tool install git+https://github.com/ChangWinde/mocop.git
+uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.9.0"
 mocop init --host gpu-node-01 --host gpu-node-02
 ```
 
@@ -137,83 +137,29 @@ mocop service status
 mocop service uninstall
 ```
 
-卸载只会停止/禁用服务并删除生成的 unit；配置、Bearer token、可选环境
-文件、SQLite 状态、浏览器数据、journal、SSH 文件/控制套接字、已安装包和
-linger 策略都会保留。升级、回滚、token 轮换或手动清理前，请阅读
-[运维手册](../../OPERATIONS.md)。
+卸载只删除生成的服务 unit。升级、回滚、token 轮换或清理前，请阅读
+[运维手册](../../OPERATIONS.md)；其中列出了全部保留文件和安全备份步骤。
 
 ## 配置
 
-初始化生成的文件已经包含全部字段。只有在网页未提供对应设置时才需要
-直接编辑。[配置字段与边界参考](../../CONFIGURATION.md) 是所有字段、默认值、
-关联约束和硬限制的权威说明。下面只展示主要资产字段：
-
-```json
-{
-  "auto_discover": false,
-  "hosts": ["monitor-host", "gpu-node-01", "gpu-node-02"],
-  "exclude_hosts": ["gpu-bastion", "git-host"],
-  "local_host": "monitor-host",
-  "expected_gpu_counts": {
-    "gpu-node-01": 8,
-    "gpu-node-02": 8
-  },
-  "host_groups": {
-    "gpu-node-01": "training",
-    "gpu-node-02": "inference"
-  }
-}
-```
-
-资产清单是明确的：`hosts` 允许采集，`exclude_hosts` 始终优先，
-`local_host` 最多指定一台白名单节点使用同一固定探针而不经过 SSH。预期
-GPU 数、显示分组、单节点周期、分级告警阈值、维护窗口和只用于展示的连接树
-都属于配置，不会变成远端发现副作用。
-
-可选的 `workloads.mode` 通过有界读取补充进程属主、命令、启动时间及支持的
-调度器/容器身份。可选 persistence 使用私有且限额的 SQLite 保存趋势和告警
-上下文，默认关闭。Webhook JSON 只保存环境变量名，不保存地址或签名密钥。
-[配置参考](../../CONFIGURATION.md)负责全部默认值与边界；
-[完整安全示例](../../../examples/mocop.example.json)展示完整 schema；
-[运维手册](../../OPERATIONS.md)负责密钥文件、重启和回滚流程。
-
-网页修改会经过同一严格校验，以私有原子写入保存并立即生效。手工修改 JSON
-后，先运行 `mocop config check`，再按运维手册重新安装/重启托管服务。
-
-### 哪些设置会保留
-
-| 设置 | 保存位置 | 服务重启后保留 | 不同浏览器共享 |
-|---|---|---:|---:|
-| 采集周期、探测超时、并发数 | `config.json` | 是 | 是 |
-| 监控节点、分组、维护和告警操作 | `config.json` | 是 | 是 |
-| 可选节点/GPU 趋势及进程/告警转移 | 私有 SQLite 状态 | 是 | 是 |
-| 视觉风格、主题色、密度、排序、筛选、GPU 列 | 浏览器 `localStorage` | 是 | 否 |
-| 自定义背景 | 浏览器 `IndexedDB` | 是 | 否 |
-
-只有清理当前浏览器的站点数据或恢复显示偏好时，浏览器设置才会丢失。移除自定义背景是单独操作。
-
-网页允许设置 2–60 秒采集周期、2–300 秒探测超时（须大于连接超时，默认 5 秒）和 1–64 个并发 worker。周期越短、并发越高，SSH 和远端主机负载越大。
+`mocop init` 会写入完整且私密的配置。控制台可安全修改常用的资产、周期、
+维护和分组设置，通常无需重启。所有字段、默认值和限制以
+[配置参考](../../CONFIGURATION.md)为准；手工编写 JSON 时参考
+[完整安全示例](../../../examples/mocop.example.json)。可选 workload 身份和
+限额 SQLite 历史默认关闭。手工修改后先执行 `mocop config check`；需要重启
+托管服务时按[运维手册](../../OPERATIONS.md)操作。
 
 ## 日常使用
 
-- 可按程序名、命令、PID、用户、workload、队列、服务器、GPU 型号或 UUID
-  搜索。在“全部服务器”中搜索得到全局结果；先选择一台服务器则只搜索该节点。
-  点击程序结果会直接打开所在 GPU，并把关键词带入单卡程序筛选。
-- 主 GPU 表可直接扫描进程数、最大已知进程、进程已分配显存和采样新鲜度，
-  无需逐卡打开详情。
-- 点击 GPU 行或热力图单元格进入以进程为先的工作区：查看归属与已知显存覆盖，
-  在 100 行显示上限前筛选“有归属/无归属”，再按显存、运行时长或程序名排序。
-  用户/workload 标签可继续筛选当前卡；快捷操作可以复制 PID/命令或转到全局搜索。
-- 打开告警查看基于证据的处理建议，再按固定时长确认或仅静默该条件。
-- 在选中节点上使用“立即探测”，提前执行一次有界采集，不改变全局刷新周期。
-- 使用“匹配算力”查找同一主机、同一型号且剩余显存足够的 GPU。结果不代表资源预留。
-- 设置维护窗口后，采集继续进行，但对应问题不会进入待处理告警。
-- 在“设置 → 监控节点”中扫描 SSH 别名，添加或删除符合条件的计算节点。
-- 按照[升级与回滚手册](../../OPERATIONS.md)操作。验证软件包升级后，可使用
-  “设置 → 监控服务状态 → 重启服务”；该按钮只在用户级服务模式下可用，
-  恢复后页面会自动刷新。
-- 可上传最大 32 MiB 的 PNG、JPEG、WebP 或 AVIF 背景；超过 8 MiB 时只在浏览器内压缩，不会上传。
-- 使用 `mocop --once > snapshot.json` 导出一次当前快照。脚本与定时任务可加 `--strict`：只要有任意配置主机未产生在线采样即退出码 `1`，并在 stderr 列出失败主机。
+- 在“全部服务器”中搜索整个集群；先选择服务器后，可按程序、命令、PID、
+  用户、workload、队列、主机、型号或 UUID 限定范围。
+- 主 GPU 表直接展示进程数、最大分配、显存覆盖和新鲜度；打开单卡后可进行
+  有界筛选、排序、复制和归属下钻。
+- 打开告警查看证据并确认/静默，或设置维护窗口；采集不会因此停止。
+- “立即探测”“匹配算力”和“设置 → 监控节点”覆盖常用操作。容量匹配只是
+  当前观测，不代表资源预留。
+- 使用 `mocop --once` 导出快照；自动化可加 `--strict`，让任一配置主机无
+  在线样本时返回失败。
 
 ## HTTP API
 
@@ -223,68 +169,21 @@ SSE 和 OpenMetrics 均要求安装级 Bearer 能力；只有 API 发现、存�
 检查公开。带认证的 curl 示例、全部端点与字段表，以及非观众型自动化不应
 发送 `X-Monitor-Request: dashboard` 标记头的原因见 [API 参考](../../API.md)。
 
-## Prometheus
+## 指标与故障排查
 
-`GET /metrics` 使用 OpenMetrics 1.0 输出当前内存快照，不会触发新的采集：
-
-```yaml
-scrape_configs:
-  - job_name: mocop
-    authorization:
-      type: Bearer
-      credentials_file: /home/alice/.config/mocop/access-token
-    static_configs:
-      - targets: ["127.0.0.1:8787"]
-```
-
-请使用绝对路径；Prometheus 必须以有权读取该私密文件的身份运行，或使用
-单独受保护的凭据副本。该端点包含采集与后台子系统健康、节点可用性、告警、
-系统资源和当前 GPU 指标。陈旧资源值、进程名称和 PID 不会被导出。
-
-## 故障行为
-
-Mocop 按节点独立调度，同一节点不会重叠采集。只要仍有 worker 容量，慢节点就
-不会推迟健康节点。失败节点保留最后一次成功样本，但会标记为陈旧并从当前汇总中
-排除；重试最长退避 60 秒，并按节点分散。
-
-采集周期是目标频率。worker 饱和或单次探测超过周期时，只会推迟对应节点，不会
-重新引入全局等待屏障。
-
-调整超时前，先用内置的只读诊断检查 SSH 路径：
-
-```bash
-mocop doctor
-mocop doctor --profile
-mocop doctor --probe
-```
-
-默认命令检查非交互可达性和连接复用；`--profile` 将耗时拆分为传输、固定
-脚本和 NVIDIA 查询；`--probe` 执行一次真实、有界的生产采集。Mocop 不会
-修改 SSH 配置。OpenSSH 复用的实测数据见[性能说明](../../PERFORMANCE.md)，
-服务诊断流程见[运维手册](../../OPERATIONS.md)。如果多台节点共同依赖一个
-跳板机、VPN 或 FRP 路径并同时离线，应先检查共享路径，再考虑重启 Mocop。
-
-### 故障排查
-
-大多数"为什么没有数据"的排查用四条命令即可覆盖：
+已认证的 `GET /metrics` 以 OpenMetrics 1.0 输出当前快照，不会触发采集。
+Prometheus 配置和指标契约由 [API 参考](../../API.md)维护。首次排查使用：
 
 ```bash
 journalctl --user -u mocop -f              # 实时跟踪服务日志
 curl -s http://127.0.0.1:8787/healthz      # 存活状态 + 累计 SSH 传输重试次数
 curl -s http://127.0.0.1:8787/readyz       # 就绪状态；首次成功采集前返回 503 并带原因
-mocop doctor --probe                       # 对每个别名执行一次真实生产采集
+mocop doctor --probe                       # 对每个别名执行一次有界生产采集
 ```
 
-`mocop doctor --probe` 按别名报告探测状态、延迟、GPU/进程数和 workload
-覆盖率。它依赖真实连接测试，因此不能与 `--no-connect` 同时使用。
-
-### CLI 退出码
-
-| 退出码 | 含义 |
-|---|---|
-| `0` | 成功。 |
-| `1` | 诊断或采集失败：`mocop doctor` 发现至少一个不可用别名，或运行中监控的采集器/监听器失败。 |
-| `2` | 配置或用法错误：配置无效、别名过滤器未知，或 `--probe` 与 `--no-connect` 之类的冲突参数。 |
+各节点独立调度；失败样本会明确标记为陈旧，并按上限退避重试。服务恢复和
+退出码见[运维手册](../../OPERATIONS.md)；调整周期或并发前阅读
+[性能说明](../../PERFORMANCE.md)。
 
 ## 安全
 
@@ -319,6 +218,7 @@ VPN；明文 HTTP 上的 Bearer 头不提供网络机密性或服务端身份认
 python3 -m unittest discover -s tests -p 'test_*.py'
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
+node tests/process_search_test.mjs
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 

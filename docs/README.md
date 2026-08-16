@@ -19,6 +19,7 @@ detailed contracts and operating procedures.
 | Performance engineer | [Performance](PERFORMANCE.md) | Hot paths, resource ceilings, benchmarks, and re-evaluation thresholds |
 | Release reviewer | [Quality and resource assessment](QUALITY.md) | Current performance, robustness, stability, resource evidence, and residual boundaries |
 | Release reader | [Changelog](CHANGELOG.md) | User-visible additions, changes, fixes, removals, and security notes |
+| Release maintainer | [Release procedure](../.github/RELEASING.md) | Version alignment, immutable tags, artifacts, and post-release verification |
 | Decision reviewer | [Architecture decision index](adr/README.md) | Accepted, superseded, and proposed structural decisions |
 | Contributor | [Contributing guide](../.github/CONTRIBUTING.md) | Development gates, writing rules, commit policy, and change requirements |
 | Community member | [Code of conduct](../.github/CODE_OF_CONDUCT.md) | Participation and enforcement expectations |
@@ -54,6 +55,7 @@ Avoid copying a detailed contract into several documents. Link to its owner:
 | Component boundary, canonical format, or consequential alternative | Architecture document and a new/superseding ADR |
 | Resource limit, hot path, benchmark, or performance claim | Performance document with a reproducible command |
 | Any user-visible addition, change, fix, removal, or security correction | Unreleased changelog |
+| Version or release artifact | Changelog, both onboarding READMEs, and release procedure |
 
 ## Language policy
 
@@ -90,10 +92,14 @@ Run these before merging a documentation or structure change:
 ```bash
 python3 -m unittest tests.test_docs -v
 python3 -m unittest discover -s tests -v
+uvx --from coverage==7.15.4 coverage run --branch --source=mocop -m unittest discover -s tests -p 'test_*.py' -q
+uvx --from coverage==7.15.4 coverage report --fail-under=85
 python3 -m compileall -q mocop tests
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
 node --check mocop/static/app.js
+node --check mocop/static/process-search.js
+node tests/process_search_test.mjs
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 

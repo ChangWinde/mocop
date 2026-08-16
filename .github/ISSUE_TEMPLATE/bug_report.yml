@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible Mocop defect without private fleet data.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not post credentials, access tokens, SSH configuration, real hostnames,
+        addresses, telemetry exports, or unredacted support bundles.
+  - type: input
+    id: version
+    attributes:
+      label: Mocop version
+      description: Use an immutable tag or commit SHA, not only a branch name.
+      placeholder: v0.9.0 or 0123456789abcdef
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Linux distribution, Python, OpenSSH, browser, systemd, and installation method when relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List exact steps using fictional aliases and redacted output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Include stable error codes and the smallest useful redacted log excerpt.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed capabilities, secrets, real inventory, addresses, and sensitive telemetry.
+          required: true

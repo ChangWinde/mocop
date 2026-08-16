@@ -344,7 +344,7 @@ Top-level fields:
 | Field | Type | Description |
 |---|---|---|
 | `version` | int | Monotonic state revision; increases on every observable change. |
-| `appVersion` | string | Mocop release, e.g. `"0.8.0"`. |
+| `appVersion` | string | Mocop release, e.g. `"0.9.0"`. |
 | `incidentVersion` | int | Incident-view revision; also advances on action/maintenance expiry. |
 | `generatedAt` | timestamp | When this snapshot projection was assembled (per state revision, not per request). |
 | `startedAt` | timestamp | Process start; changes prove a restart happened. |
@@ -620,7 +620,7 @@ API self-description. Tier P. Query: rejected (`QUERY_NOT_ALLOWED`).
 ```json
 {
   "apiVersion": "2",
-  "appVersion": "0.8.0",
+  "appVersion": "0.9.0",
   "schemaVersion": 1,
   "capabilities": {
     "restartSupported": true,

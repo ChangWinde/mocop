@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-16
+
 ### Added
 
 - Added process occupancy to the main GPU inventory and reorganized GPU detail as
@@ -13,6 +15,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   aggregate process count, allocation coverage, and freshness without exporting
   process identity. The shared weak-map summary reuses authenticated snapshot data
   and adds no remote command or API surface.
+- Added enforceable repository line budgets, release/version drift tests, a
+  measured 85% branch-coverage floor, tag-driven GitHub release workflow,
+  structured issue/PR intake, and ADR-0021's incremental module boundary.
+- Extracted the bounded process-search projection into a dependency-free static
+  leaf with an independent Node contract test while preserving the browser path.
 - Added a reproducible synthetic runtime/resource profile and a cross-dimensional
   quality assessment covering backend/browser performance, bounded retention,
   lifecycle resources, robustness evidence, scale thresholds, and explicit

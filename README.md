@@ -32,9 +32,8 @@ Remote hosts need no agent, database, Python installation, or monitoring port. T
 
 Here, **AI-native** means that the interface is built around GPU capacity, task placement, and failure diagnosis. Mocop does not call an AI service or upload telemetry.
 
-The shipped dashboard UI is currently Simplified Chinese and has no locale
-switch yet. The English README, API, operations, and engineering references are
-fully maintained.
+The dashboard UI is currently Simplified Chinese and has no locale switch. The
+English README, API, operations, and engineering references remain maintained.
 
 ## At a glance
 
@@ -103,7 +102,7 @@ Keep `ProxyJump`, ports, users, and identities in OpenSSH. Do not add jump hosts
 ### 2. Install and initialize
 
 ```bash
-uv tool install git+https://github.com/ChangWinde/mocop.git
+uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.9.0"
 mocop init --host gpu-node-01 --host gpu-node-02
 ```
 
@@ -141,92 +140,32 @@ mocop service status
 mocop service uninstall
 ```
 
-Uninstall stops/disables the service and removes only its generated unit. It
-retains the configuration, Bearer token, optional environment file, SQLite
-state, browser data, journal, SSH files/control sockets, installed package, and
-linger policy. See the [operations runbook](docs/OPERATIONS.md) before upgrade,
-rollback, token rotation, or manual cleanup.
+Uninstall removes only the generated service unit. Read the
+[operations runbook](docs/OPERATIONS.md) before upgrade, rollback, token rotation,
+or cleanup; it lists every retained file and the safe backup procedure.
 
 ## Configuration
 
-The generated file is complete. Edit it directly only when you need fields not
-exposed in the dashboard. The [configuration reference](docs/CONFIGURATION.md)
-is authoritative for every field, default, relationship, and hard boundary.
-This excerpt shows the main inventory fields:
-
-```json
-{
-  "auto_discover": false,
-  "hosts": ["monitor-host", "gpu-node-01", "gpu-node-02"],
-  "exclude_hosts": ["gpu-bastion", "git-host"],
-  "local_host": "monitor-host",
-  "expected_gpu_counts": {
-    "gpu-node-01": 8,
-    "gpu-node-02": 8
-  },
-  "host_groups": {
-    "gpu-node-01": "training",
-    "gpu-node-02": "inference"
-  }
-}
-```
-
-The inventory is explicit: `hosts` allows collection, `exclude_hosts` always
-wins, and `local_host` selects at most one allowlisted target for the same fixed
-probe without SSH. Expected GPU counts, display groups, per-host cadence, scoped
-incident thresholds, maintenance windows, and the display-only connection tree
-all remain configuration data rather than remote discovery side effects.
-
-Optional `workloads.mode` values add bounded process ownership, command, start
-time, and supported scheduler/container identity. Optional persistence retains
-bounded trends and incident context in a private SQLite database; it is disabled
-by default. Webhook JSON contains environment-variable names, never destinations
-or signing secrets. The [configuration reference](docs/CONFIGURATION.md) owns
-all defaults and bounds; the [complete safe example](examples/mocop.example.json)
-shows the entire schema, and the [operations runbook](docs/OPERATIONS.md) owns
-secret-file setup and restart procedures.
-
-Dashboard changes pass the same strict validator, use private atomic writes, and
-apply without a restart. After a manual JSON edit, run `mocop config check` and
-reinstall/restart the managed service as described in the operations runbook.
-
-### What is persisted
-
-| Setting | Storage | Survives service restart | Shared across browsers |
-|---|---|---:|---:|
-| Collection interval, probe timeout, worker count | `config.json` | Yes | Yes |
-| Monitored hosts, groups, maintenance and incident actions | `config.json` | Yes | Yes |
-| Optional host/GPU trends and process/incident transitions | private SQLite state | Yes | Yes |
-| Visual style, accent, density, sorting, filters, visible GPU columns | browser `localStorage` | Yes | No |
-| Custom background | browser `IndexedDB` | Yes | No |
-
-Browser settings are lost only when that browser's site data is cleared or its display preferences are reset. Removing a custom background is a separate action.
-
-The dashboard allows a 2–60 second interval, a 2–300 second probe timeout that must exceed the connection timeout (default 5 seconds), and 1–64 workers. Short intervals and high concurrency increase SSH and remote-host load.
+`mocop init` writes a complete, private configuration. The dashboard safely edits
+the common inventory, cadence, maintenance, and grouping settings without a
+restart. Use the [configuration reference](docs/CONFIGURATION.md) for every field,
+default, and limit; use the [complete safe example](examples/mocop.example.json)
+when authoring JSON. Optional workload identity and bounded SQLite history are
+disabled by default. After a manual edit, run `mocop config check` and follow the
+[operations runbook](docs/OPERATIONS.md) when a service restart is required.
 
 ## Daily use
 
-- Search by process name, command, PID, owner, workload, queue, host, GPU model,
-  or UUID. Search from **All servers** for a fleet-wide result, or select one
-  server first to scope results; selecting a process opens its exact GPU and
-  carries the query into the per-GPU process filter.
-- Scan the main GPU table for process count, the largest known process, allocated
-  process VRAM, and sample freshness before opening a device.
-- Select a GPU row or heatmap cell to open the process-first workspace. It
-  summarizes attribution and known-memory coverage, filters owned or unattributed
-  work before the 100-row display limit, and sorts by VRAM, runtime, or program
-  name. Owner/workload chips can narrow the device view; quick actions copy a PID
-  or command or continue the term in fleet-wide search.
-- Open an incident for evidence-based guidance, then acknowledge it or silence only that condition for a fixed period.
-- Use **Probe now** on the selected node to advance one bounded collection without changing the global interval.
-- Use **Match capacity** to find same-host, same-model GPUs with enough free VRAM. The result is not a reservation.
-- Set a maintenance window to silence actionable alerts while collection continues.
-- Scan SSH aliases in **Settings → Monitored nodes** to add or remove eligible compute nodes.
-- Follow the [upgrade and rollback runbook](docs/OPERATIONS.md). After a verified
-  package upgrade, **Settings → Service status → Restart service** is available only
-  for the installed user service and reloads the page after recovery.
-- Upload a PNG, JPEG, WebP, or AVIF background up to 32 MiB. Sources above 8 MiB are compressed locally; no image is uploaded.
-- Export one current snapshot with `mocop --once > snapshot.json`. Add `--strict` in scripts and cron jobs: it exits `1` unless every configured host produced an online sample, and lists the failing hosts on stderr.
+- Search from **All servers** for programs across the fleet, or select a server to
+  scope by process, command, PID, owner, workload, queue, host, model, or UUID.
+- Scan process count, largest allocation, memory coverage, and freshness in the
+  main GPU table; open a GPU for bounded process filters, sorting, and copy actions.
+- Open incidents for evidence and acknowledgement/silence, or schedule maintenance
+  while collection continues.
+- Use **Probe now**, **Match capacity**, and **Settings → Monitored nodes** for the
+  common operator workflows. Capacity matches are observations, not reservations.
+- Export a snapshot with `mocop --once`; add `--strict` for automation that must
+  fail when any configured host has no online sample.
 
 ## HTTP API
 
@@ -238,74 +177,23 @@ public. See the [API reference](docs/API.md) for authenticated curl examples,
 every endpoint and field, and why non-viewer automation must not send the
 `X-Monitor-Request: dashboard` header.
 
-## Prometheus
+## Metrics and troubleshooting
 
-`GET /metrics` exports the current in-memory snapshot in OpenMetrics 1.0 format and does not start another probe:
-
-```yaml
-scrape_configs:
-  - job_name: mocop
-    authorization:
-      type: Bearer
-      credentials_file: /home/alice/.config/mocop/access-token
-    static_configs:
-      - targets: ["127.0.0.1:8787"]
-```
-
-Use an absolute credential path; Prometheus must run as an identity permitted to
-read that private file, or receive a separately protected copy. The endpoint
-includes collection and background-subsystem health, host availability,
-incidents, system resources, and current GPU metrics. Stale resource values,
-process names, and PIDs are not exported.
-
-## Failure behavior
-
-Mocop schedules each host independently and never overlaps a host with itself. A slow
-node does not delay a healthy peer when worker capacity is available. Failed hosts keep
-their last successful sample but are marked stale and excluded from current totals;
-retries back off for up to 60 seconds with per-host jitter.
-
-The interval is a target cadence. Worker saturation or a probe longer than its interval
-can defer that host, but no fleet-wide barrier is introduced.
-
-Diagnose the SSH path with the bundled read-only check before changing timeouts:
-
-```bash
-mocop doctor
-mocop doctor --profile
-mocop doctor --probe
-```
-
-The default command verifies non-interactive reachability and connection reuse;
-`--profile` separates transport, fixed-script, and NVIDIA-query time; `--probe`
-runs one real bounded production collection. Mocop never edits SSH configuration.
-See the [performance reference](docs/PERFORMANCE.md) for measured OpenSSH reuse
-and the [operations runbook](docs/OPERATIONS.md) for service diagnosis. If several
-nodes sharing a jump host, VPN, or FRP route fail together, inspect that route
-before restarting Mocop.
-
-### Troubleshooting
-
-Four commands cover most "why is nothing showing up" investigations:
+Authenticated `GET /metrics` exports the current snapshot as OpenMetrics 1.0
+without starting a probe. The [API reference](docs/API.md) owns the Prometheus
+configuration and metric contract. These commands cover the first diagnosis:
 
 ```bash
 journalctl --user -u mocop -f              # follow the service logs live
 curl -s http://127.0.0.1:8787/healthz      # liveness + cumulative SSH transport retries
 curl -s http://127.0.0.1:8787/readyz       # readiness; 503 with a reason until the first successful sample
-mocop doctor --probe                       # one real production collection per alias
+mocop doctor --probe                       # one bounded production probe per alias
 ```
 
-`mocop doctor --probe` reports probe status, latency, GPU/process counts, and
-workload coverage per alias. It needs live connection tests and cannot be
-combined with `--no-connect`.
-
-### CLI exit codes
-
-| Code | Meaning |
-|---|---|
-| `0` | Success. |
-| `1` | Diagnosis or collection failure: `mocop doctor` found at least one unusable alias, or the running monitor's collector or listener failed. |
-| `2` | Configuration or usage error: invalid configuration, unknown alias filter, or conflicting flags such as `--probe` with `--no-connect`. |
+Hosts are scheduled independently; failed samples stay visibly stale and retry
+with bounded backoff. See [Operations](docs/OPERATIONS.md) for service recovery and
+exit codes, and [Performance](docs/PERFORMANCE.md) before changing cadence or
+concurrency.
 
 ## Security
 
@@ -341,6 +229,7 @@ canonical ownership, update triggers, language policy, and ADR lifecycle.
 python3 -m unittest discover -s tests -p 'test_*.py'
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
+node tests/process_search_test.mjs
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 

@@ -8,10 +8,14 @@ Python 3.10 or newer and OpenSSH are required. The runtime has no third-party Py
 
 ```bash
 python3 -m unittest discover -s tests -v
+uvx --from coverage==7.15.4 coverage run --branch --source=mocop -m unittest discover -s tests -p 'test_*.py' -q
+uvx --from coverage==7.15.4 coverage report --fail-under=85
 python3 -m compileall -q mocop tests
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
 node --check mocop/static/app.js
+node --check mocop/static/process-search.js
+node tests/process_search_test.mjs
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
@@ -64,5 +68,9 @@ Scopes use lowercase path-like names such as `repo`, `core`, `config`, `probe`, 
 The complete subject must be at most 72 characters, and the imperative summary must not end with a period. Use a body when the rationale or trade-offs are not evident from the diff. The local `commit-msg` hook checks new commits, and CI validates the complete reachable history. Git-generated merge and revert subjects are accepted only when their commit metadata proves their origin.
 
 Do not mix generated output, unrelated formatting, or local configuration into a commit. Before committing, inspect staged paths and run the checks relevant to the change.
+
+Maintainers cut immutable releases only from a verified default-branch commit;
+follow [RELEASING.md](RELEASING.md) for the version, Changelog, annotated-tag,
+artifact, and post-release verification contract.
 
 By participating, you agree to follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).

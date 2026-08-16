@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  github-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Validate tag and release notes
+        run: |
+          git fetch --no-tags --depth=1 origin master
+          test "$(git rev-parse "$GITHUB_SHA")" = "$(git rev-parse FETCH_HEAD)" || {
+            echo "release tags must identify the current verified master commit" >&2
+            exit 1
+          }
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          root = Path.cwd()
+          metadata = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+          version = metadata["project"]["version"]
+          if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+              raise SystemExit(f"project version {version!r} is not a release SemVer")
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              raise SystemExit(f"tag {tag!r} does not match project version {version!r}")
+
+          changelog = (root / "docs/CHANGELOG.md").read_text(encoding="utf-8")
+          marker = f"## [{version}]"
+          start = changelog.find(marker)
+          if start < 0:
+              raise SystemExit(f"missing {marker!r} in docs/CHANGELOG.md")
+          body_start = changelog.find("\n", start) + 1
+          end = changelog.find("\n## [", body_start)
+          notes = changelog[body_start : end if end >= 0 else None].strip()
+          if not notes:
+              raise SystemExit(f"release {version!r} has empty notes")
+          Path("/tmp/mocop-release-notes.md").write_text(notes + "\n", encoding="utf-8")
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as environment:
+              environment.write(f"MOCOP_RELEASE_VERSION={version}\n")
+          PY
+      - name: Build wheel
+        run: |
+          python -m pip wheel --no-deps --wheel-dir /tmp/mocop-dist .
+          cd /tmp/mocop-dist
+          sha256sum mocop-*.whl > SHA256SUMS
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "/tmp/mocop-dist/mocop-${MOCOP_RELEASE_VERSION}-py3-none-any.whl" \
+            "/tmp/mocop-dist/SHA256SUMS" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Mocop ${MOCOP_RELEASE_VERSION}" \
+            --notes-file /tmp/mocop-release-notes.md
