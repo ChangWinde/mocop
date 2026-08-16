@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a user outcome and its operational boundaries.
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What operator task is difficult today, and for whom?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired observable outcome
+      description: Describe what the operator should be able to do or verify.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Security, compatibility, and resource boundaries
+      description: Note remote commands, credentials, retained data, API changes, or scale expectations.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include an existing workflow or external tool if one partly solves the problem.

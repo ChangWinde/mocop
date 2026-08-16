@@ -28,3 +28,4 @@ for status and superseding rules.
 | [0018](0018-browser-process-search.md) | Accepted | Browser-side process search over the authenticated snapshot |
 | [0019](0019-repository-and-documentation-governance.md) | Accepted | Repository and documentation governance |
 | [0020](0020-process-centric-gpu-inventory.md) | Accepted | Process-centric GPU inventory and task workspace |
+| [0021](0021-incremental-module-boundaries.md) | Accepted | Incremental module boundaries and growth budgets |

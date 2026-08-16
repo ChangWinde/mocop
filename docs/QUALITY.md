@@ -15,7 +15,7 @@ has not been measured. Detailed benchmark history remains in
 | Browser responsiveness | Strong for current bounded views | The 65,536-process browser fixture retained only 200 search rows. Two consecutive runs measured 90.4–96.0 ms cold search, 26.9–30.6 ms bounded warm medians, 1.6–1.7 ms cold GPU-summary derivation, and at most 0.1 ms cached summary medians. | Browser timings are diagnostic, not CI thresholds; low-power clients need separate profiling. |
 | Memory and retention | Bounded by design and acceptable in measured deployments | Production observation measured 31.7 MiB main-process RSS. The synthetic large fixture attributed 10.20 MiB to `StateStore`; a bounded 20-host/160-GPU retention soak changed traced allocation by 12.8 KiB (0.36%) after stabilization. | The synthetic process RSS of 71.67–71.73 MiB includes the fixture, payloads, tracing, and interpreter, so it is not an idle-service claim. Multi-day live soak remains environment-specific release evidence. |
 | Robustness | Strong defense-in-depth | Probe deadlines, output caps, process-group cancellation, per-host isolation, bounded queues, authenticated HTTP, framing/authority checks, and persistence failure isolation have focused unit and integration coverage. | Correct configuration, private capability storage, OpenSSH host verification, and protected transport remain operator responsibilities. |
-| Stability | Strong deterministic coverage; long-running evidence is scoped | Unit, contract, browser, cancellation, bounded-retention, restart, migration, and fault-injection suites exercise the major state transitions. HTTP thread and file-descriptor counts returned to baseline after the synthetic lifecycle check. | This assessment does not claim that one local test run replaces a multi-day soak on the operator's drivers, network, and SSH topology. |
+| Stability | Strong deterministic coverage; long-running evidence is scoped | Unit, contract, browser, cancellation, bounded-retention, restart, migration, and fault-injection suites exercise the major state transitions. Python branch coverage measured 88% and CI rejects a regression below 85%; HTTP thread and file-descriptor counts returned to baseline after the synthetic lifecycle check. | Coverage locates unexecuted paths but does not prove assertion quality, and one local test run does not replace a multi-day soak on the operator's drivers, network, and SSH topology. |
 
 ## Resource model
 
@@ -93,6 +93,11 @@ The verification surface intentionally includes more than happy-path unit tests:
 - the real browser fixture covers authenticated SSE reconnects, responsive
   layout, keyboard focus, bounded process views, filters, drill-down, copy
   actions, and global search transitions.
+
+The 2026-08-16 Python 3.10 run executed 467 tests and measured 88% combined
+statement/branch coverage with Coverage.py 7.15.4. CI enforces a conservative
+85% floor as a regression signal; the focused contracts and failure-injection
+oracles remain the acceptance evidence.
 
 These tests establish deterministic invariants. Operators evaluating a new
 driver, tunnel, or unusually large fleet should additionally record at least one

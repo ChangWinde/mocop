@@ -289,7 +289,7 @@ try {
   assert.equal(final.selected, "2");
   assert.match(final.connection, /live/);
   assert.match(final.feedback, /2/);
-  assert.match(final.versionLabel, /v0\.8\.0/);
+  assert.match(final.versionLabel, /v0\.9\.0/);
   assert.equal(final.serverRatio, "2 / 4");
   assert.equal(final.totalGpus, "8");
   assert.match(final.persistenceStatus, /仅内存/);

@@ -14,8 +14,6 @@ const MAX_GPU_DETAIL_PROCESSES = 100;
 const MAX_PROGRAM_SEARCH_RESULTS = 200;
 const MAX_SEARCH_QUERY_LENGTH = 120;
 const GPU_PROCESS_FRESHNESS_WARNING_MS = 90_000;
-const processSearchProjectionCache = new WeakMap();
-const gpuSearchProjectionCache = new WeakMap();
 const gpuProcessSummaryCache = new WeakMap();
 const BACKGROUND_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
 const DEFAULT_PREFERENCES = Object.freeze({
@@ -176,6 +174,21 @@ const WORKLOAD_KIND_LABELS = {
   docker: "Docker",
   podman: "Podman",
 };
+
+const {
+  compareProcessSearchRecords,
+  gpuRecordMatchesSearch,
+  normalizedSearchTerms,
+  processMatchesSearch,
+  processSearchRank,
+  searchProcessRecords,
+} = globalThis.MocopProcessSearch.create({
+  maxResults: MAX_PROGRAM_SEARCH_RESULTS,
+  maxQueryLength: MAX_SEARCH_QUERY_LENGTH,
+  workloadLabels: WORKLOAD_KIND_LABELS,
+  processName: gpuProcessName,
+  numeric,
+});
 
 const view = {
   dashboardStarted: false,
@@ -4925,160 +4938,6 @@ function gpuProcessSummarySignature(gpu) {
 function gpuProcessMemoryRank(a, b) {
   return numeric(b.used_memory_mib, -1) - numeric(a.used_memory_mib, -1)
     || numeric(a.pid) - numeric(b.pid);
-}
-
-function normalizedSearchTerms(value) {
-  const normalized = String(value ?? "")
-    .slice(0, MAX_SEARCH_QUERY_LENGTH)
-    .normalize("NFKC")
-    .toLowerCase()
-    .trim();
-  return normalized ? normalized.split(/\s+/u) : [];
-}
-
-function normalizedSearchProjection(values) {
-  const text = values
-    .filter((value) => value != null && String(value) !== "")
-    .map(String)
-    .join("\u0000")
-    .normalize("NFKC")
-    .toLowerCase();
-  return { text, boundaryText: `\u0000${text}\u0000` };
-}
-
-function processSearchProjection(process) {
-  const cached = processSearchProjectionCache.get(process);
-  if (cached) return cached;
-  const workload = process.workload || {};
-  const projection = normalizedSearchProjection([
-    process.pid,
-    process.name,
-    gpuProcessName(process),
-    workload.kind,
-    Object.hasOwn(WORKLOAD_KIND_LABELS, workload.kind)
-      ? WORKLOAD_KIND_LABELS[workload.kind] : null,
-    workload.workload_id,
-    workload.name,
-    workload.owner,
-    workload.queue,
-    workload.namespace,
-    workload.command,
-  ]);
-  processSearchProjectionCache.set(process, projection);
-  return projection;
-}
-
-function gpuSearchProjection(server, gpu) {
-  const cached = gpuSearchProjectionCache.get(gpu);
-  if (cached) return cached;
-  const projection = normalizedSearchProjection([
-    server.host, gpu.index, gpu.uuid, gpu.name,
-  ]);
-  gpuSearchProjectionCache.set(gpu, projection);
-  return projection;
-}
-
-function processMatchesSearch(process, terms, server = null, gpu = null) {
-  if (!terms.length) return true;
-  const processText = processSearchProjection(process).text;
-  const placementText = server && gpu ? gpuSearchProjection(server, gpu).text : "";
-  return terms.every(
-    (term) => processText.includes(term) || placementText.includes(term),
-  );
-}
-
-function processSearchRank(record, terms) {
-  const query = terms.join(" ");
-  const projections = [
-    gpuSearchProjection(record.server, record.gpu),
-    processSearchProjection(record.process),
-  ];
-  if (projections.some(
-    (projection) => projection.boundaryText.includes(`\u0000${query}\u0000`),
-  )) return 0;
-  if (projections.some(
-    (projection) => projection.boundaryText.includes(`\u0000${query}`),
-  )) return 1;
-  return 2;
-}
-
-function compareProcessSearchRecords(a, b) {
-  return a.rank - b.rank
-    || a.server.host.localeCompare(b.server.host)
-    || numeric(a.gpu.index) - numeric(b.gpu.index)
-    || gpuProcessMemoryRank(a.process, b.process)
-    || String(a.process.name || "").localeCompare(String(b.process.name || ""));
-}
-
-// A max-heap keeps the worst retained match at index zero. This lets search
-// report the full count while holding at most the DOM result budget in memory.
-function retainProcessSearchRecord(heap, record) {
-  if (heap.length < MAX_PROGRAM_SEARCH_RESULTS) {
-    heap.push(record);
-    let index = heap.length - 1;
-    while (index > 0) {
-      const parent = Math.floor((index - 1) / 2);
-      if (compareProcessSearchRecords(heap[parent], heap[index]) >= 0) break;
-      [heap[parent], heap[index]] = [heap[index], heap[parent]];
-      index = parent;
-    }
-    return;
-  }
-  if (compareProcessSearchRecords(record, heap[0]) >= 0) return;
-  heap[0] = record;
-  let index = 0;
-  for (;;) {
-    const left = index * 2 + 1;
-    if (left >= heap.length) break;
-    const right = left + 1;
-    const worse = right < heap.length
-      && compareProcessSearchRecords(heap[right], heap[left]) > 0 ? right : left;
-    if (compareProcessSearchRecords(heap[index], heap[worse]) >= 0) break;
-    [heap[index], heap[worse]] = [heap[worse], heap[index]];
-    index = worse;
-  }
-}
-
-function searchProcessRecords(snapshot, query, host = "all") {
-  const terms = normalizedSearchTerms(query);
-  if (!snapshot || !terms.length) {
-    return { matches: [], total: 0, unavailableGpuCount: 0, staleCount: 0 };
-  }
-  const matches = [];
-  let total = 0;
-  let unavailableGpuCount = 0;
-  let staleCount = 0;
-  snapshot.servers.forEach((server) => {
-    if (host !== "all" && server.host !== host) return;
-    server.gpus.forEach((gpu) => {
-      if (gpu.processes_available === false) unavailableGpuCount += 1;
-      const processes = Array.isArray(gpu.processes) ? gpu.processes : [];
-      processes.forEach((process) => {
-        if (processMatchesSearch(process, terms, server, gpu)) {
-          total += 1;
-          if (server.stale) staleCount += 1;
-          const record = { server, gpu, process, rank: 0 };
-          record.rank = processSearchRank(record, terms);
-          retainProcessSearchRecord(matches, record);
-        }
-      });
-    });
-  });
-  matches.sort(compareProcessSearchRecords);
-  return {
-    matches,
-    total,
-    unavailableGpuCount,
-    staleCount,
-  };
-}
-
-function gpuRecordMatchesSearch(server, gpu, terms) {
-  if (!terms.length) return true;
-  const resourceText = gpuSearchProjection(server, gpu).text;
-  if (terms.every((term) => resourceText.includes(term))) return true;
-  const processes = Array.isArray(gpu.processes) ? gpu.processes : [];
-  return processes.some((process) => processMatchesSearch(process, terms, server, gpu));
 }
 
 function programSearchKey({ server, gpu, process }) {

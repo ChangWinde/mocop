@@ -12,6 +12,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from mocop import __version__
 from mocop.inventory import InventoryRequestError
 from mocop.models import GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
 from mocop.service import StateStore
@@ -371,7 +372,7 @@ class WebTests(unittest.TestCase):
         with urlopen(f"{self.base}/api/snapshot", timeout=2) as response:
             payload = json.load(response)
             self.assertEqual(response.status, 200)
-            self.assertEqual(response.headers["Server"], "mocop/0.8.0")
+            self.assertEqual(response.headers["Server"], f"mocop/{__version__}")
             self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
             self.assertIn(
                 "default-src 'self'", response.headers["Content-Security-Policy"]
@@ -381,7 +382,7 @@ class WebTests(unittest.TestCase):
                 response.headers["Content-Security-Policy"],
             )
         self.assertEqual(payload["stats"]["servers"], 0)
-        self.assertEqual(payload["appVersion"], "0.8.0")
+        self.assertEqual(payload["appVersion"], __version__)
 
     def test_snapshot_serialization_is_reused_per_state_revision(self) -> None:
         self.assertTrue(self.server.RequestHandlerClass.disable_nagle_algorithm)
@@ -486,6 +487,8 @@ class WebTests(unittest.TestCase):
             body = response.read().decode("utf-8")
         with urlopen(f"{self.base}/app.js", timeout=2) as response:
             script = response.read().decode("utf-8")
+        with urlopen(f"{self.base}/process-search.js", timeout=2) as response:
+            search_script = response.read().decode("utf-8")
         self.assertIn("Mocop", body)
         self.assertIn("AI-NATIVE GPU CLUSTER MONITOR", body)
         self.assertIn("GPU 集群实时监控", body)
@@ -558,6 +561,8 @@ class WebTests(unittest.TestCase):
         self.assertIn('class="gpu-col-power"', body)
         self.assertIn("age(snapshot.lastPollCompletedAt)", script)
         self.assertNotIn("age(snapshot.generatedAt)", script)
+        self.assertIn("createProcessSearch", search_script)
+        self.assertIn('src="/process-search.js"', body)
 
     def test_static_assets_support_etag_revalidation(self) -> None:
         conn = self.open_connection(self.server.server_port)
@@ -660,7 +665,7 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(response.status, 200)
         self.assertEqual(meta["apiVersion"], "2")
-        self.assertEqual(meta["appVersion"], "0.8.0")
+        self.assertEqual(meta["appVersion"], __version__)
         self.assertEqual(meta["schemaVersion"], 1)
         self.assertEqual(
             meta["capabilities"],
