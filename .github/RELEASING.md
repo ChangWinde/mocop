@@ -4,9 +4,10 @@ Release tags are immutable public installation identities. Create one only from
 the exact default-branch commit whose CI run is complete and successful.
 
 Repository rules enforce the release boundary: `master` accepts changes only
-through a pull request with every CI job successful, and the `v*` tag ruleset
-allows only the repository owner to create version tags while denying tag updates
-and deletions. Automatic head-branch deletion keeps merged refs from accumulating.
+through a pull request with every CI job successful, and complementary `v*` tag
+rulesets allow only the repository owner to create version tags while denying all
+tag updates and deletions. Automatic head-branch deletion keeps merged refs from
+accumulating.
 
 1. In a pull request, update `pyproject.toml` and `mocop/__init__.py` to the same
    SemVer value, move finished entries below a dated Changelog heading, and pin
