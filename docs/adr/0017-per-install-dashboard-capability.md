@@ -78,6 +78,31 @@ does not persist the token in `localStorage` or IndexedDB. Protected requests ca
 header. Automation reads the private token file and sends the same header. Authenticated
 SSE uses a streaming fetch parser.
 
+For bare or forwarded dashboard URLs, the same page may collect the capability in
+a non-dismissible form. It validates the token against a protected snapshot before
+retaining it in `sessionStorage`; rejection clears the candidate and stops automatic
+retries. This changes only the bootstrap interaction, not the capability scope or
+server-side authorization boundary.
+
+### Browser implementation boundary
+
+Three implementation boundaries were considered for the bootstrap interaction:
+
+- Keeping capability lifecycle and prompt state inline in `app.js` minimizes files,
+  but expands the main rendering orchestrator beyond its reviewed line ceiling and
+  couples authentication tests to the full dashboard.
+- Moving the dashboard to ES modules or a bundled framework improves lexical
+  encapsulation, but changes the dependency-free packaging and loading model for one
+  bounded concern.
+- A dependency-free classic-script leaf can expose one frozen factory, retain no
+  server state, and be tested without the dashboard DOM.
+
+Choose the classic-script leaf. `dashboard-auth.js` owns capability validation,
+fragment scrubbing, tab-scoped retention, and prompt state. `app.js` supplies the
+protected snapshot authentication callback and continues to own fetch, SSE, and the
+dashboard lifecycle. The leaf is loaded before `app.js`; it neither creates an
+ambient credential nor introduces a second transport or API.
+
 The route manifest defines four access tiers:
 
 - **P / `public`:** API discovery plus liveness/readiness; no capability.
@@ -91,6 +116,25 @@ Host, Origin, Fetch Metadata, and marker checks remain browser confused-deputy
 defenses; the Bearer capability is the authentication factor. The capability grants
 one operator role, not per-user or multi-tenant authorization.
 
+### Forwarded dashboard origins
+
+Three policies were considered for same-origin previews whose proxy rewrites the
+backend `Host` while preserving the browser's public `Origin`:
+
+- Exact per-session host entries provide the narrowest authority, but ephemeral
+  preview names require configuration changes and service restarts for every session.
+- A bounded HTTPS origin suffix supports ephemeral names while preserving an exact
+  backend Host check and mandatory Bearer authentication.
+- Trusting arbitrary loopback proxies or `X-Forwarded-*` headers would let an
+  unauthenticated client assert proxy identity and was rejected.
+
+Choose the bounded suffix policy. An exact `trusted_web_hosts` entry remains valid for
+both Host and Origin. A leading `*.` entry matches only HTTPS Origins strictly below
+that DNS suffix: it does not match the apex, IP literals, plain HTTP, or suffix
+confusion such as `preview.example.attacker.invalid`. It never expands the trusted
+backend Host set. Single-label broad entries such as `*.com` are rejected;
+operators must still choose the narrowest suffix controlled by their proxy.
+
 ## Impact
 
 - A copied capability grants the whole operator API until the managed token is
@@ -102,5 +146,8 @@ one operator role, not per-user or multi-tenant authorization.
   every write require Bearer authentication.
 - Remote exposure still requires authenticated TLS or a private VPN. Bearer over plain
   HTTP provides authorization but no network confidentiality or server authentication.
+- Ephemeral preview deployments can authorize a narrow HTTPS Origin suffix without
+  delegating Host validation or trusting forwarded headers; the proxy and every name
+  below that suffix remain part of the deployment trust boundary.
 - AF_UNIX plus a carefully configured authenticated proxy remains a future hardened
   deployment option, not a hidden guarantee of the generated user service.

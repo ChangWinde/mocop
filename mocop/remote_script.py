@@ -184,7 +184,13 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     gpu_health_inline=1
     [ -z "$combined_output" ] || printf '%s\n' "$combined_output"
   else
-    nvidia-smi --query-gpu=__GPU_QUERY__ --format=csv,noheader,nounits 2>/dev/null || printf 'GPU_ERROR\t%s\n' "$?"
+    fallback_output=$(nvidia-smi --query-gpu=__GPU_QUERY__ --format=csv,noheader,nounits 2>/dev/null)
+    fallback_status=$?
+    if [ "$fallback_status" -eq 0 ]; then
+      [ -z "$fallback_output" ] || printf '%s\n' "$fallback_output"
+    else
+      printf 'GPU_ERROR\t%s\n' "$fallback_status"
+    fi
   fi
 else
   printf 'GPU_UNAVAILABLE\n'

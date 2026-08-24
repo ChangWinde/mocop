@@ -6,6 +6,7 @@ build/
 dist/
 
 # Test and analysis output
+/.logs/
 .coverage
 .coverage.*
 coverage.xml

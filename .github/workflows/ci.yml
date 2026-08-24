@@ -54,7 +54,10 @@ jobs:
       - name: JavaScript syntax
         run: |
           node --check mocop/static/app.js
+          node --check mocop/static/dashboard-auth.js
           node --check mocop/static/process-search.js
+      - name: Dashboard-auth contract
+        run: node tests/dashboard_auth_test.mjs
       - name: Process-search contract
         run: node tests/process_search_test.mjs
 
@@ -74,6 +77,7 @@ jobs:
         run: |
           cd /tmp
           mocop --help
+          mocop deploy --help
           mocop init --config /tmp/mocop-ci.json
           mocop --config /tmp/mocop-ci.json --once > /tmp/snapshot.json
           python -c 'import json; data=json.load(open("/tmp/snapshot.json")); assert data["stats"]["servers"] == 0'
@@ -118,6 +122,7 @@ jobs:
           /tmp/mocop-wheel-venv/bin/python -m pip install --no-deps /tmp/mocop-dist/mocop-*.whl
           cd /tmp
           /tmp/mocop-wheel-venv/bin/mocop --help
+          /tmp/mocop-wheel-venv/bin/mocop deploy --help
           /tmp/mocop-wheel-venv/bin/mocop init --config /tmp/mocop-wheel-config.json
           /tmp/mocop-wheel-venv/bin/mocop --config /tmp/mocop-wheel-config.json --once > /tmp/mocop-wheel-snapshot.json
           /tmp/mocop-wheel-venv/bin/python -c 'import json; data=json.load(open("/tmp/mocop-wheel-snapshot.json")); assert data["stats"]["servers"] == 0'

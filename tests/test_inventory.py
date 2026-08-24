@@ -53,6 +53,9 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(snapshot["ignoredCodeHostCount"], 3)
         self.assertEqual(snapshot["excludedHostCount"], 1)
         self.assertEqual(snapshot["hostGroups"], {})
+        self.assertEqual(snapshot["sshDiscoveryMode"], "topology")
+        self.assertEqual(snapshot["infrastructureHosts"], [])
+        self.assertEqual(snapshot["sshDiscoveryWarnings"], [])
         self.assertEqual(
             snapshot["collectorSettings"],
             {

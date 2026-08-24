@@ -39,6 +39,15 @@ claim in a user manager; private ownership/modes protect configuration and secre
 without breaking required SSH agent or multiplex-socket paths. Installation rejects
 symlink, non-regular, foreign-owned, or group/other-accessible capability and optional
 environment files before systemd may read them.
+Cross-machine migration reads one private, valid source config and creates one
+exclusive `0600` target. It refuses overwrite and a pre-existing target capability,
+does not read or copy adjacent tokens, environment secrets, SSH material, units, or
+history, and preserves automatic host admission unless the operator explicitly
+changes it. Old-machine local policy is removed before strict target validation.
+Fresh-host `mocop deploy` similarly refuses an existing config, sibling capability, or
+service environment. It creates new private configuration before delegating capability,
+unit, rollback, and health verification to the existing service lifecycle. It never
+modifies SSH material or executes a downloaded bootstrap script.
 The generated unit marks its process as supervised. In that mode an exact empty JSON
 restart request sets a fixed in-process event and exits with status 75 after the HTTP
 acknowledgement; systemd's existing failure policy starts the replacement. The web
@@ -80,20 +89,27 @@ and a 300-point cap; the incident route accepts only one integer capped at 200. 
 diagnostic serializer uses an explicit field allowlist, aliases nodes, and omits raw
 errors, UUIDs, paths, configuration, processes, and workload identity. The inventory
 scan and topology projection use the same read guard. The topology endpoint accepts no
-query, reads only validated local JSON, starts no process, and returns no resolved
-OpenSSH field. Only `HostSource.hosts()` authorizes a probe. All write routes require
+query. Configured topology reads only validated local JSON; opt-in resolved discovery
+may populate the shared cache with bounded `ssh -G` processes but never initiates an
+SSH connection. It retains only safe aliases, route kinds, and sanitized warnings;
+usernames, addresses, and raw proxy commands are discarded. Only the resulting
+`HostDiscoverySnapshot.hosts` authorizes a probe. A `host_groups` key alone is
+display metadata and never adds an alias to that set. All write routes require
 Bearer authentication, an exact queryless path, valid trusted HTTP(S) `Origin`, the
 dashboard marker, non-cross-site Fetch Metadata when present, exact JSON media type,
 unique keys, exact schema, and a route-specific body cap. The detailed route bounds
 and stable errors are the tested contract in [API.md](API.md).
 
 The write guard intentionally does not compare external Origin with a proxy-rewritten
-backend Host. JSON plus the custom header make every POST non-simple, every CORS
+backend Host. Exact `trusted_web_hosts` entries authorize Host and Origin; a leading
+`*.` entry authorizes only HTTPS Origins strictly below that DNS suffix and never
+relaxes the exact backend Host check. JSON plus the custom header make every POST non-simple, every CORS
 preflight is rejected with no `Access-Control-Allow-Origin`, forms cannot add the
 marker or required media type, and browser-supplied Fetch Metadata must not be
 cross-site. This preserves browser CSRF protection behind a same-origin Host-rewriting
-proxy. Non-browser clients can forge these browser-defense headers but must still
-possess the Bearer capability. POST connections close so rejected unread
+proxy without trusting client-supplied forwarding headers. Non-browser clients can
+forge these browser-defense headers but must still possess the Bearer capability.
+POST connections close so rejected unread
 bytes cannot be reused as another request. Configuration mutation serializes
 concurrent changes, reloads the current file, limits the file to 1 MiB, refuses the
 bundled template and non-regular or differently owned files, writes a `0600`
@@ -157,6 +173,13 @@ it is never stored in a cookie, persistent `localStorage`, or IndexedDB. Closing
 tab ends that browser session. Webhook URLs and signing secrets are read from environment variables;
 for the generated service, place them in the optional private `environment` file next
 to `config.json`. They never enter the config API, snapshot, status, or logs.
+
+If the dashboard starts without a fragment or stored capability, it accepts the
+same token through a non-dismissible form and retains it only after successful
+authentication. Invalid tokens are cleared and are not retried. A reverse proxy
+that terminates TLS can observe subsequent Bearer headers and is therefore part of
+the trusted computing base; do not expose Mocop through an untrusted forwarding
+service.
 
 `mocop doctor` is read-only: it resolves aliases with `ssh -G`, optionally runs the
 bounded non-interactive probe command, and never writes SSH configuration or keys.

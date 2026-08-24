@@ -24,7 +24,12 @@ from .config import (
     is_valid_maintenance_reason,
     load_config,
 )
-from .discovery import HostSource, is_code_host_alias
+from .discovery import (
+    HostDiscoverySnapshot,
+    HostSource,
+    is_code_host_alias,
+    resolve_host_discovery,
+)
 from .models import utc_after
 
 _MAX_CONFIG_BYTES = 1_048_576
@@ -90,9 +95,18 @@ class ConfigInventory:
             return self._snapshot(config)
 
     def topology(self) -> dict[str, object]:
-        """Return validated display metadata without scanning or connecting."""
+        """Return configured or cached resolved display metadata."""
         with self._lock:
-            topology = self._load().topology
+            config = self._load()
+            topology = (
+                config.topology
+                if config.topology is not None
+                else (
+                    resolve_host_discovery(self._host_source, config).topology
+                    if config.ssh_discovery.mode == "topology"
+                    else None
+                )
+            )
             return (
                 topology.to_dict()
                 if topology is not None
@@ -486,22 +500,21 @@ class ConfigInventory:
         except (OSError, ValueError) as exc:
             raise InventoryError("OpenSSH aliases could not be scanned") from exc
 
+    def _discover(self, config: MonitorConfig) -> HostDiscoverySnapshot:
+        try:
+            return resolve_host_discovery(self._host_source, config)
+        except (OSError, ValueError) as exc:
+            raise InventoryError("OpenSSH aliases could not be scanned") from exc
+
     def _eligible_aliases(self, config: MonitorConfig) -> tuple[str, ...]:
-        return tuple(
-            alias
-            for alias in self._scan(config)
-            if alias not in config.exclude_hosts and not is_code_host_alias(alias)
-        )
+        return self._discover(config).eligible_aliases
 
     def _snapshot(self, config: MonitorConfig) -> dict[str, object]:
-        scanned = self._scan(config)
-        eligible = tuple(
-            alias
-            for alias in scanned
-            if alias not in config.exclude_hosts and not is_code_host_alias(alias)
-        )
+        discovery = self._discover(config)
+        scanned = discovery.aliases
+        eligible = discovery.eligible_aliases
         try:
-            active = self._host_source.hosts(config)
+            active = discovery.hosts
         except (OSError, ValueError) as exc:
             raise InventoryError("active inventory could not be resolved") from exc
         active_set = set(active)
@@ -531,7 +544,14 @@ class ConfigInventory:
                 for action in config.incident_actions
                 if action.is_active(now)
             ],
-            "hostGroups": dict(config.host_groups),
+            "hostGroups": {
+                host: group
+                for host, group in discovery.host_groups
+                if host in config.hosts
+            },
+            "sshDiscoveryMode": discovery.mode,
+            "infrastructureHosts": list(discovery.infrastructure_hosts),
+            "sshDiscoveryWarnings": list(discovery.warnings),
             "writable": self._is_writable_target(),
         }
 

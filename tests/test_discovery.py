@@ -3,10 +3,27 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
-from mocop.config import MonitorConfig
+from mocop.config import (
+    ConnectionTopologyConfig,
+    MonitorConfig,
+    SshDiscoveryConfig,
+    TopologyLinkConfig,
+)
 from mocop.discovery import OpenSshConfigHostSource
+from mocop.ssh_topology import SshRoute, SshTopologyPlanner
+
+
+class _RouteResolver:
+    def __init__(self, routes: dict[str, SshRoute | None]) -> None:
+        self.routes = routes
+        self.calls: list[str] = []
+
+    def resolve(self, alias, _config, _known_aliases, _timeout_seconds):
+        self.calls.append(alias)
+        return self.routes.get(alias)
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -93,6 +110,116 @@ class DiscoveryTests(unittest.TestCase):
             ),
         )
         self.assertEqual(source.hosts(config), ("github", "gpu-01", "gpu-02", "manual"))
+
+    def test_group_metadata_does_not_authorize_an_undiscovered_alias(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        ssh_config = Path(directory.name) / "config"
+        ssh_config.write_text("Host gpu-01\n", encoding="utf-8")
+        config = replace(
+            self._config(ssh_config),
+            host_groups=(("not-in-ssh-config", "Training"),),
+        )
+
+        discovery = OpenSshConfigHostSource().discovery(config)
+
+        self.assertEqual(discovery.hosts, ("gpu-01",))
+        self.assertEqual(discovery.host_groups, (("not-in-ssh-config", "Training"),))
+
+    def test_topology_discovery_excludes_proxy_aliases_and_infers_groups(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        ssh_config = Path(directory.name) / "config"
+        ssh_config.write_text(
+            "Host bastion gpu-01 gpu-02 github.com\n", encoding="utf-8"
+        )
+        resolver = _RouteResolver(
+            {
+                "bastion": SshRoute("direct"),
+                "gpu-01": SshRoute("proxyjump", ("bastion",)),
+                "gpu-02": SshRoute("proxyjump", ("bastion",)),
+            }
+        )
+        config = replace(
+            self._config(ssh_config),
+            hosts=("monitor",),
+            local_host="monitor",
+            ssh_discovery=SshDiscoveryConfig(
+                mode="topology", refresh_seconds=300, resolve_timeout_seconds=2
+            ),
+        )
+        source = OpenSshConfigHostSource(SshTopologyPlanner(resolver))
+
+        snapshot = source.discovery(config)
+
+        self.assertEqual(snapshot.hosts, ("gpu-01", "gpu-02", "monitor"))
+        self.assertEqual(snapshot.infrastructure_hosts, ("bastion",))
+        self.assertEqual(snapshot.eligible_aliases, ("gpu-01", "gpu-02"))
+        self.assertEqual(
+            snapshot.host_groups,
+            (("gpu-01", "bastion"), ("gpu-02", "bastion")),
+        )
+        self.assertIsNotNone(snapshot.topology)
+
+    def test_explicit_inventory_and_groups_override_topology_inference(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        ssh_config = Path(directory.name) / "config"
+        ssh_config.write_text("Host bastion gpu-01\n", encoding="utf-8")
+        resolver = _RouteResolver(
+            {
+                "bastion": SshRoute("direct"),
+                "gpu-01": SshRoute("proxyjump", ("bastion",)),
+            }
+        )
+        config = replace(
+            self._config(ssh_config),
+            hosts=("monitor", "bastion", "gpu-01"),
+            local_host="monitor",
+            host_groups=(("gpu-01", "Training"),),
+            topology=ConnectionTopologyConfig(
+                "monitor", (TopologyLinkConfig("monitor", "gpu-01", "vpn"),)
+            ),
+            ssh_discovery=SshDiscoveryConfig(mode="topology"),
+        )
+        source = OpenSshConfigHostSource(SshTopologyPlanner(resolver))
+
+        snapshot = source.discovery(config)
+
+        self.assertEqual(snapshot.hosts, ("bastion", "gpu-01", "monitor"))
+        self.assertEqual(dict(snapshot.host_groups)["gpu-01"], "Training")
+        self.assertEqual(snapshot.topology, config.topology)
+
+    def test_topology_resolution_is_cached_until_refresh_deadline(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        ssh_config = Path(directory.name) / "config"
+        ssh_config.write_text("Host bastion gpu-01\n", encoding="utf-8")
+        resolver = _RouteResolver(
+            {
+                "bastion": SshRoute("direct"),
+                "gpu-01": SshRoute("proxyjump", ("bastion",)),
+            }
+        )
+        clock = [10.0]
+        config = replace(
+            self._config(ssh_config),
+            ssh_discovery=SshDiscoveryConfig(
+                mode="topology", refresh_seconds=30, resolve_timeout_seconds=2
+            ),
+        )
+        source = OpenSshConfigHostSource(
+            SshTopologyPlanner(resolver), monotonic=lambda: clock[0]
+        )
+
+        source.discovery(config)
+        first_calls = len(resolver.calls)
+        source.discovery(config)
+        self.assertEqual(len(resolver.calls), first_calls)
+
+        clock[0] = 40.0
+        source.discovery(config)
+        self.assertGreater(len(resolver.calls), first_calls)
 
     def test_rejects_option_like_explicit_host(self) -> None:
         config = MonitorConfig(

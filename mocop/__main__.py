@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
+import shlex
 import signal
+import socket
 import sys
 import threading
 from pathlib import Path
@@ -15,12 +17,14 @@ from .inventory import ConfigInventory
 from .lifecycle import (
     LifecycleError,
     UserServiceManager,
+    access_token_path,
     ensure_access_token,
     initialize_config,
     read_access_token,
     user_config_path,
     user_unit_path,
 )
+from .migration import migrate_config
 from .notifications import (
     DisabledNotificationSink,
     NotificationError,
@@ -91,6 +95,61 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="SSH_ALIAS",
         help="SSH host alias to monitor; repeat for multiple servers",
     )
+
+    deploy_parser = commands.add_parser(
+        "deploy", help="configure and start Mocop on a fresh monitoring server"
+    )
+    deploy_parser.add_argument(
+        "--config",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="new configuration path; it must not already exist",
+    )
+    deploy_parser.add_argument(
+        "--host",
+        dest="hosts",
+        action="append",
+        default=[],
+        metavar="SSH_ALIAS",
+        help="explicit SSH alias to monitor; repeat for multiple servers",
+    )
+    deploy_identity = deploy_parser.add_mutually_exclusive_group()
+    deploy_identity.add_argument("--local-host", metavar="ALIAS")
+    deploy_identity.add_argument(
+        "--no-local", action="store_true", help="do not monitor this server locally"
+    )
+    deploy_parser.add_argument("--display-name")
+    deploy_parser.add_argument("--ssh-config", default="~/.ssh/config")
+    deploy_admission = deploy_parser.add_mutually_exclusive_group()
+    deploy_admission.add_argument(
+        "--auto-discover", dest="auto_discover", action="store_true"
+    )
+    deploy_admission.add_argument(
+        "--no-auto-discover", dest="auto_discover", action="store_false"
+    )
+    deploy_parser.set_defaults(auto_discover=True)
+
+    migrate_parser = commands.add_parser(
+        "migrate", help="generate a new private config from another installation"
+    )
+    migrate_parser.add_argument("--from-config", type=Path, required=True)
+    migrate_parser.add_argument(
+        "--config",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="new configuration path; it must not already exist",
+    )
+    local_identity = migrate_parser.add_mutually_exclusive_group()
+    local_identity.add_argument("--local-host", metavar="ALIAS")
+    local_identity.add_argument("--drop-local-host", action="store_true")
+    migrate_parser.add_argument("--display-name")
+    migrate_parser.add_argument("--ssh-config", default="~/.ssh/config")
+    admission = migrate_parser.add_mutually_exclusive_group()
+    admission.add_argument("--auto-discover", dest="auto_discover", action="store_true")
+    admission.add_argument(
+        "--no-auto-discover", dest="auto_discover", action="store_false"
+    )
+    migrate_parser.set_defaults(auto_discover=None)
 
     config_parser = commands.add_parser(
         "config", help="inspect the monitor configuration"
@@ -390,10 +449,20 @@ def _run_config_check(args: argparse.Namespace) -> int:
     print(f"configuration OK: {config_path}")
     local_note = f" (local: {config.local_host})" if config.local_host else ""
     print(f"hosts: {len(config.hosts)}{local_note}")
+    print(
+        "ssh discovery: "
+        f"{config.ssh_discovery.mode} "
+        f"(refresh {config.ssh_discovery.refresh_seconds}s, "
+        f"resolve timeout {config.ssh_discovery.resolve_timeout_seconds:g}s)"
+    )
     print(f"persistence: {'enabled' if config.persistence.enabled else 'disabled'}")
     print(f"workloads: {config.workloads.mode}")
     if config.topology is None:
-        print("topology: none")
+        print(
+            "topology: resolved from SSH at runtime"
+            if config.ssh_discovery.mode == "topology"
+            else "topology: none"
+        )
     else:
         print(f"topology: configured ({len(config.topology.links)} links)")
     if not config.webhooks:
@@ -413,7 +482,84 @@ def _run_config_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _install_service(config_path: Path) -> int:
+    manager = UserServiceManager(
+        config_path=config_path,
+        unit_path=user_unit_path(),
+        python_executable=Path(sys.executable),
+    )
+    config = manager.install()
+    try:
+        active = manager.wait_until_active()
+        token = read_access_token(manager.access_token_path) if active else None
+        healthy = (
+            manager.wait_until_healthy(
+                config.listen_host,
+                config.listen_port,
+                token,
+            )
+            if token is not None
+            else False
+        )
+    except BaseException as verification_error:
+        try:
+            manager.rollback_install()
+        except LifecycleError as rollback_error:
+            raise LifecycleError(
+                "service verification failed and rollback is incomplete: "
+                f"{rollback_error}"
+            ) from verification_error
+        raise
+    if not active or not healthy:
+        manager.rollback_install()
+        print("Service did not become healthy; the previous unit was restored")
+        print("Inspect it with: systemctl --user status mocop")
+        print("Logs: journalctl --user -u mocop -f")
+        return 1
+    assert token is not None
+    manager.commit_install()
+    print(f"Installed and started {manager.unit_path}")
+    print(
+        f"Dashboard: {_http_url(config.listen_host, config.listen_port)}"
+        f"#access_token={token}"
+    )
+    print("Logs: journalctl --user -u mocop -f")
+    return 0
+
+
 def _run_lifecycle(args: argparse.Namespace) -> int:
+    if args.command == "migrate":
+        target = args.config or user_config_path()
+        result = migrate_config(
+            args.from_config,
+            target,
+            current_hostname=socket.gethostname(),
+            local_host=args.local_host,
+            drop_local_host=args.drop_local_host,
+            display_name=args.display_name,
+            ssh_config=args.ssh_config,
+            auto_discover=args.auto_discover,
+        )
+        print(f"Migrated configuration: {result.target}")
+        print(f"Source preserved: {result.source}")
+        if result.old_local_host or result.new_local_host:
+            print(
+                f"Local host: {result.old_local_host or 'none'} -> "
+                f"{result.new_local_host or 'none'}"
+            )
+        print(
+            "Automatic host discovery: "
+            f"{'enabled' if result.auto_discover else 'disabled'}"
+        )
+        if result.dropped_fields:
+            print(f"Dropped old-machine metadata: {', '.join(result.dropped_fields)}")
+        print("No capability, secrets, service unit, or history was copied.")
+        target_argument = shlex.quote(str(result.target))
+        print(f"Next: mocop config check --config {target_argument}")
+        print(f"Then: mocop doctor --no-connect --config {target_argument}")
+        print(f"Then: mocop service install --config {target_argument}")
+        return 0
+
     if args.command == "init":
         path = args.config or user_config_path()
         created = initialize_config(path, args.hosts)
@@ -424,50 +570,46 @@ def _run_lifecycle(args: argparse.Namespace) -> int:
         print("Then: mocop service install")
         return 0
 
+    if args.command == "deploy":
+        target = args.config or user_config_path()
+        sibling_paths = (
+            access_token_path(target),
+            access_token_path(target).with_name("environment"),
+        )
+        existing_siblings = [
+            path.name for path in sibling_paths if os.path.lexists(path)
+        ]
+        if existing_siblings:
+            raise LifecycleError(
+                "fresh deployment found existing installation state "
+                f"({', '.join(existing_siblings)}); use a clean target directory "
+                "or run service install for an existing setup"
+            )
+        local_host = None
+        if not args.no_local:
+            local_host = args.local_host or socket.gethostname()
+        created = initialize_config(
+            target,
+            args.hosts,
+            local_host=local_host,
+            display_name=args.display_name,
+            ssh_config=args.ssh_config,
+            auto_discover=args.auto_discover,
+        )
+        print(f"Fresh deployment configuration: {created}")
+        result = _install_service(created)
+        if result != 0:
+            print(f"Configuration retained for diagnosis: {created}")
+        return result
+
     config_path = args.config or user_config_path()
+    if args.action == "install":
+        return _install_service(config_path)
     manager = UserServiceManager(
         config_path=config_path,
         unit_path=user_unit_path(),
         python_executable=Path(sys.executable),
     )
-    if args.action == "install":
-        config = manager.install()
-        try:
-            active = manager.wait_until_active()
-            token = read_access_token(manager.access_token_path) if active else None
-            healthy = (
-                manager.wait_until_healthy(
-                    config.listen_host,
-                    config.listen_port,
-                    token,
-                )
-                if token is not None
-                else False
-            )
-        except BaseException as verification_error:
-            try:
-                manager.rollback_install()
-            except LifecycleError as rollback_error:
-                raise LifecycleError(
-                    "service verification failed and rollback is incomplete: "
-                    f"{rollback_error}"
-                ) from verification_error
-            raise
-        if not active or not healthy:
-            manager.rollback_install()
-            print("Service did not become healthy; the previous unit was restored")
-            print("Inspect it with: systemctl --user status mocop")
-            print("Logs: journalctl --user -u mocop -f")
-            return 1
-        assert token is not None
-        manager.commit_install()
-        print(f"Installed and started {manager.unit_path}")
-        print(
-            f"Dashboard: {_http_url(config.listen_host, config.listen_port)}"
-            f"#access_token={token}"
-        )
-        print("Logs: journalctl --user -u mocop -f")
-        return 0
     if args.action == "status":
         return manager.status()
     manager.uninstall()

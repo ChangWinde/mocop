@@ -97,18 +97,18 @@ ssh gpu-node-01 true
 ssh -o BatchMode=yes gpu-node-01 true
 ```
 
-Keep `ProxyJump`, ports, users, and identities in OpenSSH. Do not add jump hosts or Git remotes to Mocop's monitored `hosts` list. The optional display-only topology can show jump and FRP nodes without probing them.
+Keep `ProxyJump`, `ProxyCommand`, ports, users, and identities in OpenSSH. New configurations use bounded, connection-free `ssh -G` resolution to identify proxy aliases, keep automatically discovered jump hosts out of the probe inventory, build the display topology, and group targets by their closest jump alias. Direct targets sharing a numbered alias prefix (such as `gpu-1` and `gpu-2`) form a fallback group. Explicit hosts, exclusions, groups, and configured topology override inference. Git remotes remain filtered separately.
 
-### 2. Install and initialize
+### 2. Install and deploy
 
 ```bash
 uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.9.0"
-mocop init --host gpu-node-01 --host gpu-node-02
+"$(uv tool dir --bin)/mocop" deploy --display-name monitor-0
 ```
 
-`mocop init` creates `~/.config/mocop/config.json` with mode `0600`. It monitors only the aliases passed with `--host`, disables automatic discovery, and uses a 5-second collection interval.
+`mocop deploy` needs no inventory JSON on a fresh server: it creates a `0600` config, monitors the current machine locally, discovers safe aliases from `~/.ssh/config`, excludes resolved jump hosts, enables topology grouping, and installs and verifies the user service. The explicit bin path works before a new shell picks up uv's tool directory. The command refuses existing config or capability state; use `mocop service install` for an existing setup.
 
-### 3. Validate the configuration and the SSH path
+### 3. Validate the deployment and SSH path
 
 ```bash
 mocop config check
@@ -119,19 +119,19 @@ mocop doctor
 
 `mocop doctor` then verifies non-interactive SSH reachability and connection reuse for every monitored alias (exit `0` when every alias is usable, `1` otherwise).
 
-### 4. Start the dashboard
+### 4. Open the dashboard
 
-```bash
-mocop service install
-```
-
-Open the exact `Dashboard:` capability URL printed by the command, for example
-`http://127.0.0.1:8787/#access_token=...`. The fragment is not sent over HTTP;
+Open the exact `Dashboard:` capability URL printed by `mocop deploy`, for example `http://127.0.0.1:8787/#access_token=...`. The fragment is not sent over HTTP;
 the page removes it immediately and keeps the capability in tab-scoped
 `sessionStorage`, so reloads and the managed restart flow remain authenticated.
-Closing the tab or opening an independent tab requires the printed URL again. The command installs,
+Closing the tab or opening an independent tab requires the printed URL again. Deployment installs,
 enables, starts, and verifies a user-level systemd service. It does not change
 the system linger policy.
+
+A bare dashboard or trusted forwarded URL now opens a token prompt instead of an
+empty dashboard. Paste the contents of the managed `access-token` file; Mocop
+validates it before storing it in the tab session. Invalid credentials are neither
+retained nor retried automatically.
 
 Run `mocop` for a foreground process, or manage the service with:
 
@@ -141,12 +141,12 @@ mocop service uninstall
 ```
 
 Uninstall removes only the generated service unit. Read the
-[operations runbook](docs/OPERATIONS.md) before upgrade, rollback, token rotation,
-or cleanup; it lists every retained file and the safe backup procedure.
+[operations runbook](docs/OPERATIONS.md) before cross-machine migration, upgrade,
+rollback, token rotation, or cleanup; it covers `mocop migrate`, retained files, and safe backup.
 
 ## Configuration
 
-`mocop init` writes a complete, private configuration. The dashboard safely edits
+`mocop deploy` writes the fresh-host configuration; `mocop init` is the lower-level configuration-only command. The dashboard safely edits
 the common inventory, cadence, maintenance, and grouping settings without a
 restart. Use the [configuration reference](docs/CONFIGURATION.md) for every field,
 default, and limit; use the [complete safe example](examples/mocop.example.json)

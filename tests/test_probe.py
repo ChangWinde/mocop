@@ -969,6 +969,39 @@ class ProbeTests(unittest.TestCase):
         self.assertGreater(system.memory_total_kib, 0)
         self.assertGreater(system.uptime_seconds, 0)
 
+    def test_failed_gpu_query_discards_partial_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "nvidia-smi"
+            executable.write_text(
+                "#!/bin/sh\n"
+                'case "$1" in\n'
+                "  --query-gpu=*) printf '%s\\n' "
+                "'0, GPU-partial, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+                "81920, 40960, 40960, 287.5, 400'; exit 9 ;;\n"
+                "  --query-compute-apps=*) exit 9 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            completed = _run_bounded_process(
+                ["sh", "-s"],
+                input_text=_remote_script("disabled", True),
+                timeout_seconds=5,
+                max_output_bytes=2_097_152,
+                environment={
+                    **os.environ,
+                    "LC_ALL": "C",
+                    "PATH": f"{root}:{os.environ['PATH']}",
+                },
+            )
+
+        self.assertEqual(completed.returncode, 0)
+        system, gpus, message = parse_linux_resource_payload(completed.stdout)
+        self.assertGreater(system.cpu_cores, 0)
+        self.assertEqual(gpus, ())
+        self.assertEqual(message, "nvidia-smi query failed")
+
     def test_fixed_script_omits_the_process_query_when_not_due(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

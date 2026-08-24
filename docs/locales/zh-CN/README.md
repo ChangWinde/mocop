@@ -95,18 +95,25 @@ ssh gpu-node-01 true
 ssh -o BatchMode=yes gpu-node-01 true
 ```
 
-`ProxyJump`、端口、用户和身份文件应继续由 OpenSSH 管理。不要把跳板机或 Git 远端加入 Mocop 的被监控 `hosts` 列表。可选的展示拓扑可以呈现跳板机和 FRP 节点，但不会采集它们。
+`ProxyJump`、`ProxyCommand`、端口、用户和身份文件仍由 OpenSSH 管理。新配置会通过
+有界且不建立连接的 `ssh -G` 解析识别代理别名，将自动发现的跳板机排除在采集清单
+之外，生成展示拓扑，并按离目标最近的跳板 alias 自动分组；没有跳板的目标若共享编号
+alias 前缀（如 `gpu-1`、`gpu-2`），则使用该前缀兜底分组。显式主机、排除项、分组和
+手工拓扑始终优先；Git 远端仍单独过滤。
 
-### 2. 安装并初始化
+### 2. 安装并快速部署
 
 ```bash
 uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.9.0"
-mocop init --host gpu-node-01 --host gpu-node-02
+"$(uv tool dir --bin)/mocop" deploy --display-name monitor-0
 ```
 
-`mocop init` 会创建权限为 `0600` 的 `~/.config/mocop/config.json`。它只监控通过 `--host` 指定的别名，关闭自动发现，并将采集周期设为 5 秒。
+全新服务器无需手写资产 JSON：`mocop deploy` 会创建 `0600` 配置、默认采集本机、从
+`~/.ssh/config` 自动发现安全 alias、排除识别出的跳板机、启用拓扑分组，并安装和验证
+用户服务。显式 bin 路径不依赖当前 shell 的 PATH。已有配置或 token 时命令会拒绝；
+已有部署请使用 `mocop service install`。
 
-### 3. 校验配置与 SSH 路径
+### 3. 校验部署与 SSH 路径
 
 ```bash
 mocop config check
@@ -117,18 +124,18 @@ mocop doctor
 
 随后 `mocop doctor` 验证每个受监控别名的非交互式 SSH 可达性与连接复用（全部别名可用时退出 `0`，否则为 `1`）。
 
-### 4. 启动控制台
+### 4. 打开控制台
 
-```bash
-mocop service install
-```
-
-打开命令打印的完整 `Dashboard:` 能力 URL，例如
+打开 `mocop deploy` 打印的完整 `Dashboard:` 能力 URL，例如
 `http://127.0.0.1:8787/#access_token=...`。URL 片段不会随 HTTP 请求发送；
 页面会立即清除它，并把能力保存在当前标签页的 `sessionStorage` 中，刷新和
 服务重启流程仍可继续认证；关闭标签页或新开独立标签页后，需要再次使用
 打印的完整 URL。该命令会安装、启用、启动并验证用户级
 systemd 服务，但不会修改系统的 linger 策略。
+
+直接打开控制台裸地址或受信任的转发地址时，页面会显示令牌输入框，而不会
+停留在空白数据状态。粘贴托管 `access-token` 文件的内容即可；Mocop 仅在
+验证成功后将其保存到当前标签页，错误凭据不会被保留或自动重试。
 
 直接运行 `mocop` 可使用前台模式。后台服务可通过以下命令管理：
 
@@ -137,12 +144,14 @@ mocop service status
 mocop service uninstall
 ```
 
-卸载只删除生成的服务 unit。升级、回滚、token 轮换或清理前，请阅读
-[运维手册](../../OPERATIONS.md)；其中列出了全部保留文件和安全备份步骤。
+卸载只删除生成的服务 unit。跨机器迁移、升级、回滚、token 轮换或清理前，请阅读
+[运维手册](../../OPERATIONS.md)；其中包含非破坏性的 `mocop migrate` 流程、全部
+保留文件和安全备份步骤。
 
 ## 配置
 
-`mocop init` 会写入完整且私密的配置。控制台可安全修改常用的资产、周期、
+`mocop deploy` 写入全新服务器配置；`mocop init` 是只创建配置的底层命令。
+控制台可安全修改常用的资产、周期、
 维护和分组设置，通常无需重启。所有字段、默认值和限制以
 [配置参考](../../CONFIGURATION.md)为准；手工编写 JSON 时参考
 [完整安全示例](../../../examples/mocop.example.json)。可选 workload 身份和

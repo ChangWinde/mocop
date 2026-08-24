@@ -4,6 +4,37 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Added
+
+- Added `mocop deploy` as the fresh-server fast path. After package installation, one
+  non-overwriting command configures the current host, enables safe SSH alias/topology
+  discovery, creates a fresh capability, and installs and verifies the user service.
+- Added non-destructive `mocop migrate` configuration generation for moving the
+  monitor to another machine. It rebinds local identity, drops reported machine-bound
+  policy, upgrades bounded topology discovery, preserves host admission by default,
+  refuses existing targets/copied capabilities, and never copies secrets or history.
+- Added opt-in, cached SSH topology discovery from bounded `ssh -G` resolution.
+  Effective `ProxyJump` chains and common SSH-backed `ProxyCommand` forms identify
+  infrastructure aliases, keep automatically discovered jump hosts out of the probe
+  inventory, build the display tree, and group targets by their closest known hop,
+  with shared numbered alias prefixes as a fallback for direct targets.
+  Explicit inventory, exclusions, groups, and configured topology remain authoritative;
+  group metadata may predeclare auto-discovered aliases without authorizing probes;
+  raw commands, users, and addresses are never published.
+- Added HTTPS-only `trusted_web_hosts` suffix entries (for example,
+  `*.preview.example`) for ephemeral Host-rewriting dashboard proxies. Suffix entries
+  authorize browser Origin only; exact backend Host validation and Bearer
+  authentication remain mandatory.
+- Added an explicit dashboard token prompt for bare and forwarded URLs. Submitted
+  credentials are retained only after successful API authentication; malformed or
+  rejected tokens remain unstored and do not trigger automatic retries.
+
+### Fixed
+
+- Applied configured host display names consistently across node navigation, resource
+  inventory, heatmap, topology, GPU details, search placement, incidents, and alerts.
+- Fixed managed-service shutdown when no host-specific probe timeout is configured.
+
 ## [0.9.0] - 2026-08-16
 
 ### Added

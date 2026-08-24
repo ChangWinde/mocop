@@ -12,7 +12,7 @@ The installed runtime contains no inventory and has no third-party Python depend
 
 ```text
 local JSON configuration
-        ├── explicit allowlist + optional OpenSSH alias discovery
+        ├── explicit allowlist + optional OpenSSH alias/route discovery
         │
         ▼
   HostSource Protocol
@@ -38,7 +38,7 @@ local JSON configuration
       ├── JSON / SSE → dashboard
       └── runtime config ← ConfigInventory ← bounded settings + eligible aliases
 
- display-only topology ── ConfigInventory ── `/api/topology` ── dashboard
+ configured/cached resolved topology ── ConfigInventory ── `/api/topology` ── dashboard
 ```
 
 The dependency direction is `web → StateStore ← service → protocols/models/config`.
@@ -52,7 +52,9 @@ interfaces without a runtime plugin registry.
 | Module | Responsibility |
 |---|---|
 | `config.py` | configuration discovery, strict schema validation, safe defaults |
+| `discovery_policy.py` | dependency-free SSH discovery policy parsing and bounds |
 | `discovery.py` | explicit inventory and optional OpenSSH alias discovery |
+| `ssh_topology.py` | bounded effective-route resolution, infrastructure classification, topology and grouping projection |
 | `inventory.py` | typed dashboard configuration projection and private atomic mutation |
 | `metrics.py` | deterministic OpenMetrics 1.0 snapshot exposition |
 | `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
@@ -65,7 +67,8 @@ interfaces without a runtime plugin registry.
 | `notifications.py` | HTTPS webhook validation, deduplication, throttling, and delivery |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
 | `lifecycle.py` | private config creation and user-level systemd management |
-| `static/` | dependency-free dashboard assets |
+| `migration.py` | non-destructive cross-machine config transformation and private target creation |
+| `static/` | dependency-free dashboard assets, including authentication and process-search leaves |
 
 ## Boundaries and canonical formats
 
@@ -75,10 +78,16 @@ The optional connection topology is a validated, directed tree of safe display a
 Links contain an enumerated logical transport and an optional bounded label. A topology
 alias may describe the monitoring host, an excluded jump host, an FRP endpoint, or a
 monitored server; it becomes a live resource node only when the independent active
-inventory contains the same alias. Topology fields never enter `HostSource`, a process
-argument, or a command. The dedicated `/api/topology` projection is loaded without an
-OpenSSH scan or remote probe and is fetched separately from the telemetry SSE.
-[ADR-0008](adr/0008-configured-ssh-connection-topology.md) records the alternatives.
+inventory contains the same alias. Configured topology fields never enter a process
+argument or command. With `ssh_discovery.mode: "topology"`, a cached `HostDiscoverySnapshot`
+is instead built from bounded `ssh -G` output: raw proxy commands, users, and addresses
+are discarded; inferred infrastructure aliases leave the automatic probe candidate set;
+the closest known hop supplies a group, with shared numbered alias prefixes as the
+fallback for direct targets. Explicit inventory, exclusions, groups, and a configured
+topology override inference. The dedicated `/api/topology` projection remains
+separate from telemetry SSE and never opens a remote connection. [ADR-0008](adr/0008-configured-ssh-connection-topology.md)
+owns configured topology; [ADR-0022](adr/0022-resolved-ssh-topology-discovery.md) owns
+resolved discovery.
 
 Collection produces immutable `ProbeResult`, `SystemMetrics`, `DiskMetrics`,
 `GpuMetrics`, `GpuHealthMetrics`, `GpuProcess`, and optional `WorkloadMetadata`
@@ -151,6 +160,12 @@ state. Restored data for hosts outside the active configuration is discarded on
 inventory initialization. Retention and database page limits are configuration bounds.
 OpenMetrics remains current-state only.
 
+The HTTP boundary authenticates every private route with the per-install Bearer
+capability. Browser writes additionally require an exact trusted backend Host and a
+trusted Origin. Deployments with ephemeral Host-rewriting preview names may authorize
+a bounded `*.example` HTTPS Origin suffix; suffix entries never authorize Host and no
+`X-Forwarded-*` header participates in the trust decision.
+
 `IncidentPolicy` is the sole authority for connectivity, CPU, memory, swap, filesystem, GPU availability, pressure, temperature, and hardware-health conditions. `IncidentTracker` applies bounded activation and recovery cycles while preserving previous resource conditions across failed probes, so transient samples and missing telemetry are not mistaken for stable failure or recovery.
 
 Time-bounded maintenance and condition-level actions are overlays on that authority,
@@ -209,11 +224,15 @@ never initiates collection.
 
 ## Process and service model
 
-Package installation and service management are separate operations. `mocop init`
-creates a non-overwriting `0600` user configuration. `mocop service install` validates
-that configuration, creates or validates the sibling private Bearer token, generates a
-unit for the active Python environment, enables the user service, starts it, verifies
-active state, and prints a fragment-bearing capability URL.
+Package installation remains separate from local service deployment. On a fresh host,
+`mocop deploy` composes configuration creation with verified service installation: it
+uses the current hostname as the local target, enables resolved SSH discovery by default,
+and refuses existing configuration or capability state. `mocop init` remains the
+non-overwriting lower-level configuration command. `mocop service install` validates a
+configuration, creates or validates the sibling private Bearer token, generates a unit
+for the active Python environment, enables the user service, starts it, verifies active
+state, and prints a fragment-bearing capability URL. [ADR-0024](adr/0024-fresh-host-fast-deployment.md)
+records the composition and rejected remote-script alternative.
 
 The user service is intentional because OpenSSH configuration, `known_hosts`, keys,
 and agent sockets belong to that identity. The unit invokes `systemctl --user` without
@@ -292,7 +311,10 @@ ratchet, not a target. A change that would cross one extracts a coherent leaf an
 lowers the ceiling instead of increasing it. Browser leaves remain dependency-free
 classic scripts loaded before `app.js`, expose one frozen namespace/factory, and
 consume the authenticated snapshot rather than creating a second API or state
-store. Python extraction must keep each lock-owned invariant inside one module.
+store. `dashboard-auth.js` owns capability ingestion, fragment scrubbing,
+tab-scoped retention, and the explicit token prompt; `app.js` still owns request
+transport and dashboard lifecycle. Python extraction must keep each lock-owned
+invariant inside one module.
 
 [ADR-0021](adr/0021-incremental-module-boundaries.md) compares immediate splitting,
 incremental leaf extraction, and adding a build/registry layer. It selects the

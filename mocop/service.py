@@ -30,7 +30,12 @@ from .config import (
 )
 from .correlation import create_incident_correlator
 from .diagnostics import diagnose_condition, sanitized_bundle
-from .discovery import HostSource
+from .discovery import (
+    CancellableHostSource,
+    HostDiscoverySnapshot,
+    HostSource,
+    resolve_host_discovery,
+)
 from .incidents import IncidentPolicy, IncidentTracker, ThresholdIncidentPolicy
 from .models import GpuProcess, ProbeResult, ServerState, utc_after, utc_now
 from .notifications import DisabledNotificationSink, IncidentNotificationSink
@@ -2217,6 +2222,10 @@ class MonitorService:
         self._manual_probe_requests: set[str] = set()
         self._last_manual_probe_at: dict[str, float] = {}
 
+    def _apply_discovery_metadata(self, discovery: HostDiscoverySnapshot) -> None:
+        self._state.set_host_groups(discovery.host_groups)
+        self._state.set_topology(discovery.topology)
+
     def request_probe(self, host: str) -> dict[str, object]:
         """Queue one bounded host probe without changing the periodic schedule."""
         now = time.monotonic()
@@ -2263,11 +2272,17 @@ class MonitorService:
         """Atomically replace configuration used by future probes."""
         with self._config_update_lock:
             try:
-                hosts: tuple[str, ...] | None = self._host_source.hosts(config)
+                discovery: HostDiscoverySnapshot | None = resolve_host_discovery(
+                    self._host_source, config
+                )
             except (OSError, ValueError):
-                hosts = None
+                discovery = None
             with self._config_lock:
-                self._state.reconfigure(config, hosts)
+                self._state.reconfigure(
+                    config, discovery.hosts if discovery is not None else None
+                )
+                if discovery is not None:
+                    self._apply_discovery_metadata(discovery)
                 self._config = config
                 self._config_generation += 1
             self._state.notify_inventory_changed()
@@ -2285,11 +2300,13 @@ class MonitorService:
             for _, override in config.host_overrides
             if override.probe_timeout_seconds is not None
         )
-        return max(config.probe_timeout_seconds, *host_timeouts) + 1
+        return max((config.probe_timeout_seconds, *host_timeouts)) + 1
 
     def stop(self) -> None:
         """Wake the scheduler and cancel probe-owned child processes, when supported."""
         self._scheduler_wakeup.set()
+        if isinstance(self._host_source, CancellableHostSource):
+            self._host_source.cancel()
         if isinstance(self._probe, CancellableResourceProbe):
             self._probe.cancel()
 
@@ -2326,7 +2343,8 @@ class MonitorService:
     def poll_once(self) -> None:
         config, generation = self._config_snapshot()
         try:
-            hosts = self._host_source.hosts(config)
+            discovery = resolve_host_discovery(self._host_source, config)
+            hosts = discovery.hosts
         except (OSError, ValueError) as exc:
             print(f"Host discovery failed: {exc}", file=sys.stderr)
             self._state.set_collector_error(
@@ -2336,6 +2354,7 @@ class MonitorService:
         if isinstance(self._probe, InventoryAwareResourceProbe):
             self._probe.retain_hosts(set(hosts))
         self._state.set_collector_error(None)
+        self._apply_discovery_metadata(discovery)
         self._state.set_hosts(hosts)
         active_hosts = set(hosts)
         self._failure_counts = {
@@ -2456,7 +2475,8 @@ class MonitorService:
 
                 if now >= inventory_refresh_at or generation != inventory_generation:
                     try:
-                        discovered = self._host_source.hosts(config)
+                        discovery = resolve_host_discovery(self._host_source, config)
+                        discovered = discovery.hosts
                     except (OSError, ValueError) as exc:
                         print(f"Host discovery failed: {exc}", file=sys.stderr)
                         self._state.set_collector_error(
@@ -2482,6 +2502,7 @@ class MonitorService:
                                 active_host_set
                             )
                         self._state.set_collector_error(None)
+                        self._apply_discovery_metadata(discovery)
                         self._state.set_hosts(discovered)
                         self._prune_schedules(active_host_set)
                         healthy_started_at = {

@@ -15,16 +15,23 @@ The first applicable source wins:
 4. `./config/mocop.json`, for a source checkout
 5. the bundled empty default
 
-`mocop init` and `mocop service install` manage a real file, not a symlink.
+`mocop deploy`, `mocop init`, and `mocop service install` manage a real file, not a symlink.
 The managed file must be owned by the invoking user and inaccessible to group
 and other users; generated and rewritten files use mode `0600`. Its directory
 must be owned by that user and not group/other writable. The service also
 validates the optional sibling `environment` and `access-token` files as private
 regular files. Dashboard writes are atomic same-directory replacements.
+Fresh servers should use `mocop deploy`; it creates this file with local collection,
+automatic SSH alias admission, and topology discovery before installing the user service.
+Cross-machine moves should use `mocop migrate --from-config SOURCE`; it creates a
+new private file, rebinds machine identity, and never copies adjacent credentials or
+state. See the [operations runbook](OPERATIONS.md#cross-machine-migration).
 
 Host aliases use `[A-Za-z0-9][A-Za-z0-9._-]{0,252}`. Fields described as a
 “safe alias” use that grammar. An explicit host referenced by another field
-must be in `hosts` and not in `exclude_hosts`.
+must be in `hosts` and not in `exclude_hosts`. `host_groups` is the exception
+when `auto_discover` is enabled: it may predeclare safe discovered aliases but
+does not make those aliases active probe targets.
 
 ## Top-level fields
 
@@ -34,6 +41,7 @@ The ten fields marked required must be present, even when empty.
 |---|---:|---|---|
 | `ssh_config` | yes | non-empty string | OpenSSH config path; `~` expands, relative paths resolve beside the JSON file, and control/surrogate characters are rejected. |
 | `auto_discover` | yes | boolean | Add eligible literal aliases discovered in `ssh_config`; `exclude_hosts` still wins. |
+| `ssh_discovery` | no | alias-only compatibility policy | `{mode, refresh_seconds, resolve_timeout_seconds}`. `mode` is `aliases` or `topology`; see below. Newly generated configurations select topology mode. |
 | `hosts` | yes | string array | Explicit allowlist; unique after trimming, at most 1,024 safe aliases. |
 | `exclude_hosts` | yes | string array | Deny-list; unique after trimming, at most 1,024 safe aliases. |
 | `poll_interval_seconds` | yes | number | 1–3,600. Dashboard writes intentionally narrow this to 2–60. |
@@ -43,7 +51,7 @@ The ten fields marked required must be present, even when empty.
 | `listen_host` | yes | hostname/IP | Plain DNS name, IPv4, or IPv6; no scheme, credentials, path, or query. |
 | `listen_port` | yes | integer | 1–65,535. |
 | `local_host` | no | `null` | Safe alias in the explicit active `hosts` list; runs the fixed probe locally. |
-| `trusted_web_hosts` | no | `[]` | At most 32 plain hostnames/IP literals; no scheme or port. Adds browser Host/Origin authorities, not authentication. |
+| `trusted_web_hosts` | no | `[]` | At most 32 exact hostnames/IP literals or HTTPS-only origin suffixes such as `*.preview.example`; no scheme or port. Exact entries authorize browser Host/Origin, while suffix entries authorize Origin only. This is not authentication. |
 | `gpu_process_poll_interval_seconds` | no | `15` | Number 2–3,600; independent process-query cadence. |
 | `retry_jitter_pct` | no | `15` | Number 0–50. |
 | `manual_probe_cooldown_seconds` | no | `5` | Number 1–300. |
@@ -56,7 +64,7 @@ The ten fields marked required must be present, even when empty.
 | `incidents` | no | defaults below | Exact optional stability-cycle object. |
 | `host_overrides` | no | `{}` | Active explicit alias → non-empty override object. |
 | `maintenance_windows` | no | `{}` | Active explicit alias → one-shot or recurring UTC window. |
-| `host_groups` | no | `{}` | Active explicit alias → 1–48 visible characters. |
+| `host_groups` | no | `{}` | Active alias → 1–48 visible characters; auto-discovery mode permits inert predeclared aliases. |
 | `topology` | no | absent | Validated display-only tree; never authorizes a probe. |
 | `persistence` | no | disabled | Bounded SQLite history settings. |
 | `workloads` | no | disabled | Remote process metadata tier. |
@@ -127,6 +135,22 @@ actionable. This preserves a continuous outage across a supervised restart while
 failing open if recovery happened during downtime.
 
 ## Topology
+
+`ssh_discovery.mode: "aliases"` preserves literal-alias discovery. In
+`"topology"` mode Mocop periodically runs bounded `ssh -G` resolution without
+opening an SSH connection. Aliases referenced by effective `ProxyJump` or a
+recognizable SSH-backed `ProxyCommand` become infrastructure and are not admitted
+by automatic discovery. Explicit active `hosts` entries still win. The closest
+resolved proxy alias becomes the inferred group. Direct targets sharing the same
+numbered alias prefix form a fallback group; explicit `host_groups` wins.
+Opaque proxy commands are represented by a non-sensitive synthetic node and
+their command/address text is discarded.
+
+`ssh_discovery.refresh_seconds` is an integer from 30–3,600 (default 300), and
+`resolve_timeout_seconds` is a finite number from 1–30 (default 3) per alias.
+Omitting `ssh_discovery` preserves the pre-discovery `aliases` mode for upgrade
+compatibility. A configured `topology` remains authoritative over the generated
+tree.
 
 `topology` contains exactly `root` and `links`. Root and endpoints are safe
 aliases, but topology-only aliases need not be monitoring targets. There are at

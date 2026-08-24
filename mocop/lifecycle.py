@@ -18,6 +18,7 @@ from .config import (
     ConfigError,
     MonitorConfig,
     is_safe_alias,
+    load_config,
     load_private_config,
 )
 
@@ -121,13 +122,27 @@ def read_access_token(path: Path) -> str:
     return token
 
 
-def initialize_config(path: Path, hosts: Sequence[str]) -> Path:
+def initialize_config(
+    path: Path,
+    hosts: Sequence[str],
+    *,
+    local_host: str | None = None,
+    display_name: str | None = None,
+    ssh_config: str | None = None,
+    auto_discover: bool = False,
+) -> Path:
     """Create a private config once; never replace an existing operator config."""
     target = _absolute_without_resolving_symlinks(path)
-    normalized_hosts = tuple(dict.fromkeys(host.strip() for host in hosts))
+    normalized_local = local_host.strip() if local_host is not None else None
+    candidates = (*((normalized_local,) if normalized_local else ()), *hosts)
+    normalized_hosts = tuple(dict.fromkeys(host.strip() for host in candidates))
     invalid = [host for host in normalized_hosts if not is_safe_alias(host)]
     if invalid:
         raise LifecycleError(f"invalid SSH host alias: {', '.join(invalid)}")
+    if local_host is not None and normalized_local is None:
+        raise LifecycleError("local host alias cannot be empty")
+    if display_name is not None and normalized_local is None:
+        raise LifecycleError("display name requires a local host")
 
     try:
         data = json.loads(BUNDLED_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -136,6 +151,12 @@ def initialize_config(path: Path, hosts: Sequence[str]) -> Path:
             "the bundled configuration template is unavailable"
         ) from exc
     data["hosts"] = list(normalized_hosts)
+    data["local_host"] = normalized_local
+    data["auto_discover"] = auto_discover
+    if ssh_config is not None:
+        data["ssh_config"] = ssh_config
+    if display_name is not None:
+        data["host_overrides"] = {normalized_local: {"display_name": display_name}}
     payload = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -155,6 +176,11 @@ def initialize_config(path: Path, hosts: Sequence[str]) -> Path:
     except OSError as exc:
         target.unlink(missing_ok=True)
         raise LifecycleError(f"cannot write configuration: {target}") from exc
+    try:
+        load_config(target)
+    except ConfigError as exc:
+        target.unlink(missing_ok=True)
+        raise LifecycleError(f"cannot create valid configuration: {exc}") from exc
     return target
 
 

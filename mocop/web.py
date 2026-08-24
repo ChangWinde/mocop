@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import socket
@@ -43,6 +44,7 @@ _STATIC_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/process-search.js": ("process-search.js", "text/javascript; charset=utf-8"),
+    "/dashboard-auth.js": ("dashboard-auth.js", "text/javascript; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
@@ -166,21 +168,38 @@ def _reject_json_constant(_value: str) -> object:
     raise ValueError("non-finite JSON number")
 
 
-def _trusted_hostnames(
+def _trusted_web_policy(
     bind_host: str, trusted_hosts: Iterable[str] | None
-) -> frozenset[str]:
-    """Hostnames accepted in Host/Origin for writes and protected reads."""
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return exact Host authorities and HTTPS-only Origin suffixes.
+
+    Reverse proxies commonly rewrite ``Host`` to the loopback upstream while
+    preserving the browser's public ``Origin``. Exact entries remain valid for
+    both headers. A leading ``*.`` is deliberately narrower: it authorizes only
+    HTTPS origins below that DNS suffix and never relaxes the Host check.
+    """
     trusted = set(_LOOPBACK_HOSTNAMES)
+    origin_suffixes: set[str] = set()
     if str(bind_host).strip().lower() not in _WILDCARD_BIND_HOSTS:
         bind_hostname = normalize_web_hostname(bind_host)
         if bind_hostname is not None:
             trusted.add(bind_hostname)
     for candidate in trusted_hosts or ():
+        if isinstance(candidate, str) and candidate.strip().startswith("*."):
+            suffix = normalize_web_hostname(candidate.strip()[2:])
+            if suffix is None or "." not in suffix:
+                raise ValueError(f"invalid trusted web origin suffix: {candidate!r}")
+            try:
+                ipaddress.ip_address(suffix)
+            except ValueError:
+                origin_suffixes.add(suffix)
+                continue
+            raise ValueError(f"invalid trusted web origin suffix: {candidate!r}")
         hostname = normalize_web_hostname(candidate)
         if hostname is None:
             raise ValueError(f"invalid trusted web host: {candidate!r}")
         trusted.add(hostname)
-    return frozenset(trusted)
+    return frozenset(trusted), frozenset(origin_suffixes)
 
 
 class MonitorHttpServer(ThreadingHTTPServer):
@@ -212,7 +231,9 @@ class MonitorHttpServer(ThreadingHTTPServer):
         self.inventory = inventory
         self.restart = restart
         self.probe_control = probe_control
-        self.trusted_hostnames = _trusted_hostnames(address[0], trusted_hosts)
+        self.trusted_hostnames, self.trusted_origin_suffixes = _trusted_web_policy(
+            address[0], trusted_hosts
+        )
         self.access_token = access_token
         self.shutdown_event = threading.Event()
         self._connection_slots = threading.BoundedSemaphore(
@@ -1346,13 +1367,27 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         fetch_site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
         return (
             parsed.scheme in {"http", "https"}
-            and parsed.hostname in self.monitor_server.trusted_hostnames
+            and self._has_trusted_origin(parsed)
             and parsed.username is None
             and parsed.password is None
             and parsed.path in {"", "/"}
             and not parsed.query
             and not parsed.fragment
             and fetch_site in {"", "same-origin", "none"}
+        )
+
+    def _has_trusted_origin(self, origin: SplitResult) -> bool:
+        """Match an exact authority or one configured HTTPS subdomain suffix."""
+        hostname = normalize_web_hostname(origin.hostname)
+        if hostname is None:
+            return False
+        if hostname in self.monitor_server.trusted_hostnames:
+            return True
+        if origin.scheme != "https":
+            return False
+        return any(
+            hostname.endswith(f".{suffix}")
+            for suffix in self.monitor_server.trusted_origin_suffixes
         )
 
     def _is_dashboard_read_request(self) -> bool:

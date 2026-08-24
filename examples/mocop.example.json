@@ -1,6 +1,11 @@
 {
   "ssh_config": "~/.ssh/config",
   "auto_discover": false,
+  "ssh_discovery": {
+    "mode": "topology",
+    "refresh_seconds": 300,
+    "resolve_timeout_seconds": 3
+  },
   "hosts": [
     "monitor-host",
     "gpu-node-01",
