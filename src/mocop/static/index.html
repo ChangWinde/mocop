@@ -107,6 +107,14 @@
           </article>
         </section>
 
+        <div id="capacity-watch-banner" class="capacity-watch-banner" role="status" aria-live="polite" hidden>
+          <strong id="capacity-watch-banner-text">GPU 已就绪</strong>
+          <span class="capacity-watch-banner-actions">
+            <button id="capacity-watch-banner-open" class="inline-action" type="button">查看匹配</button>
+            <button id="capacity-watch-banner-dismiss" class="inline-action" type="button">知道了</button>
+            <button id="capacity-watch-banner-stop" class="inline-action" type="button">停止守望</button>
+          </span>
+        </div>
         <div id="collector-error" class="alert" hidden></div>
         <section id="attention-panel" class="attention-panel" aria-label="需要关注的服务器" hidden>
           <div class="attention-heading">
@@ -567,6 +575,10 @@
         </label>
         <button class="primary-action" type="submit">开始匹配</button>
       </form>
+      <div class="capacity-watch">
+        <button id="capacity-watch-toggle" class="inline-action" type="button">空闲时提醒我</button>
+        <span id="capacity-watch-status" class="capacity-watch-status" role="status">保存当前条件后，页面会在出现满足的空闲组合时提醒（可选浏览器通知）</span>
+      </div>
       <div class="capacity-rule"><i></i><span id="capacity-rule">空闲判定将在获得数据后显示</span></div>
       <div class="capacity-heading">
         <div><span class="section-kicker">LIVE CANDIDATES</span><h3 id="capacity-summary">等待 GPU 快照</h3></div>
@@ -610,6 +622,7 @@
           <span id="gpu-detail-host" class="section-kicker">GPU DETAIL</span>
           <h2 id="gpu-detail-title">GPU 详情</h2>
         </div>
+        <button id="gpu-detail-ssh" class="inline-action gpu-detail-ssh" type="button">复制 SSH</button>
         <button class="dialog-close" data-close-dialog="gpu-detail-dialog" type="button" aria-label="关闭 GPU 详情">×</button>
       </div>
       <div class="gpu-detail-content">
@@ -702,7 +715,9 @@
         </section>
       </div>
     </dialog>
+    <script src="/format.js" defer></script>
     <script src="/process-search.js" defer></script>
+    <script src="/capacity-watch.js" defer></script>
     <script src="/dashboard-auth.js" defer></script>
     <script src="/app.js" defer></script>
   </body>

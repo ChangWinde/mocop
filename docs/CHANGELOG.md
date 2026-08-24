@@ -28,6 +28,15 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Added an explicit dashboard token prompt for bare and forwarded URLs. Submitted
   credentials are retained only after successful API authentication; malformed or
   rejected tokens remain unstored and do not trigger automatic retries.
+- Added a capacity watch to the capacity matcher: one saved demand
+  (count/model/per-GPU free VRAM) is re-evaluated on every accepted snapshot in
+  the browser. The ready edge shows an in-page banner and title marker, sends an
+  opt-in browser notification with a 60-second cooldown, re-arms only after the
+  demand stops being satisfied, and persists per browser. No new API or SSH
+  work is involved.
+- Added one-click `ssh <alias>` copy to capacity candidates and the GPU detail
+  dialog. The copied command uses the configured OpenSSH alias; display names
+  stay presentation-only.
 
 ### Changed
 

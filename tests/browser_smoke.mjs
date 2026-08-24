@@ -1024,6 +1024,53 @@ try {
   );
   assert(capacity.centerDelta < 2);
 
+  const capacityWatchFlow = await cdp.evaluate(`(() => {
+    document.querySelector("#capacity-toggle").click();
+    document.querySelector("#capacity-gpu-count").value = "2";
+    document.querySelector("#capacity-vram").value = "60";
+    const toggle = document.querySelector("#capacity-watch-toggle");
+    const status = document.querySelector("#capacity-watch-status");
+    const banner = document.querySelector("#capacity-watch-banner");
+    toggle.click();
+    const afterSave = {
+      toggleText: toggle.textContent,
+      watching: toggle.dataset.watching || "",
+      statusText: status.textContent,
+      bannerVisible: !banner.hidden,
+      bannerText: document.querySelector("#capacity-watch-banner-text").textContent,
+      title: document.title,
+      stored: JSON.parse(localStorage.getItem("mocop.capacityWatch.v1") || "null"),
+    };
+    document.querySelector("#capacity-watch-banner-dismiss").click();
+    const afterDismiss = { bannerVisible: !banner.hidden, title: document.title };
+    toggle.click();
+    const afterStop = {
+      toggleText: toggle.textContent,
+      watching: toggle.dataset.watching || "",
+      bannerVisible: !banner.hidden,
+      stored: localStorage.getItem("mocop.capacityWatch.v1"),
+    };
+    document.querySelector("#capacity-dialog").close();
+    return { afterSave, afterDismiss, afterStop };
+  })()`);
+  // Saving the watch while the fixture already satisfies 2x60 GiB must fire
+  // the ready edge immediately: banner, title marker, and durable state.
+  assert.equal(capacityWatchFlow.afterSave.toggleText, "\u505C\u6B62\u5B88\u671B");
+  assert.equal(capacityWatchFlow.afterSave.watching, "true");
+  assert.match(capacityWatchFlow.afterSave.statusText, /\u5DF2\u5C31\u7EEA/);
+  assert.equal(capacityWatchFlow.afterSave.bannerVisible, true);
+  assert.match(capacityWatchFlow.afterSave.bannerText, /1 \u4E2A\u8282\u70B9\u6EE1\u8DB3/);
+  assert.match(capacityWatchFlow.afterSave.bannerText, /60 GiB/);
+  assert(capacityWatchFlow.afterSave.title.startsWith("\u25CF "));
+  assert.equal(capacityWatchFlow.afterSave.stored?.state, "notified");
+  assert.equal(capacityWatchFlow.afterSave.stored?.request?.gpuCount, 2);
+  assert.equal(capacityWatchFlow.afterDismiss.bannerVisible, false);
+  assert(!capacityWatchFlow.afterDismiss.title.startsWith("\u25CF "));
+  assert.equal(capacityWatchFlow.afterStop.toggleText, "\u7A7A\u95F2\u65F6\u63D0\u9192\u6211");
+  assert.equal(capacityWatchFlow.afterStop.watching, "");
+  assert.equal(capacityWatchFlow.afterStop.bannerVisible, false);
+  assert.equal(capacityWatchFlow.afterStop.stored, null);
+
   const owners = await cdp.evaluate(`(() => {
     document.querySelector("#owners-toggle").click();
     const dialog = document.querySelector("#owners-dialog");

@@ -189,7 +189,7 @@ after this overlay and may include the current correlation context.
 
 ## Dashboard rendering
 
-GPU count, busy devices, and cluster VRAM form the first summary layer. The capacity matcher ranks same-node, same-model groups from the current snapshot by requested device count, per-device free VRAM, health, utilization, and CPU context; it excludes stale and maintained nodes and never triggers collection. The fleet rail can render config-backed host sections without changing telemetry order or collection. The scheduling heatmap follows, then system resources and native per-host GPU groups. GPU groups are collapsed by default. Search and status filters temporarily expand matching groups without losing the user's explicit expansion state.
+GPU count, busy devices, and cluster VRAM form the first summary layer. The capacity matcher ranks same-node, same-model groups from the current snapshot by requested device count, per-device free VRAM, health, utilization, and CPU context; it excludes stale and maintained nodes and never triggers collection. One optional capacity watch persists a saved demand in the browser and re-evaluates it on every accepted snapshot: the satisfaction edge raises an in-page banner, a title marker, and an opt-in browser notification under a bounded cooldown, then re-arms only after demand stops being satisfied. The watch is a browser-only projection and never adds an API call or SSH command. The fleet rail can render config-backed host sections without changing telemetry order or collection. The scheduling heatmap follows, then system resources and native per-host GPU groups. GPU groups are collapsed by default. Search and status filters temporarily expand matching groups without losing the user's explicit expansion state.
 
 The unified inventory query also builds a bounded process result projection from
 the authenticated in-memory snapshot. Its scope follows the selected host, so
@@ -315,9 +315,12 @@ lowers the ceiling instead of increasing it. Browser leaves remain dependency-fr
 classic scripts loaded before `app.js`, expose one frozen namespace/factory, and
 consume the authenticated snapshot rather than creating a second API or state
 store. `dashboard-auth.js` owns capability ingestion, fragment scrubbing,
-tab-scoped retention, and the explicit token prompt; `app.js` still owns request
-transport and dashboard lifecycle. Python extraction must keep each lock-owned
-invariant inside one module.
+tab-scoped retention, and the explicit token prompt; `format.js` owns pure
+numeric/time formatting; `capacity-watch.js` owns capacity matching and the
+armed/notified watch state machine with its notification cooldown, while
+`app.js` still owns request transport, notification delivery, and dashboard
+lifecycle. Python extraction must keep each lock-owned invariant inside one
+module.
 
 [ADR-0021](adr/0021-incremental-module-boundaries.md) compares immediate splitting,
 incremental leaf extraction, and adding a build/registry layer. It selects the

@@ -1,5 +1,10 @@
 "use strict";
 
+const {
+  age, clamp, combinedMetric, duration, durationSince, format, memory, numeric,
+  optionalMetric, rate, ratio, retryCountdown, shortTime, storage,
+} = globalThis.MocopFormat.create();
+
 const PREFERENCE_STORAGE_KEY = "mocop.preferences.v1";
 const VISUAL_ASSET_DATABASE = "mocop.visual-assets.v1";
 const VISUAL_ASSET_STORE = "assets";
@@ -43,13 +48,6 @@ const VISUAL_STYLE_VALUES = new Set([
 const ACCENT_VALUES = new Set(["cobalt", "cyan", "violet", "emerald", "amber", "rose"]);
 const DENSITY_VALUES = new Set(["comfortable", "compact"]);
 const SERVER_FILTER_VALUES = new Set(["all", "issues", "busy", "available", "stale"]);
-const CAPACITY_HOST_BLOCKERS = new Set(["connectivity", "gpu_availability", "gpu_count"]);
-const CAPACITY_GPU_BLOCKERS = new Set([
-  "gpu_ecc",
-  "gpu_memory_repair",
-  "gpu_slowdown",
-  "gpu_temperature",
-]);
 const TOPOLOGY_TRANSPORT_VALUES = new Set(["ssh", "frp-stcp", "frp-xtcp", "vpn"]);
 const TOPOLOGY_TRANSPORT_LABELS = Object.freeze({
   ssh: "SSH",
@@ -159,6 +157,8 @@ const {
   numeric,
 });
 
+const capacityWatch = globalThis.MocopCapacityWatch.create({ storage: localStorage });
+
 const view = {
   dashboardStarted: false,
   snapshot: null,
@@ -247,6 +247,10 @@ const view = {
   notificationTestPending: false,
   capacityRequest: { gpuCount: 1, minVramGiB: 24, model: "any" },
   capacityModelSignature: "",
+  capacityWatch: capacityWatch.loadWatch(),
+  capacityWatchSatisfied: 0,
+  capacityWatchBannerDismissed: false,
+  baseDocumentTitle: document.title,
   inventory: null,
   inventoryLoading: false,
   inventoryMessage: "",
@@ -317,6 +321,13 @@ const elements = {
   capacitySummary: $("#capacity-summary"),
   capacityUpdated: $("#capacity-updated"),
   capacityResults: $("#capacity-results"),
+  capacityWatchToggle: $("#capacity-watch-toggle"),
+  capacityWatchStatus: $("#capacity-watch-status"),
+  capacityWatchBanner: $("#capacity-watch-banner"),
+  capacityWatchBannerText: $("#capacity-watch-banner-text"),
+  capacityWatchBannerOpen: $("#capacity-watch-banner-open"),
+  capacityWatchBannerDismiss: $("#capacity-watch-banner-dismiss"),
+  capacityWatchBannerStop: $("#capacity-watch-banner-stop"),
   ownersToggle: $("#owners-toggle"),
   ownersDialog: $("#owners-dialog"),
   ownersSummary: $("#owners-summary"),
@@ -428,6 +439,7 @@ const elements = {
   gpuDetailDialog: $("#gpu-detail-dialog"),
   gpuDetailHost: $("#gpu-detail-host"),
   gpuDetailTitle: $("#gpu-detail-title"),
+  gpuDetailSsh: $("#gpu-detail-ssh"),
   gpuDetailState: $("#gpu-detail-state"),
   gpuDetailMetrics: $("#gpu-detail-metrics"),
   gpuHistoryRange: $("#gpu-history-range"),
@@ -1011,105 +1023,6 @@ function resetPreferences() {
   syncPreferenceControls();
   savePreferences();
   render();
-}
-
-function numeric(value, fallback = 0) {
-  const result = Number(value);
-  return Number.isFinite(result) ? result : fallback;
-}
-
-function optionalMetric(point, key) {
-  return point[key] == null ? NaN : numeric(point[key], NaN);
-}
-
-function combinedMetric(point, first, second) {
-  if (point[first] == null && point[second] == null) return NaN;
-  return numeric(point[first]) + numeric(point[second]);
-}
-
-function clamp(value) {
-  return Math.min(100, Math.max(0, numeric(value)));
-}
-
-function format(value, digits = 0) {
-  return numeric(value).toLocaleString("zh-CN", { maximumFractionDigits: digits });
-}
-
-function memory(mib) {
-  const amount = numeric(mib);
-  if (amount >= 1024) return `${format(amount / 1024, 1)} GiB`;
-  return `${format(amount)} MiB`;
-}
-
-function storage(mib) {
-  const amount = numeric(mib);
-  if (amount >= 1024 ** 2) return `${format(amount / 1024 ** 2, 1)} TiB`;
-  return memory(amount);
-}
-
-function rate(bytesPerSecond) {
-  const value = numeric(bytesPerSecond, NaN);
-  if (!Number.isFinite(value)) return "—";
-  if (value >= 1024 ** 3) return `${format(value / 1024 ** 3, 1)} GiB/s`;
-  if (value >= 1024 ** 2) return `${format(value / 1024 ** 2, 1)} MiB/s`;
-  if (value >= 1024) return `${format(value / 1024, 1)} KiB/s`;
-  return `${format(value)} B/s`;
-}
-
-function duration(seconds) {
-  const value = numeric(seconds);
-  const days = Math.floor(value / 86400);
-  const hours = Math.floor((value % 86400) / 3600);
-  if (days) return `${days} 天 ${hours} 小时`;
-  return `${hours} 小时 ${Math.floor((value % 3600) / 60)} 分钟`;
-}
-
-function ratio(used, total) {
-  return numeric(total) > 0 ? (numeric(used) / numeric(total)) * 100 : 0;
-}
-
-function age(timestamp, now = Date.now()) {
-  if (!timestamp) return "等待数据";
-  const seconds = Math.max(0, Math.round((now - Date.parse(timestamp)) / 1000));
-  if (seconds < 3) return "刚刚";
-  if (seconds < 60) return `${seconds} 秒前`;
-  return `${Math.floor(seconds / 60)} 分钟前`;
-}
-
-// Elapsed-duration wording ("3 小时 12 分") for process runtimes, unlike the
-// "X 前" phrasing that age() produces for sample freshness.
-function durationSince(timestamp, now = Date.now()) {
-  const elapsed = now - Date.parse(timestamp);
-  if (!Number.isFinite(elapsed)) return "时长未知";
-  const seconds = Math.max(0, Math.floor(elapsed / 1000));
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  if (days) return `${days} 天 ${hours} 小时`;
-  if (hours) return `${hours} 小时 ${minutes} 分`;
-  if (minutes) return `${minutes} 分钟`;
-  return `${seconds} 秒`;
-}
-
-function shortTime(timestamp) {
-  const value = new Date(timestamp);
-  if (!Number.isFinite(value.getTime())) return "未知时间";
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(value);
-}
-
-function retryCountdown(timestamp, now = Date.now()) {
-  if (!timestamp) return "";
-  const milliseconds = Date.parse(timestamp) - now;
-  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return "等待重试";
-  const seconds = Math.max(1, Math.ceil(milliseconds / 1000));
-  if (seconds < 60) return `${seconds} 秒后重试`;
-  return `${Math.ceil(seconds / 60)} 分钟后重试`;
 }
 
 function refreshRelativeTimes() {
@@ -2426,99 +2339,22 @@ function serverConditions(server) {
     }));
 }
 
-function capacityConditions(host) {
-  // Silenced alerts stay in scope: an operator acknowledging noise must not
-  // turn a faulty GPU back into a capacity candidate. Maintenance hosts are
-  // excluded separately in capacityMatches().
-  if (!Array.isArray(view.incidents?.active)) return [];
-  return view.incidents.active.filter((condition) => condition.host === host);
-}
-
 function incidentsSyncedWithSnapshot() {
   return Array.isArray(view.incidents?.active)
     && view.snapshot != null
     && view.incidentVersion === numeric(view.snapshot.incidentVersion, 0);
 }
 
-function gpuHasCapacityBlocker(gpu, conditions) {
-  const identity = String(gpu.uuid || gpu.index);
-  const resourcePrefix = `GPU ${gpu.index}`;
-  return conditions.some((condition) => {
-    if (!CAPACITY_GPU_BLOCKERS.has(condition.category)) return false;
-    const key = String(condition.conditionKey || "");
-    const resource = String(condition.resource || "");
-    return key.endsWith(`:${identity}`)
-      || resource === resourcePrefix
-      || resource.startsWith(`${resourcePrefix} `);
+function capacityMatches(request) {
+  // The raw active list keeps silenced alerts in scope: an operator
+  // acknowledging noise must not turn a faulty GPU back into a candidate.
+  return capacityWatch.matches({
+    servers: view.snapshot.servers,
+    activeConditions: view.incidents?.active,
+    request,
+    busyPct: limits().gpu_busy_pct,
+    temperatureC: limits().gpu_temperature_warning_c,
   });
-}
-
-function capacityMatches() {
-  const request = view.capacityRequest;
-  const minimumFreeMiB = request.minVramGiB * 1024;
-  const busyThreshold = limits().gpu_busy_pct;
-  const temperatureThreshold = limits().gpu_temperature_warning_c;
-  const candidates = [];
-  let excludedMaintenance = 0;
-  let excludedHealth = 0;
-
-  view.snapshot.servers.forEach((server) => {
-    if (server.status !== "online" || server.stale) return;
-    if (server.maintenance) {
-      excludedMaintenance += 1;
-      return;
-    }
-    const conditions = capacityConditions(server.host);
-    if (conditions.some((condition) => CAPACITY_HOST_BLOCKERS.has(condition.category))) {
-      excludedHealth += 1;
-      return;
-    }
-    const groups = new Map();
-    server.gpus.forEach((gpu) => {
-      const model = gpu.name || "Unknown NVIDIA GPU";
-      if (request.model !== "any" && model !== request.model) return;
-      const group = groups.get(model) || [];
-      group.push(gpu);
-      groups.set(model, group);
-    });
-    groups.forEach((gpus, model) => {
-      const available = gpus.filter((gpu) => {
-        const utilization = optionalMetric(gpu, "utilization_gpu_pct");
-        const freeMemory = optionalMetric(gpu, "memory_free_mib");
-        const temperature = optionalMetric(gpu, "temperature_c");
-        return Number.isFinite(utilization)
-          && utilization < busyThreshold
-          && Number.isFinite(freeMemory)
-          && freeMemory >= minimumFreeMiB
-          && (!Number.isFinite(temperature) || temperature < temperatureThreshold)
-          && !gpuHasCapacityBlocker(gpu, conditions);
-      });
-      const freeValues = available.map((gpu) => numeric(gpu.memory_free_mib));
-      const utilizationValues = available.map((gpu) => numeric(gpu.utilization_gpu_pct));
-      candidates.push({
-        host: server.host,
-        model,
-        total: gpus.length,
-        available,
-        satisfies: available.length >= request.gpuCount,
-        deficit: Math.max(0, request.gpuCount - available.length),
-        minimumFreeMiB: freeValues.length ? Math.min(...freeValues) : 0,
-        averageUtilization: utilizationValues.length
-          ? utilizationValues.reduce((sum, value) => sum + value, 0) / utilizationValues.length
-          : 101,
-        cpuUsage: optionalMetric(server.system || {}, "cpu_usage_pct"),
-      });
-    });
-  });
-  candidates.sort((first, second) => (
-    Number(second.satisfies) - Number(first.satisfies)
-    || first.deficit - second.deficit
-    || second.available.length - first.available.length
-    || second.minimumFreeMiB - first.minimumFreeMiB
-    || first.averageUtilization - second.averageUtilization
-    || first.host.localeCompare(second.host)
-  ));
-  return { candidates, excludedMaintenance, excludedHealth };
 }
 
 function syncCapacityModels() {
@@ -2595,14 +2431,41 @@ function capacityCandidateCard(candidate) {
   if (candidate.available.length > 12) {
     devices.append(create("span", "", `+${candidate.available.length - 12}`));
   }
+  const actions = create("div", "capacity-candidate-actions");
   const locate = create("button", "inline-action", "查看节点");
   locate.type = "button";
   locate.addEventListener("click", () => {
     elements.capacityDialog.close();
     selectHost(candidate.host);
   });
-  card.append(heading, metrics, devices, locate);
+  actions.append(locate, sshCopyButton(candidate.host));
+  card.append(heading, metrics, devices, actions);
   return card;
+}
+
+// The copied command uses the configured OpenSSH alias, which is exactly what
+// the operator's own ssh client resolves; display names stay presentation-only.
+async function copySshCommand(button, host) {
+  if (button.dataset.resetTimer) clearTimeout(Number(button.dataset.resetTimer));
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+    await navigator.clipboard.writeText(`ssh ${host}`);
+    button.textContent = "已复制";
+  } catch (_error) {
+    button.textContent = "复制失败";
+  }
+  button.dataset.resetTimer = String(setTimeout(() => {
+    button.textContent = "复制 SSH";
+    delete button.dataset.resetTimer;
+  }, 2000));
+}
+
+function sshCopyButton(host) {
+  const button = create("button", "inline-action", "复制 SSH");
+  button.type = "button";
+  button.title = `复制 ssh ${host}`;
+  button.addEventListener("click", () => copySshCommand(button, host));
+  return button;
 }
 
 function renderOwners() {
@@ -2866,7 +2729,7 @@ function renderCapacityMatcher() {
     );
     return;
   }
-  const result = capacityMatches();
+  const result = capacityMatches(view.capacityRequest);
   const exact = result.candidates.filter((candidate) => candidate.satisfies).length;
   elements.capacityRule.textContent = `空闲 = GPU 负载低于 ${format(limits().gpu_busy_pct)}% · 单卡可用显存至少 ${format(request.minVramGiB)} GiB · 温度低于 ${format(limits().gpu_temperature_warning_c)}°C 警戒线 · 无 GPU 硬件告警`;
   elements.capacitySummary.textContent = exact
@@ -2894,6 +2757,83 @@ function renderCapacityMatcher() {
     const restored = [...elements.capacityResults.querySelectorAll(".capacity-candidate")]
       .find((card) => card.dataset.candidateKey === focusedKey);
     restored?.querySelector("button.inline-action")?.focus();
+  }
+}
+
+function capacityWatchLabel(request) {
+  const model = request.model === "any" ? "不限型号" : request.model;
+  return `${request.gpuCount} 张 GPU · ${model} · 每卡空闲 ≥ ${request.minVramGiB} GiB`;
+}
+
+// One watch, evaluated on every accepted snapshot regardless of dialog
+// visibility. The leaf owns the armed/notified edge and its cooldown; this
+// layer only projects the result into the banner, title, and notification.
+function evaluateCapacityWatch() {
+  const watch = view.capacityWatch;
+  if (!watch || !view.snapshot || !incidentsSyncedWithSnapshot()) return;
+  const result = capacityMatches(watch.request);
+  const satisfied = result.candidates.filter((candidate) => candidate.satisfies).length;
+  view.capacityWatchSatisfied = satisfied;
+  const evaluated = capacityWatch.evaluateWatch(watch, satisfied);
+  if (evaluated.watch.state === "armed" && watch.state === "notified") {
+    view.capacityWatchBannerDismissed = false;
+  }
+  view.capacityWatch = evaluated.watch;
+  if (evaluated.shouldNotify) {
+    view.capacityWatchBannerDismissed = false;
+    deliverCapacityWatchNotification(satisfied);
+  }
+}
+
+function deliverCapacityWatchNotification(satisfied) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  try {
+    const notification = new Notification("Mocop · GPU 已就绪", {
+      body: `${satisfied} 个节点满足 ${capacityWatchLabel(view.capacityWatch.request)}`,
+      tag: "mocop-capacity-watch",
+    });
+    notification.addEventListener("click", () => {
+      window.focus();
+      notification.close();
+    });
+  } catch (_error) {
+    // The in-page banner still reports readiness without system notifications.
+  }
+}
+
+function renderCapacityWatchControls() {
+  if (!elements.capacityWatchToggle) return;
+  const watch = view.capacityWatch;
+  if (!watch) {
+    elements.capacityWatchToggle.textContent = "空闲时提醒我";
+    delete elements.capacityWatchToggle.dataset.watching;
+    elements.capacityWatchStatus.className = "capacity-watch-status";
+    elements.capacityWatchStatus.textContent =
+      "保存当前条件后，页面会在出现满足的空闲组合时提醒（可选浏览器通知）";
+    return;
+  }
+  elements.capacityWatchToggle.textContent = "停止守望";
+  elements.capacityWatchToggle.dataset.watching = "true";
+  const ready = watch.state === "notified";
+  elements.capacityWatchStatus.className =
+    `capacity-watch-status ${ready ? "ready" : "armed"}`;
+  elements.capacityWatchStatus.textContent = ready
+    ? `已就绪 · ${view.capacityWatchSatisfied} 个节点满足 ${capacityWatchLabel(watch.request)}`
+    : `守望中 · ${capacityWatchLabel(watch.request)}`;
+}
+
+function renderCapacityWatchBanner() {
+  const banner = elements.capacityWatchBanner;
+  if (!banner) return;
+  const watch = view.capacityWatch;
+  const show = Boolean(
+    watch && watch.state === "notified" && !view.capacityWatchBannerDismissed,
+  );
+  banner.hidden = !show;
+  document.title = show ? `● ${view.baseDocumentTitle}` : view.baseDocumentTitle;
+  if (show) {
+    elements.capacityWatchBannerText.textContent =
+      `GPU 已就绪：${view.capacityWatchSatisfied} 个节点满足 ${capacityWatchLabel(watch.request)}`;
   }
 }
 
@@ -5487,6 +5427,8 @@ function renderGpuDetail() {
 
   elements.gpuDetailHost.textContent = `${displayHost(server)} · GPU ${gpu.index}`;
   elements.gpuDetailTitle.textContent = gpu.name || "Unknown NVIDIA GPU";
+  elements.gpuDetailSsh.dataset.host = server.host;
+  elements.gpuDetailSsh.title = `复制 ssh ${server.host}`;
   elements.gpuDetailState.textContent = [
     state,
     server.stale ? "历史样本" : "实时样本",
@@ -6117,7 +6059,10 @@ function render() {
   renderTable();
   renderGpuDetail();
   renderIncidentDetail();
+  evaluateCapacityWatch();
   renderCapacityMatcher();
+  renderCapacityWatchControls();
+  renderCapacityWatchBanner();
   renderOwners();
   renderTopology();
   refreshRelativeTimes();
@@ -6457,6 +6402,7 @@ elements.capacityToggle.addEventListener("click", () => {
   elements.capacityModel.value = view.capacityRequest.model;
   elements.capacityDialog.showModal();
   renderCapacityMatcher();
+  renderCapacityWatchControls();
 });
 
 elements.ownersToggle.addEventListener("click", () => {
@@ -6496,6 +6442,58 @@ elements.capacityForm.addEventListener("submit", (event) => {
     model: elements.capacityModel.value,
   };
   renderCapacityMatcher();
+});
+
+elements.capacityWatchToggle.addEventListener("click", () => {
+  if (view.capacityWatch) {
+    capacityWatch.clearWatch();
+    view.capacityWatch = null;
+    view.capacityWatchSatisfied = 0;
+    view.capacityWatchBannerDismissed = false;
+  } else {
+    if (!elements.capacityForm.reportValidity()) return;
+    const request = {
+      gpuCount: Number(elements.capacityGpuCount.value),
+      minVramGiB: Number(elements.capacityVram.value),
+      model: elements.capacityModel.value,
+    };
+    const saved = capacityWatch.saveWatch(request);
+    if (!saved) return;
+    view.capacityWatch = saved;
+    view.capacityRequest = { ...request };
+    // Permission is requested inside the click gesture; a denied or ignored
+    // prompt still leaves the in-page banner and title indicator working.
+    if (typeof Notification !== "undefined" && Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+    evaluateCapacityWatch();
+    renderCapacityMatcher();
+  }
+  renderCapacityWatchControls();
+  renderCapacityWatchBanner();
+});
+
+elements.capacityWatchBannerOpen.addEventListener("click", () => {
+  if (!elements.capacityDialog.open) elements.capacityToggle.click();
+});
+
+elements.capacityWatchBannerDismiss.addEventListener("click", () => {
+  view.capacityWatchBannerDismissed = true;
+  renderCapacityWatchBanner();
+});
+
+elements.capacityWatchBannerStop.addEventListener("click", () => {
+  capacityWatch.clearWatch();
+  view.capacityWatch = null;
+  view.capacityWatchSatisfied = 0;
+  view.capacityWatchBannerDismissed = false;
+  renderCapacityWatchControls();
+  renderCapacityWatchBanner();
+});
+
+elements.gpuDetailSsh.addEventListener("click", () => {
+  const host = elements.gpuDetailSsh.dataset.host;
+  if (host) copySshCommand(elements.gpuDetailSsh, host);
 });
 
 document.querySelectorAll("[data-close-dialog]").forEach((button) => {

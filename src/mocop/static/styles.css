@@ -859,6 +859,15 @@ body.hide-gpu-power .gpu-col-power { display: none !important; }
 .capacity-vram-field { position: relative; }
 .capacity-vram-field input { padding-right: 42px; }
 .capacity-vram-field small { position: absolute; right: 11px; bottom: 12px; color: var(--muted-2); font-size: 8px; }
+.capacity-watch { display: flex; align-items: center; gap: 10px; margin: 0 20px 10px; padding: 9px 11px; border: 1px dashed var(--line); border-radius: 9px; }
+.capacity-watch .inline-action { flex: 0 0 auto; }
+.capacity-watch-status { min-width: 0; color: var(--muted-2); font-size: 9px; line-height: 1.5; }
+.capacity-watch-status.armed { color: color-mix(in srgb, var(--accent-2) 65%, var(--muted)); }
+.capacity-watch-status.ready { color: #5de0a0; }
+.capacity-watch-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 14px; padding: 11px 14px; border: 1px solid rgba(93, 224, 160, 0.28); border-radius: 10px; color: #5de0a0; background: rgba(93, 224, 160, 0.08); font-size: 11px; }
+.capacity-watch-banner[hidden] { display: none; }
+.capacity-watch-banner strong { min-width: 0; font-weight: 600; }
+.capacity-watch-banner-actions { display: flex; flex: 0 0 auto; gap: 8px; }
 .capacity-rule { min-height: 38px; display: flex; align-items: center; gap: 8px; margin: 0 20px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--accent-2) 18%, transparent); border-radius: 9px; color: color-mix(in srgb, var(--accent-2) 65%, var(--muted)); background: var(--accent-2-soft); font-size: 9px; line-height: 1.5; }
 .capacity-rule i { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: var(--accent-2); box-shadow: 0 0 8px color-mix(in srgb, var(--accent-2) 42%, transparent); }
 .capacity-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; padding: 18px 20px 10px; }
@@ -874,6 +883,8 @@ body.hide-gpu-power .gpu-col-power { display: none !important; }
 .capacity-candidate-heading em { flex: 0 0 auto; padding: 3px 6px; border-radius: 6px; color: var(--amber); background: rgba(245,185,95,.08); font-size: 8px; font-style: normal; }
 .capacity-candidate.match .capacity-candidate-heading em { color: var(--green); background: var(--green-soft); }
 .capacity-candidate-metrics { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 12px; color: var(--muted); font-size: 8px; }
+.capacity-candidate-actions { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
+.gpu-detail-ssh { flex: 0 0 auto; align-self: center; }
 .capacity-devices { min-width: 0; display: flex; flex-wrap: wrap; gap: 5px; }
 .capacity-devices span { padding: 4px 6px; border: 1px solid color-mix(in srgb, var(--accent-2) 18%, transparent); border-radius: 6px; color: var(--accent-2); background: var(--accent-2-soft); font-family: var(--font-mono); font-size: 7px; }
 .capacity-devices .owner-host-chip { padding: 4px 6px; border: 1px solid color-mix(in srgb, var(--accent-2) 18%, transparent); border-radius: 6px; color: var(--accent-2); background: var(--accent-2-soft); cursor: pointer; font-family: var(--font-mono); font-size: 7px; }

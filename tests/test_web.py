@@ -491,6 +491,10 @@ class WebTests(unittest.TestCase):
             authentication_script = response.read().decode("utf-8")
         with urlopen(f"{self.base}/process-search.js", timeout=2) as response:
             search_script = response.read().decode("utf-8")
+        with urlopen(f"{self.base}/capacity-watch.js", timeout=2) as response:
+            watch_script = response.read().decode("utf-8")
+        with urlopen(f"{self.base}/format.js", timeout=2) as response:
+            format_script = response.read().decode("utf-8")
         self.assertIn("Mocop", body)
         self.assertIn("AI-NATIVE GPU CLUSTER MONITOR", body)
         self.assertIn("GPU 集群实时监控", body)
@@ -565,9 +569,16 @@ class WebTests(unittest.TestCase):
         self.assertNotIn("age(snapshot.generatedAt)", script)
         self.assertIn("createProcessSearch", search_script)
         self.assertIn("MocopDashboardAuth", authentication_script)
+        self.assertIn("MocopCapacityWatch", watch_script)
+        self.assertIn("MocopFormat", format_script)
         self.assertIn('id="authentication-dialog"', body)
+        self.assertIn('id="capacity-watch-toggle"', body)
+        self.assertIn('id="capacity-watch-banner"', body)
+        self.assertIn('id="gpu-detail-ssh"', body)
         self.assertIn('src="/dashboard-auth.js"', body)
         self.assertIn('src="/process-search.js"', body)
+        self.assertIn('src="/capacity-watch.js"', body)
+        self.assertIn('src="/format.js"', body)
 
     def test_static_assets_support_etag_revalidation(self) -> None:
         conn = self.open_connection(self.server.server_port)

@@ -14,8 +14,11 @@ python3 -m compileall -q src/mocop tests
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
 node --check src/mocop/static/app.js
+node --check src/mocop/static/capacity-watch.js
 node --check src/mocop/static/dashboard-auth.js
+node --check src/mocop/static/format.js
 node --check src/mocop/static/process-search.js
+node tests/capacity_watch_test.mjs
 node tests/dashboard_auth_test.mjs
 node tests/process_search_test.mjs
 node --experimental-websocket tests/browser_smoke.mjs
