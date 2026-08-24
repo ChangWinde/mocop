@@ -80,7 +80,7 @@ class ApiReferenceDriftTests(unittest.TestCase):
     def test_stable_error_code_table_matches_web_implementation(self) -> None:
         import ast
 
-        source = (ROOT / "mocop" / "web.py").read_text(encoding="utf-8")
+        source = (ROOT / "src" / "mocop" / "web.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         implemented = {
             node.value

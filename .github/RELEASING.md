@@ -9,7 +9,7 @@ rulesets allow only the repository owner to create version tags while denying al
 tag updates and deletions. Automatic head-branch deletion keeps merged refs from
 accumulating.
 
-1. In a pull request, update `pyproject.toml` and `mocop/__init__.py` to the same
+1. In a pull request, update `pyproject.toml` and `src/mocop/__init__.py` to the same
    SemVer value, move finished entries below a dated Changelog heading, and pin
    both onboarding READMEs to that tag.
 2. Run every command in [Contributing](CONTRIBUTING.md), review the complete diff,

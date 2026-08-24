@@ -292,17 +292,20 @@ rollback procedures live in [OPERATIONS.md](OPERATIONS.md).
 .github/   contribution, conduct, security, and CI policy
 docs/      governed references, decision records, assets, and localized onboarding
 examples/  publication-safe operator examples
-mocop/     runtime package and embedded dashboard
+src/mocop/ runtime package and embedded dashboard
 tests/     unit, contract, fixture, and browser coverage
 ```
 
-The package remains at the repository root to preserve direct, dependency-free
-test execution. Standard build and project entry files stay at the root; local
+The package lives under `src/` so the checkout can never shadow an installed
+release and packaging stays isolated. `tests/__init__.py` prepends `src` to
+`sys.path`, which preserves direct, dependency-free test execution from a
+source checkout. Standard build and project entry files stay at the root; local
 agent configuration, caches, build output, and dependency-solver state are not
 repository structure. [The documentation portal](README.md) owns the audience
-map and update triggers. [ADR-0019](adr/0019-repository-and-documentation-governance.md)
-records the stable-path decision and supersedes the earlier layout decision in
-[ADR-0001](adr/0001-repository-layout.md).
+map and update triggers. [ADR-0025](adr/0025-src-package-layout.md) records the
+`src/` migration; [ADR-0019](adr/0019-repository-and-documentation-governance.md)
+still owns documentation governance and supersedes the earlier layout decision
+in [ADR-0001](adr/0001-repository-layout.md).
 
 ## Maintainability boundary
 

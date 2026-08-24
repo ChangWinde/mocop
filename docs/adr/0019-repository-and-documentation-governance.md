@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted; the root-level package layout is superseded by
+[ADR-0025](0025-src-package-layout.md)
 
 ## Context
 

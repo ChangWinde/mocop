@@ -19,21 +19,21 @@ TRACKED_ROOT_ENTRIES = {
     "README.md",
     "docs",
     "examples",
-    "mocop",
     "pyproject.toml",
+    "src",
     "tests",
 }
 
 # These ceilings are a ratchet over the reviewed 0.9.0 tree, not a general style
 # rule. Extract a coherent leaf and lower the budget instead of raising it.
 CORE_MODULE_LINE_BUDGETS = {
-    "mocop/static/app.js": 6_825,
-    "mocop/static/dashboard-auth.js": 150,
-    "mocop/static/process-search.js": 225,
-    "mocop/service.py": 2_750,
-    "mocop/web.py": 1_800,
-    "mocop/probe.py": 1_625,
-    "mocop/config.py": 1_575,
+    "src/mocop/static/app.js": 6_825,
+    "src/mocop/static/dashboard-auth.js": 150,
+    "src/mocop/static/process-search.js": 225,
+    "src/mocop/service.py": 2_750,
+    "src/mocop/web.py": 1_800,
+    "src/mocop/probe.py": 1_625,
+    "src/mocop/config.py": 1_575,
 }
 
 

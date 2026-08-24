@@ -3,7 +3,7 @@
 This is the complete reference for Mocop's HTTP API. It is written for both
 human operators and automation ("agents"): every route, header requirement,
 response field, and stable error code below is verified against the route
-manifest (`API_ROUTES` in `mocop/web.py`) by a repository test, so the
+manifest (`API_ROUTES` in `src/mocop/web.py`) by a repository test, so the
 document and the running server cannot drift apart silently.
 
 ## Scope and compatibility

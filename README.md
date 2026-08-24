@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="mocop/static/favicon.svg" width="88" height="88" alt="Mocop logo">
+  <img src="src/mocop/static/favicon.svg" width="88" height="88" alt="Mocop logo">
 </p>
 
 <h1 align="center">Mocop</h1>

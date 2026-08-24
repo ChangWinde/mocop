@@ -29,6 +29,14 @@ All notable changes are documented here. This project follows Semantic Versionin
   credentials are retained only after successful API authentication; malformed or
   rejected tokens remain unstored and do not trigger automatic retries.
 
+### Changed
+
+- Moved the runtime package to `src/mocop` ([ADR-0025](adr/0025-src-package-layout.md)).
+  Package names and wheel contents are unchanged. A source checkout still runs
+  tests without installation: `tests/__init__.py` prepends `src` to `sys.path`,
+  and discovery now names the repository root (`python3 -m unittest discover
+  -s tests -t .`). Contributor commands reference `src/mocop` paths.
+
 ### Fixed
 
 - Applied configured host display names consistently across node navigation, resource

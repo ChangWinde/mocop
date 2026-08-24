@@ -43,19 +43,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Python syntax
-        run: python -m compileall -q mocop tests
+        run: python -m compileall -q src/mocop tests
       - name: Python lint
         run: |
           python -m pip install ruff==0.12.11
           ruff check .
           ruff format --check .
       - name: Unit and contract tests
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests -t . -v
       - name: JavaScript syntax
         run: |
-          node --check mocop/static/app.js
-          node --check mocop/static/dashboard-auth.js
-          node --check mocop/static/process-search.js
+          node --check src/mocop/static/app.js
+          node --check src/mocop/static/dashboard-auth.js
+          node --check src/mocop/static/process-search.js
       - name: Dashboard-auth contract
         run: node tests/dashboard_auth_test.mjs
       - name: Process-search contract
@@ -97,7 +97,7 @@ jobs:
       - name: Branch coverage baseline
         run: |
           python -m pip install coverage==7.15.4
-          coverage run --branch --source=mocop -m unittest discover -s tests -p 'test_*.py' -q
+          coverage run --branch --source=src/mocop -m unittest discover -s tests -t . -p 'test_*.py' -q
           coverage report --fail-under=85
 
   wheel-smoke:
