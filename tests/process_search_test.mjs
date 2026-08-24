@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-await import("../mocop/static/process-search.js");
+await import("../src/mocop/static/process-search.js");
 
 const createSearch = (overrides = {}) => globalThis.MocopProcessSearch.create({
   maxResults: 2,

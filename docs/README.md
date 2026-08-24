@@ -91,14 +91,19 @@ Run these before merging a documentation or structure change:
 
 ```bash
 python3 -m unittest tests.test_docs -v
-python3 -m unittest discover -s tests -v
-uvx --from coverage==7.15.4 coverage run --branch --source=mocop -m unittest discover -s tests -p 'test_*.py' -q
+python3 -m unittest discover -s tests -t . -v
+uvx --from coverage==7.15.4 coverage run --branch --source=src/mocop -m unittest discover -s tests -t . -p 'test_*.py' -q
 uvx --from coverage==7.15.4 coverage report --fail-under=85
-python3 -m compileall -q mocop tests
+python3 -m compileall -q src/mocop tests
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
-node --check mocop/static/app.js
-node --check mocop/static/process-search.js
+node --check src/mocop/static/app.js
+node --check src/mocop/static/capacity-watch.js
+node --check src/mocop/static/dashboard-auth.js
+node --check src/mocop/static/format.js
+node --check src/mocop/static/process-search.js
+node tests/capacity_watch_test.mjs
+node tests/dashboard_auth_test.mjs
 node tests/process_search_test.mjs
 node --experimental-websocket tests/browser_smoke.mjs
 ```

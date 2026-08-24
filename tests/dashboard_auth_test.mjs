@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-await import("../mocop/static/dashboard-auth.js");
+await import("../src/mocop/static/dashboard-auth.js");
 
 const VALID_TOKEN = "A".repeat(43);
 

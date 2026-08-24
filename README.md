@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="mocop/static/favicon.svg" width="88" height="88" alt="Mocop logo">
+  <img src="src/mocop/static/favicon.svg" width="88" height="88" alt="Mocop logo">
 </p>
 
 <h1 align="center">Mocop</h1>
@@ -51,8 +51,11 @@ English README, API, operations, and engineering references remain maintained.
 
 - GPU utilization, VRAM, temperature, power, model, driver, hardware health, and
   scan-friendly per-GPU process summaries
-- GPU capacity matching, scheduling heatmap, connection map, global/selected-host
-  program search, active-process filtering/sorting, attribution filters, and CSV export
+- GPU capacity matching with an optional capacity watch that raises an in-page
+  banner and an opt-in browser notification when a satisfying idle combination
+  appears, plus a scheduling heatmap, connection map, global/selected-host
+  program search, active-process filtering/sorting, attribution filters,
+  one-click `ssh <alias>` copy, and CSV export
 - CPU, load, memory, swap, disk capacity and I/O, network rate, uptime, and kernel pressure stall (PSI) telemetry
 - Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, and timed maintenance
 - Independent per-host scheduling, possible shared-path grouping, and optional HTTPS webhooks

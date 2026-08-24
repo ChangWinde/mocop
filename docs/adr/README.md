@@ -26,9 +26,10 @@ for status and superseding rules.
 | [0016](0016-single-version-protocol-and-agent-api.md) | Accepted | Single-version collection protocol and agent-facing API conventions |
 | [0017](0017-per-install-dashboard-capability.md) | Accepted | Per-install dashboard capability |
 | [0018](0018-browser-process-search.md) | Accepted | Browser-side process search over the authenticated snapshot |
-| [0019](0019-repository-and-documentation-governance.md) | Accepted | Repository and documentation governance |
+| [0019](0019-repository-and-documentation-governance.md) | Accepted; root-package layout superseded by 0025 | Repository and documentation governance |
 | [0020](0020-process-centric-gpu-inventory.md) | Accepted | Process-centric GPU inventory and task workspace |
 | [0021](0021-incremental-module-boundaries.md) | Accepted | Incremental module boundaries and growth budgets |
 | [0022](0022-resolved-ssh-topology-discovery.md) | Accepted | Resolved SSH topology discovery and proxy grouping |
 | [0023](0023-non-destructive-host-migration.md) | Accepted | Non-destructive cross-machine configuration migration |
 | [0024](0024-fresh-host-fast-deployment.md) | Accepted | Fresh-host fast deployment |
+| [0025](0025-src-package-layout.md) | Accepted | src/ package layout |

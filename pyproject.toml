@@ -31,6 +31,7 @@ Issues = "https://github.com/ChangWinde/mocop/issues"
 Repository = "https://github.com/ChangWinde/mocop"
 
 [tool.setuptools]
+package-dir = {"" = "src"}
 packages = ["mocop", "mocop.static"]
 
 [tool.setuptools.package-data]
