@@ -1,10 +1,9 @@
 # Operations, upgrade, and rollback
 
-This runbook covers the generated user-level systemd service. Package
-installation and service installation are separate: changing the installed
-package does not restart the running process; `mocop service install` validates
-the selected configuration, regenerates the unit, restarts it, and verifies
-that it becomes active.
+This runbook covers the generated user-level systemd service. Installing a package
+never changes a running service. A fresh host uses `mocop deploy`; an existing setup
+uses `mocop service install` to validate the selected configuration, regenerate the
+unit, restart it, and verify that it becomes active.
 
 ## Installed state and ownership
 
@@ -116,11 +115,80 @@ against the only copy of production state.
 5. Open the exact `Dashboard:` capability URL printed by the installer. The page
    immediately removes the fragment and keeps the token in tab-scoped
    `sessionStorage`. Reloads remain authenticated; a closed or independent tab
-   requires the printed URL again.
+   requires the printed URL again. A bare or forwarded dashboard URL instead
+   presents a token prompt; paste the contents of the sibling `access-token`
+   file. Use only a trusted TLS-terminating proxy because it carries subsequent
+   Bearer-authenticated API traffic.
 
 Treat a successful systemd restart as necessary but insufficient: it does not prove
 SSH reachability, readiness, history restoration, webhook delivery, or browser
 rendering.
+
+## Fresh-host fast deployment
+
+After installing the package on a server with a user-level systemd manager and an
+operator-owned OpenSSH configuration, deploy Mocop with one local command:
+
+```bash
+uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.9.0"
+"$(uv tool dir --bin)/mocop" deploy --display-name monitor-0
+```
+
+The explicit executable path works even when the current shell has not reloaded uv's
+tool path. The command creates the normal private config, adds the current hostname as
+the local target, enables automatic alias admission and resolved topology discovery,
+then installs and health-checks the user service. Use repeatable `--host SSH_ALIAS` for
+targets absent from OpenSSH discovery, `--local-host ALIAS` to choose the internal local
+identity, `--no-local` for a controller-only monitor, and `--no-auto-discover` for an
+explicit-only inventory.
+
+Fresh deployment refuses an existing config, sibling `access-token`, or sibling
+`environment`; it never overwrites or silently adopts an old installation. Use
+`mocop service install` when a valid config already exists, or `mocop migrate` only
+when transforming another
+installation. If service verification fails, the unit rollback runs and the new config
+remains available for `mocop config check` and `mocop doctor`.
+
+## Cross-machine migration
+
+Do not copy the entire Mocop config/state directory or the generated systemd unit to
+another machine. In particular, the sibling `access-token` is an installation
+capability, the unit embeds an interpreter path, and `local_host`, maintenance,
+incident actions, SSH paths, and optional SQLite history may belong to the old machine.
+
+Copy only the old `config.json` into a temporary owner-only location on the new
+machine, set its mode to `0600`, install the new Mocop package, and generate a new
+configuration:
+
+```bash
+chmod 600 /private/import/config.json
+mocop migrate --from-config /private/import/config.json \
+  --display-name new-console --auto-discover
+mocop config check
+mocop doctor --no-connect
+mocop service install
+```
+
+The target defaults to the normal user configuration path and must not exist. Use
+`--config PATH` for a different new target. If the source monitored itself through
+`local_host`, migration replaces that alias with this machine's hostname; use
+`--local-host ALIAS` to choose another safe identity, or `--drop-local-host` when the
+new monitor must not collect itself. `--display-name` affects presentation only.
+`--ssh-config` defaults to the new machine's `~/.ssh/config`.
+
+Migration preserves the source `auto_discover` setting unless `--auto-discover` or
+`--no-auto-discover` is supplied. It upgrades route discovery metadata to bounded
+topology mode but does not run `ssh -G` or connect. Old-local expected GPU counts,
+host overrides, maintenance, host incident overrides, and incident actions are
+dropped; its group and configured topology node follow the new local alias. The
+command reports every dropped field and never changes the source.
+
+No capability, webhook environment, SSH credential, unit, or SQLite history is
+copied. A target directory containing `access-token` is rejected so `service install`
+creates a fresh capability. Migrate webhook variables manually into a new private
+`environment` file. Move SQLite history only as a separate, stopped-service,
+schema-compatible backup/restore operation described above. Complete live `doctor`,
+readiness, authenticated snapshot, journal, and browser checks after installation.
 
 ## Rollback
 

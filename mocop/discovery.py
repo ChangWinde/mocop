@@ -4,11 +4,21 @@ import os
 import re
 import shlex
 import stat
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from glob import iglob
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
-from .config import MonitorConfig, is_safe_alias
+from .config import (
+    CONFIG_MAX_HOST_ALIASES,
+    ConnectionTopologyConfig,
+    MonitorConfig,
+    is_safe_alias,
+)
+from .ssh_topology import SshTopologyPlanner, default_topology_root
 
 _MAX_CONFIG_FILES = 128
 _MAX_CONFIG_BYTES = 1_048_576
@@ -20,8 +30,62 @@ class HostSource(Protocol):
     def hosts(self, config: MonitorConfig) -> tuple[str, ...]: ...
 
 
+@runtime_checkable
+class CancellableHostSource(Protocol):
+    def cancel(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class HostDiscoverySnapshot:
+    aliases: tuple[str, ...]
+    eligible_aliases: tuple[str, ...]
+    hosts: tuple[str, ...]
+    infrastructure_hosts: tuple[str, ...]
+    host_groups: tuple[tuple[str, str], ...]
+    topology: ConnectionTopologyConfig | None
+    warnings: tuple[str, ...]
+    mode: str
+
+
+@runtime_checkable
+class DiscoveryHostSource(Protocol):
+    def discovery(self, config: MonitorConfig) -> HostDiscoverySnapshot: ...
+
+
+def resolve_host_discovery(
+    source: HostSource, config: MonitorConfig
+) -> HostDiscoverySnapshot:
+    if isinstance(source, DiscoveryHostSource):
+        return source.discovery(config)
+    return HostDiscoverySnapshot(
+        aliases=(),
+        eligible_aliases=(),
+        hosts=source.hosts(config),
+        infrastructure_hosts=(),
+        host_groups=config.host_groups,
+        topology=config.topology,
+        warnings=(),
+        mode="aliases",
+    )
+
+
 class OpenSshConfigHostSource:
     """Enumerate literal Host aliases from OpenSSH config and its Include files."""
+
+    def __init__(
+        self,
+        planner: SshTopologyPlanner | None = None,
+        monotonic: Callable[[], float] | None = None,
+    ) -> None:
+        self._planner = planner or SshTopologyPlanner()
+        self._monotonic = monotonic or time.monotonic
+        self._cache_lock = threading.Lock()
+        self._cache_key: tuple[object, ...] | None = None
+        self._cache_until = 0.0
+        self._cache: HostDiscoverySnapshot | None = None
+
+    def cancel(self) -> None:
+        self._planner.cancel()
 
     def aliases(self, config: MonitorConfig) -> tuple[str, ...]:
         aliases = self._read_aliases(config.ssh_config)
@@ -31,13 +95,24 @@ class OpenSshConfigHostSource:
                 "host aliases must contain only letters, numbers, dots, underscores, "
                 f"and hyphens: {', '.join(invalid)}"
             )
+        if len(aliases) > CONFIG_MAX_HOST_ALIASES:
+            raise ValueError(
+                "SSH config contains more than "
+                f"{CONFIG_MAX_HOST_ALIASES} literal host aliases"
+            )
         return tuple(sorted(aliases))
 
     def hosts(self, config: MonitorConfig) -> tuple[str, ...]:
+        return self.discovery(config).hosts
+
+    @staticmethod
+    def _alias_only_hosts(
+        config: MonitorConfig, aliases: tuple[str, ...]
+    ) -> tuple[str, ...]:
         discovered = set(config.hosts)
         if config.auto_discover:
             discovered.update(
-                alias for alias in self.aliases(config) if not is_code_host_alias(alias)
+                alias for alias in aliases if not is_code_host_alias(alias)
             )
 
         invalid = sorted(host for host in discovered if not is_safe_alias(host))
@@ -47,6 +122,86 @@ class OpenSshConfigHostSource:
                 f"and hyphens: {', '.join(invalid)}"
             )
         return tuple(sorted(discovered - config.exclude_hosts))
+
+    @staticmethod
+    def _cache_identity(
+        config: MonitorConfig, aliases: tuple[str, ...]
+    ) -> tuple[object, ...]:
+        return (
+            config.ssh_config,
+            aliases,
+            config.auto_discover,
+            config.hosts,
+            config.exclude_hosts,
+            config.local_host,
+            config.host_groups,
+            config.topology,
+            config.max_workers,
+            config.ssh_discovery,
+        )
+
+    def discovery(self, config: MonitorConfig) -> HostDiscoverySnapshot:
+        aliases = self.aliases(config)
+        eligible = tuple(
+            alias
+            for alias in aliases
+            if alias not in config.exclude_hosts and not is_code_host_alias(alias)
+        )
+        if config.ssh_discovery.mode == "aliases":
+            return HostDiscoverySnapshot(
+                aliases=aliases,
+                eligible_aliases=eligible,
+                hosts=self._alias_only_hosts(config, aliases),
+                infrastructure_hosts=(),
+                host_groups=config.host_groups,
+                topology=config.topology,
+                warnings=(),
+                mode="aliases",
+            )
+
+        now = self._monotonic()
+        cache_key = self._cache_identity(config, aliases)
+        with self._cache_lock:
+            if (
+                self._cache is not None
+                and self._cache_key == cache_key
+                and now < self._cache_until
+            ):
+                return self._cache
+            targets = tuple(
+                sorted(set(eligible) | (set(config.hosts) - config.exclude_hosts))
+            )
+            resolution = self._planner.resolve(aliases, targets, config)
+            route_map = resolution.route_map()
+            infrastructure = {hop for route in route_map.values() for hop in route.hops}
+            failed = set(resolution.failures)
+            auto_hosts = set(eligible) - infrastructure - failed
+            explicit_hosts = set(config.hosts) - config.exclude_hosts
+            active = explicit_hosts | (auto_hosts if config.auto_discover else set())
+            hosts = tuple(sorted(active))
+            projection = self._planner.project(
+                default_topology_root(config, aliases), hosts, resolution
+            )
+            inferred_groups = dict(projection.host_groups)
+            inferred_groups.update(config.host_groups)
+            snapshot = HostDiscoverySnapshot(
+                aliases=aliases,
+                eligible_aliases=tuple(
+                    alias
+                    for alias in eligible
+                    if alias not in infrastructure and alias not in failed
+                ),
+                hosts=hosts,
+                infrastructure_hosts=tuple(sorted(infrastructure)),
+                host_groups=tuple(sorted(inferred_groups.items())),
+                topology=config.topology or projection.topology,
+                warnings=projection.warnings,
+                mode="topology",
+            )
+            self._cache_key = cache_key
+            self._cache_until = now + config.ssh_discovery.refresh_seconds
+            self._cache = snapshot
+            return snapshot
 
     def _read_aliases(self, root: Path) -> set[str]:
         aliases: set[str] = set()

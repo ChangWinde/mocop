@@ -487,6 +487,8 @@ class WebTests(unittest.TestCase):
             body = response.read().decode("utf-8")
         with urlopen(f"{self.base}/app.js", timeout=2) as response:
             script = response.read().decode("utf-8")
+        with urlopen(f"{self.base}/dashboard-auth.js", timeout=2) as response:
+            authentication_script = response.read().decode("utf-8")
         with urlopen(f"{self.base}/process-search.js", timeout=2) as response:
             search_script = response.read().decode("utf-8")
         self.assertIn("Mocop", body)
@@ -562,6 +564,9 @@ class WebTests(unittest.TestCase):
         self.assertIn("age(snapshot.lastPollCompletedAt)", script)
         self.assertNotIn("age(snapshot.generatedAt)", script)
         self.assertIn("createProcessSearch", search_script)
+        self.assertIn("MocopDashboardAuth", authentication_script)
+        self.assertIn('id="authentication-dialog"', body)
+        self.assertIn('src="/dashboard-auth.js"', body)
         self.assertIn('src="/process-search.js"', body)
 
     def test_static_assets_support_etag_revalidation(self) -> None:
@@ -1421,6 +1426,51 @@ class WebTests(unittest.TestCase):
         with urlopen(request, timeout=2) as response:
             payload = json.load(response)
         self.assertEqual(payload["pollIntervalSeconds"], 2)
+        self.assertEqual(state.snapshot()["pollIntervalSeconds"], 2)
+
+    def test_trusted_https_origin_suffix_supports_ephemeral_proxy_hosts(self) -> None:
+        state = StateStore(5)
+        server, thread = serve_in_thread(
+            "127.0.0.1",
+            0,
+            state,
+            _Inventory(),
+            trusted_hosts=("*.fwd.memory.whalent.com",),
+        )
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.assertNotIn("fwd.memory.whalent.com", server.trusted_hostnames)
+        self.assertEqual(
+            server.trusted_origin_suffixes, frozenset({"fwd.memory.whalent.com"})
+        )
+
+        allowed = self.poll_interval_request(
+            b'{"pollIntervalSeconds":2}',
+            origin="https://35sc9ontjvbtfee57ow5sdynv.fwd.memory.whalent.com",
+        )
+        allowed.full_url = (
+            f"http://127.0.0.1:{server.server_port}/api/settings/poll-interval"
+        )
+        with urlopen(allowed, timeout=2) as response:
+            payload = json.load(response)
+        self.assertEqual(payload["pollIntervalSeconds"], 2)
+
+        rejected_origins = (
+            "http://35sc9ontjvbtfee57ow5sdynv.fwd.memory.whalent.com",
+            "https://fwd.memory.whalent.com",
+            "https://fwd.memory.whalent.com.attacker.example",
+            "https://attacker.example",
+        )
+        for origin in rejected_origins:
+            with self.subTest(origin=origin):
+                request = self.poll_interval_request(
+                    b'{"pollIntervalSeconds":3}', origin=origin
+                )
+                request.full_url = (
+                    f"http://127.0.0.1:{server.server_port}/api/settings/poll-interval"
+                )
+                self.assert_http_error(request, 403)
         self.assertEqual(state.snapshot()["pollIntervalSeconds"], 2)
 
     def test_rejects_dns_rebinding_hosts_despite_loopback_delivery(self) -> None:

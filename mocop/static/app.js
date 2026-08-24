@@ -13,6 +13,7 @@ const MAX_COMPRESSED_BACKGROUND_PIXELS = 12_000_000;
 const MAX_GPU_DETAIL_PROCESSES = 100;
 const MAX_PROGRAM_SEARCH_RESULTS = 200;
 const MAX_SEARCH_QUERY_LENGTH = 120;
+const MAX_HEATMAP_COLUMNS = 8;
 const GPU_PROCESS_FRESHNESS_WARNING_MS = 90_000;
 const gpuProcessSummaryCache = new WeakMap();
 const BACKGROUND_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
@@ -120,39 +121,7 @@ document.documentElement.style.setProperty(
 // never sent by HTTP. Keep it in tab-scoped session storage so an intentional
 // reload (including the managed restart workflow) remains usable, while never
 // turning it into an ambient cookie or persistent cross-session credential.
-const DASHBOARD_TOKEN_STORAGE_KEY = "mocop.dashboardAccessToken.v1";
-const fragmentParameters = new URLSearchParams(window.location.hash.slice(1));
-const fragmentToken = fragmentParameters.get("access_token");
-const validFragmentToken = fragmentToken != null
-  && /^[A-Za-z0-9_-]{32,192}$/.test(fragmentToken) ? fragmentToken : "";
-let storedDashboardAccessToken = "";
-try {
-  if (validFragmentToken) {
-    window.sessionStorage.setItem(DASHBOARD_TOKEN_STORAGE_KEY, validFragmentToken);
-  } else if (fragmentToken == null) {
-    storedDashboardAccessToken = window.sessionStorage.getItem(
-      DASHBOARD_TOKEN_STORAGE_KEY,
-    ) || "";
-  } else {
-    window.sessionStorage.removeItem(DASHBOARD_TOKEN_STORAGE_KEY);
-  }
-} catch (_error) {
-  // Privacy modes may disable sessionStorage. The fragment still works for
-  // this document; a later reload will then require reopening the install URL.
-}
-const dashboardAccessToken = validFragmentToken
-  || (/^[A-Za-z0-9_-]{32,192}$/.test(storedDashboardAccessToken)
-    ? storedDashboardAccessToken : "");
-const invalidDashboardAccessToken = fragmentToken != null && !validFragmentToken;
-if (fragmentToken != null) {
-  fragmentParameters.delete("access_token");
-  const retainedFragment = fragmentParameters.toString();
-  window.history.replaceState(
-    null,
-    "",
-    `${window.location.pathname}${window.location.search}${retainedFragment ? `#${retainedFragment}` : ""}`,
-  );
-}
+const dashboardAuthentication = globalThis.MocopDashboardAuth.create(window);
 // Shadowing the script-scope fetch keeps the viewer marker and explicit
 // capability uniform for all call sites.
 const nativeFetch = window.fetch.bind(window);
@@ -162,8 +131,8 @@ const fetch = (url, options = {}) => nativeFetch(url, {
   headers: {
     "X-Monitor-Request": "dashboard",
     ...(options.headers || {}),
-    ...(dashboardAccessToken
-      ? { Authorization: `Bearer ${dashboardAccessToken}` } : {}),
+    ...(dashboardAuthentication.token
+      ? { Authorization: `Bearer ${dashboardAuthentication.token}` } : {}),
   },
 });
 
@@ -322,6 +291,11 @@ const SERVER_FILTER_LABELS = Object.freeze({
 const elements = {
   connection: $("#connection"),
   connectionText: $("#connection-text"),
+  authenticationDialog: $("#authentication-dialog"),
+  authenticationForm: $("#authentication-form"),
+  authenticationToken: $("#authentication-token"),
+  authenticationSubmit: $("#authentication-submit"),
+  authenticationStatus: $("#authentication-status"),
   settingsToggle: $("#settings-toggle"),
   settingsDialog: $("#settings-dialog"),
   topologyToggle: $("#topology-toggle"),
@@ -1373,6 +1347,11 @@ function normalizeInventory(payload) {
     configuredHosts,
   );
   const hostGroups = normalizeHostGroups(payload.hostGroups, configuredHosts);
+  const infrastructureHosts = safeStoredHosts(payload.infrastructureHosts || []);
+  const sshDiscoveryWarnings = Array.isArray(payload.sshDiscoveryWarnings)
+    ? payload.sshDiscoveryWarnings.filter((item) => typeof item === "string").slice(0, 1024)
+    : [];
+  const sshDiscoveryMode = payload.sshDiscoveryMode || "aliases";
   if (
     configuredHosts.length !== payload.configuredHosts?.length
     || activeHosts.length !== payload.activeHosts?.length
@@ -1382,6 +1361,8 @@ function normalizeInventory(payload) {
     || typeof payload.writable !== "boolean"
     || !Number.isSafeInteger(payload.ignoredCodeHostCount)
     || !Number.isSafeInteger(payload.excludedHostCount)
+    || !["aliases", "topology"].includes(sshDiscoveryMode)
+    || infrastructureHosts.length !== (payload.infrastructureHosts || []).length
   ) {
     throw new TypeError("Invalid inventory response");
   }
@@ -1397,6 +1378,7 @@ function normalizeInventory(payload) {
     collectorSettings,
     maintenanceWindows,
     hostGroups,
+    infrastructureHosts, sshDiscoveryWarnings, sshDiscoveryMode,
   };
 }
 
@@ -1464,6 +1446,7 @@ function normalizeTopology(payload) {
   return { root, links };
 }
 
+function displayHost(value) { const server = typeof value === "string" ? topologyServer(value) : value; return server?.displayName || server?.host || value || ""; }
 function topologyServer(host) {
   return view.snapshot?.servers.find((server) => server.host === host) || null;
 }
@@ -1486,13 +1469,13 @@ function updateTopologyNode(reference, host, server) {
     metaText = `${server.gpus.length} GPU · CPU ${Number.isFinite(cpu) ? `${format(cpu)}%` : "—"}`;
     statusLabel = metaText;
   }
-  const signature = server ? `${state}\u0000${metaText}` : "infrastructure";
+  const signature = server ? `${displayHost(server)}\u0000${state}\u0000${metaText}` : "infrastructure";
   if (reference.signature === signature) return;
   reference.signature = signature;
   reference.button.className = `topology-node ${state}`;
   reference.button.disabled = !server;
-  reference.meta.textContent = metaText;
-  reference.button.setAttribute("aria-label", `${host}，${statusLabel}`);
+  reference.button.querySelector("strong").textContent = displayHost(server || host); reference.meta.textContent = metaText;
+  reference.button.setAttribute("aria-label", `${displayHost(server || host)}，${statusLabel}`);
 }
 
 function topologyNode(host, isRoot, nodeRefs) {
@@ -1502,7 +1485,7 @@ function topologyNode(host, isRoot, nodeRefs) {
   const heading = create("span", "topology-node-heading");
   heading.append(
     create("i", "topology-node-dot"),
-    create("strong", "", host),
+    create("strong", "", displayHost(host)),
   );
   if (isRoot) heading.append(create("small", "topology-root-badge", "起点"));
   const meta = create("span", "topology-node-meta");
@@ -1576,11 +1559,11 @@ function buildTopologyGraph(topology) {
 }
 
 function syncTopologyUnmapped(servers) {
-  const key = servers.map((server) => server.host).join("\u0000");
+  const key = servers.map((server) => `${server.host}\u0000${server.displayName || ""}`).join("\u0000");
   if (view.topologyUnmappedKey === key) return;
   view.topologyUnmappedKey = key;
   const buttons = servers.map((server) => {
-    const button = create("button", "topology-unmapped-node", server.host);
+    const button = create("button", "topology-unmapped-node", displayHost(server));
     button.type = "button";
     button.addEventListener("click", () => {
       selectHost(server.host);
@@ -2070,6 +2053,8 @@ function renderInventory() {
   const ignored = inventory.ignoredCodeHostCount + inventory.excludedHostCount;
   let message = `正在监控 ${inventory.activeHosts.length} 个节点，可添加 ${inventory.availableHosts.length} 个`;
   if (ignored) message += `，已按规则忽略 ${ignored} 个别名`;
+  if (inventory.infrastructureHosts.length) message += `，识别 ${inventory.infrastructureHosts.length} 个跳板/代理节点`;
+  if (inventory.sshDiscoveryWarnings.length) message += `，${inventory.sshDiscoveryWarnings.length} 条拓扑解析提示`;
   if (inventory.autoDiscover) message += "；自动发现已开启";
   if (!inventory.writable) message = "当前配置不可由网页修改，请先运行 mocop init 创建用户配置";
   elements.inventoryStatus.className = `inventory-status ${view.inventoryMessageKind}`.trim();
@@ -2566,7 +2551,7 @@ function capacityCandidateCard(candidate) {
   card.dataset.candidateKey = `${candidate.host}\u0000${candidate.model}`;
   const heading = create("div", "capacity-candidate-heading");
   const identity = create("span", "capacity-candidate-identity");
-  const hostName = create("strong", "", candidate.host);
+  const hostName = create("strong", "", displayHost(candidate.host));
   hostName.title = candidate.host;
   const modelName = create("small", "", candidate.model);
   modelName.title = candidate.model;
@@ -3087,7 +3072,7 @@ function renderAttention() {
   visibleIssues.forEach((issue) => {
     const item = create(issue.shared ? "article" : "button", `attention-item ${issue.severity}${issue.shared ? " shared" : ""}`);
     if (!issue.shared) item.type = "button";
-    const issueLabel = issue.shared ? issue.sharedLabel : issue.server.host;
+    const issueLabel = issue.shared ? issue.sharedLabel : displayHost(issue.server);
     item.title = `${issueLabel}：${issue.messages.join(" · ")}`;
     const heading = create("span", "attention-item-heading");
     heading.append(
@@ -3099,7 +3084,7 @@ function renderAttention() {
     if (issue.shared) {
       const hosts = create("span", "attention-hosts");
       issue.hosts.forEach((host) => {
-        const button = create("button", "attention-host", host);
+        const button = create("button", "attention-host", displayHost(host));
         button.type = "button";
         button.addEventListener("click", () => selectHost(host));
         hosts.append(button);
@@ -3358,7 +3343,7 @@ function renderIncidents() {
   const visible = view.incidentExpanded ? events : events.slice(0, 6);
   elements.incidentSummary.textContent = view.selectedHost === "all"
     ? `${events.length} 条近期状态变化`
-    : `${view.selectedHost} · ${events.length} 条近期变化`;
+    : `${displayHost(view.selectedHost)} · ${events.length} 条近期变化`;
   elements.incidentToggle.hidden = events.length <= 6;
   elements.incidentToggle.textContent = view.incidentExpanded ? "收起" : "展开全部";
   const fragment = document.createDocumentFragment();
@@ -3371,11 +3356,11 @@ function renderIncidents() {
       `incident-item ${stateClass}${event.silenced ? " silenced" : ""}`,
     );
     item.type = "button";
-    item.title = `${event.host}：${incidentDescription(event)}`;
+    item.title = `${displayHost(event.host)}：${incidentDescription(event)}`;
     const body = create("span", "incident-body");
     const title = create("span", "incident-title");
     title.append(
-      create("strong", "", event.host),
+      create("strong", "", displayHost(event.host)),
       create("em", "", incidentStateLabel(event.state)),
     );
     if (event.silenced) {
@@ -4021,7 +4006,7 @@ function serverItem(server, selectedHost) {
   item.type = "button";
   if (selectedHost === server.host) item.setAttribute("aria-current", "true");
   item.title = [
-    `${server.host} · ${label}`,
+    `${displayHost(server)} · ${label}`,
     server.lastSuccessAt ? `上次成功 ${age(server.lastSuccessAt)}` : "尚无成功样本",
     server.polling ? "正在重新探测" : server.nextRetryAt ? retryCountdown(server.nextRetryAt) : "",
   ].filter(Boolean).join(" · ");
@@ -4033,7 +4018,7 @@ function serverItem(server, selectedHost) {
 
   const main = create("div", "server-main");
   const identity = create("div", "server-main");
-  identity.append(create("i", `status-dot ${stateClass}`), create("span", "server-name", server.displayName || server.host));
+  identity.append(create("i", `status-dot ${stateClass}`), create("span", "server-name", displayHost(server)));
   const group = hostGroupName(server);
   if (group) identity.append(create("span", "server-group-badge", group));
   const gpuLabel = `${server.gpus.length} GPU${server.stale ? " · 历史" : ""}`;
@@ -4389,7 +4374,7 @@ function heatmapTile(server, gpu) {
   );
   tile.type = "button";
   tile.style.setProperty("--heat-level", String(0.07 + (clamp(metric.level) / 100) * 0.63));
-  tile.title = `${server.host} · GPU ${gpu.index} · ${gpu.name} · ${metric.label}`;
+  tile.title = `${displayHost(server)} · GPU ${gpu.index} · ${gpu.name} · ${metric.label}`;
   tile.setAttribute("aria-label", tile.title);
   tile.append(
     create("small", "", `#${gpu.index}`),
@@ -4400,15 +4385,19 @@ function heatmapTile(server, gpu) {
 }
 
 function heatmapRow(server, columns) {
-  const row = create("div", "heatmap-row");
+  const row = create("div", "heatmap-row"); row.dataset.host = server.host;
   row.style.setProperty("--heat-columns", columns);
-  const host = create("button", "heatmap-host", server.host);
+  const rowCount = Math.max(1, Math.ceil((Math.max(
+    ...server.gpus.map((gpu) => numeric(gpu.index)),
+  ) + 1) / columns));
+  row.style.setProperty("--heat-rows", rowCount);
+  const host = create("button", "heatmap-host", displayHost(server));
   host.type = "button";
-  host.title = `查看 ${server.host}`;
+  host.title = `查看 ${displayHost(server)}`;
   host.addEventListener("click", () => selectHost(server.host));
   row.append(host);
   const byIndex = new Map(server.gpus.map((gpu) => [numeric(gpu.index), gpu]));
-  for (let index = 0; index < columns; index += 1) {
+  for (let index = 0; index < columns * rowCount; index += 1) {
     const gpu = byIndex.get(index);
     row.append(gpu ? heatmapTile(server, gpu) : create("span", "heatmap-cell placeholder"));
   }
@@ -4417,7 +4406,7 @@ function heatmapRow(server, columns) {
 
 function cachedHeatmapRow(server, columns) {
   const signature = JSON.stringify({
-    metric: view.heatMetric,
+    metric: `${view.heatMetric}\u0000${server.displayName || ""}`,
     columns,
     threshold: limits().gpu_temperature_warning_c,
     gpus: server.gpus.map((gpu) => ({
@@ -4446,9 +4435,12 @@ function renderHeatmap() {
     elements.gpuHeatmap.hidden = true;
     return;
   }
-  const columns = Math.max(
-    1,
-    ...servers.flatMap((server) => server.gpus.map((gpu) => numeric(gpu.index) + 1)),
+  const columns = Math.min(
+    MAX_HEATMAP_COLUMNS,
+    Math.max(
+      1,
+      ...servers.flatMap((server) => server.gpus.map((gpu) => numeric(gpu.index) + 1)),
+    ),
   );
   const activeHosts = new Set(servers.map((server) => server.host));
   [...view.heatmapCache.keys()].forEach((host) => {
@@ -4994,7 +4986,7 @@ function updateProgramSearchRow(row, record) {
   row.command.textContent = command || "命令行未采集";
   if (command) row.command.title = command;
   else row.command.removeAttribute("title");
-  row.location.textContent = `${server.host} · GPU ${gpu.index} · PID ${process.pid}`;
+  row.location.textContent = `${displayHost(server)} · GPU ${gpu.index} · PID ${process.pid}`;
   const freshness = gpu.processes_observed_at
     ? `任务数据 ${age(gpu.processes_observed_at)}` : "等待任务数据";
   row.context.textContent = `${server.stale ? "历史样本" : "当前样本"} · ${freshness}`;
@@ -5025,7 +5017,7 @@ function updateProgramSearchRow(row, record) {
   row.item.dataset.gpuId = String(gpu.uuid || gpu.index);
   row.button.setAttribute(
     "aria-label",
-    `打开 ${server.host} GPU ${gpu.index} 上的 ${shortName}，PID ${process.pid}`,
+    `打开 ${displayHost(server)} GPU ${gpu.index} 上的 ${shortName}，PID ${process.pid}`,
   );
   row.button.onclick = () => {
     const key = `${process.pid}|${process.name || ""}`;
@@ -5035,12 +5027,12 @@ function updateProgramSearchRow(row, record) {
 
 function renderProgramSearch() {
   const terms = normalizedSearchTerms(view.query);
-  const scope = view.selectedHost === "all" ? "全局" : view.selectedHost;
+  const scope = view.selectedHost === "all" ? "全局" : displayHost(view.selectedHost);
   elements.programSearchScope.textContent = scope;
   elements.search.setAttribute("aria-label", `在${scope}搜索服务器、GPU 或程序`);
   elements.search.placeholder = view.selectedHost === "all"
     ? "搜索服务器、GPU 或程序"
-    : `在 ${view.selectedHost} 搜索 GPU 或程序`;
+    : `在 ${displayHost(view.selectedHost)} 搜索 GPU 或程序`;
   elements.programSearchPanel.hidden = !terms.length;
   if (!terms.length) {
     view.programSearchRowCache.clear();
@@ -5493,7 +5485,7 @@ function renderGpuDetail() {
   const emptyCardClass = staleProcessFreshness
     ? "gpu-task-empty gpu-task-freshness-stale" : "gpu-task-empty";
 
-  elements.gpuDetailHost.textContent = `${server.host} · GPU ${gpu.index}`;
+  elements.gpuDetailHost.textContent = `${displayHost(server)} · GPU ${gpu.index}`;
   elements.gpuDetailTitle.textContent = gpu.name || "Unknown NVIDIA GPU";
   elements.gpuDetailState.textContent = [
     state,
@@ -5711,7 +5703,7 @@ function tableRow(record, grouped = false) {
   const device = create("div", "device-cell");
   device.append(create("span", "gpu-index", String(gpu.index)));
   const deviceText = create("div", "device-text");
-  deviceText.append(create("strong", "", grouped ? `GPU ${gpu.index}` : server.host));
+  deviceText.append(create("strong", "", grouped ? `GPU ${gpu.index}` : displayHost(server)));
   deviceText.append(create("span", "", gpu.uuid ? gpu.uuid.slice(-12) : "No UUID"));
   device.append(deviceText);
   deviceCell.append(device);
@@ -5930,7 +5922,7 @@ function gpuGroup(group) {
   const identity = create("span", "gpu-group-identity");
   const name = create("span", "gpu-group-name");
   name.append(
-    create("strong", "", server.host),
+    create("strong", "", displayHost(server)),
     create("small", "", `${records.length === server.gpus.length ? records.length : `${records.length} / ${server.gpus.length}`} 张 GPU`),
   );
   identity.append(create("i", "status-dot online"), name);
@@ -5977,7 +5969,7 @@ function gpuGroup(group) {
 function tableSignature(server, records) {
   const system = server.system;
   return JSON.stringify({
-    host: server.host,
+    host: `${server.host}\u0000${server.displayName || ""}`,
     incidentVersion: view.incidentVersion,
     filter: view.filter,
     query: view.query.trim(),
@@ -6052,7 +6044,7 @@ function renderTable() {
     ? null
     : view.snapshot.servers.find((server) => server.host === view.selectedHost);
   elements.inventoryTitle.textContent = selected
-    ? selected.host
+    ? displayHost(selected)
     : view.serverFilter === "all" ? "全局资源" : SERVER_FILTER_LABELS[view.serverFilter];
   elements.probeNow.hidden = !selected;
   elements.probeNow.disabled = !selected || selected.polling || view.manualProbePending;
@@ -6096,7 +6088,7 @@ function selectedHostPanelKey() {
   );
   if (!server) return `${view.selectedHost}\u0000missing`;
   return [
-    server.host, server.status, server.stale, server.polling,
+    `${server.host}\u0000${server.displayName || ""}`, server.status, server.stale, server.polling,
     server.lastAttemptAt, server.lastSuccessAt, server.nextRetryAt,
     server.consecutiveFailures, server.message,
     view.incidentVersion,
@@ -6146,9 +6138,8 @@ async function fetchSnapshot() {
     try {
       const response = await fetch("/api/snapshot", { cache: "no-store" });
       if (response.status === 403) {
-        view.authenticationFailed = true;
-        view.dashboardStarted = false;
-        setConnection("offline", "认证失败，请重新打开安装命令输出的链接");
+        dashboardAuthentication.forget();
+        requestDashboardAuthentication("访问令牌不正确或已失效，请重新输入");
         return false;
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -6309,7 +6300,7 @@ async function connectAuthenticatedStream() {
 }
 
 function connect() {
-  if (dashboardAccessToken) {
+  if (dashboardAuthentication.token) {
     connectAuthenticatedStream();
     return;
   }
@@ -6783,33 +6774,52 @@ setInterval(() => {
   else if (elapsed > 16000) fetchSnapshot();
 }, 1000);
 
+const requestDashboardAuthentication = dashboardAuthentication.bindPrompt({
+  dialog: elements.authenticationDialog,
+  form: elements.authenticationForm,
+  input: elements.authenticationToken,
+  submit: elements.authenticationSubmit,
+  status: elements.authenticationStatus,
+  authenticate: async () => {
+    view.authenticationFailed = false;
+    const started = await startDashboard();
+    return { started, rejected: view.authenticationFailed };
+  },
+  onRequired: () => {
+    view.authenticationFailed = true;
+    view.dashboardStarted = false;
+    setConnection("offline", "需要访问令牌");
+  },
+});
+
 syncPreferenceControls();
 renderInventory();
 
 async function startDashboard() {
   loadStoredBackground();
-  if (invalidDashboardAccessToken) {
-    setConnection("offline", "认证失败");
-    return;
+  if (dashboardAuthentication.consumeInvalidFragment()) {
+    dashboardAuthentication.forget();
+    requestDashboardAuthentication("URL 中的访问令牌格式无效，请重新输入");
+    return false;
   }
   try {
     const response = await fetch("/api/meta", { cache: "no-store" });
     if (response.ok) {
       const meta = await response.json();
-      if (meta.authenticationRequired === true && !dashboardAccessToken) {
-        view.authenticationFailed = true;
-        setConnection("offline", "认证失败，请重新打开安装命令输出的链接");
-        return;
+      if (meta.authenticationRequired === true && !dashboardAuthentication.token) {
+        requestDashboardAuthentication("请输入此 Mocop 实例的访问令牌");
+        return false;
       }
     }
   } catch (_error) {
     // Snapshot/SSE reconnect logic owns transient reachability handling.
   }
   view.dashboardStarted = true;
-  await fetchSnapshot();
-  if (view.authenticationFailed) return;
+  const snapshotLoaded = await fetchSnapshot();
+  if (view.authenticationFailed || !snapshotLoaded) return false;
   fetchTopology();
   connect();
+  return true;
 }
 
 startDashboard();

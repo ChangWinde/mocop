@@ -14,6 +14,12 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlsplit
 
+from .discovery_policy import (
+    SshDiscoveryConfig,
+    SshDiscoveryPolicyError,
+    parse_ssh_discovery_config,
+)
+
 CONFIG_ENV_VAR = "MOCOP_CONFIG"
 LOCAL_CONFIG_PATH = Path("config/mocop.json")
 USER_CONFIG_RELATIVE_PATH = Path("mocop/config.json")
@@ -236,6 +242,7 @@ class MonitorConfig:
     max_workers: int
     listen_host: str
     listen_port: int
+    ssh_discovery: SshDiscoveryConfig = field(default_factory=SshDiscoveryConfig)
     trusted_web_hosts: tuple[str, ...] = ()
     gpu_process_poll_interval_seconds: float = 15
     retry_jitter_pct: float = 15
@@ -336,6 +343,7 @@ _OPTIONAL_KEYS = {
     "webhooks",
     "incident_actions",
     "incident_overrides",
+    "ssh_discovery",
 }
 _THRESHOLD_KEYS = {
     "cpu_warning_pct",
@@ -999,6 +1007,10 @@ def _parse_config_bytes(content: bytes, config_path: Path) -> MonitorConfig:
         raise ConfigError("ssh_config must be a non-empty path")
     if not isinstance(data["auto_discover"], bool):
         raise ConfigError("auto_discover must be true or false")
+    try:
+        ssh_discovery = parse_ssh_discovery_config(data.get("ssh_discovery", {}))
+    except SshDiscoveryPolicyError as exc:
+        raise ConfigError(str(exc)) from exc
     if (
         not isinstance(data["listen_host"], str)
         or normalize_web_hostname(data["listen_host"]) is None
@@ -1070,13 +1082,27 @@ def _parse_config_bytes(content: bytes, config_path: Path) -> MonitorConfig:
         )
     trusted_web_hosts: list[str] = []
     for item in raw_trusted_hosts:
-        hostname = normalize_web_hostname(item)
+        wildcard = isinstance(item, str) and item.strip().startswith("*.")
+        candidate = item.strip()[2:] if wildcard else item
+        hostname = normalize_web_hostname(candidate)
+        if wildcard and hostname is not None:
+            try:
+                ipaddress.ip_address(hostname)
+            except ValueError:
+                # Requiring a registrable-looking suffix prevents dangerously
+                # broad entries such as ``*.com`` without adding a public
+                # suffix dependency to the runtime.
+                if "." not in hostname:
+                    hostname = None
+            else:
+                hostname = None
         if hostname is None:
             raise ConfigError(
-                "trusted_web_hosts entries must be hostnames or IP literals "
-                "without scheme, port, credentials, or path"
+                "trusted_web_hosts entries must be hostnames, IP literals, or "
+                "HTTPS origin suffixes such as *.preview.example without "
+                "scheme, port, credentials, or path"
             )
-        trusted_web_hosts.append(hostname)
+        trusted_web_hosts.append(f"*.{hostname}" if wildcard else hostname)
     history_value = data.get("history_points", 720)
     if isinstance(history_value, bool) or not isinstance(history_value, int):
         raise ConfigError("history_points must be an integer")
@@ -1326,7 +1352,7 @@ def _parse_config_bytes(content: bytes, config_path: Path) -> MonitorConfig:
     for alias, group_value in host_group_data.items():
         if not isinstance(alias, str) or not is_safe_alias(alias):
             raise ConfigError("host_groups keys must be safe host aliases")
-        if alias not in hosts:
+        if alias not in hosts and not data["auto_discover"]:
             raise ConfigError(f"host_groups.{alias} must reference an explicit host")
         if alias in excludes:
             raise ConfigError(f"host_groups.{alias} cannot be excluded")
@@ -1491,6 +1517,7 @@ def _parse_config_bytes(content: bytes, config_path: Path) -> MonitorConfig:
         max_workers=max_workers,
         listen_host=data["listen_host"].strip(),
         listen_port=listen_port,
+        ssh_discovery=ssh_discovery,
         trusted_web_hosts=tuple(dict.fromkeys(trusted_web_hosts)),
         gpu_process_poll_interval_seconds=gpu_process_poll_interval,
         retry_jitter_pct=retry_jitter_pct,
@@ -1533,3 +1560,16 @@ def load_private_config(path: Path | str) -> MonitorConfig:
     except (RuntimeError, UnicodeError, OSError) as exc:
         raise ConfigError("managed config path is invalid") from exc
     return _parse_config_bytes(_read_private_config_path(config_path), config_path)
+
+
+def load_private_config_document(
+    path: Path | str,
+) -> tuple[dict[str, object], MonitorConfig]:
+    """Load mutable JSON and its typed config from one protected file read."""
+    try:
+        config_path = Path(os.path.abspath(Path(path).expanduser()))
+    except (RuntimeError, UnicodeError, OSError) as exc:
+        raise ConfigError("managed config path is invalid") from exc
+    content = _read_private_config_path(config_path)
+    config = _parse_config_bytes(content, config_path)
+    return json.loads(content), config

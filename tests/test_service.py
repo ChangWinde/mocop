@@ -17,6 +17,7 @@ from mocop.config import (
     MonitorConfig,
     TopologyLinkConfig,
 )
+from mocop.discovery import HostDiscoverySnapshot
 from mocop.models import (
     DiskMetrics,
     GpuMetrics,
@@ -1724,6 +1725,17 @@ class _ConfigHostSource:
         return config.hosts
 
 
+class _ResolvedHostSource:
+    def __init__(self, discovery: HostDiscoverySnapshot) -> None:
+        self._discovery = discovery
+
+    def hosts(self, _config):
+        return self._discovery.hosts
+
+    def discovery(self, _config):
+        return self._discovery
+
+
 class _FailingHostSource:
     def __init__(self) -> None:
         self.calls = 0
@@ -2328,6 +2340,49 @@ class MonitorServiceTests(unittest.TestCase):
 
         self.assertEqual([call[0] for call in probe.calls], ["gpu-01"])
 
+    def test_resolved_discovery_applies_groups_and_never_probes_infrastructure(
+        self,
+    ) -> None:
+        config = MonitorConfig(
+            ssh_config=Path("/tmp/config"),
+            auto_discover=True,
+            hosts=(),
+            exclude_hosts=frozenset(),
+            poll_interval_seconds=5,
+            probe_timeout_seconds=12,
+            connect_timeout_seconds=5,
+            max_workers=2,
+            listen_host="127.0.0.1",
+            listen_port=8787,
+        )
+        topology = ConnectionTopologyConfig(
+            root="monitor",
+            links=(
+                TopologyLinkConfig("monitor", "bastion", "ssh"),
+                TopologyLinkConfig("bastion", "gpu-01", "ssh"),
+            ),
+        )
+        discovery = HostDiscoverySnapshot(
+            aliases=("bastion", "gpu-01"),
+            eligible_aliases=("gpu-01",),
+            hosts=("gpu-01",),
+            infrastructure_hosts=("bastion",),
+            host_groups=(("gpu-01", "bastion"),),
+            topology=topology,
+            warnings=(),
+            mode="topology",
+        )
+        state = StateStore(5)
+        probe = _RecordingProbe()
+        service = MonitorService(config, _ResolvedHostSource(discovery), probe, state)
+
+        service.poll_once()
+
+        self.assertEqual([call[0] for call in probe.calls], ["gpu-01"])
+        server = state.snapshot()["servers"][0]
+        self.assertEqual(server["group"], "bastion")
+        self.assertEqual(state.incidents(10)["correlations"], [])
+
     def test_replaces_persisted_collector_policy_without_restart(self) -> None:
         config = MonitorConfig(
             ssh_config=Path("/tmp/config"),
@@ -2401,6 +2456,28 @@ class MonitorServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(service.shutdown_timeout_seconds(), 31)
+
+    def test_shutdown_wait_uses_global_timeout_without_host_overrides(self) -> None:
+        config = MonitorConfig(
+            ssh_config=Path("/tmp/config"),
+            auto_discover=False,
+            hosts=("gpu-01",),
+            exclude_hosts=frozenset(),
+            poll_interval_seconds=5,
+            probe_timeout_seconds=12,
+            connect_timeout_seconds=5,
+            max_workers=2,
+            listen_host="127.0.0.1",
+            listen_port=8787,
+        )
+        service = MonitorService(
+            config,
+            _ConfigHostSource(),
+            _RecordingProbe(),
+            StateStore(5),
+        )
+
+        self.assertEqual(service.shutdown_timeout_seconds(), 13)
 
     def test_replaces_inventory_config_without_restarting_the_service(self) -> None:
         config = MonitorConfig(

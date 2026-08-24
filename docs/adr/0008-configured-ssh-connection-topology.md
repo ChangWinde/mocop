@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-0022 for installations using resolved SSH discovery. The
+configured-topology contract remains accepted for alias-only discovery.
 
 ## Context
 

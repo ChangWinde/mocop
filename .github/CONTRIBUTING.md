@@ -14,7 +14,9 @@ python3 -m compileall -q mocop tests
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
 node --check mocop/static/app.js
+node --check mocop/static/dashboard-auth.js
 node --check mocop/static/process-search.js
+node tests/dashboard_auth_test.mjs
 node tests/process_search_test.mjs
 node --experimental-websocket tests/browser_smoke.mjs
 ```

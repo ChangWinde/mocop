@@ -11,6 +11,7 @@ from unittest.mock import patch
 from mocop.__main__ import _arguments, main
 from mocop.config import load_config
 from mocop.lifecycle import LifecycleError
+from mocop.migration import MigrationResult
 from mocop.models import ProbeResult
 
 
@@ -139,6 +140,51 @@ class CliTests(unittest.TestCase):
         self.assertEqual(install_args.command, "service")
         self.assertEqual(install_args.action, "install")
 
+    def test_deploy_defaults_to_local_topology_discovery(self) -> None:
+        args = _arguments(["deploy", "--display-name", "console-0"])
+
+        self.assertEqual(args.command, "deploy")
+        self.assertEqual(args.hosts, [])
+        self.assertEqual(args.display_name, "console-0")
+        self.assertIsNone(args.local_host)
+        self.assertFalse(args.no_local)
+        self.assertTrue(args.auto_discover)
+        self.assertEqual(args.ssh_config, "~/.ssh/config")
+
+        opted_out = _arguments(
+            ["deploy", "--no-local", "--no-auto-discover", "--host", "gpu-01"]
+        )
+        self.assertTrue(opted_out.no_local)
+        self.assertFalse(opted_out.auto_discover)
+        self.assertEqual(opted_out.hosts, ["gpu-01"])
+
+    def test_migrate_command_parses_identity_and_admission_policy(self) -> None:
+        args = _arguments(
+            [
+                "migrate",
+                "--from-config",
+                "/backup/config.json",
+                "--config",
+                "/new/config.json",
+                "--local-host",
+                "new-monitor",
+                "--display-name",
+                "console-0",
+                "--auto-discover",
+            ]
+        )
+
+        self.assertEqual(args.command, "migrate")
+        self.assertEqual(args.from_config, Path("/backup/config.json"))
+        self.assertEqual(args.config, Path("/new/config.json"))
+        self.assertEqual(args.local_host, "new-monitor")
+        self.assertFalse(args.drop_local_host)
+        self.assertEqual(args.display_name, "console-0")
+        self.assertTrue(args.auto_discover)
+
+        preserved = _arguments(["migrate", "--from-config", "/backup/config.json"])
+        self.assertIsNone(preserved.auto_discover)
+
     def test_config_check_and_doctor_probe_are_parsed(self) -> None:
         check_args = _arguments(["config", "check", "--config", "/tmp/c.json"])
         doctor_args = _arguments(["doctor", "--probe"])
@@ -195,6 +241,154 @@ class CliTests(unittest.TestCase):
             result = main(["init"])
 
         self.assertEqual(result, 2)
+
+    @patch("mocop.__main__.socket.gethostname", return_value="monitor-01")
+    @patch("mocop.__main__._install_service", return_value=0)
+    def test_deploy_creates_fresh_profile_and_installs_service(
+        self, install_service, _hostname
+    ) -> None:
+        target = self.root / "deploy" / "config.json"
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            result = main(
+                [
+                    "deploy",
+                    "--config",
+                    str(target),
+                    "--host",
+                    "gpu-01",
+                    "--display-name",
+                    "console-0",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        install_service.assert_called_once_with(target)
+        config = load_config(target)
+        self.assertEqual(config.hosts, ("monitor-01", "gpu-01"))
+        self.assertEqual(config.local_host, "monitor-01")
+        self.assertTrue(config.auto_discover)
+        self.assertEqual(config.ssh_discovery.mode, "topology")
+        self.assertEqual(config.host_display_names(), (("monitor-01", "console-0"),))
+        self.assertIn("Fresh deployment configuration", stdout.getvalue())
+
+    @patch("mocop.__main__._install_service")
+    def test_deploy_refuses_existing_config_or_capability(
+        self, install_service
+    ) -> None:
+        existing = self.root / "existing" / "config.json"
+        existing.parent.mkdir()
+        existing.write_text("keep", encoding="utf-8")
+        existing_bytes = existing.read_bytes()
+
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["deploy", "--config", str(existing)]), 2)
+        self.assertEqual(existing.read_bytes(), existing_bytes)
+
+        target = self.root / "token" / "config.json"
+        target.parent.mkdir()
+        token = target.with_name("access-token")
+        token.write_text("A" * 43, encoding="ascii")
+        token.chmod(0o600)
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["deploy", "--config", str(target)]), 2)
+        self.assertFalse(target.exists())
+
+        environment_target = self.root / "environment" / "config.json"
+        environment_target.parent.mkdir()
+        environment_target.with_name("environment").write_text(
+            "MOCOP_TEST=value\n", encoding="utf-8"
+        )
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["deploy", "--config", str(environment_target)]), 2)
+        self.assertFalse(environment_target.exists())
+        install_service.assert_not_called()
+
+    @patch("mocop.__main__._install_service", return_value=1)
+    def test_deploy_retains_new_config_when_service_verification_fails(
+        self, _install_service
+    ) -> None:
+        target = self.root / "failed" / "config.json"
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            result = main(["deploy", "--config", str(target), "--no-local"])
+
+        self.assertEqual(result, 1)
+        self.assertTrue(target.is_file())
+        self.assertIn("retained for diagnosis", stdout.getvalue())
+
+    @patch("mocop.__main__._install_service")
+    def test_deploy_rejects_display_name_without_local_target(
+        self, install_service
+    ) -> None:
+        target = self.root / "no-local" / "config.json"
+
+        with redirect_stderr(io.StringIO()):
+            result = main(
+                [
+                    "deploy",
+                    "--config",
+                    str(target),
+                    "--no-local",
+                    "--display-name",
+                    "console-0",
+                ]
+            )
+
+        self.assertEqual(result, 2)
+        self.assertFalse(target.exists())
+        install_service.assert_not_called()
+
+    @patch("mocop.__main__.socket.gethostname", return_value="new-monitor")
+    @patch("mocop.__main__.migrate_config")
+    def test_migrate_reports_result_and_safe_next_steps(
+        self, migrate, _hostname
+    ) -> None:
+        migrate.return_value = MigrationResult(
+            source=Path("/backup/config.json"),
+            target=Path("/new config/config.json"),
+            old_local_host="old-monitor",
+            new_local_host="new-monitor",
+            auto_discover=True,
+            dropped_fields=("maintenance_windows.old-monitor",),
+        )
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            result = main(
+                [
+                    "migrate",
+                    "--from-config",
+                    "/backup/config.json",
+                    "--config",
+                    "/new/config.json",
+                    "--display-name",
+                    "console-0",
+                    "--auto-discover",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        migrate.assert_called_once_with(
+            Path("/backup/config.json"),
+            Path("/new/config.json"),
+            current_hostname="new-monitor",
+            local_host=None,
+            drop_local_host=False,
+            display_name="console-0",
+            ssh_config="~/.ssh/config",
+            auto_discover=True,
+        )
+        output = stdout.getvalue()
+        self.assertIn("old-monitor -> new-monitor", output)
+        self.assertIn("maintenance_windows.old-monitor", output)
+        self.assertIn("config check", output)
+        self.assertIn("doctor --no-connect", output)
+        self.assertIn("service install", output)
+        self.assertIn("--config '/new config/config.json'", output)
+        self.assertIn("No capability, secrets, service unit, or history", output)
 
     def test_config_check_reports_summary_and_environment_names(self) -> None:
         config_path = write_config(

@@ -47,6 +47,30 @@ class LifecycleTests(unittest.TestCase):
             initialize_config(unsafe_path, ("--proxy-command=bad",))
         self.assertFalse(unsafe_path.exists())
 
+    def test_init_can_generate_the_fresh_host_deployment_profile(self) -> None:
+        path = self.root / "deploy" / "config.json"
+
+        initialize_config(
+            path,
+            ("gpu-01", "monitor-01"),
+            local_host="monitor-01",
+            display_name="console-0",
+            ssh_config="~/.ssh/fleet-config",
+            auto_discover=True,
+        )
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["hosts"], ["monitor-01", "gpu-01"])
+        self.assertEqual(data["local_host"], "monitor-01")
+        self.assertEqual(
+            data["host_overrides"],
+            {"monitor-01": {"display_name": "console-0"}},
+        )
+        self.assertEqual(data["ssh_config"], "~/.ssh/fleet-config")
+        self.assertTrue(data["auto_discover"])
+        self.assertEqual(data["ssh_discovery"]["mode"], "topology")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def test_access_token_is_private_stable_and_rejects_symlinks(self) -> None:
         config_path = self.root / "private" / "config.json"
         initialize_config(config_path, ())

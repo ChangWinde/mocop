@@ -15,7 +15,7 @@ for status and superseding rules.
 | [0005](0005-dashboard-persisted-collector-settings.md) | Accepted | Persist bounded collector settings from the dashboard |
 | [0006](0006-browser-local-visual-assets.md) | Accepted | Browser-local visual assets |
 | [0007](0007-time-bounded-maintenance-overlay.md) | Accepted | Time-bounded maintenance as an incident overlay |
-| [0008](0008-configured-ssh-connection-topology.md) | Accepted | Configured SSH connection topology |
+| [0008](0008-configured-ssh-connection-topology.md) | Superseded by 0022 for resolved discovery | Configured SSH connection topology |
 | [0009](0009-orthogonal-visual-style-and-accent.md) | Accepted | Orthogonal visual style and accent |
 | [0010](0010-independent-host-scheduling.md) | Accepted | Independent host scheduling |
 | [0011](0011-bounded-operations-extensions.md) | Accepted | Bounded operational extensions |
@@ -29,3 +29,6 @@ for status and superseding rules.
 | [0019](0019-repository-and-documentation-governance.md) | Accepted | Repository and documentation governance |
 | [0020](0020-process-centric-gpu-inventory.md) | Accepted | Process-centric GPU inventory and task workspace |
 | [0021](0021-incremental-module-boundaries.md) | Accepted | Incremental module boundaries and growth budgets |
+| [0022](0022-resolved-ssh-topology-discovery.md) | Accepted | Resolved SSH topology discovery and proxy grouping |
+| [0023](0023-non-destructive-host-migration.md) | Accepted | Non-destructive cross-machine configuration migration |
+| [0024](0024-fresh-host-fast-deployment.md) | Accepted | Fresh-host fast deployment |

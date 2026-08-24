@@ -28,6 +28,7 @@ TRACKED_ROOT_ENTRIES = {
 # rule. Extract a coherent leaf and lower the budget instead of raising it.
 CORE_MODULE_LINE_BUDGETS = {
     "mocop/static/app.js": 6_825,
+    "mocop/static/dashboard-auth.js": 150,
     "mocop/static/process-search.js": 225,
     "mocop/service.py": 2_750,
     "mocop/web.py": 1_800,

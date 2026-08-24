@@ -62,6 +62,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.gpu_process_poll_interval_seconds, 15)
         self.assertEqual(config.retry_jitter_pct, 15)
         self.assertEqual(config.manual_probe_cooldown_seconds, 5)
+        self.assertEqual(config.ssh_discovery.mode, "aliases")
+        self.assertEqual(config.ssh_discovery.refresh_seconds, 300)
+        self.assertEqual(config.ssh_discovery.resolve_timeout_seconds, 3)
         self.assertEqual(config.expected_gpu_counts, ())
         self.assertEqual(config.host_overrides, ())
         self.assertEqual(config.maintenance_windows, ())
@@ -79,6 +82,33 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.incidents.recovery_cycles, 2)
         self.assertEqual(config.incidents.gpu_idle_memory_cycles, 12)
 
+    def test_validates_resolved_ssh_discovery_policy(self) -> None:
+        value = valid_config()
+        value["ssh_discovery"] = {
+            "mode": "topology",
+            "refresh_seconds": 120,
+            "resolve_timeout_seconds": 2.5,
+        }
+
+        config = load_config(self.write(value))
+
+        self.assertEqual(config.ssh_discovery.mode, "topology")
+        self.assertEqual(config.ssh_discovery.refresh_seconds, 120)
+        self.assertEqual(config.ssh_discovery.resolve_timeout_seconds, 2.5)
+
+        invalid = (
+            {"mode": "automatic"},
+            {"mode": "topology", "refresh_seconds": 29},
+            {"mode": "topology", "resolve_timeout_seconds": 0},
+            {"mode": "topology", "unknown": True},
+        )
+        for policy in invalid:
+            with self.subTest(policy=policy):
+                candidate = valid_config()
+                candidate["ssh_discovery"] = policy
+                with self.assertRaisesRegex(ConfigError, "ssh_discovery"):
+                    load_config(self.write(candidate))
+
     def test_validates_trusted_web_hosts(self) -> None:
         default = load_config(self.write(valid_config()))
         self.assertEqual(default.trusted_web_hosts, ())
@@ -89,12 +119,19 @@ class ConfigTests(unittest.TestCase):
             "10.0.0.8",
             "fd00::5",
             "[fd00::6]",
+            "*.FWD.Memory.Whalent.com",
             "dashboard.example",
         ]
         config = load_config(self.write(value))
         self.assertEqual(
             config.trusted_web_hosts,
-            ("dashboard.example", "10.0.0.8", "fd00::5", "fd00::6"),
+            (
+                "dashboard.example",
+                "10.0.0.8",
+                "fd00::5",
+                "fd00::6",
+                "*.fwd.memory.whalent.com",
+            ),
         )
 
         invalid_cases = (
@@ -107,6 +144,10 @@ class ConfigTests(unittest.TestCase):
             ["   "],
             [42],
             ["[not-an-ip]"],
+            ["*.com"],
+            ["*.127.0.0.1"],
+            ["*.*.example.com"],
+            ["dashboard.*.example.com"],
             ["a" * 300],
             ["dashboard.example"] * 33,
         )
@@ -656,6 +697,15 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "cannot be excluded"):
             load_config(self.write(value))
 
+    def test_allows_group_metadata_for_auto_discovered_aliases(self) -> None:
+        value = valid_config()
+        value["host_groups"] = {"gpu-1": "Training"}
+
+        config = load_config(self.write(value))
+
+        self.assertEqual(config.hosts, ())
+        self.assertEqual(dict(config.host_groups), {"gpu-1": "Training"})
+
     def test_rebuilds_host_lookup_indexes_when_config_is_replaced(self) -> None:
         original_data = valid_config()
         original_data.update(
@@ -1101,6 +1151,7 @@ class ConfigTests(unittest.TestCase):
     def test_bundled_default_is_safe_and_loadable(self) -> None:
         config = load_config(BUNDLED_CONFIG_PATH)
         self.assertFalse(config.auto_discover)
+        self.assertEqual(config.ssh_discovery.mode, "topology")
         self.assertEqual(config.hosts, ())
         self.assertEqual(config.poll_interval_seconds, 5)
         self.assertEqual(config.max_output_bytes, 2_097_152)

@@ -277,6 +277,22 @@
         <span id="poll-info">等待采集</span>
       </footer>
     </div>
+    <dialog id="authentication-dialog" class="authentication-dialog" aria-labelledby="authentication-title" aria-describedby="authentication-description">
+      <div class="authentication-mark" aria-hidden="true">M</div>
+      <div class="authentication-heading">
+        <span class="section-kicker">SECURE ACCESS</span>
+        <h2 id="authentication-title">连接 Mocop</h2>
+      </div>
+      <p id="authentication-description">输入此 Mocop 实例的访问令牌。令牌来自受保护的安装配置，仅用于此页面向 Mocop API 认证。</p>
+      <form id="authentication-form" class="authentication-form" novalidate>
+        <label for="authentication-token">访问令牌</label>
+        <input id="authentication-token" name="access-token" type="password" minlength="32" maxlength="192" pattern="[A-Za-z0-9_-]{32,192}" autocomplete="off" autocapitalize="none" spellcheck="false" required aria-describedby="authentication-help authentication-status">
+        <small id="authentication-help">本机默认位置：<code>~/.config/mocop/access-token</code></small>
+        <button id="authentication-submit" class="primary-action" type="submit">验证并连接</button>
+        <span id="authentication-status" class="authentication-status" role="alert" aria-live="polite"></span>
+      </form>
+      <small class="authentication-privacy">验证成功后仅保存在当前标签页的会话存储中；关闭标签页即失效。</small>
+    </dialog>
     <dialog id="settings-dialog" class="side-dialog settings-dialog" aria-labelledby="settings-title">
       <div class="dialog-heading">
         <div>
@@ -470,7 +486,7 @@
             </div>
             <button id="inventory-refresh" class="inline-action" type="button">扫描</button>
           </div>
-          <p class="inventory-note">扫描只读取本机 SSH 别名，不会发起连接。Git、GitHub、GitLab 与 <code>exclude_hosts</code> 中的别名会被忽略。节点分组会写入本地配置并热更新导航；维护窗口不会停止采集，只会暂时静默该节点的待处理问题。</p>
+          <p class="inventory-note">扫描不会发起 SSH 连接；拓扑模式会运行有界 <code>ssh -G</code> 解析有效的 ProxyJump/ProxyCommand。识别出的跳板基础设施不会被自动采集，并按最近的跳板 alias 生成分组；显式分组仍可覆盖。Git、GitHub、GitLab 与 <code>exclude_hosts</code> 中的别名会被忽略。维护窗口不会停止采集，只会暂时静默该节点的待处理问题。</p>
           <div id="inventory-status" class="inventory-status" role="status">打开设置后自动扫描</div>
           <div class="inventory-columns">
             <div class="inventory-block">
@@ -687,6 +703,7 @@
       </div>
     </dialog>
     <script src="/process-search.js" defer></script>
+    <script src="/dashboard-auth.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

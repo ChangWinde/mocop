@@ -62,7 +62,10 @@ document and the running server cannot drift apart silently.
   capability and prints its fragment URL. URL fragments are never sent over
   HTTP. The dashboard scrubs the fragment immediately and retains it only in
   tab-scoped `sessionStorage`; it never creates an ambient Cookie or persistent
-  `localStorage`/IndexedDB credential.
+  `localStorage`/IndexedDB credential. When no fragment or stored capability is
+  available, the dashboard presents a non-dismissible token prompt. It stores
+  a submitted token only after an authenticated snapshot succeeds; malformed or
+  rejected tokens remain unstored and do not enter a reconnect loop.
 
 ## Access tiers
 
@@ -76,11 +79,14 @@ Every endpoint belongs to one of four tiers (the `access` value in
 | **R** | `reader` | Everything in A, a trusted `Host`, and `X-Monitor-Request: dashboard`. If present, `Sec-Fetch-Site` must be `same-origin` or `none`. |
 | **W** | `writer` | Everything in R, **plus** an `Origin` header whose scheme is `http`/`https`, whose hostname is trusted, whose path is empty or `/`, and which carries no credentials, query, or fragment, **plus** `Content-Type: application/json` and a body within the route's byte cap. |
 
-Trusted hostnames are: `localhost`, `127.0.0.1`, `::1`, the configured
-non-wildcard `listen_host`, and every entry of the optional
-`trusted_web_hosts` configuration list. A failed bearer check answers
-`403 AUTHENTICATION_REQUIRED`; a failed browser-origin check answers
-`403 UNTRUSTED_ORIGIN`.
+Trusted Host names are `localhost`, `127.0.0.1`, `::1`, the configured
+non-wildcard `listen_host`, and every exact entry of the optional
+`trusted_web_hosts` configuration list. A leading `*.` entry authorizes only
+HTTPS browser Origins on strict subdomains of that suffix; it does not authorize
+the suffix apex and never relaxes the exact backend Host check. This supports
+ephemeral, Host-rewriting preview proxies without trusting arbitrary forwarded
+headers. A failed bearer check answers `403 AUTHENTICATION_REQUIRED`; a failed
+browser-origin check answers `403 UNTRUSTED_ORIGIN`.
 
 The capability is not an account system and carries one operator role. It
 exists because TCP loopback is shared by every local Unix user. Host/Origin
@@ -731,6 +737,9 @@ Configuration projection. Tier R. Query: rejected.
 | `maintenanceWindows` | object | **Every configured window**, keyed by alias: `{until, reason, active}` plus `recurring: true` for weekly windows. `active` says whether the window is silencing the host right now; for recurring windows `until` is the end of the current or next instance. |
 | `incidentActions` | array | Currently active actions: `{host, condition_key, action, until, reason, incident_started_at}` (snake_case keys); the last field binds the action to one incident generation. |
 | `hostGroups` | object | Alias → group name. |
+| `sshDiscoveryMode` | string | `aliases` or `topology`. |
+| `infrastructureHosts` | array | Safe aliases inferred as proxy/jump infrastructure; never raw addresses or commands. |
+| `sshDiscoveryWarnings` | array | Bounded, sanitized route-resolution findings. |
 | `writable` | bool | Whether dashboard writes can persist to the configuration file. |
 
 Errors: `403 UNTRUSTED_ORIGIN`, `503 SERVICE_UNAVAILABLE` (scan failed or
@@ -738,8 +747,10 @@ no configuration controller).
 
 ### GET /api/topology
 
-Display-only connection tree from the configuration. Tier R. Query:
-rejected. Response: `{root, links[]}` where `root` is an alias or `null`
+Display-only configured or cached resolved connection tree. Tier R. Query:
+rejected. In topology-discovery mode the first uncached read may run bounded
+local `ssh -G` resolution but never opens an SSH connection. Response:
+`{root, links[]}` where `root` is an alias or `null`
 and each link is `{source, target, transport, label?}` with `transport` one
 of `ssh`, `frp-stcp`, `frp-xtcp`, `vpn`. Topology aliases never authorize
 probing.

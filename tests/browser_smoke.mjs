@@ -48,6 +48,17 @@ async function waitFor(url, timeoutMs = 10_000) {
   throw new Error(`Timed out waiting for ${url}: ${lastError || "not ready"}`);
 }
 
+async function waitForEvaluation(client, expression, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  let value;
+  while (Date.now() < deadline) {
+    value = await client.evaluate(expression, true);
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for browser expression: ${expression}; last=${value}`);
+}
+
 function capture(process) {
   let output = "";
   for (const stream of [process.stdout, process.stderr]) {
@@ -229,7 +240,9 @@ try {
   await cdp.send("Runtime.enable");
   await cdp.send("Network.enable");
   await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-    source: `window.addEventListener("DOMContentLoaded", () => {
+    source: `const shouldChangeCadence = window.location.hash.includes("access_token=");
+    window.addEventListener("DOMContentLoaded", () => {
+      if (!shouldChangeCadence) return;
       const select = document.querySelector("#refresh-interval");
       select.value = "2";
       select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -241,9 +254,89 @@ try {
   // same 30-second startup budget as the DevTools endpoint.
   const loaded = cdp.waitFor("Page.loadEventFired", 30_000);
   await cdp.send("Page.navigate", {
-    url: `http://127.0.0.1:${monitorPort}/#access_token=${browserAccessToken}`,
+    url: `http://127.0.0.1:${monitorPort}/`,
   });
   await loaded;
+
+  // A bare forwarded URL cannot inherit a capability from another tab. It
+  // must present an explicit, non-dismissible authentication flow instead of
+  // leaving the dashboard as an unexplained collection of empty placeholders.
+  await waitForEvaluation(cdp, "document.querySelector('#authentication-dialog')?.open");
+  const missingAuthentication = await cdp.evaluate(`({
+    open: document.querySelector("#authentication-dialog")?.open,
+    focused: document.activeElement?.id,
+    connection: document.querySelector("#connection-text")?.textContent,
+    stored: window.sessionStorage.getItem("mocop.dashboardAccessToken.v1"),
+  })`);
+  assert.deepEqual(missingAuthentication, {
+    open: true,
+    focused: "authentication-token",
+    connection: "需要访问令牌",
+    stored: null,
+  });
+
+  const invalidAuthentication = await cdp.evaluate(`(async () => {
+    const input = document.querySelector("#authentication-token");
+    input.value = "short";
+    document.querySelector("#authentication-form").requestSubmit();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return {
+      open: document.querySelector("#authentication-dialog").open,
+      status: document.querySelector("#authentication-status").textContent,
+      stored: window.sessionStorage.getItem("mocop.dashboardAccessToken.v1"),
+    };
+  })()`, true);
+  assert.equal(invalidAuthentication.open, true);
+  assert.match(invalidAuthentication.status, /格式/);
+  assert.equal(invalidAuthentication.stored, null);
+
+  const wrongToken = "C".repeat(43);
+  await cdp.evaluate(`(() => {
+    const input = document.querySelector("#authentication-token");
+    input.value = ${JSON.stringify(wrongToken)};
+    document.querySelector("#authentication-form").requestSubmit();
+  })()`);
+  await waitForEvaluation(
+    cdp,
+    "document.querySelector('#authentication-status')?.textContent.includes('不正确')",
+  );
+  assert.equal(
+    await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"),
+    null,
+  );
+
+  await cdp.evaluate(`(() => {
+    const input = document.querySelector("#authentication-token");
+    input.value = ${JSON.stringify(browserAccessToken)};
+    document.querySelector("#authentication-form").requestSubmit();
+  })()`);
+  await waitForEvaluation(
+    cdp,
+    "!document.querySelector('#authentication-dialog')?.open && Boolean(window.sessionStorage.getItem('mocop.dashboardAccessToken.v1'))",
+  );
+  const authenticatedReload = cdp.waitFor("Page.loadEventFired", 30_000);
+  await cdp.send("Page.reload", { ignoreCache: true });
+  await authenticatedReload;
+  await waitForEvaluation(cdp, "document.querySelector('#server-ratio')?.textContent !== '— / —'");
+  assert.equal(
+    await cdp.evaluate("document.querySelector('#authentication-dialog')?.open"),
+    false,
+  );
+
+  // Keep the original capability-link path covered independently: a fragment
+  // still auto-authenticates, is scrubbed immediately, and can perform the
+  // pre-snapshot collector update without an unauthenticated request.
+  await cdp.evaluate("window.sessionStorage.clear()");
+  const fragmentLoaded = cdp.waitFor("Page.loadEventFired", 30_000);
+  await cdp.send("Page.navigate", {
+    url: `http://127.0.0.1:${monitorPort}/?auth=fragment#access_token=${browserAccessToken}`,
+  });
+  await fragmentLoaded;
+  assert.equal(await cdp.evaluate("window.location.hash"), "");
+  assert.equal(
+    await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"),
+    browserAccessToken,
+  );
 
   const initial = await cdp.evaluate(`({
     title: document.title,
@@ -258,7 +351,6 @@ try {
   assert.equal(initial.earlyCadenceChange, true);
   assert.equal(initial.gpuMemoryCard, true);
   assert.equal(initial.overflow, false);
-  assert.equal(await cdp.evaluate("window.location.hash"), "");
   assert.equal(
     await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"),
     browserAccessToken,
@@ -301,6 +393,102 @@ try {
   assert.equal(final.heatmapVisible, true);
   assert.equal(final.attentionVisible, true);
   assert.equal(final.overflow, false);
+
+  const displayName = await cdp.evaluate(`(() => {
+    const server = view.snapshot.servers.find((item) => item.host === "atlas-01");
+    const previousDisplayName = server.displayName;
+    const previousHost = view.selectedHost;
+    server.displayName = "console-0";
+    view.serverItemCache.clear();
+    view.groupCache.clear();
+    view.heatmapCache.clear();
+    view.singleTableCache = null;
+    render();
+    const sidebar = document.querySelector(
+      '.server-item[data-host="atlas-01"] .server-name',
+    )?.textContent;
+    const groupHeading = document.querySelector(
+      '.gpu-server-group[data-host="atlas-01"] .gpu-group-name strong',
+    )?.textContent;
+    const heatmapHeading = document.querySelector(
+      '.heatmap-row[data-host="atlas-01"] .heatmap-host',
+    )?.textContent;
+    selectHost("atlas-01");
+    const inventoryTitle = document.querySelector("#inventory-title")?.textContent;
+    const tableHeading = document.querySelector(
+      '#gpu-groups tr[data-host="atlas-01"] .device-text strong',
+    )?.textContent;
+    openGpuDetail(server, server.gpus[0]);
+    const gpuDetailHeading = document.querySelector("#gpu-detail-host")?.textContent;
+    document.querySelector("#gpu-detail-dialog").close();
+    server.displayName = previousDisplayName;
+    view.selectedHost = previousHost;
+    view.serverItemCache.clear();
+    view.groupCache.clear();
+    view.heatmapCache.clear();
+    view.singleTableCache = null;
+    render();
+    return {
+      sidebar,
+      groupHeading,
+      heatmapHeading,
+      inventoryTitle,
+      tableHeading,
+      gpuDetailHeading,
+      internalHost: server.host,
+    };
+  })()`);
+  assert.equal(displayName.sidebar, "console-0");
+  assert.equal(displayName.groupHeading, "console-0");
+  assert.equal(displayName.heatmapHeading, "console-0");
+  assert.equal(displayName.inventoryTitle, "console-0");
+  assert.equal(displayName.tableHeading, "console-0");
+  assert.match(displayName.gpuDetailHeading, /^console-0 · GPU 0$/);
+  assert.equal(displayName.internalHost, "atlas-01");
+
+  const heatmapPacking = await cdp.evaluate(`(() => {
+    const previousSnapshot = view.snapshot;
+    const previousHost = view.selectedHost;
+    const template = previousSnapshot.servers.find(
+      (server) => server.status === "online" && server.gpus.length,
+    );
+    const gpu = template.gpus[0];
+    const server = {
+      ...template,
+      host: "sixteen-gpu",
+      gpus: Array.from({ length: 16 }, (_, index) => ({
+        ...gpu,
+        index,
+        uuid: \`GPU-SIXTEEN-\${String(index).padStart(2, "0")}\`,
+      })),
+    };
+    view.snapshot = { ...previousSnapshot, servers: [server] };
+    view.selectedHost = "all";
+    view.heatmapCache.clear();
+    view.heatmapAxisCache = null;
+    renderHeatmap();
+    const row = document.querySelector(".heatmap-row");
+    const tiles = [...row.querySelectorAll(".heatmap-cell:not(.placeholder)")];
+    const rows = Map.groupBy(tiles, (tile) => Math.round(tile.getBoundingClientRect().top));
+    const result = {
+      columns: getComputedStyle(row).gridTemplateColumns.split(" ").length - 1,
+      rows: getComputedStyle(row).gridTemplateRows.split(" ").length,
+      rowSizes: [...rows.values()].map((items) => items.length),
+      tileCount: tiles.length,
+    };
+    view.snapshot = previousSnapshot;
+    view.selectedHost = previousHost;
+    view.heatmapCache.clear();
+    view.heatmapAxisCache = null;
+    renderHeatmap();
+    return result;
+  })()`);
+  assert.deepEqual(heatmapPacking, {
+    columns: 8,
+    rows: 2,
+    rowSizes: [8, 8],
+    tileCount: 16,
+  });
 
   const programSearch = await cdp.evaluate(`(() => {
     const input = document.querySelector("#search");
@@ -2265,14 +2453,14 @@ try {
   );
   assert.equal(
     meta.fixture.unauthenticatedPrivateRequests,
-    0,
-    "every private dashboard request carries the Bearer capability",
+    1,
+    "only the explicit wrong-token submission reaches a private route unauthenticated",
   );
   assert.deepEqual(await cdp.send("Network.getAllCookies"), { cookies: [] });
   assert.deepEqual(cdp.errors, []);
 
   console.log(JSON.stringify({
-    browser: "chrome", initial, final, failureMappings,
+    browser: "chrome", initial, final, displayName, heatmapPacking, failureMappings,
     heartbeat, topologyBenchmark, programSearchBenchmark,
     capacity, owners, ownersUsage, ownersDrilldown,
     incidentMaintenance, grouping, emptyFleet,
