@@ -199,6 +199,7 @@ class DemoNotificationSink:
                 "queuedDeliveries": 2,
                 "deliveredEvents": 18,
                 "droppedDeliveries": 0,
+                "suppressedDeliveries": 1,
                 "lastError": None,
                 "lastAttemptAt": _iso(now - timedelta(minutes=5)),
                 "lastSuccessAt": _iso(now - timedelta(minutes=5)),
@@ -209,6 +210,7 @@ class DemoNotificationSink:
                 "queuedDeliveries": 0,
                 "deliveredEvents": 4,
                 "droppedDeliveries": 3,
+                "suppressedDeliveries": 0,
                 "lastError": "HTTP 503 from relay",
                 "lastAttemptAt": _iso(now - timedelta(minutes=2)),
                 "lastSuccessAt": None,
@@ -231,6 +233,9 @@ class DemoNotificationSink:
             ),
             "droppedDeliveries": sum(
                 int(endpoint["droppedDeliveries"]) for endpoint in endpoints
+            ),
+            "suppressedDeliveries": sum(
+                int(endpoint["suppressedDeliveries"]) for endpoint in endpoints
             ),
             "endpoints": endpoints,
         }

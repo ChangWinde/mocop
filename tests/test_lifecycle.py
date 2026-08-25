@@ -106,7 +106,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn(f'--config="{self.root}/config file.json"', unit)
         self.assertIn("NoNewPrivileges=true", unit)
         self.assertIn(
-            f'EnvironmentFile=-"{self.root}/environment"',
+            f"EnvironmentFile=-{self.root}/environment",
             unit,
         )
         self.assertNotIn("ProtectSystem=", unit)
@@ -135,21 +135,22 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn(f'ExecStart="{venv_python}" -m mocop', unit)
         self.assertNotIn(f'ExecStart="{base_python}"', unit)
 
-    def test_optional_environment_path_quotes_spaces_without_hiding_prefix(
-        self,
-    ) -> None:
-        # systemd interprets C-style escapes only inside quotes; an unquoted
-        # \x20 path names a nonexistent literal-backslash file and the "-"
-        # prefix then silently drops the webhook environment.
+    def test_optional_environment_path_is_a_bare_absolute_path(self) -> None:
+        # systemd takes the whole EnvironmentFile= line as one path and does
+        # not unquote it: a quoted or escaped value fails the absolute-path
+        # check and the "-" prefix silently drops the webhook environment. A
+        # bare path with spaces is the only form systemd actually loads.
         unit = render_user_unit(
             Path("/usr/bin/python3"),
             self.root / "config directory" / "config.json",
         )
 
         self.assertIn(
-            f'EnvironmentFile=-"{self.root}/config directory/environment"',
+            f"EnvironmentFile=-{self.root}/config directory/environment",
             unit,
         )
+        self.assertNotIn('EnvironmentFile=-"', unit)
+        self.assertNotIn("\\x", unit)
 
     def test_service_install_uses_fixed_systemctl_arguments(self) -> None:
         config_path = self.root / "config.json"
@@ -474,28 +475,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(active)
         self.assertEqual(len(calls), 10)
 
-    def test_wait_until_healthy_requires_an_authenticated_snapshot(self) -> None:
-        manager = self.build_manager(lambda _arguments: 0)
-        connection = Mock()
-        meta = Mock(status=200)
-        meta.read.return_value = b'{"apiVersion":"2","authenticationRequired":true}'
-        protected = Mock(status=200)
-        protected.read.return_value = b""
-        connection.getresponse.side_effect = (meta, protected)
-        with patch(
-            "mocop.lifecycle.http.client.HTTPConnection", return_value=connection
-        ):
-            self.assertTrue(
-                manager.wait_until_healthy("0.0.0.0", 8787, "A" * 43, timeout_seconds=0)
-            )
-        self.assertEqual(connection.request.call_count, 2)
-        connection.request.assert_called_with(
-            "HEAD",
-            "/api/snapshot",
-            headers={"Authorization": f"Bearer {'A' * 43}"},
-        )
-
-    def test_wait_until_healthy_rejects_a_wrong_capability(self) -> None:
+    def test_wait_until_healthy_confirms_auth_without_sending_the_token(self) -> None:
         manager = self.build_manager(lambda _arguments: 0)
         connection = Mock()
         meta = Mock(status=200)
@@ -506,10 +486,34 @@ class LifecycleTests(unittest.TestCase):
         with patch(
             "mocop.lifecycle.http.client.HTTPConnection", return_value=connection
         ):
+            self.assertTrue(
+                manager.wait_until_healthy("0.0.0.0", 8787, timeout_seconds=0)
+            )
+        self.assertEqual(connection.request.call_count, 2)
+        # The capability never leaves the installer: the liveness probe is an
+        # unauthenticated request that the service must reject.
+        second_call = connection.request.call_args_list[1]
+        self.assertEqual(second_call.args, ("GET", "/api/snapshot"))
+        self.assertNotIn("headers", second_call.kwargs)
+        for call in connection.request.call_args_list:
+            self.assertNotIn("Authorization", str(call))
+
+    def test_wait_until_healthy_rejects_a_service_without_auth(self) -> None:
+        # A service that started without a readable token serves
+        # unauthenticated; the 200 to an unauthenticated read must fail the
+        # health check instead of being mistaken for a live install.
+        manager = self.build_manager(lambda _arguments: 0)
+        connection = Mock()
+        meta = Mock(status=200)
+        meta.read.return_value = b'{"apiVersion":"2","authenticationRequired":true}'
+        protected = Mock(status=200)
+        protected.read.return_value = b""
+        connection.getresponse.side_effect = (meta, protected)
+        with patch(
+            "mocop.lifecycle.http.client.HTTPConnection", return_value=connection
+        ):
             self.assertFalse(
-                manager.wait_until_healthy(
-                    "127.0.0.1", 8787, "wrong", timeout_seconds=0
-                )
+                manager.wait_until_healthy("127.0.0.1", 8787, timeout_seconds=0)
             )
 
     def test_status_is_read_only_and_uninstall_removes_only_its_unit(self) -> None:

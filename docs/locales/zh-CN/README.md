@@ -227,7 +227,7 @@ VPN；明文 HTTP 上的 Bearer 头不提供网络机密性或服务端身份认
 python3 -m unittest discover -s tests -t . -p 'test_*.py'
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
-for t in capacity_watch csv_export dashboard_auth process_search; do node "tests/${t}_test.mjs"; done
+for t in capacity_match capacity_watch csv_export dashboard_auth process_search; do node "tests/${t}_test.mjs"; done
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 

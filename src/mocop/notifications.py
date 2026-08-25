@@ -99,6 +99,7 @@ class DisabledNotificationSink:
             "healthy": True,
             "queuedDeliveries": 0,
             "droppedDeliveries": 0,
+            "suppressedDeliveries": 0,
             "endpoints": [],
         }
 
@@ -422,6 +423,7 @@ class _WebhookWorker:
         self._seen_order: deque[int] = deque()
         self._seen: set[int] = set()
         self._dropped = 0
+        self._suppressed = 0
         self._delivered = 0
         self._last_error: str | None = None
         self._last_attempt_at: str | None = None
@@ -498,6 +500,7 @@ class _WebhookWorker:
                 "queuedDeliveries": self._queue.qsize(),
                 "deliveredEvents": self._delivered,
                 "droppedDeliveries": self._dropped,
+                "suppressedDeliveries": self._suppressed,
                 "lastError": self._last_error,
                 "lastAttemptAt": self._last_attempt_at,
                 "lastSuccessAt": self._last_success_at,
@@ -540,9 +543,12 @@ class _WebhookWorker:
                     and not self._pairing_saturated
                 ):
                     # A recovery for a condition the receiver never saw would
-                    # only confuse it; drop the event but keep it accounted.
+                    # only confuse it. This is a deliberate suppression (for
+                    # example a recovery inside a maintenance window), not a
+                    # delivery failure, so it is counted separately and never
+                    # inflates droppedDeliveries or flips the healthy flag.
                     with self._status_lock:
-                        self._dropped += 1
+                        self._suppressed += 1
                     continue
                 body = self._payload(item)
                 headers = self._headers(item.event, body)
@@ -702,6 +708,9 @@ class WebhookNotificationSink:
             ),
             "droppedDeliveries": sum(
                 int(endpoint["droppedDeliveries"]) for endpoint in endpoints
+            ),
+            "suppressedDeliveries": sum(
+                int(endpoint["suppressedDeliveries"]) for endpoint in endpoints
             ),
             "endpoints": endpoints,
         }

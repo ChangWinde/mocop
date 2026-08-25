@@ -227,6 +227,31 @@ class MigrationTests(unittest.TestCase):
             )
         self.assertFalse((self.root / "topology-collision" / "config.json").exists())
 
+    def test_deploying_onto_a_topology_node_without_local_rename_succeeds(self) -> None:
+        # No source local_host means no rename, so the collision guard must
+        # not fire: migrating the monitor onto a machine that is already a
+        # topology node (a jump host) is valid.
+        source = self.write_source(
+            directory="no-local",
+            hosts=["gpu-01"],
+            local_host=None,
+            topology={
+                "root": "gateway",
+                "links": [
+                    {"source": "gateway", "target": "gpu-01", "transport": "ssh"},
+                ],
+            },
+        )
+        target = self.root / "no-local-target" / "config.json"
+
+        result = migrate_config(
+            source, target, current_hostname="gateway", local_host="gateway"
+        )
+
+        config = load_private_config(target)
+        self.assertEqual(config.local_host, "gateway")
+        self.assertEqual(result.new_local_host, "gateway")
+
         existing = self.root / "existing" / "config.json"
         existing.parent.mkdir(mode=0o700)
         existing.write_text("keep", encoding="utf-8")

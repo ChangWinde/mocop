@@ -183,14 +183,15 @@ def migrate_config(
     if new_local_host is not None and new_local_host in excludes:
         raise LifecycleError(f"new local host alias is excluded: {new_local_host}")
     if (
-        new_local_host is not None
+        old_local_host is not None
+        and new_local_host is not None
         and new_local_host != old_local_host
         and _topology_contains(raw.get("topology"), new_local_host)
     ):
-        # Renaming the old local node onto an existing topology node (for
-        # example a jump host) would fold two nodes into one and produce
-        # self-links; refuse with a direct explanation instead of leaving the
-        # operator to decode the downstream schema error.
+        # Only a rename can fold two topology nodes into one and self-link.
+        # Guard exactly that: when the source has no local_host there is no
+        # rename, so deploying onto a machine that is already a topology node
+        # (a jump host, for example) stays a valid migration.
         raise LifecycleError(
             "new local host alias already appears in the configured topology: "
             f"{new_local_host}"

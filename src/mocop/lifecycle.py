@@ -199,12 +199,18 @@ def _systemd_quote(value: Path) -> str:
 def _systemd_optional_environment_file(value: Path) -> str:
     """Render an optional EnvironmentFile= path that systemd actually reads.
 
-    C-style ``\\xNN`` escapes are only interpreted inside quotes, so an
-    unquoted escaped path would name a literal-backslash file and the ``-``
-    prefix would silently ignore it, dropping webhook credentials. Quote the
-    path like every other unit path and keep the prefix outside the quotes.
+    ``EnvironmentFile=`` takes the whole remaining line as one path after the
+    optional ``-`` prefix; systemd does not word-split or unquote it. Quoting
+    (or C-style ``\\xNN`` escaping) makes the value start with ``"`` (or ``\\``),
+    which fails the absolute-path check, so systemd ignores the whole line and
+    the ``-`` prefix suppresses the error — webhook credentials then never
+    load. A bare absolute path with spaces is valid; only ``%`` needs escaping
+    against specifier expansion. Control characters are already rejected by
+    ``_validate_service_path``.
     """
-    return f"-{_systemd_quote(value)}"
+    text = str(value)
+    _validate_service_path(text)
+    return f"-{text.replace('%', '%%')}"
 
 
 def _validate_service_path(text: str) -> None:
@@ -571,14 +577,25 @@ class UserServiceManager:
         self,
         host: str,
         port: int,
-        token: str,
         *,
         timeout_seconds: float = 8.0,
         poll_interval_seconds: float = 0.2,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> bool:
-        """Verify that the newly installed authenticated Mocop API is live."""
+        """Verify that the newly installed authenticated Mocop API is live.
+
+        The capability is never sent here. ``wait_until_active`` already
+        confirmed this exact user unit is running, and its generated
+        ExecStart binds the config and sibling token this installer wrote, so
+        the running service's token matches by construction. Transmitting it
+        would instead expose it to whatever process holds the loopback port
+        if our own unit crash-loops (a Type=simple unit reports active on
+        fork, before a bind failure). Confirming liveness with an
+        unauthenticated request that must be rejected proves the listener is a
+        Mocop instance enforcing authentication and also catches a service
+        that started without a readable token (which would answer 200).
+        """
         connect_host = (
             "127.0.0.1" if host == "0.0.0.0" else "::1" if host == "::" else host
         )
@@ -604,14 +621,10 @@ class UserServiceManager:
                         and meta.get("apiVersion") == "2"
                         and meta.get("authenticationRequired") is True
                     ):
-                        connection.request(
-                            "HEAD",
-                            "/api/snapshot",
-                            headers={"Authorization": f"Bearer {token}"},
-                        )
+                        connection.request("GET", "/api/snapshot")
                         protected = connection.getresponse()
                         protected.read()
-                        if protected.status == 200:
+                        if protected.status == 403:
                             return True
             except (
                 OSError,

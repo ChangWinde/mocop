@@ -129,6 +129,21 @@ class SshTopologyPlannerTests(unittest.TestCase):
             (("training-1", "training"), ("training-2", "training")),
         )
 
+    def test_word_prefixes_and_model_numbers_do_not_form_groups(self) -> None:
+        # ADR-0022 sanctions only numbered fleets: a shared word prefix or an
+        # embedded model number is not evidence of one scheduling pool.
+        aliases = ("paris-web", "paris-db", "gpu-a100", "gpu-h100")
+        resolution = SshRouteResolution(
+            known_aliases=aliases,
+            routes=tuple((alias, SshRoute("direct")) for alias in aliases),
+            failures=(),
+            warnings=(),
+        )
+
+        projection = SshTopologyPlanner.project("monitor", aliases, resolution)
+
+        self.assertEqual(projection.host_groups, ())
+
     def test_projects_nested_routes_and_groups_by_closest_jump_alias(self) -> None:
         resolution = SshRouteResolution(
             known_aliases=("bastion", "cluster-a", "gpu-01", "gpu-02"),

@@ -496,7 +496,6 @@ def _install_service(config_path: Path) -> int:
             manager.wait_until_healthy(
                 config.listen_host,
                 config.listen_port,
-                token,
             )
             if token is not None
             else False

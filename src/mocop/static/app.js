@@ -157,6 +157,7 @@ const {
   numeric,
 });
 
+const capacityMatch = globalThis.MocopCapacityMatch.create();
 const capacityWatch = globalThis.MocopCapacityWatch.create({ storage: localStorage });
 
 const view = {
@@ -2357,7 +2358,7 @@ function incidentsSyncedWithSnapshot() {
 function capacityMatches(request) {
   // The raw active list keeps silenced alerts in scope: an operator
   // acknowledging noise must not turn a faulty GPU back into a candidate.
-  return capacityWatch.matches({
+  return capacityMatch.matches({
     servers: view.snapshot.servers,
     activeConditions: view.incidents?.active,
     request,
@@ -2769,11 +2770,6 @@ function renderCapacityMatcher() {
   }
 }
 
-function capacityWatchLabel(request) {
-  const model = request.model === "any" ? "不限型号" : request.model;
-  return `${request.gpuCount} 张 GPU · ${model} · 每卡空闲 ≥ ${request.minVramGiB} GiB`;
-}
-
 // One watch, evaluated on every accepted snapshot regardless of dialog
 // visibility. The leaf owns the armed/notified edge and its cooldown; this
 // layer only projects the result into the banner, title, and notification.
@@ -2784,6 +2780,13 @@ function evaluateCapacityWatch() {
   const satisfied = result.candidates.filter((candidate) => candidate.satisfies).length;
   view.capacityWatchSatisfied = satisfied;
   const evaluated = capacityWatch.evaluateWatch(watch, satisfied);
+  if (!evaluated.watch) {
+    // Another tab stopped or replaced this watch; adopt that, never revive.
+    view.capacityWatch = null;
+    view.capacityWatchSatisfied = 0;
+    view.capacityWatchBannerDismissed = false;
+    return;
+  }
   if (evaluated.watch.state === "armed" && watch.state === "notified") {
     view.capacityWatchBannerDismissed = false;
   }
@@ -2798,7 +2801,7 @@ function deliverCapacityWatchNotification(satisfied) {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   try {
     const notification = new Notification("Mocop · GPU 已就绪", {
-      body: `${satisfied} 个节点满足 ${capacityWatchLabel(view.capacityWatch.request)}`,
+      body: capacityWatch.bannerText(view.capacityWatch, satisfied),
       tag: "mocop-capacity-watch",
     });
     notification.addEventListener("click", () => {
@@ -2826,9 +2829,10 @@ function renderCapacityWatchControls() {
   const ready = watch.state === "notified";
   elements.capacityWatchStatus.className =
     `capacity-watch-status ${ready ? "ready" : "armed"}`;
-  elements.capacityWatchStatus.textContent = ready
-    ? `已就绪 · ${view.capacityWatchSatisfied} 个节点满足 ${capacityWatchLabel(watch.request)}`
-    : `守望中 · ${capacityWatchLabel(watch.request)}`;
+  elements.capacityWatchStatus.textContent = capacityWatch.controlText(
+    watch,
+    view.capacityWatchSatisfied,
+  );
 }
 
 function renderCapacityWatchBanner() {
@@ -2841,8 +2845,10 @@ function renderCapacityWatchBanner() {
   banner.hidden = !show;
   document.title = show ? `● ${view.baseDocumentTitle}` : view.baseDocumentTitle;
   if (show) {
-    elements.capacityWatchBannerText.textContent =
-      `GPU 已就绪：${view.capacityWatchSatisfied} 个节点满足 ${capacityWatchLabel(watch.request)}`;
+    elements.capacityWatchBannerText.textContent = capacityWatch.bannerText(
+      watch,
+      view.capacityWatchSatisfied,
+    );
   }
 }
 
@@ -6193,6 +6199,9 @@ async function connectAuthenticatedStream() {
       });
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
       setConnection("live", "实时连接");
+      // A healthy stream is as good as a successful poll: clear the failure
+      // streak so a later brief drop does not inherit a stale backoff.
+      view.snapshotFailureStreak = 0;
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -6242,6 +6251,9 @@ function connect() {
       clearTimeout(view.connectionErrorTimer);
       view.connectionErrorTimer = null;
     }
+    // Stream liveness resets the poll backoff the same way a poll success
+    // would, so a recovered stream does not keep a stale failure streak.
+    view.snapshotFailureStreak = 0;
     setConnection("live", "实时连接");
   };
   events.addEventListener("open", markLive);

@@ -4,6 +4,46 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Changed
+
+- Service-install health verification no longer transmits the dashboard
+  capability. It confirms liveness with an unauthenticated request the
+  service must reject, closing a narrow window where the token could reach a
+  process that had bound the loopback port while the real unit crash-looped,
+  and it now also flags a service that started without a readable token.
+- Webhook status reports `suppressedDeliveries` separately from
+  `droppedDeliveries`, so a deliberately withheld recovery (an unpaired
+  resolved event, for example inside a maintenance window) no longer inflates
+  the failure count or marks an endpoint unhealthy.
+
+### Fixed
+
+- Fixed the generated systemd unit's `EnvironmentFile=` line, which a prior
+  change had quoted; systemd treats the whole line as one unquoted path, so
+  the quoted form failed the absolute-path check and every install silently
+  dropped its webhook credentials. The path is now emitted bare (verified
+  with `systemd-analyze`), and paths with spaces load correctly.
+- A malformed `nvidia-smi` payload is now treated as unavailable GPU
+  telemetry. It previously degraded to an authoritative empty inventory that,
+  combined with identity-absence recovery, silently resolved every per-GPU
+  hardware incident within two cycles without opening an availability alert.
+- Resolved-topology grouping now follows ADR-0022 exactly: only a trailing
+  numeric segment (`training-1`/`training-2`) forms an inferred group. Shared
+  word prefixes (`paris-web`/`paris-db`) and embedded model numbers
+  (`gpu-a100`) no longer group hosts that are not one numbered fleet;
+  explicit `host_groups` remain the override.
+- `mocop migrate` no longer rejects deploying the monitor onto a machine that
+  is already a topology node when the source has no local host; the topology
+  collision guard now fires only for an actual local-host rename.
+- The dashboard capacity watch reconciles with shared browser storage on
+  every evaluation, so a watch stopped or replaced in one tab is no longer
+  resurrected or overwritten by another tab. A wall-clock rollback no longer
+  freezes its notification cooldown, and a watch on a long (up to 256-char)
+  GPU model name now saves instead of failing silently.
+- GPU severity escalation now requires consecutive confirmable samples,
+  matching incident opening: two critical observations split by a probe-
+  failure gap no longer accumulate into an escalation.
+
 ## [0.10.1] - 2026-08-25
 
 ### Fixed

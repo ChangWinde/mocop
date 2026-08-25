@@ -360,7 +360,7 @@ Top-level fields:
 | `lastPollDurationMs` | int \| null | Duration of that batch. |
 | `collectorError` | string \| null | Fleet-level collector failure (e.g. discovery failed), else `null`. |
 | `persistence` | object | `{enabled, backend, healthy, queuedWrites, droppedWrites, lastError}` (+ `writtenRecords` when SQLite). |
-| `notifications` | object | `{enabled, healthy, queuedDeliveries, droppedDeliveries, endpoints[]}`; each endpoint reports `{name, healthy, queuedDeliveries, deliveredEvents, droppedDeliveries, lastError, lastAttemptAt, lastSuccessAt}`. |
+| `notifications` | object | `{enabled, healthy, queuedDeliveries, droppedDeliveries, suppressedDeliveries, endpoints[]}`; each endpoint reports `{name, healthy, queuedDeliveries, deliveredEvents, droppedDeliveries, suppressedDeliveries, lastError, lastAttemptAt, lastSuccessAt}`. `suppressedDeliveries` counts deliberately withheld recoveries (an unpaired resolved event, for example inside a maintenance window) and never marks the endpoint unhealthy. |
 | `thresholds` | object | The eleven active incident thresholds (`cpu_warning_pct`, …, `psi_io_some_pct`). |
 | `stats` | object | Fleet aggregates; see below. |
 | `servers` | array | Per-host state; see below. |
