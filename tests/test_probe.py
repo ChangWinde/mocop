@@ -324,7 +324,9 @@ class ProbeTests(unittest.TestCase):
         raw, _, _ = parse_linux_resource_payload(resource_payload())
         self.assertIsNone(raw.pressure)
 
-    def test_rejects_malformed_pressure_records(self) -> None:
+    def test_malformed_pressure_records_degrade_to_no_pressure_view(self) -> None:
+        # Pressure telemetry is auxiliary: a malformed PSI row must drop the
+        # pressure view while the core system sample stays online.
         malformed = (
             "PSI\tmemory\t1.0\t2.0",  # missing full columns
             "PSI\tswap\t1.0\t2.0\t\t",  # unknown resource
@@ -335,11 +337,12 @@ class ProbeTests(unittest.TestCase):
             "PSI\tmemory\t1.0\t2.0\t\t\nPSI\tmemory\t1.0\t2.0\t\t",  # duplicate
         )
         for psi_payload in malformed:
-            with (
-                self.subTest(psi_payload=psi_payload),
-                self.assertRaisesRegex(ValueError, "pressure"),
-            ):
-                parse_linux_resource_payload(resource_payload(psi_payload=psi_payload))
+            with self.subTest(psi_payload=psi_payload):
+                system, _gpus, _message = parse_linux_resource_payload(
+                    resource_payload(psi_payload=psi_payload)
+                )
+                self.assertIsNone(system.pressure)
+                self.assertGreater(system.cpu_total_ticks, 0)
 
     def test_rejects_unknown_resource_protocol(self) -> None:
         with self.assertRaisesRegex(ValueError, "protocol version"):
@@ -1535,6 +1538,84 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(len(gpus), 1)
         self.assertFalse(gpus[0].processes_available)
         self.assertEqual(gpus[0].processes, ())
+
+    def test_system_awk_pass_survives_an_empty_block_device_glob(self) -> None:
+        # A diskless or sandboxed guest has no /sys/block entries. The literal
+        # unexpanded glob used to reach awk, abort the pass before END, and
+        # silently drop every core row, so the host looked permanently failed.
+        script = _remote_script("disabled", False)
+        self.assertIn("set -- /sys/block/*/stat", script)
+        self.assertIn('[ -e "$1" ] || set --', script)
+        with tempfile.TemporaryDirectory() as directory:
+            rewritten = script.replace("/sys/block/", f"{directory}/empty-block/")
+            completed = _run_bounded_process(
+                ["sh", "-s"],
+                input_text=rewritten,
+                timeout_seconds=10,
+                max_output_bytes=2_097_152,
+                environment={**os.environ, "LC_ALL": "C"},
+            )
+
+        self.assertEqual(completed.returncode, 0)
+        raw, _, _ = parse_linux_resource_payload(completed.stdout)
+        self.assertGreater(raw.cpu_total_ticks, 0)
+        self.assertGreater(raw.memory_total_kib, 0)
+        # No block devices simply means no I/O counters, not a failed host.
+        self.assertEqual(raw.disk_read_bytes, 0)
+        self.assertEqual(raw.disk_write_bytes, 0)
+
+    def test_script_drops_disk_rows_with_non_numeric_capacity(self) -> None:
+        # gvfs and some rclone FUSE backends report "-" capacity columns.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stub = root / "df"
+            stub.write_text(
+                "#!/bin/sh\n"
+                "cat <<'ROWS'\n"
+                "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n"
+                "/dev/sda1 ext4 1000 500 500 50% /\n"
+                "gvfsd-fuse fuse.gvfsd-fuse - - - - /run/user/1000/gvfs\n"
+                "backend fuse.rclone 1000 - 500 50% /mnt/remote\n"
+                "ROWS\n",
+                encoding="utf-8",
+            )
+            stub.chmod(0o700)
+            completed = _run_bounded_process(
+                ["sh", "-s"],
+                input_text=_remote_script("disabled", False),
+                timeout_seconds=10,
+                max_output_bytes=2_097_152,
+                environment={
+                    **os.environ,
+                    "LC_ALL": "C",
+                    "PATH": f"{root}:{os.environ['PATH']}",
+                },
+            )
+
+        self.assertEqual(completed.returncode, 0)
+        raw, _, _ = parse_linux_resource_payload(completed.stdout)
+        self.assertEqual([disk.mountpoint for disk in raw.disks], ["/"])
+
+    def test_parser_isolates_non_numeric_disk_rows(self) -> None:
+        # Defense in depth for older deployed scripts: one exotic row degrades
+        # to a missing disk entry instead of rejecting the whole host sample.
+        payload = resource_payload().replace(
+            "DISKS_BEGIN\n",
+            "DISKS_BEGIN\nDISK\tgvfsd\tfuse.gvfsd\t-\t-\t-\t-\t/run/user/1000/gvfs\n",
+        )
+        raw, gpus, _ = parse_linux_resource_payload(payload)
+
+        self.assertEqual([disk.mountpoint for disk in raw.disks], ["/"])
+        self.assertEqual(len(gpus), 1)
+
+    def test_malformed_gpu_rows_degrade_to_unavailable_gpu_data(self) -> None:
+        raw, gpus, message = parse_linux_resource_payload(
+            resource_payload(gpu_payload="0, GPU-abc, NVIDIA A100, 550.54, P0")
+        )
+
+        self.assertEqual(gpus, ())
+        self.assertEqual(message, "nvidia-smi output was malformed")
+        self.assertGreater(raw.cpu_total_ticks, 0)
 
     def test_parses_v7_workload_records_with_start_and_command(self) -> None:
         workloads = parse_workload_records(

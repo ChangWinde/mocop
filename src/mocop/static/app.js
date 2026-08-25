@@ -161,6 +161,8 @@ const capacityWatch = globalThis.MocopCapacityWatch.create({ storage: localStora
 
 const view = {
   dashboardStarted: false,
+  connectStarted: false,
+  snapshotFailureStreak: 0,
   snapshot: null,
   topology: null,
   topologyLoading: false,
@@ -1111,11 +1113,18 @@ function syncRefreshControl() {
 }
 
 function acceptSnapshot(snapshot) {
+  // servers is part of the envelope: renderers dereference it unguarded, so
+  // a structurally broken snapshot must be rejected here instead of
+  // replacing good state and freezing every later render.
   if (
     !snapshot
     || typeof snapshot !== "object"
     || !Number.isSafeInteger(snapshot.version)
     || typeof snapshot.startedAt !== "string"
+    || !Array.isArray(snapshot.servers)
+    || snapshot.servers.some(
+      (server) => !server || typeof server.host !== "string" || !Array.isArray(server.gpus),
+    )
   ) {
     throw new TypeError("Invalid snapshot envelope");
   }
@@ -5748,53 +5757,11 @@ function visibleOrderedRecords() {
   return groupedRecords(records).flatMap((group) => group.records);
 }
 
-function csvCell(value) {
-  const raw = value == null ? "" : String(value);
-  const safe = /^[\s\u0000-\u001F]*[=+\-@]/.test(raw) ? `'${raw}` : raw;
-  return `"${safe.replaceAll('"', '""')}"`;
-}
-
-function buildCsv(records) {
-  const columns = [
-    ["主机", ({ server }) => server.host],
-    ["GPU Index", ({ gpu }) => gpu.index],
-    ["UUID", ({ gpu }) => gpu.uuid],
-    ["型号", ({ gpu }) => gpu.name],
-    ["驱动", ({ gpu }) => gpu.driver_version],
-    ["P-State", ({ gpu }) => gpu.pstate],
-    ["GPU 利用率 %", ({ gpu }) => gpu.utilization_gpu_pct],
-    ["显存利用率 %", ({ gpu }) => ratio(gpu.memory_used_mib, gpu.memory_total_mib).toFixed(2)],
-    ["显存已用 MiB", ({ gpu }) => gpu.memory_used_mib],
-    ["显存总量 MiB", ({ gpu }) => gpu.memory_total_mib],
-    ["温度 °C", ({ gpu }) => gpu.temperature_c],
-    ["功耗 W", ({ gpu }) => gpu.power_draw_w],
-    ["功耗上限 W", ({ gpu }) => gpu.power_limit_w],
-    ["进程数", ({ gpu }) => gpu.processes_available === false
-      ? null : gpuProcessSummary(gpu).count],
-    ["进程已知分配显存 MiB", ({ gpu }) => {
-      const summary = gpuProcessSummary(gpu);
-      return gpu.processes_available === false || !summary.knownMemoryCount
-        ? null : summary.knownMemoryMiB;
-    }],
-    ["进程显存覆盖", ({ gpu }) => {
-      const summary = gpuProcessSummary(gpu);
-      return gpu.processes_available === false
-        ? null : `${summary.knownMemoryCount}/${summary.count}`;
-    }],
-    ["进程采样状态", ({ gpu }) => gpu.processes_available === false
-      ? "unavailable" : gpu.processes_sampled === false ? "cached" : "sampled"],
-    ["进程采样时间", ({ gpu }) => gpu.processes_observed_at],
-    ["CPU 利用率 %", ({ server }) => server.system?.cpu_usage_pct],
-    ["系统内存利用率 %", ({ server }) => ratio(server.system?.memory_used_mib, server.system?.memory_total_mib).toFixed(2)],
-    ["GPU 状态", ({ server, gpu }) => gpuState(gpu, server)[0]],
-    ["采样时间", ({ server }) => server.lastAttemptAt],
-  ];
-  const lines = [columns.map(([label]) => csvCell(label)).join(",")];
-  records.forEach((record) => {
-    lines.push(columns.map(([, getter]) => csvCell(getter(record))).join(","));
-  });
-  return `\uFEFF${lines.join("\r\n")}\r\n`;
-}
+const { buildCsv } = globalThis.MocopCsvExport.create({
+  ratio,
+  gpuProcessSummary,
+  gpuState,
+});
 
 function exportVisibleCsv() {
   const records = visibleOrderedRecords();
@@ -6077,6 +6044,11 @@ function scheduleRender() {
   });
 }
 
+function snapshotBackoffMs() {
+  const streak = view.snapshotFailureStreak;
+  return streak > 0 ? Math.min(30_000, 4_000 * 2 ** (streak - 1)) : 0;
+}
+
 async function fetchSnapshot() {
   if (view.snapshotFetchInFlight) return view.snapshotFetchInFlight;
   const request = (async () => {
@@ -6089,6 +6061,12 @@ async function fetchSnapshot() {
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const snapshot = await response.json();
+      view.snapshotFailureStreak = 0;
+      // A page that loaded while the service was restarting recovers here:
+      // establish the missing stream once and correct the stuck offline
+      // badge, since the polling success path never reported liveness.
+      if (view.dashboardStarted && !view.connectStarted) connect();
+      if (view.transportKind === "offline") setConnection("delayed", "轮询同步");
       if (!acceptSnapshot(snapshot)) return true;
       view.lastEventAt = Date.now();
       normalizeSelection();
@@ -6097,6 +6075,7 @@ async function fetchSnapshot() {
       syncIncidents();
       return true;
     } catch (_error) {
+      view.snapshotFailureStreak += 1;
       if (!view.snapshot) setConnection("offline", "服务不可达");
       return false;
     }
@@ -6234,17 +6213,25 @@ async function connectAuthenticatedStream() {
       }
     } catch (_error) {
       const reachable = await fetchSnapshot();
-      if (view.authenticationFailed) return;
+      if (view.authenticationFailed) {
+        // A future re-authentication must be able to establish a new stream.
+        view.connectStarted = false;
+        return;
+      }
       setConnection(
         reachable ? "delayed" : "offline",
         reachable ? "轮询同步" : "服务不可达",
       );
     }
-    if (view.dashboardStarted) await wait(1200);
+    // Downtime uses the shared snapshot backoff so an unreachable service is
+    // not hammered at a fixed rate, matching the auxiliary channels.
+    if (view.dashboardStarted) await wait(Math.max(1200, snapshotBackoffMs()));
   }
 }
 
 function connect() {
+  if (view.connectStarted) return;
+  view.connectStarted = true;
   if (dashboardAuthentication.token) {
     connectAuthenticatedStream();
     return;
@@ -6765,11 +6752,14 @@ setInterval(() => {
   renderConnectionStatus();
   const elapsed = Date.now() - view.lastEventAt;
   const fallbackAfter = Math.max(2000, numeric(view.snapshot?.pollIntervalSeconds, 5) * 1000);
-  if (view.transportKind !== "live" && elapsed > fallbackAfter) fetchSnapshot();
+  // Consecutive failures widen the poll gate up to 30s so an outage is not
+  // hammered at a fixed rate; one success resets the backoff immediately.
+  const gate = Math.max(fallbackAfter, snapshotBackoffMs());
+  if (view.transportKind !== "live" && elapsed > gate) fetchSnapshot();
   // 16s instead of 15s: named heartbeats arrive on a 15s cadence, so the
   // grace second keeps jitter from triggering a pointless snapshot poll on a
   // healthy stream. Services without named heartbeats still fall back here.
-  else if (elapsed > 16000) fetchSnapshot();
+  else if (elapsed > Math.max(16000, snapshotBackoffMs())) fetchSnapshot();
 }, 1000);
 
 const requestDashboardAuthentication = dashboardAuthentication.bindPrompt({

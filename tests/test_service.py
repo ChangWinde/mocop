@@ -1392,6 +1392,52 @@ class StateStoreTests(unittest.TestCase):
         store.set_host_display_names(())
         self.assertIsNone(store.snapshot()["servers"][0]["displayName"])
 
+    def test_resolved_transitions_reach_notifications_inside_maintenance(self) -> None:
+        # The opened event was delivered before the window began; suppressing
+        # the resolved pairing would leave the receiver's alert hanging
+        # forever, so resolved transitions always reach the delivery queue.
+        notifications = _RecordingNotifications()
+        current = [datetime(2026, 8, 10, 0, 0, tzinfo=timezone.utc)]
+        store = StateStore(
+            5,
+            notifications=notifications,
+            utc_clock=lambda: current[0],
+        )
+        store.set_hosts(("gpu-1",))
+        store.apply(
+            ProbeResult(
+                "gpu-1",
+                "unreachable",
+                1,
+                observed_at="2026-08-10T00:00:00Z",
+            )
+        )
+        published_states = [
+            event.state for events, _ in notifications.published for event in events
+        ]
+        self.assertEqual(published_states, ["opened"])
+
+        window = MaintenanceWindowConfig(
+            reason="Planned recovery",
+            until=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        )
+        store.set_maintenance_windows((("gpu-1", window),))
+        for minute in (1, 2):
+            current[0] = datetime(2026, 8, 10, 0, minute, tzinfo=timezone.utc)
+            store.apply(
+                ProbeResult(
+                    "gpu-1",
+                    "online",
+                    1,
+                    observed_at=f"2026-08-10T00:0{minute}:00Z",
+                )
+            )
+
+        published_states = [
+            event.state for events, _ in notifications.published for event in events
+        ]
+        self.assertEqual(published_states, ["opened", "resolved"])
+
     def test_recurring_maintenance_window_activates_in_snapshot(self) -> None:
         # 2030-06-19 is a Wednesday (weekday 2); the window runs 18:00-20:00.
         window = MaintenanceWindowConfig(

@@ -396,6 +396,73 @@ class IncidentTrackerTests(unittest.TestCase):
         self.tracker.update(healthy)
         self.assertEqual(self.tracker.snapshot(20)["active"], [])
 
+    def test_blind_gap_between_spikes_resets_open_confirmation(self) -> None:
+        # Opening requires consecutively confirmable samples: two isolated
+        # spikes separated by unreachable probes are transient noise, not a
+        # sustained failure, and must never accumulate into an opened event.
+        healthy = ProbeResult("node-a", "online", 1, (gpu(70),), system=system(20, 20))
+        spike = ProbeResult("node-a", "online", 1, (gpu(70),), system=system(95, 20))
+        self.tracker.update(healthy)
+        self.tracker.update(spike)
+        for _ in range(5):
+            self.tracker.update(ProbeResult("node-a", "unreachable", 5000))
+        self.tracker.update(spike)
+
+        categories = [item["category"] for item in self.tracker.snapshot(20)["active"]]
+        self.assertNotIn("cpu", categories)
+
+        # A second consecutive confirmation after the gap still opens.
+        self.tracker.update(spike)
+        categories = [item["category"] for item in self.tracker.snapshot(20)["active"]]
+        self.assertIn("cpu", categories)
+
+    def test_replaced_gpu_identity_lets_its_conditions_recover(self) -> None:
+        # A complete inventory is authoritative about absence: after a card
+        # swap the old identity never reappears, and its conditions must
+        # recover instead of pinning ghost alerts until a process restart.
+        hot_old = ProbeResult("node-a", "online", 1, (gpu(95),), system=system(20, 20))
+        self.tracker.update(hot_old)
+        self.tracker.update(hot_old)
+        self.assertEqual(
+            [item["category"] for item in self.tracker.snapshot(20)["active"]],
+            ["gpu_temperature"],
+        )
+
+        replaced = replace(gpu(40), uuid="GPU-2")
+        swapped = ProbeResult("node-a", "online", 1, (replaced,), system=system(20, 20))
+        self.tracker.update(swapped)
+        self.tracker.update(swapped)
+
+        snapshot = self.tracker.snapshot(20)
+        self.assertEqual(snapshot["active"], [])
+        self.assertIn(
+            ("gpu_temperature", "resolved"),
+            [(event["category"], event["state"]) for event in snapshot["events"]],
+        )
+
+    def test_failed_gpu_query_still_freezes_identity_conditions(self) -> None:
+        # The absence rule above must not weaken the query-failure freeze: a
+        # host whose nvidia-smi breaks says nothing about the old card.
+        hot_old = ProbeResult("node-a", "online", 1, (gpu(95),), system=system(20, 20))
+        self.tracker.update(hot_old)
+        self.tracker.update(hot_old)
+
+        query_failed = ProbeResult(
+            "node-a",
+            "online",
+            1,
+            (),
+            system=system(20, 20),
+            message="nvidia-smi query failed",
+        )
+        for _ in range(5):
+            self.tracker.update(query_failed)
+
+        self.assertIn(
+            "gpu_temperature",
+            [item["category"] for item in self.tracker.snapshot(20)["active"]],
+        )
+
     def test_connectivity_flapping_opens_once_until_stable_recovery(self) -> None:
         healthy = ProbeResult("node-a", "online", 1, system=system(20, 20))
         failed = ProbeResult("node-a", "unreachable", 5000)

@@ -152,7 +152,7 @@ mocop service uninstall
 
 `mocop deploy` 写入全新服务器配置；`mocop init` 是只创建配置的底层命令。
 控制台可安全修改常用的资产、周期、
-维护和分组设置，通常无需重启。所有字段、默认值和限制以
+维护和分组设置，无需重启。所有字段、默认值和限制以
 [配置参考](../../CONFIGURATION.md)为准；手工编写 JSON 时参考
 [完整安全示例](../../../examples/mocop.example.json)。可选 workload 身份和
 限额 SQLite 历史默认关闭。手工修改后先执行 `mocop config check`；需要重启
@@ -224,10 +224,10 @@ VPN；明文 HTTP 上的 Bearer 头不提供网络机密性或服务端身份认
 ## 开发
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest discover -s tests -t . -p 'test_*.py'
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
-node tests/process_search_test.mjs
+for t in capacity_watch csv_export dashboard_auth process_search; do node "tests/${t}_test.mjs"; done
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 

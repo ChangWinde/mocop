@@ -851,10 +851,16 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
                 # host, so df reports the host's filesystem under a file path.
                 # That capacity is not this target's and would double-count.
                 continue
-            total = _required_number(parts[3], "disk total") / 1024
-            used = _required_number(parts[4], "disk used") / 1024
-            available = _required_number(parts[5], "disk available") / 1024
-            used_pct = _required_number(parts[6], "disk usage")
+            try:
+                total = _required_number(parts[3], "disk total") / 1024
+                used = _required_number(parts[4], "disk used") / 1024
+                available = _required_number(parts[5], "disk available") / 1024
+                used_pct = _required_number(parts[6], "disk usage")
+            except ValueError:
+                # One exotic mount (a FUSE backend reporting "-", for example)
+                # degrades to a missing disk row; it must not reject the whole
+                # system sample the way a missing core section does.
+                continue
             disks.append(
                 DiskMetrics(
                     device=parts[1][:255],
@@ -867,12 +873,14 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
                 )
             )
         elif in_disks:
-            raise ValueError("resource payload has an invalid disk record")
+            # Rows the fixed script never emits (foreign columns, truncated
+            # fields) are dropped; section markers still bound the payload.
+            continue
         elif parts[0] == "PSI":
             # PSI repeats per resource, so it cannot ride the last-wins
             # key/value map; rows are validated together after the scan.
             if len(parts) != 6:
-                raise ValueError("resource payload has an invalid pressure record")
+                continue
             psi_rows.append(parts)
         elif len(parts) >= 2:
             values[parts[0]] = parts[1:]
@@ -918,6 +926,12 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
     if not cores.is_integer() or cores > 65536:
         raise ValueError("resource payload has invalid CPU core count")
 
+    try:
+        pressure = _parse_psi_records(psi_rows)
+    except ValueError:
+        # Pressure telemetry is auxiliary: an out-of-range or duplicated PSI
+        # row degrades the pressure view instead of failing the whole host.
+        pressure = None
     raw = _RawSystemSample(
         hostname=values["HOST"][0].strip()[:255] or "unknown",
         cpu_total_ticks=_required_number(values["CPU"][0], "CPU total ticks", 1),
@@ -936,7 +950,7 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
         disk_read_bytes=_required_number(values["IO"][0], "disk read bytes"),
         disk_write_bytes=_required_number(values["IO"][1], "disk write bytes"),
         disks=tuple(disks),
-        pressure=_parse_psi_records(psi_rows),
+        pressure=pressure,
     )
     gpu_payload = "\n".join(gpu_lines)
     first_gpu_row = next(
@@ -948,10 +962,20 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
         None,
     )
     inline_health: dict[str, GpuHealthMetrics] = {}
-    if first_gpu_row is not None and len(first_gpu_row) == len(_COMBINED_QUERY_FIELDS):
-        gpus, inline_health = parse_nvidia_combined_csv(gpu_payload)
-    else:
-        gpus = parse_nvidia_smi_csv(gpu_payload)
+    try:
+        if first_gpu_row is not None and len(first_gpu_row) == len(
+            _COMBINED_QUERY_FIELDS
+        ):
+            gpus, inline_health = parse_nvidia_combined_csv(gpu_payload)
+        else:
+            gpus = parse_nvidia_smi_csv(gpu_payload)
+    except ValueError:
+        # A malformed nvidia-smi row degrades to "GPU data unavailable" so the
+        # CPU/memory/disk sample survives; expected-count incidents then point
+        # at the GPUs instead of a false whole-host collection failure.
+        gpus = ()
+        inline_health = {}
+        gpu_message = "nvidia-smi output was malformed"
     if processes_sampled and processes_available:
         try:
             processes = parse_nvidia_processes_csv("\n".join(process_lines))

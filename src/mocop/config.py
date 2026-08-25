@@ -12,13 +12,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
-from urllib.parse import urlsplit
 
 from .discovery_policy import (
     SshDiscoveryConfig,
     SshDiscoveryPolicyError,
     parse_ssh_discovery_config,
 )
+from .hostnames import normalize_web_hostname
 
 CONFIG_ENV_VAR = "MOCOP_CONFIG"
 LOCAL_CONFIG_PATH = Path("config/mocop.json")
@@ -445,67 +445,6 @@ def _string_list(data: dict[str, Any], key: str) -> tuple[str, ...]:
 
 def is_safe_alias(value: str) -> bool:
     return bool(_SAFE_ALIAS.fullmatch(value))
-
-
-def normalize_web_hostname(value: object, *, allow_port: bool = False) -> str | None:
-    """Return the canonical lowercase hostname for a Host-style value.
-
-    Accepts DNS names, IPv4 literals, and IPv6 literals (bare or bracketed).
-    A port suffix is accepted only when ``allow_port`` is true; schemes,
-    credentials, paths, and queries are always rejected. Returns ``None``
-    when the value cannot be interpreted as a plain hostname.
-    """
-    if not isinstance(value, str):
-        return None
-    candidate = value.strip()
-    if (
-        not candidate
-        or len(candidate) > 260
-        or any(
-            unicodedata.category(character).startswith("C") for character in candidate
-        )
-    ):
-        return None
-    if candidate.count(":") >= 2 and not candidate.startswith("["):
-        candidate = f"[{candidate}]"  # bare IPv6 literal
-    try:
-        parsed = urlsplit(f"//{candidate}")
-        port = parsed.port
-    except ValueError:
-        return None
-    hostname = parsed.hostname
-    if (
-        hostname is None
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path
-        or parsed.query
-        or parsed.fragment
-        or (port is not None and not allow_port)
-    ):
-        return None
-    if "[" in parsed.netloc:
-        # Bracketed hosts must be IP literals even on Pythons whose urlsplit
-        # does not validate them.
-        try:
-            ipaddress.ip_address(hostname)
-        except ValueError:
-            return None
-    else:
-        try:
-            ipaddress.ip_address(hostname)
-        except ValueError:
-            if len(hostname) > 253 or not hostname.isascii():
-                return None
-            labels = hostname.removesuffix(".").split(".")
-            if any(
-                not label
-                or len(label) > 63
-                or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?", label)
-                for label in labels
-            ):
-                return None
-    return hostname
 
 
 def _has_disallowed_text_characters(value: str) -> bool:

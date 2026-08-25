@@ -121,6 +121,9 @@ class ConfigTests(unittest.TestCase):
             "[fd00::6]",
             "*.FWD.Memory.Whalent.com",
             "dashboard.example",
+            # The absolute DNS form is the same name; one canonical spelling
+            # keeps the browser's Host/Origin comparable to the trusted set.
+            "dashboard.example.",
         ]
         config = load_config(self.write(value))
         self.assertEqual(

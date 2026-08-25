@@ -106,7 +106,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn(f'--config="{self.root}/config file.json"', unit)
         self.assertIn("NoNewPrivileges=true", unit)
         self.assertIn(
-            f"EnvironmentFile=-{self.root}/environment",
+            f'EnvironmentFile=-"{self.root}/environment"',
             unit,
         )
         self.assertNotIn("ProtectSystem=", unit)
@@ -135,16 +135,19 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn(f'ExecStart="{venv_python}" -m mocop', unit)
         self.assertNotIn(f'ExecStart="{base_python}"', unit)
 
-    def test_optional_environment_path_escapes_spaces_without_hiding_prefix(
+    def test_optional_environment_path_quotes_spaces_without_hiding_prefix(
         self,
     ) -> None:
+        # systemd interprets C-style escapes only inside quotes; an unquoted
+        # \x20 path names a nonexistent literal-backslash file and the "-"
+        # prefix then silently drops the webhook environment.
         unit = render_user_unit(
             Path("/usr/bin/python3"),
             self.root / "config directory" / "config.json",
         )
 
         self.assertIn(
-            f"EnvironmentFile=-{self.root}/config\\x20directory/environment",
+            f'EnvironmentFile=-"{self.root}/config directory/environment"',
             unit,
         )
 

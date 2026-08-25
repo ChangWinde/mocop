@@ -51,6 +51,34 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Applied configured host display names consistently across node navigation, resource
   inventory, heatmap, topology, GPU details, search placement, incidents, and alerts.
 - Fixed managed-service shutdown when no host-specific probe timeout is configured.
+- Kept the `nvidia-smi` fallback query from emitting an empty success line when the
+  combined query is unsupported and the base query returns no rows.
+- Fixed the collection script for hosts without block devices: an empty
+  `/sys/block` glob aborted the system `awk` pass and dropped every core CPU,
+  memory, load, network, and I/O row, permanently misreporting a healthy host
+  as failed. Exotic mounts (for example FUSE backends reporting `-` capacity),
+  a malformed `nvidia-smi` row, and malformed pressure rows now degrade only
+  their own section instead of rejecting the whole host sample.
+- Restoring SQLite history now drops rows whose required percentage columns are
+  NULL (foreign writers or partial corruption) instead of crashing the
+  collector on every start until the row was deleted by hand.
+- Non-ASCII Bearer credentials now fail closed with the documented 403 instead
+  of crashing the comparison and resetting the connection; trusted-host and
+  Origin checks now canonicalize the absolute DNS form (trailing dot).
+- The generated unit now quotes `EnvironmentFile=` so configuration paths with
+  spaces load webhook credentials instead of being silently ignored, and
+  service health polling tolerates malformed HTTP responses during startup.
+- Resolved incident transitions now always reach the webhook queue, so an
+  alert that recovers inside a maintenance window or silence no longer leaves
+  the receiver hanging. Opening a condition now requires consecutively
+  confirmable samples, so two isolated spikes separated by a probe-failure gap
+  can no longer open an incident. Conditions bound to a GPU identity that left
+  a fully observed inventory (a replaced card) now recover instead of pinning
+  ghost alerts until a restart.
+- The dashboard now establishes its event stream and corrects the connection
+  badge after recovering from a failed first snapshot, rejects structurally
+  broken snapshots before they can freeze rendering, and backs off snapshot
+  polling up to 30 seconds during an outage.
 
 ## [0.9.0] - 2026-08-16
 
