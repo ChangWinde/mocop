@@ -202,6 +202,31 @@ class MigrationTests(unittest.TestCase):
                 current_hostname="new-monitor",
             )
 
+        # A collision with a topology-only node (a jump host, for example)
+        # would fold two nodes into one and self-link; the refusal must name
+        # the collision instead of surfacing a downstream schema error.
+        infrastructure = self.write_source(
+            directory="infrastructure",
+            hosts=["old-monitor", "gpu-01"],
+            local_host="old-monitor",
+            topology={
+                "root": "old-monitor",
+                "links": [
+                    {"source": "old-monitor", "target": "bastion", "transport": "ssh"},
+                    {"source": "bastion", "target": "gpu-01", "transport": "ssh"},
+                ],
+            },
+        )
+        with self.assertRaisesRegex(
+            LifecycleError, "already appears in the configured topology: bastion"
+        ):
+            migrate_config(
+                infrastructure,
+                self.root / "topology-collision" / "config.json",
+                current_hostname="bastion",
+            )
+        self.assertFalse((self.root / "topology-collision" / "config.json").exists())
+
         existing = self.root / "existing" / "config.json"
         existing.parent.mkdir(mode=0o700)
         existing.write_text("keep", encoding="utf-8")

@@ -373,7 +373,7 @@ class InventoryTests(unittest.TestCase):
         with (
             patch.object(
                 self.inventory._host_source,
-                "aliases",
+                "_read_aliases",
                 side_effect=OSError("scan failed"),
             ),
             self.assertRaisesRegex(InventoryError, "could not be scanned"),

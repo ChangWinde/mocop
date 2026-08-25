@@ -88,19 +88,32 @@ class OpenSshConfigHostSource:
         self._planner.cancel()
 
     def aliases(self, config: MonitorConfig) -> tuple[str, ...]:
+        return self._safe_aliases(config)[0]
+
+    def _safe_aliases(
+        self, config: MonitorConfig
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Split discovered aliases into safe candidates and skip warnings.
+
+        One unrelated exotic Host entry (an IPv6 literal, a token carrying
+        ':' or '%') must not veto monitoring of explicitly configured hosts:
+        an unsafe alias could never become a probe target anyway, so it
+        leaves the candidate set with a visible warning instead of failing
+        the whole discovery (ADR-0022). Explicit configuration keeps its own
+        strict validation in the config loader and downstream guards.
+        """
         aliases = self._read_aliases(config.ssh_config)
-        invalid = sorted(alias for alias in aliases if not is_safe_alias(alias))
-        if invalid:
-            raise ValueError(
-                "host aliases must contain only letters, numbers, dots, underscores, "
-                f"and hyphens: {', '.join(invalid)}"
-            )
-        if len(aliases) > CONFIG_MAX_HOST_ALIASES:
+        skipped = tuple(
+            f"{alias}: unsafe ssh alias ignored"
+            for alias in sorted(alias for alias in aliases if not is_safe_alias(alias))
+        )
+        safe = {alias for alias in aliases if is_safe_alias(alias)}
+        if len(safe) > CONFIG_MAX_HOST_ALIASES:
             raise ValueError(
                 "SSH config contains more than "
                 f"{CONFIG_MAX_HOST_ALIASES} literal host aliases"
             )
-        return tuple(sorted(aliases))
+        return tuple(sorted(safe)), skipped
 
     def hosts(self, config: MonitorConfig) -> tuple[str, ...]:
         return self.discovery(config).hosts
@@ -141,7 +154,7 @@ class OpenSshConfigHostSource:
         )
 
     def discovery(self, config: MonitorConfig) -> HostDiscoverySnapshot:
-        aliases = self.aliases(config)
+        aliases, alias_warnings = self._safe_aliases(config)
         eligible = tuple(
             alias
             for alias in aliases
@@ -155,12 +168,12 @@ class OpenSshConfigHostSource:
                 infrastructure_hosts=(),
                 host_groups=config.host_groups,
                 topology=config.topology,
-                warnings=(),
+                warnings=alias_warnings,
                 mode="aliases",
             )
 
         now = self._monotonic()
-        cache_key = self._cache_identity(config, aliases)
+        cache_key = self._cache_identity(config, aliases) + (alias_warnings,)
         with self._cache_lock:
             if (
                 self._cache is not None
@@ -195,7 +208,7 @@ class OpenSshConfigHostSource:
                 infrastructure_hosts=tuple(sorted(infrastructure)),
                 host_groups=tuple(sorted(inferred_groups.items())),
                 topology=config.topology or projection.topology,
-                warnings=projection.warnings,
+                warnings=alias_warnings + projection.warnings,
                 mode="topology",
             )
             self._cache_key = cache_key
