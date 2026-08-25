@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-08-25
+
 ### Changed
 
 - Service-install health verification no longer transmits the dashboard

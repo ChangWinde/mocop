@@ -104,7 +104,7 @@ alias 前缀（如 `gpu-1`、`gpu-2`），则使用该前缀兜底分组。显�
 ### 2. 安装并快速部署
 
 ```bash
-uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.10.1"
+uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.10.2"
 "$(uv tool dir --bin)/mocop" deploy --display-name monitor-0
 ```
 
