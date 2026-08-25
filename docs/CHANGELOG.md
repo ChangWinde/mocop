@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-25
+
 ### Fixed
 
 - One exotic literal `Host` entry in the OpenSSH configuration (an IPv6
