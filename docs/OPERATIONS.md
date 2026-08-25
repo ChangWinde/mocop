@@ -130,7 +130,7 @@ After installing the package on a server with a user-level systemd manager and a
 operator-owned OpenSSH configuration, deploy Mocop with one local command:
 
 ```bash
-uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.10.0"
+uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.10.1"
 "$(uv tool dir --bin)/mocop" deploy --display-name monitor-0
 ```
 

@@ -104,7 +104,7 @@ Keep `ProxyJump`, `ProxyCommand`, ports, users, and identities in OpenSSH. New c
 ### 2. Install and deploy
 
 ```bash
-uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.10.0"
+uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.10.1"
 "$(uv tool dir --bin)/mocop" deploy --display-name monitor-0
 ```
 

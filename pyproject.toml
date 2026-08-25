@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mocop"
-version = "0.10.0"
+version = "0.10.1"
 description = "AI-native GPU cluster monitor over OpenSSH."
 readme = "README.md"
 requires-python = ">=3.10"
