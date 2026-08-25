@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hmac
-import ipaddress
 import json
 import math
 import socket
@@ -23,6 +22,7 @@ from .config import (
     is_valid_maintenance_reason,
     normalize_web_hostname,
 )
+from .hostnames import trusted_web_policy
 from .inventory import (
     DASHBOARD_INCIDENT_ACTION_DURATIONS,
     DASHBOARD_MAINTENANCE_DURATIONS,
@@ -44,6 +44,7 @@ from .static_assets import (
     load_asset,
     strong_etag,
 )
+from .updates import UpdateStatusSource
 
 _MAX_SETTINGS_BODY_BYTES = 128
 _MAX_COLLECTOR_BODY_BYTES = 512
@@ -81,6 +82,8 @@ API_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/diagnostics", "reader"),
     ("GET", "/api/inventory", "reader"),
     ("GET", "/api/topology", "reader"),
+    ("GET", "/api/update", "reader"),
+    ("POST", "/api/update/apply", "writer"),
     ("POST", "/api/settings/collector", "writer"),
     ("POST", "/api/settings/poll-interval", "writer"),
     ("POST", "/api/settings/hosts", "writer"),
@@ -108,6 +111,7 @@ _WRITE_BODY_LIMITS = {
     "/api/settings/maintenance": _MAX_MAINTENANCE_BODY_BYTES,
     "/api/settings/host-group": _MAX_HOST_GROUP_BODY_BYTES,
     "/api/service/restart": _MAX_RESTART_BODY_BYTES,
+    "/api/update/apply": _MAX_RESTART_BODY_BYTES,
     "/api/settings/incident-action": _MAX_INCIDENT_ACTION_BODY_BYTES,
     "/api/probe": _MAX_PROBE_BODY_BYTES,
     "/api/notifications/test": _MAX_NOTIFICATION_TEST_BODY_BYTES,
@@ -116,8 +120,6 @@ _DEPRECATED_ENDPOINT_HEADERS = (("Deprecation", "true"),)
 # Hostnames a browser can present when it genuinely reached this server over
 # the loopback interface. DNS rebinding presents the attacker's own domain in
 # Host/Origin instead, so pinning these names closes the rebinding bypass.
-_LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
-_WILDCARD_BIND_HOSTS = frozenset({"", "0.0.0.0", "::"})
 _SSE_HEARTBEAT_SECONDS = 15.0
 # SSE loops wake at this cadence to notice the server shutdown event.
 _SSE_STOP_POLL_SECONDS = 1.0
@@ -164,40 +166,6 @@ def _reject_json_constant(_value: str) -> object:
     raise ValueError("non-finite JSON number")
 
 
-def _trusted_web_policy(
-    bind_host: str, trusted_hosts: Iterable[str] | None
-) -> tuple[frozenset[str], frozenset[str]]:
-    """Return exact Host authorities and HTTPS-only Origin suffixes.
-
-    Reverse proxies commonly rewrite ``Host`` to the loopback upstream while
-    preserving the browser's public ``Origin``. Exact entries remain valid for
-    both headers. A leading ``*.`` is deliberately narrower: it authorizes only
-    HTTPS origins below that DNS suffix and never relaxes the Host check.
-    """
-    trusted = set(_LOOPBACK_HOSTNAMES)
-    origin_suffixes: set[str] = set()
-    if str(bind_host).strip().lower() not in _WILDCARD_BIND_HOSTS:
-        bind_hostname = normalize_web_hostname(bind_host)
-        if bind_hostname is not None:
-            trusted.add(bind_hostname)
-    for candidate in trusted_hosts or ():
-        if isinstance(candidate, str) and candidate.strip().startswith("*."):
-            suffix = normalize_web_hostname(candidate.strip()[2:])
-            if suffix is None or "." not in suffix:
-                raise ValueError(f"invalid trusted web origin suffix: {candidate!r}")
-            try:
-                ipaddress.ip_address(suffix)
-            except ValueError:
-                origin_suffixes.add(suffix)
-                continue
-            raise ValueError(f"invalid trusted web origin suffix: {candidate!r}")
-        hostname = normalize_web_hostname(candidate)
-        if hostname is None:
-            raise ValueError(f"invalid trusted web host: {candidate!r}")
-        trusted.add(hostname)
-    return frozenset(trusted), frozenset(origin_suffixes)
-
-
 class MonitorHttpServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -216,6 +184,7 @@ class MonitorHttpServer(ThreadingHTTPServer):
         *,
         trusted_hosts: Iterable[str] | None = None,
         access_token: str | None = None,
+        updates: UpdateStatusSource | None = None,
     ) -> None:
         try:
             socket.inet_pton(socket.AF_INET6, address[0].split("%", 1)[0])
@@ -227,7 +196,8 @@ class MonitorHttpServer(ThreadingHTTPServer):
         self.inventory = inventory
         self.restart = restart
         self.probe_control = probe_control
-        self.trusted_hostnames, self.trusted_origin_suffixes = _trusted_web_policy(
+        self.updates = updates
+        self.trusted_hostnames, self.trusted_origin_suffixes = trusted_web_policy(
             address[0], trusted_hosts
         )
         self.access_token = access_token
@@ -556,6 +526,9 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/topology":
             self._send_topology(request_url.query)
             return
+        if path == "/api/update":
+            self._send_update_status(request_url.query)
+            return
         if path == "/api/diagnostics":
             self._send_diagnostics(request_url.query)
             return
@@ -796,6 +769,9 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         if request_url.path == "/api/service/restart":
             self._restart_service(payload)
             return
+        if request_url.path == "/api/update/apply":
+            self._apply_update(payload)
+            return
         self._change_poll_interval(payload)
 
     def _unsupported_method(self, method: str) -> None:
@@ -987,6 +963,38 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(snapshot)
+
+    def _send_update_status(self, query: str) -> None:
+        if query:
+            self._send_error(
+                "query parameters are not allowed",
+                HTTPStatus.BAD_REQUEST,
+                code="QUERY_NOT_ALLOWED",
+            )
+            return
+        updates = self.monitor_server.updates
+        self._send_json(
+            updates.status()
+            if updates is not None
+            else {"mode": "off", "currentVersion": __version__}
+        )
+
+    def _apply_update(self, payload: object) -> None:
+        if not isinstance(payload, dict) or payload:
+            self._send_error(
+                "invalid update request schema",
+                HTTPStatus.BAD_REQUEST,
+                code="INVALID_SCHEMA",
+            )
+            return
+        updates = self.monitor_server.updates
+        accepted, message = (
+            updates.apply() if updates is not None else (False, "self-update is off")
+        )
+        if not accepted:
+            self._send_error(message, HTTPStatus.CONFLICT, code="UPDATE_NOT_APPLICABLE")
+            return
+        self._send_json({"status": "updating"}, HTTPStatus.ACCEPTED)
 
     def _restart_service(self, payload: object) -> None:
         if not isinstance(payload, dict) or payload:
@@ -1769,6 +1777,7 @@ def serve_in_thread(
     probe_control: ProbeControl | None = None,
     trusted_hosts: Iterable[str] | None = None,
     access_token: str | None = None,
+    updates: UpdateStatusSource | None = None,
 ) -> tuple[MonitorHttpServer, threading.Thread]:
     server = MonitorHttpServer(
         (host, port),
@@ -1778,6 +1787,7 @@ def serve_in_thread(
         probe_control,
         trusted_hosts=trusted_hosts,
         access_token=access_token,
+        updates=updates,
     )
     thread = threading.Thread(
         target=server.serve_forever, name="mocop-http", daemon=True

@@ -4,6 +4,21 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in release-currency pill to the dashboard header
+  ([ADR-0026](adr/0026-dashboard-self-update.md)). `updates.mode: "check"`
+  polls the hardcoded official repository on a bounded interval and shows
+  whether the running release is current; `"self-update"` also enables a
+  one-click apply that downloads the release wheel, verifies it against the
+  release SHA-256 manifest, installs it with the environment's own pip or
+  uv, proves the installed version through the target interpreter, and
+  restarts through the supervised-restart path before the page reloads
+  itself. The shipped default stays `"off"` with no outbound requests; the
+  browser can never name a version, and a failed attempt keeps the running
+  version serving with a visible manual-recovery hint
+  (`GET /api/update`, `POST /api/update/apply`).
+
 ## [0.10.2] - 2026-08-25
 
 ### Changed

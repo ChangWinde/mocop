@@ -162,6 +162,19 @@ account and state directory. Webhook delivery is not a persistent outbox. Separa
 roles, per-person identity, revocation lists, and multi-tenant authorization remain out
 of scope: one bearer capability grants the complete operator surface.
 
+Opt-in self-update ([ADR-0026](adr/0026-dashboard-self-update.md)) is the only
+non-SSH, non-webhook outbound surface, and only when `updates.mode` is not
+`off`. It polls one hardcoded official repository over HTTPS with bounded
+response sizes; the browser can trigger only a fixed empty writer-tier POST
+and can never name a version, repository, or installer option. Apply installs
+the exact `mocop-<version>-py3-none-any.whl` release asset only after its
+SHA-256 matches the release manifest, uses wheels exclusively so no downloaded
+code executes during installation, verifies the installed version through the
+target interpreter, and triggers the ADR-0012 supervised restart only on a
+verified match — a failed attempt reports its state and the running process
+keeps serving. GitHub and its release infrastructure become trusted parties
+exactly when an operator enables the mode.
+
 ## Secret handling
 
 The process inherits the operator's SSH environment so OpenSSH can use ssh-agent. It

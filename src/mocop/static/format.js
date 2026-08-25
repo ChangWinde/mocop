@@ -104,8 +104,17 @@
       return `${Math.ceil(seconds / 60)} 分钟后重试`;
     }
 
+    // Pure text normalization for SSE framing: fold complete CRLF and lone-CR
+    // line endings while retaining a final CR until the next chunk arrives,
+    // so a CR/LF split across two reads cannot become a false blank line or
+    // an unbounded partial frame.
+    function appendStreamChunk(buffer, chunk) {
+      return `${buffer}${chunk}`.replaceAll("\r\n", "\n").replace(/\r(?!$)/g, "\n");
+    }
+
     return Object.freeze({
       age,
+      appendStreamChunk,
       clamp,
       combinedMetric,
       duration,

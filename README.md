@@ -51,17 +51,18 @@ English README, API, operations, and engineering references remain maintained.
 
 - GPU utilization, VRAM, temperature, power, model, driver, hardware health, and
   scan-friendly per-GPU process summaries
-- GPU capacity matching plus a capacity watch: a banner and opt-in browser
-  notification fire once a satisfying idle combination appears; also a
-  scheduling heatmap, connection map, program search, process
-  filtering/sorting, attribution filters, `ssh` copy, and CSV export
+- GPU capacity matching plus a capacity watch: a banner and opt-in
+  notification fire when idle GPUs satisfy it, plus scheduling heatmap,
+  connection map, program search, process filters, attribution filters,
+  `ssh` copy, and CSV export
 - CPU, load, memory, swap, disk capacity and I/O, network rate, uptime, and kernel pressure stall (PSI) telemetry
 - Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, and timed maintenance
 - Independent per-host scheduling, possible shared-path grouping, and optional HTTPS webhooks
 - Config-backed host inventory, expected GPU counts, local-host collection, and host groups
 - Per-GPU trends and process timelines, with optional bounded SQLite retention and read-only Slurm/Kubernetes/Docker/Podman context
-- Per-owner GPU occupancy and idle-share rollups over a selectable window (`GET /api/usage` and the owners dialog)
+- Per-owner GPU occupancy and idle-share rollups over a selectable window
 - Six visual styles, six independent accents, compact mode, saved ordering, and validated local backgrounds
+- Opt-in release checks and one-click verified self-update
 - OpenMetrics 1.0 endpoint for Prometheus and Grafana
 
 ## Quick start
@@ -231,7 +232,7 @@ canonical ownership, update triggers, language policy, and ADR lifecycle.
 python3 -m unittest discover -s tests -t . -p 'test_*.py'
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
-for t in capacity_match capacity_watch csv_export dashboard_auth process_search; do node "tests/${t}_test.mjs"; done
+for t in capacity_match capacity_watch csv_export dashboard_auth process_search update_pill; do node "tests/${t}_test.mjs"; done
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 

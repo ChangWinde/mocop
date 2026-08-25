@@ -160,6 +160,26 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(entries=entries), self.assertRaises(ConfigError):
                 load_config(self.write(broken))
 
+    def test_validates_the_updates_policy(self) -> None:
+        default = load_config(self.write(valid_config()))
+        self.assertEqual(default.updates.mode, "off")
+
+        value = valid_config()
+        value["updates"] = {"mode": "self-update", "check_interval_seconds": 7200}
+        config = load_config(self.write(value))
+        self.assertEqual(config.updates.mode, "self-update")
+        self.assertEqual(config.updates.check_interval_seconds, 7200)
+
+        for updates in (
+            {"mode": "auto"},
+            {"repository": "evil/repo"},
+            {"check_interval_seconds": 60},
+        ):
+            broken = valid_config()
+            broken["updates"] = updates
+            with self.subTest(updates=updates), self.assertRaises(ConfigError):
+                load_config(self.write(broken))
+
     def test_validates_durable_incident_actions_and_scoped_overrides(self) -> None:
         value = valid_config()
         value.update(
