@@ -1077,6 +1077,38 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         self.assertEqual(loaded.history, {})
         self.assertEqual(loaded.incident_events, ())
 
+    def test_load_skips_history_rows_with_null_required_percentages(self) -> None:
+        # A NULL in a required percentage column (foreign writer or partial
+        # corruption) used to survive load() and crash host initialization on
+        # every start; such rows must be dropped while valid rows survive.
+        # Timestamps stay inside the retention window so pruning cannot
+        # interfere with what this test asserts.
+        now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+        dropped_at = (now - timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
+        kept_at = now.isoformat().replace("+00:00", "Z")
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        store.record_history("gpu-01", history_point(dropped_at, 10))
+        store.record_history("gpu-01", history_point(kept_at, 11))
+        self.assertTrue(store.flush())
+        store.close()
+        for column in ("memory_usage_pct", "swap_usage_pct", "disk_usage_pct"):
+            with closing(sqlite3.connect(self.path)) as connection, connection:
+                connection.execute("UPDATE history SET " + column + " = NULL")
+                connection.execute(
+                    f"UPDATE history SET {column} = 12.5 WHERE observed_at = ?",
+                    (kept_at,),
+                )
+
+            reopened = SqliteTelemetryPersistence(self.config, self.path)
+            loaded = reopened.load(20, 20)
+            reopened.close()
+
+            with self.subTest(column=column):
+                observed = [
+                    point["observedAt"] for point in loaded.history.get("gpu-01", [])
+                ]
+                self.assertEqual(observed, [kept_at])
+
 
 if __name__ == "__main__":
     unittest.main()

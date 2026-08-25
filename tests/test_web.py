@@ -304,6 +304,15 @@ class WebTests(unittest.TestCase):
         )
         self.assert_json_error(wrong, 403, "AUTHENTICATION_REQUIRED")
 
+        # Header values are latin-1: a non-ASCII credential must fail closed
+        # with the documented 403, not crash the comparison and drop the
+        # connection without a response.
+        non_ascii = Request(
+            f"{base}/api/snapshot",
+            headers={"Authorization": "Bearer caf\u00e9-token-value-long-enough"},
+        )
+        self.assert_json_error(non_ascii, 403, "AUTHENTICATION_REQUIRED")
+
         authenticated = Request(
             f"{base}/api/snapshot",
             headers={
@@ -579,6 +588,7 @@ class WebTests(unittest.TestCase):
         self.assertIn('src="/process-search.js"', body)
         self.assertIn('src="/capacity-watch.js"', body)
         self.assertIn('src="/format.js"', body)
+        self.assertIn('src="/csv-export.js"', body)
 
     def test_static_assets_support_etag_revalidation(self) -> None:
         conn = self.open_connection(self.server.server_port)

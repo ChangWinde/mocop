@@ -553,6 +553,11 @@ def _condition_domains_for_category(category: str, key: str) -> tuple[str, ...]:
     return ()
 
 
+_PER_IDENTITY_GPU_DOMAINS = frozenset(
+    {"gpu_present", "gpu_health", "gpu_temperature", "gpu_memory", "gpu_utilization"}
+)
+
+
 def _telemetry_unknown(
     condition: IncidentCondition,
     key: str,
@@ -561,9 +566,31 @@ def _telemetry_unknown(
     """True when the sample carried no fresh telemetry for this condition."""
     if observed_domains is None:
         return False
-    return any(
-        domain not in observed_domains for domain in _condition_domains(condition, key)
-    )
+    missing = [
+        domain
+        for domain in _condition_domains(condition, key)
+        if domain not in observed_domains
+    ]
+    if not missing:
+        return False
+    # A fully observed GPU inventory is authoritative about absence: when a
+    # device identity has left a complete inventory (a replaced or renumbered
+    # card), its per-identity domains can never be observed again. Freezing
+    # would pin the ghost condition and its counts forever, so recovery may
+    # advance instead. A failed GPU query never reaches this branch because
+    # it does not observe ``gpu_inventory``.
+    if "gpu_inventory" in observed_domains:
+        identities = set()
+        for domain in missing:
+            prefix, _, identity = domain.partition(":")
+            if prefix not in _PER_IDENTITY_GPU_DOMAINS:
+                return True
+            identities.add(identity)
+        if all(
+            f"gpu_present:{identity}" not in observed_domains for identity in identities
+        ):
+            return False
+    return True
 
 
 class IncidentTracker:
@@ -657,11 +684,14 @@ class IncidentTracker:
         last_observed_at = self._last_observed_at[result.host]
         current = dict(previous)
         observed_domains = self._observed_domains(result)
-        if result.status == "online":
-            for key in set(candidates) - set(observed):
-                if _telemetry_unknown(candidates[key][0], key, observed_domains):
-                    continue
-                del candidates[key]
+        # Opening a condition requires consecutively confirmable samples: an
+        # unreachable probe or a telemetry blind spot breaks the confirmation
+        # chain and discards the candidate, so two isolated spikes separated
+        # by an arbitrarily long blind gap can never add up to an opened
+        # incident. Active conditions keep their documented freeze semantics
+        # in the recovery loop below.
+        for key in set(candidates) - set(observed):
+            del candidates[key]
 
         for key, new in observed.items():
             recoveries.pop(key, None)

@@ -197,21 +197,14 @@ def _systemd_quote(value: Path) -> str:
 
 
 def _systemd_optional_environment_file(value: Path) -> str:
-    """Render an optional absolute path with systemd-compatible byte escapes."""
-    text = str(value)
-    _validate_service_path(text)
-    safe = frozenset(
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._-"
-    )
-    escaped = []
-    for byte in text.encode("utf-8"):
-        if byte in safe:
-            escaped.append(chr(byte))
-        elif byte == ord("%"):
-            escaped.append("%%")
-        else:
-            escaped.append(f"\\x{byte:02x}")
-    return f"-{''.join(escaped)}"
+    """Render an optional EnvironmentFile= path that systemd actually reads.
+
+    C-style ``\\xNN`` escapes are only interpreted inside quotes, so an
+    unquoted escaped path would name a literal-backslash file and the ``-``
+    prefix would silently ignore it, dropping webhook credentials. Quote the
+    path like every other unit path and keep the prefix outside the quotes.
+    """
+    return f"-{_systemd_quote(value)}"
 
 
 def _validate_service_path(text: str) -> None:
@@ -620,7 +613,15 @@ class UserServiceManager:
                         protected.read()
                         if protected.status == 200:
                             return True
-            except (OSError, ValueError, json.JSONDecodeError):
+            except (
+                OSError,
+                ValueError,
+                json.JSONDecodeError,
+                http.client.HTTPException,
+            ):
+                # BadStatusLine and friends are transient just like a refused
+                # connection: a service that answers garbage while starting up
+                # must be polled again, not crash the installer mid-rollback.
                 pass
             finally:
                 if connection is not None:

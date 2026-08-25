@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import hmac
 import ipaddress
 import json
@@ -13,7 +12,6 @@ from collections.abc import Callable, Iterable
 from contextlib import suppress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import SplitResult, parse_qs, urlsplit
 
 from . import __version__
@@ -38,19 +36,15 @@ from .metrics import (
     render_openmetrics,
 )
 from .service import ProbeControl, StateStore
+from .static_assets import (
+    STATIC_ROUTES as _STATIC_ROUTES,
+)
+from .static_assets import (
+    client_cache_is_current,
+    load_asset,
+    strong_etag,
+)
 
-_STATIC_ROOT = Path(__file__).with_name("static")
-_STATIC_ROUTES = {
-    "/": ("index.html", "text/html; charset=utf-8"),
-    "/index.html": ("index.html", "text/html; charset=utf-8"),
-    "/format.js": ("format.js", "text/javascript; charset=utf-8"),
-    "/process-search.js": ("process-search.js", "text/javascript; charset=utf-8"),
-    "/capacity-watch.js": ("capacity-watch.js", "text/javascript; charset=utf-8"),
-    "/dashboard-auth.js": ("dashboard-auth.js", "text/javascript; charset=utf-8"),
-    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-    "/styles.css": ("styles.css", "text/css; charset=utf-8"),
-    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
-}
 _MAX_SETTINGS_BODY_BYTES = 128
 _MAX_COLLECTOR_BODY_BYTES = 512
 _MAX_INVENTORY_BODY_BYTES = 512
@@ -454,7 +448,13 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         if len(values) != 1 or not values[0].startswith("Bearer "):
             return False
         candidate = values[0][len("Bearer ") :]
-        return hmac.compare_digest(candidate, expected)
+        try:
+            return hmac.compare_digest(candidate, expected)
+        except TypeError:
+            # Header values are latin-1 and may carry non-ASCII bytes, which
+            # compare_digest refuses; such a credential is simply wrong and
+            # must produce the documented 403, not a reset connection.
+            return False
 
     def _require_authentication(self, path: str) -> bool:
         """Protect every non-health API surface from other local users."""
@@ -611,15 +611,12 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self._send_static(*static)
 
     def _send_static(self, filename: str, content_type: str) -> None:
-        try:
-            payload = (_STATIC_ROOT / filename).read_bytes()
-        except OSError:
+        payload = load_asset(filename)
+        if payload is None:
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        # Strong content validator: revalidation stays correct across restarts
-        # and deployments because it depends only on the bytes served.
-        etag = f'"{hashlib.sha256(payload).hexdigest()}"'
-        if self._client_cache_is_current(etag):
+        etag = strong_etag(payload)
+        if client_cache_is_current(self.headers.get("If-None-Match"), etag):
             self.send_response(HTTPStatus.NOT_MODIFIED)
             self._common_headers(content_type, cache="no-cache")
             self.send_header("ETag", etag)
@@ -631,16 +628,6 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self._write_body(payload)
-
-    def _client_cache_is_current(self, etag: str) -> bool:
-        header = self.headers.get("If-None-Match")
-        if header is None:
-            return False
-        if header.strip() == "*":
-            return True
-        # If-None-Match uses the weak comparison: a W/ prefix still matches.
-        candidates = {value.strip().removeprefix("W/") for value in header.split(",")}
-        return etag in candidates
 
     def _send_meta(self, query: str) -> None:
         if query:

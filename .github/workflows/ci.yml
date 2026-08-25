@@ -55,11 +55,14 @@ jobs:
         run: |
           node --check src/mocop/static/app.js
           node --check src/mocop/static/capacity-watch.js
+          node --check src/mocop/static/csv-export.js
           node --check src/mocop/static/dashboard-auth.js
           node --check src/mocop/static/format.js
           node --check src/mocop/static/process-search.js
       - name: Capacity-watch contract
         run: node tests/capacity_watch_test.mjs
+      - name: CSV-export contract
+        run: node tests/csv_export_test.mjs
       - name: Dashboard-auth contract
         run: node tests/dashboard_auth_test.mjs
       - name: Process-search contract

@@ -864,9 +864,17 @@ class StateStore:
                 notification_events = tuple(
                     event
                     for event in incident_events
-                    if event.host not in active_windows
-                    and not self._condition_is_silenced_locked(
-                        event.host, event.condition.key
+                    # A resolved transition always reaches the queue: the
+                    # delivery worker pairs it with the opened event it
+                    # already sent, and suppressing it here would leave the
+                    # receiver's alert hanging forever when a condition
+                    # recovers inside a maintenance window or silence.
+                    if event.state == "resolved"
+                    or (
+                        event.host not in active_windows
+                        and not self._condition_is_silenced_locked(
+                            event.host, event.condition.key
+                        )
                     )
                 )
             if notification_events:
@@ -1314,7 +1322,9 @@ class StateStore:
                 )
             )
             snapshot["version"] = self._incident_revision
-            return copy.deepcopy(snapshot)
+        # The projection is rebuilt per call, so only the copy must leave the
+        # lock: result publication and SSE wakeups never wait on it.
+        return copy.deepcopy(snapshot)
 
     def has_active_incident(self, host: str, condition_key: str) -> bool:
         """Return whether an action can bind to a currently active condition."""

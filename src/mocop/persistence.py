@@ -48,12 +48,25 @@ _INTERNAL_USAGE_KEY = "_mocopProcessUsageV1"
 # Rows whose stored types cannot round-trip are excluded in SQL before any
 # restore limit applies, so corrupt rows never displace older valid records.
 _NUMERIC_COLUMN_TYPES = "('integer', 'real', 'null')"
+# The in-memory history point requires these three percentages, so a NULL
+# written by a foreign or corrupted database must not survive the restore:
+# it would crash host initialization on every service start.
+_REQUIRED_NUMERIC_COLUMN_TYPES = "('integer', 'real')"
+_REQUIRED_HISTORY_COLUMNS = frozenset(
+    {"memory_usage_pct", "swap_usage_pct", "disk_usage_pct"}
+)
+_REQUIRED_HISTORY_FIELDS = frozenset({"memoryUsagePct", "swapUsagePct", "diskUsagePct"})
 _HISTORY_ROW_FILTER = " AND ".join(
     (
         "typeof(host) = 'text'",
         "typeof(observed_at) = 'text'",
         *(
-            f"typeof({column}) IN {_NUMERIC_COLUMN_TYPES}"
+            f"typeof({column}) IN "
+            + (
+                _REQUIRED_NUMERIC_COLUMN_TYPES
+                if column in _REQUIRED_HISTORY_COLUMNS
+                else _NUMERIC_COLUMN_TYPES
+            )
             for column in (
                 "cpu_usage_pct",
                 "memory_usage_pct",
@@ -427,6 +440,7 @@ class SqliteTelemetryPersistence:
         history: dict[str, list[dict[str, object]]] = {}
         for row in history_rows:
             host, observed_at, *values, transport_retried = row
+            fields = dict(zip(_HISTORY_FIELDS, values, strict=True))
             if (
                 not isinstance(host, str)
                 or not 0 < len(host) <= 253
@@ -434,10 +448,11 @@ class SqliteTelemetryPersistence:
                 or not 0 < len(observed_at) <= 64
                 or transport_retried not in (0, 1)
                 or not all(_is_optional_finite_number(value) for value in values)
+                or any(fields[field] is None for field in _REQUIRED_HISTORY_FIELDS)
             ):
                 continue
             point: dict[str, object] = {"observedAt": observed_at}
-            point.update(dict(zip(_HISTORY_FIELDS, values, strict=True)))
+            point.update(fields)
             point["transportRetried"] = bool(transport_retried)
             history.setdefault(host, []).append(point)
 
