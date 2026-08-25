@@ -65,6 +65,7 @@ interfaces without a runtime plugin registry.
 | `diagnostics.py` | deterministic incident guidance and redacted support bundles |
 | `persistence.py` | optional bounded asynchronous SQLite history |
 | `notifications.py` | HTTPS webhook validation, deduplication, throttling, and delivery |
+| `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
 | `lifecycle.py` | private config creation and user-level systemd management |
 | `migration.py` | non-destructive cross-machine config transformation and private target creation |
@@ -252,6 +253,17 @@ waits for the snapshot `startedAt` identity to change before reloading its stati
 assets. Foreground processes fail closed, and cancellable probes terminate active SSH
 process groups during shutdown. [ADR-0012](adr/0012-supervised-dashboard-restart.md)
 records the alternatives and security boundary.
+
+The opt-in `updates` policy layers release currency on the same restart
+authority: `check` polls the hardcoded official repository on a bounded
+interval and the header pill reports it, while `self-update` also accepts one
+fixed empty apply request that downloads the release wheel, verifies its
+SHA-256 manifest entry, installs it with the environment's own toolchain,
+proves the installed version through the target interpreter, and only then
+signals the supervised restart. The browser never names a version; a failed
+attempt leaves the running process serving.
+[ADR-0026](adr/0026-dashboard-self-update.md) records the boundary and the
+rejected notification-only and bootstrap-script alternatives.
 
 ## Failure model
 

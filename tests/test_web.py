@@ -593,6 +593,10 @@ class WebTests(unittest.TestCase):
         self.assertIn('src="/capacity-match.js"', body)
         self.assertIn('src="/format.js"', body)
         self.assertIn('src="/csv-export.js"', body)
+        self.assertIn('src="/update-pill.js"', body)
+        self.assertIn('id="update-pill"', body)
+        with urlopen(f"{self.base}/update-pill.js", timeout=2) as response:
+            self.assertIn("MocopUpdatePill", response.read().decode("utf-8"))
 
     def test_static_assets_support_etag_revalidation(self) -> None:
         conn = self.open_connection(self.server.server_port)
@@ -688,6 +692,91 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status, 202)
         self.assertEqual(payload, {"status": "restarting"})
         self.assertTrue(requested.wait(1))
+
+    def test_update_endpoints_project_status_and_gate_the_apply_action(self) -> None:
+        class _Updates:
+            def __init__(self) -> None:
+                self.applied = 0
+                self.accept = True
+
+            def status(self) -> dict[str, object]:
+                return {
+                    "mode": "self-update",
+                    "currentVersion": "1.0.0",
+                    "latestVersion": "2.0.0",
+                    "updateAvailable": True,
+                    "checkedAt": "2026-08-25T00:00:00Z",
+                    "state": "idle",
+                    "detail": None,
+                }
+
+            def apply(self) -> tuple[bool, str]:
+                if not self.accept:
+                    return False, "no newer release is available"
+                self.applied += 1
+                return True, "update started"
+
+        updates = _Updates()
+        server, thread = serve_in_thread(
+            "127.0.0.1", 0, StateStore(5), restart=lambda: None, updates=updates
+        )
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_port}"
+
+        with urlopen(f"{base}/api/update", timeout=2) as response:
+            status = json.load(response)
+        self.assertEqual(status["latestVersion"], "2.0.0")
+        self.assertTrue(status["updateAvailable"])
+        self.assert_json_error(f"{base}/api/update?refresh=1", 400, "QUERY_NOT_ALLOWED")
+
+        # The browser cannot name a version or pass options: only the fixed
+        # empty same-origin POST is accepted.
+        cross = self.poll_interval_request(
+            b"{}",
+            origin="https://attacker.example",
+            path="/api/update/apply",
+            fetch_site="cross-site",
+        )
+        cross.full_url = f"{base}/api/update/apply"
+        self.assert_http_error(cross, 403)
+        self.assertEqual(updates.applied, 0)
+
+        invalid = self.poll_interval_request(
+            b'{"version":"9.9.9"}', origin=base, path="/api/update/apply"
+        )
+        invalid.full_url = f"{base}/api/update/apply"
+        self.assert_http_error(invalid, 400)
+        self.assertEqual(updates.applied, 0)
+
+        accepted = self.poll_interval_request(
+            b"{}", origin=base, path="/api/update/apply"
+        )
+        accepted.full_url = f"{base}/api/update/apply"
+        with urlopen(accepted, timeout=2) as response:
+            payload = json.load(response)
+        self.assertEqual(response.status, 202)
+        self.assertEqual(payload, {"status": "updating"})
+        self.assertEqual(updates.applied, 1)
+
+        updates.accept = False
+        rejected = self.poll_interval_request(
+            b"{}", origin=base, path="/api/update/apply"
+        )
+        rejected.full_url = f"{base}/api/update/apply"
+        self.assert_json_error(rejected, 409, "UPDATE_NOT_APPLICABLE")
+
+    def test_update_endpoints_stay_inert_without_a_manager(self) -> None:
+        with urlopen(f"{self.base}/api/update", timeout=2) as response:
+            status = json.load(response)
+        self.assertEqual(status["mode"], "off")
+
+        request = self.poll_interval_request(
+            b"{}", origin=self.base, path="/api/update/apply"
+        )
+        request.full_url = f"{self.base}/api/update/apply"
+        self.assert_json_error(request, 409, "UPDATE_NOT_APPLICABLE")
 
     def test_meta_describes_versions_capabilities_and_endpoints(self) -> None:
         with urlopen(f"{self.base}/api/meta", timeout=2) as response:

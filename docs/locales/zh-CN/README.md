@@ -58,6 +58,7 @@ Mocop 是面向 NVIDIA GPU 集群的本地网页监控工具。它复用已有 O
 - 单卡趋势和进程时间线，以及可选的有界 SQLite 留存与只读 Slurm/Kubernetes/Docker/Podman 上下文
 - 按使用者聚合的 GPU 占用与闲置占比账单（`GET /api/usage` 与使用者面板，窗口可选）
 - 六种视觉风格、六种独立主题色、紧凑模式、排序记忆和经过校验的本地背景
+- 可选的版本检查与经过校验的控制台一键自更新（默认关闭）
 - 可供 Prometheus 和 Grafana 使用的 OpenMetrics 1.0 端点
 
 ## 快速开始
@@ -227,7 +228,7 @@ VPN；明文 HTTP 上的 Bearer 头不提供网络机密性或服务端身份认
 python3 -m unittest discover -s tests -t . -p 'test_*.py'
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
-for t in capacity_match capacity_watch csv_export dashboard_auth process_search; do node "tests/${t}_test.mjs"; done
+for t in capacity_match capacity_watch csv_export dashboard_auth process_search update_pill; do node "tests/${t}_test.mjs"; done
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 

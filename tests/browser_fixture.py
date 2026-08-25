@@ -598,11 +598,32 @@ def main() -> int:
         name="mocop-browser-fixture",
         daemon=True,
     ).start()
+
+    class DemoUpdates:
+        """A stable release-currency projection for the browser journey."""
+
+        def status(self) -> dict[str, object]:
+            return {
+                "mode": "self-update",
+                "currentVersion": "0.9.0",
+                "latestVersion": "9.9.9",
+                "updateAvailable": True,
+                "checkedAt": "2026-08-25T00:00:00Z",
+                "state": "idle",
+                "detail": None,
+            }
+
+        def apply(self) -> tuple[bool, str]:
+            # The smoke journey only renders the pill; applying is refused so
+            # an accidental click cannot destabilize the fixture.
+            return False, "no newer release is available"
+
     server = MonitorHttpServer(
         ("127.0.0.1", int(sys.argv[1])),
         state,
         DemoInventory(state),
         access_token=_BROWSER_ACCESS_TOKEN,
+        updates=DemoUpdates(),
     )
     server.unmarked_dashboard_reads = 0
     server.unauthenticated_private_requests = 0

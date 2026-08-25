@@ -206,6 +206,7 @@ responses carry the probe status body *plus* a `code` field instead of an
 | `UNKNOWN_GPU` | 404 | The named GPU identity has no telemetry on that host. |
 | `METHOD_NOT_ALLOWED` | 405 | Wrong method for a known path; the `Allow` header lists valid methods. |
 | `PROBE_IN_PROGRESS` | 409 | A probe for that host is already running. |
+| `UPDATE_NOT_APPLICABLE` | 409 | Self-update is off, unmanaged, already running, or no newer release exists. |
 | `INVENTORY_CHANGED` | 409 | The configuration changed under the request; re-read and retry. |
 | `INCIDENT_NOT_ACTIVE` | 409 | The condition is no longer active or its incident generation changed. |
 | `PAYLOAD_TOO_LARGE` | 413 | Body missing, empty, or beyond the route's byte cap. |
@@ -328,6 +329,7 @@ This table matches the server's route manifest exactly.
 | GET | `/api/diagnostics` | R | Redacted, alias-anonymized support bundle. |
 | GET | `/api/inventory` | R | Configured/active/available hosts and collector settings. |
 | GET | `/api/topology` | R | Display-only connection tree. |
+| GET | `/api/update` | R | Release-currency status of this installation. |
 | POST | `/api/settings/collector` | W | Update any subset of the collector settings. |
 | POST | `/api/settings/poll-interval` | W | **Deprecated** single-field cadence alias. |
 | POST | `/api/settings/hosts` | W | Add or remove one monitored host. |
@@ -337,6 +339,7 @@ This table matches the server's route manifest exactly.
 | POST | `/api/probe` | W | Queue one immediate probe of one host. |
 | POST | `/api/notifications/test` | W | Queue one webhook delivery test. |
 | POST | `/api/service/restart` | W | Restart the supervised service. |
+| POST | `/api/update/apply` | W | Install the latest verified release and restart. |
 
 ## Endpoints
 
@@ -887,6 +890,28 @@ right after acknowledging and systemd starts the replacement. Available
 only when `GET /api/meta` reports `restartSupported: true`; otherwise
 `503 SERVICE_UNAVAILABLE`. **Never blind-retry this call** — verify via
 `GET /healthz` and the snapshot `startedAt` change (see idempotency notes).
+
+### GET /api/update
+
+Release-currency status. Tier R. Query: not allowed. Returns `{mode,
+currentVersion, latestVersion, updateAvailable, checkedAt, state, detail}`.
+`mode` mirrors the `updates` configuration (`off` performs no release
+checks and hides the dashboard pill); `state` is `idle`, `updating`,
+`restarting`, or `failed`, with `detail` carrying progress or the
+manual-recovery hint after a failure. The poll target is the hardcoded
+official repository; see the configuration reference and ADR-0026.
+
+### POST /api/update/apply
+
+Install the latest verified official release and restart. Tier W. Body cap
+32 bytes. Body: exactly `{}` — the request cannot name a version,
+repository, or installer option; the service always applies the newest
+release it verified. Success `202`: `{"status": "updating"}`; follow
+progress through `GET /api/update` and treat a new snapshot `startedAt` as
+the completed switch. `409 UPDATE_NOT_APPLICABLE` when self-update is not
+enabled, the service is not supervised, no newer release exists, or an
+update is already running. A failed attempt reports `state: "failed"`
+without restarting, and the running version keeps serving.
 
 ## Agent playbooks
 

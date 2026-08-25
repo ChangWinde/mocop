@@ -374,6 +374,24 @@ h1, h2, h3 { font-family: var(--font-display); }
 .connection.delayed i { background: var(--amber); box-shadow: 0 0 0 4px rgba(245,185,95,.08); }
 .connection.offline i { background: var(--red); box-shadow: 0 0 0 4px rgba(255, 115, 125, 0.07); }
 
+.update-pill {
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  color: var(--muted-2);
+  background: var(--glass);
+  cursor: default;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.update-pill[hidden] { display: none; }
+.update-pill.available { border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line)); color: var(--accent-2); background: var(--accent-2-soft); cursor: pointer; }
+.update-pill.available:hover:not(:disabled) { color: var(--text); }
+.update-pill.busy { color: var(--muted); }
+.update-pill.failed { border-color: rgba(255, 115, 125, 0.35); color: #ffacb2; cursor: pointer; }
+.update-pill:disabled { cursor: default; }
 .settings-toggle {
   gap: 7px;
   height: 38px;
@@ -1409,6 +1427,7 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
   .connection { width: 34px; justify-content: center; padding: 0; }
   .settings-toggle { width: 34px; justify-content: center; padding: 0; }
   .settings-toggle > span:last-child { display: none; }
+  .update-pill { max-width: 96px; height: 34px; overflow: hidden; padding: 0 8px; text-overflow: ellipsis; }
   .metrics-grid { gap: 8px; }
   .metric-card { min-height: 124px; padding: 16px; }
   .metric-card > .track { right: 16px; bottom: 9px; left: 16px; }

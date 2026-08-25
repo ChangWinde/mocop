@@ -60,6 +60,7 @@ jobs:
           node --check src/mocop/static/dashboard-auth.js
           node --check src/mocop/static/format.js
           node --check src/mocop/static/process-search.js
+          node --check src/mocop/static/update-pill.js
       - name: Capacity-match contract
         run: node tests/capacity_match_test.mjs
       - name: Capacity-watch contract
@@ -68,6 +69,8 @@ jobs:
         run: node tests/csv_export_test.mjs
       - name: Dashboard-auth contract
         run: node tests/dashboard_auth_test.mjs
+      - name: Update-pill contract
+        run: node tests/update_pill_test.mjs
       - name: Process-search contract
         run: node tests/process_search_test.mjs
 

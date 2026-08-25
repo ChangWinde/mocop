@@ -1,9 +1,10 @@
-"""Canonical Host/Origin hostname normalization.
+"""Canonical Host/Origin hostname normalization and web trust policy.
 
 One shared spelling backs every trust comparison in the configuration loader
 and the HTTP boundary: lowercase, unbracketed IP literals, and the absolute
 DNS form (trailing dot) folded away, so equal names can never be split into
-trusted and untrusted variants.
+trusted and untrusted variants. The trust-policy builder lives beside the
+normalizer so both sides of every comparison use the same grammar.
 """
 
 from __future__ import annotations
@@ -11,9 +12,46 @@ from __future__ import annotations
 import ipaddress
 import re
 import unicodedata
+from collections.abc import Iterable
 from urllib.parse import urlsplit
 
 _LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?")
+_LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+_WILDCARD_BIND_HOSTS = frozenset({"", "0.0.0.0", "::"})
+
+
+def trusted_web_policy(
+    bind_host: str, trusted_hosts: Iterable[str] | None
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return exact Host authorities and HTTPS-only Origin suffixes.
+
+    Reverse proxies commonly rewrite ``Host`` to the loopback upstream while
+    preserving the browser's public ``Origin``. Exact entries remain valid for
+    both headers. A leading ``*.`` is deliberately narrower: it authorizes only
+    HTTPS origins below that DNS suffix and never relaxes the Host check.
+    """
+    trusted = set(_LOOPBACK_HOSTNAMES)
+    origin_suffixes: set[str] = set()
+    if str(bind_host).strip().lower() not in _WILDCARD_BIND_HOSTS:
+        bind_hostname = normalize_web_hostname(bind_host)
+        if bind_hostname is not None:
+            trusted.add(bind_hostname)
+    for candidate in trusted_hosts or ():
+        if isinstance(candidate, str) and candidate.strip().startswith("*."):
+            suffix = normalize_web_hostname(candidate.strip()[2:])
+            if suffix is None or "." not in suffix:
+                raise ValueError(f"invalid trusted web origin suffix: {candidate!r}")
+            try:
+                ipaddress.ip_address(suffix)
+            except ValueError:
+                origin_suffixes.add(suffix)
+                continue
+            raise ValueError(f"invalid trusted web origin suffix: {candidate!r}")
+        hostname = normalize_web_hostname(candidate)
+        if hostname is None:
+            raise ValueError(f"invalid trusted web host: {candidate!r}")
+        trusted.add(hostname)
+    return frozenset(trusted), frozenset(origin_suffixes)
 
 
 def normalize_web_hostname(value: object, *, allow_port: bool = False) -> str | None:

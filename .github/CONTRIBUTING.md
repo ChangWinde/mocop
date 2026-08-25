@@ -20,11 +20,13 @@ node --check src/mocop/static/csv-export.js
 node --check src/mocop/static/dashboard-auth.js
 node --check src/mocop/static/format.js
 node --check src/mocop/static/process-search.js
+node --check src/mocop/static/update-pill.js
 node tests/capacity_match_test.mjs
 node tests/capacity_watch_test.mjs
 node tests/csv_export_test.mjs
 node tests/dashboard_auth_test.mjs
 node tests/process_search_test.mjs
+node tests/update_pill_test.mjs
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 

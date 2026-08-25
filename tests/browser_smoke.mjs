@@ -1032,6 +1032,23 @@ try {
   );
   assert(capacity.centerDelta < 2);
 
+  // The release pill is a header control fed by GET /api/update: the fixture
+  // advertises a newer release in self-update mode, so the pill must be
+  // visible, enabled, and name the exact target version.
+  const updatePill = await cdp.evaluate(`(() => {
+    const pill = document.querySelector("#update-pill");
+    return {
+      hidden: pill.hidden,
+      disabled: pill.disabled,
+      text: pill.textContent,
+      className: pill.className,
+    };
+  })()`, true);
+  assert.equal(updatePill.hidden, false);
+  assert.equal(updatePill.disabled, false);
+  assert.match(updatePill.text, /\u66F4\u65B0\u5230 v9\.9\.9/);
+  assert.match(updatePill.className, /available/);
+
   const capacityWatchFlow = await cdp.evaluate(`(() => {
     document.querySelector("#capacity-toggle").click();
     document.querySelector("#capacity-gpu-count").value = "2";

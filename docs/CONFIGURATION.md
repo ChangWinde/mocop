@@ -71,6 +71,7 @@ The ten fields marked required must be present, even when empty.
 | `webhooks` | no | `[]` | At most 16 HTTPS endpoint definitions using environment-variable names. |
 | `incident_actions` | no | `[]` | At most 512 durable acknowledgement/silence records. Usually UI-managed. |
 | `incident_overrides` | no | `{}` | Per-active-host/per-configured-group thresholds and disk exclusions. |
+| `updates` | no | `{mode: "off"}` | Release-currency policy: `{mode, check_interval_seconds}`. `mode` is `off` (default: no release checks, no outbound requests), `check` (poll and display), or `self-update` (also allow the dashboard's one-click apply); interval 3,600–86,400 seconds, default 21,600. The poll target is the hardcoded official repository ([ADR-0026](adr/0026-dashboard-self-update.md)); no configuration value can change the update source. |
 
 ## Thresholds and incident stability
 

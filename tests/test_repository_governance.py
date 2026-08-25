@@ -34,6 +34,7 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/static/dashboard-auth.js": 150,
     "src/mocop/static/format.js": 150,
     "src/mocop/static/process-search.js": 225,
+    "src/mocop/static/update-pill.js": 175,
     "src/mocop/service.py": 2_750,
     "src/mocop/web.py": 1_800,
     "src/mocop/probe.py": 1_625,

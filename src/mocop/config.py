@@ -19,6 +19,7 @@ from .discovery_policy import (
     parse_ssh_discovery_config,
 )
 from .hostnames import normalize_web_hostname
+from .updates import UpdatesConfig, UpdatesPolicyError, parse_updates_config
 
 CONFIG_ENV_VAR = "MOCOP_CONFIG"
 LOCAL_CONFIG_PATH = Path("config/mocop.json")
@@ -243,6 +244,7 @@ class MonitorConfig:
     listen_host: str
     listen_port: int
     ssh_discovery: SshDiscoveryConfig = field(default_factory=SshDiscoveryConfig)
+    updates: UpdatesConfig = field(default_factory=UpdatesConfig)
     trusted_web_hosts: tuple[str, ...] = ()
     gpu_process_poll_interval_seconds: float = 15
     retry_jitter_pct: float = 15
@@ -344,6 +346,7 @@ _OPTIONAL_KEYS = {
     "incident_actions",
     "incident_overrides",
     "ssh_discovery",
+    "updates",
 }
 _THRESHOLD_KEYS = {
     "cpu_warning_pct",
@@ -950,6 +953,10 @@ def _parse_config_bytes(content: bytes, config_path: Path) -> MonitorConfig:
         ssh_discovery = parse_ssh_discovery_config(data.get("ssh_discovery", {}))
     except SshDiscoveryPolicyError as exc:
         raise ConfigError(str(exc)) from exc
+    try:
+        updates = parse_updates_config(data.get("updates", {}))
+    except UpdatesPolicyError as exc:
+        raise ConfigError(str(exc)) from exc
     if (
         not isinstance(data["listen_host"], str)
         or normalize_web_hostname(data["listen_host"]) is None
@@ -1457,6 +1464,7 @@ def _parse_config_bytes(content: bytes, config_path: Path) -> MonitorConfig:
         listen_host=data["listen_host"].strip(),
         listen_port=listen_port,
         ssh_discovery=ssh_discovery,
+        updates=updates,
         trusted_web_hosts=tuple(dict.fromkeys(trusted_web_hosts)),
         gpu_process_poll_interval_seconds=gpu_process_poll_interval,
         retry_jitter_pct=retry_jitter_pct,

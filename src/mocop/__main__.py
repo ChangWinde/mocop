@@ -37,6 +37,7 @@ from .persistence import (
 )
 from .probe import OpenSshLinuxResourceProbe
 from .service import MonitorService, StateStore
+from .updates import UpdateManager
 from .web import MonitorHttpServer
 
 
@@ -345,6 +346,10 @@ def _run_monitor(args: argparse.Namespace) -> int:
     def stop(_signum: int, _frame: object) -> None:
         stop_event.set()
 
+    updates = UpdateManager(
+        config.updates,
+        restart=restart_event.set if args.managed_service else None,
+    )
     try:
         inventory = ConfigInventory(config_path, host_source, monitor.update_config)
         server = MonitorHttpServer(
@@ -355,6 +360,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
             monitor,
             trusted_hosts=config.trusted_web_hosts,
             access_token=access_token,
+            updates=updates,
         )
     except (OSError, ValueError, UnicodeError) as exc:
         print(
@@ -380,6 +386,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
     shutdown_failed = False
     try:
         collector.start()
+        updates.start()
         print(f"Configuration: {config_path}")
         dashboard_url = _http_url(config.listen_host, config.listen_port)
         if not args.managed_service:
@@ -399,6 +406,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
         signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)
         stop_event.set()
+        updates.stop()
         monitor.stop()
         server.server_close()
         collector.join(timeout=monitor.shutdown_timeout_seconds())

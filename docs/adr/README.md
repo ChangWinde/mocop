@@ -33,3 +33,4 @@ for status and superseding rules.
 | [0023](0023-non-destructive-host-migration.md) | Accepted | Non-destructive cross-machine configuration migration |
 | [0024](0024-fresh-host-fast-deployment.md) | Accepted | Fresh-host fast deployment |
 | [0025](0025-src-package-layout.md) | Accepted | src/ package layout |
+| [0026](0026-dashboard-self-update.md) | Accepted | Dashboard self-update |

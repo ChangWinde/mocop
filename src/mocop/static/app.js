@@ -1,8 +1,8 @@
 "use strict";
 
 const {
-  age, clamp, combinedMetric, duration, durationSince, format, memory, numeric,
-  optionalMetric, rate, ratio, retryCountdown, shortTime, storage,
+  age, appendStreamChunk, clamp, combinedMetric, duration, durationSince, format,
+  memory, numeric, optionalMetric, rate, ratio, retryCountdown, shortTime, storage,
 } = globalThis.MocopFormat.create();
 
 const PREFERENCE_STORAGE_KEY = "mocop.preferences.v1";
@@ -6184,13 +6184,6 @@ function acceptStreamFrame(frame, markLive) {
   }
 }
 
-function appendStreamChunk(buffer, chunk) {
-  // Normalize complete CRLF and lone-CR line endings while retaining a final
-  // CR until the next chunk arrives. This prevents a CR/LF split across two
-  // reads from becoming a false blank line or an unbounded partial frame.
-  return `${buffer}${chunk}`.replaceAll("\r\n", "\n").replace(/\r(?!$)/g, "\n");
-}
-
 async function connectAuthenticatedStream() {
   while (view.dashboardStarted) {
     try {
@@ -6819,7 +6812,12 @@ async function startDashboard() {
   if (view.authenticationFailed || !snapshotLoaded) return false;
   fetchTopology();
   connect();
+  // Polling a reader route only starts once this document is authenticated.
+  updatePill.start();
   return true;
 }
+
+const updatePill = globalThis.MocopUpdatePill
+  .create({ button: $("#update-pill"), request: (path, options) => fetch(path, options) });
 
 startDashboard();
