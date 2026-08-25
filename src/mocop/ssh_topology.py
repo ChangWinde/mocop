@@ -284,25 +284,45 @@ class SshTopologyPlanner:
         warnings = list(resolution.warnings)
         chain_cache: dict[str, tuple[str, ...]] = {}
 
-        def expanded_hops(alias: str, stack: tuple[str, ...] = ()) -> tuple[str, ...]:
+        def expanded_hops(alias: str) -> tuple[str, ...]:
             if alias in chain_cache:
                 return chain_cache[alias]
-            if alias in stack:
-                warnings.append(f"{alias}: proxy route cycle ignored")
-                return ()
-            route = routes.get(alias)
-            if route is None or not route.hops:
-                chain_cache[alias] = ()
-                return ()
-            first = route.hops[0]
-            prefix = expanded_hops(first, (*stack, alias)) if first in routes else ()
-            combined: list[str] = []
-            for hop in (*prefix, *route.hops):
-                if hop not in combined and hop not in {root, alias}:
-                    combined.append(hop)
-            result = tuple(combined)
-            chain_cache[alias] = result
-            return result
+            # Walk the first-hop chain iteratively: an operator config may
+            # nest ProxyJump hundreds of levels deep, and a RecursionError
+            # would escape the collector's (OSError, ValueError) boundary
+            # and stop all monitoring instead of degrading one route.
+            stack: list[str] = []
+            seen: set[str] = set()
+            prefix: tuple[str, ...] = ()
+            cursor = alias
+            while True:
+                route = routes.get(cursor)
+                if route is None or not route.hops:
+                    chain_cache[cursor] = ()
+                    break
+                stack.append(cursor)
+                seen.add(cursor)
+                first = route.hops[0]
+                if first not in routes:
+                    break
+                if first in chain_cache:
+                    prefix = chain_cache[first]
+                    break
+                if first in seen:
+                    warnings.append(f"{first}: proxy route cycle ignored")
+                    break
+                cursor = first
+            # Unwind deepest-first: every level combines its own hops behind
+            # the child chain while excluding itself and the root, exactly
+            # like the recursive formulation this replaces.
+            for node in reversed(stack):
+                combined: list[str] = []
+                for hop in (*prefix, *routes[node].hops):
+                    if hop not in combined and hop not in {root, node}:
+                        combined.append(hop)
+                prefix = tuple(combined)
+                chain_cache[node] = prefix
+            return chain_cache[alias]
 
         parent_by_node: dict[str, str] = {}
         links: dict[tuple[str, str], TopologyLinkConfig] = {}

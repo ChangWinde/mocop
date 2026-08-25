@@ -167,3 +167,30 @@ class SshTopologyPlannerTests(unittest.TestCase):
                 ("monitor", "bastion"),
             ),
         )
+
+    def test_projects_proxy_chains_deeper_than_the_recursion_limit(self) -> None:
+        # A pathological operator config may chain ProxyJump through every
+        # known alias. Chain expansion must stay iterative: a RecursionError
+        # would escape the collector's error boundary and stop all
+        # monitoring instead of degrading one route.
+        depth = 1500
+        aliases = tuple(f"hop-{index:04d}" for index in range(depth))
+        routes = [(aliases[0], SshRoute("direct"))]
+        routes.extend(
+            (aliases[index], SshRoute("proxyjump", (aliases[index - 1],)))
+            for index in range(1, depth)
+        )
+        resolution = SshRouteResolution(
+            known_aliases=aliases,
+            routes=tuple(routes),
+            failures=(),
+            warnings=(),
+        )
+
+        projection = SshTopologyPlanner.project("monitor", (aliases[-1],), resolution)
+
+        # The display tree stays inside its documented link bound while the
+        # grouping projection still reflects the full resolved chain.
+        assert projection.topology is not None
+        self.assertLessEqual(len(projection.topology.links), 512)
+        self.assertEqual(projection.host_groups, ((aliases[-1], aliases[-2][:48]),))

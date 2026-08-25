@@ -374,6 +374,52 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(status["deliveredEvents"], 2)
         self.assertEqual(status["droppedDeliveries"], 1)
 
+    def test_pairing_saturation_stops_suppressing_unpaired_recoveries(self) -> None:
+        # Capacity eviction discards pairing records whose opened events were
+        # delivered long ago. After the first eviction, absence from the table
+        # no longer proves the receiver never saw an open, so recoveries must
+        # deliver: a spurious resolved is recoverable, a hanging alert is not.
+        sender = _ImmediateSender()
+        with patch("mocop.notifications._WEBHOOK_SEEN_CAPACITY", 2):
+            sink = create_notification_sink(
+                (
+                    self.config(
+                        events=("opened", "resolved", "escalated", "deescalated")
+                    ),
+                ),
+                environ={
+                    "MOCOP_WEBHOOK_URL": "https://hooks.example.test/events",
+                    "MOCOP_WEBHOOK_SECRET": "top-secret",
+                },
+                resolver=resolver_for("8.8.8.8"),
+                sender=sender,
+            )
+
+            def condition_event(event_id: int, key: str, state: str) -> IncidentEvent:
+                return replace(
+                    incident(),
+                    event_id=event_id,
+                    state=state,
+                    condition=replace(incident().condition, key=key, category="cpu"),
+                )
+
+            sink.publish((condition_event(60, "cpu:a", "opened"),), ())
+            sink.publish((condition_event(61, "cpu:b", "opened"),), ())
+            # This third open evicts cpu:a's pairing record (capacity 2).
+            sink.publish((condition_event(62, "cpu:c", "opened"),), ())
+            sink.publish((condition_event(63, "cpu:a", "resolved"),), ())
+            sink.close()
+
+        deliveries = [
+            (
+                json.loads(call[1])["event"]["conditionKey"],
+                json.loads(call[1])["event"]["state"],
+            )
+            for call in sender.calls
+        ]
+        self.assertIn(("cpu:a", "resolved"), deliveries)
+        self.assertEqual(sink.status()["endpoints"][0]["droppedDeliveries"], 0)
+
     def test_actionable_check_runs_before_every_delivery_attempt(self) -> None:
         checks = []
 

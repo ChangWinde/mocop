@@ -111,6 +111,26 @@ class DiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(source.hosts(config), ("github", "gpu-01", "gpu-02", "manual"))
 
+    def test_unsafe_ssh_alias_is_skipped_without_stopping_discovery(self) -> None:
+        # One exotic literal Host entry (an IPv6 literal here) must not veto
+        # monitoring: explicit hosts stay active, safe aliases stay
+        # discoverable, and the skip is visible as a warning (ADR-0022).
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        ssh_config = Path(directory.name) / "config"
+        ssh_config.write_text("Host gpu-01 fe80::1 gpu-02\n", encoding="utf-8")
+        config = replace(
+            self._config(ssh_config),
+            auto_discover=True,
+            hosts=("manual",),
+        )
+        source = OpenSshConfigHostSource()
+
+        self.assertEqual(source.aliases(config), ("gpu-01", "gpu-02"))
+        discovery = source.discovery(config)
+        self.assertEqual(discovery.hosts, ("gpu-01", "gpu-02", "manual"))
+        self.assertEqual(discovery.warnings, ("fe80::1: unsafe ssh alias ignored",))
+
     def test_group_metadata_does_not_authorize_an_undiscovered_alias(self) -> None:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -246,9 +266,15 @@ class DiscoveryTests(unittest.TestCase):
             encoding="utf-8",
         )
         config = self._config(ssh_config)
+        source = OpenSshConfigHostSource()
 
-        with self.assertRaisesRegex(ValueError, "hash#value"):
-            OpenSshConfigHostSource().aliases(config)
+        # The '#' token never becomes a candidate, but as an unrelated entry
+        # it must not stop discovery either; it degrades to a warning.
+        self.assertEqual(source.aliases(config), ("equals", "safe", "spaced"))
+        self.assertEqual(
+            source.discovery(config).warnings,
+            ("hash#value: unsafe ssh alias ignored",),
+        )
 
         ssh_config.write_text(
             "Host=equals\nHost = spaced\nHost safe # comment\n", encoding="utf-8"

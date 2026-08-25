@@ -4,6 +4,22 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Fixed
+
+- One exotic literal `Host` entry in the OpenSSH configuration (an IPv6
+  literal, a token carrying `:` or `#`) no longer stops discovery for every
+  monitored host: unsafe aliases now leave the candidate set with a visible
+  scan warning while explicit hosts stay monitored (ADR-0022).
+- Proxy-chain expansion for resolved topology is now iterative, so a
+  pathologically deep `ProxyJump` chain can no longer overflow the
+  interpreter stack and stop the collector.
+- `mocop migrate` now refuses a new local alias that already appears in the
+  configured topology with a direct explanation instead of a downstream
+  schema error about self-links.
+- After the webhook pairing table hits its capacity bound, unpaired
+  recoveries are delivered instead of suppressed, so a long-lived incident
+  whose pairing record was evicted can still resolve on the receiver.
+
 ## [0.10.0] - 2026-08-25
 
 ### Added

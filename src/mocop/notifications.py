@@ -429,6 +429,12 @@ class _WebhookWorker:
         self._last_test_queued_at = float("-inf")
         self._closed = False
         self._active_conditions: OrderedDict[tuple[str, str], None] = OrderedDict()
+        # Worker-thread state: once capacity eviction discards a pairing
+        # record, table absence stops proving "the receiver never saw an
+        # open", so unpaired-recovery suppression turns off for the rest of
+        # this process (a spurious resolved is recoverable; a hanging alert
+        # is not).
+        self._pairing_saturated = False
         self._thread = threading.Thread(
             target=self._run,
             name=f"mocop-webhook-{endpoint.config.name}",
@@ -531,6 +537,7 @@ class _WebhookWorker:
                     paired_delivery
                     and item.event.state == "resolved"
                     and condition_key not in self._active_conditions
+                    and not self._pairing_saturated
                 ):
                     # A recovery for a condition the receiver never saw would
                     # only confuse it; drop the event but keep it accounted.
@@ -585,6 +592,7 @@ class _WebhookWorker:
                             self._active_conditions.move_to_end(condition_key)
                             while len(self._active_conditions) > _WEBHOOK_SEEN_CAPACITY:
                                 self._active_conditions.popitem(last=False)
+                                self._pairing_saturated = True
                     else:
                         self._dropped += 1
                         if not suppressed:
