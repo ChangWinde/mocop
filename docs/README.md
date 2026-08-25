@@ -98,11 +98,13 @@ python3 -m compileall -q src/mocop tests
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
 node --check src/mocop/static/app.js
+node --check src/mocop/static/capacity-match.js
 node --check src/mocop/static/capacity-watch.js
 node --check src/mocop/static/csv-export.js
 node --check src/mocop/static/dashboard-auth.js
 node --check src/mocop/static/format.js
 node --check src/mocop/static/process-search.js
+node tests/capacity_match_test.mjs
 node tests/capacity_watch_test.mjs
 node tests/csv_export_test.mjs
 node tests/dashboard_auth_test.mjs

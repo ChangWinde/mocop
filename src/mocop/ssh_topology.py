@@ -113,9 +113,17 @@ def _synthetic_proxy_alias(target: str, index: int) -> str:
 
 
 def _alias_group_candidate(alias: str) -> str | None:
+    """Numbered-fleet prefix per ADR-0022: training-1 -> training.
+
+    Only a trailing numeric segment marks members of one numbered fleet.
+    A shared word prefix ("paris-web"/"paris-db") or an embedded model
+    number ("gpu-a100") is not evidence of one scheduling pool and stays
+    ungrouped; explicit host_groups remain the override for those.
+    """
     separator = max(alias.rfind("-"), alias.rfind("_"), alias.rfind("."))
     if separator > 0:
-        return alias[:separator]
+        tail = alias[separator + 1 :]
+        return alias[:separator] if tail.isdigit() else None
     numeric = _TRAILING_NUMERIC_ALIAS.fullmatch(alias)
     if numeric is not None and numeric.group(1):
         return numeric.group(1)

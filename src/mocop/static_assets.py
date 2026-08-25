@@ -20,6 +20,7 @@ STATIC_ROUTES: dict[str, tuple[str, str]] = {
     "/format.js": ("format.js", _JAVASCRIPT),
     "/csv-export.js": ("csv-export.js", _JAVASCRIPT),
     "/process-search.js": ("process-search.js", _JAVASCRIPT),
+    "/capacity-match.js": ("capacity-match.js", _JAVASCRIPT),
     "/capacity-watch.js": ("capacity-watch.js", _JAVASCRIPT),
     "/dashboard-auth.js": ("dashboard-auth.js", _JAVASCRIPT),
     "/app.js": ("app.js", _JAVASCRIPT),

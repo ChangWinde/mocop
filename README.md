@@ -54,7 +54,7 @@ English README, API, operations, and engineering references remain maintained.
 - GPU capacity matching plus a capacity watch: a banner and opt-in browser
   notification fire once a satisfying idle combination appears; also a
   scheduling heatmap, connection map, program search, process
-  filtering/sorting, attribution filters, `ssh <alias>` copy, and CSV export
+  filtering/sorting, attribution filters, `ssh` copy, and CSV export
 - CPU, load, memory, swap, disk capacity and I/O, network rate, uptime, and kernel pressure stall (PSI) telemetry
 - Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, and timed maintenance
 - Independent per-host scheduling, possible shared-path grouping, and optional HTTPS webhooks
@@ -231,7 +231,7 @@ canonical ownership, update triggers, language policy, and ADR lifecycle.
 python3 -m unittest discover -s tests -t . -p 'test_*.py'
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
-for t in capacity_watch csv_export dashboard_auth process_search; do node "tests/${t}_test.mjs"; done
+for t in capacity_match capacity_watch csv_export dashboard_auth process_search; do node "tests/${t}_test.mjs"; done
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 

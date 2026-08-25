@@ -1,27 +1,14 @@
-// Capacity matching and the capacity watch state machine, extracted from
-// app.js under the ADR-0021 leaf pattern. The leaf owns snapshot-projection
-// logic and durable watch state; app.js keeps DOM rendering, notification
-// delivery, and dashboard lifecycle. No network access happens here.
+// The capacity watch state machine: a durable, per-browser demand that fires
+// one notification when a satisfying idle GPU combination appears. Extracted
+// from app.js under the ADR-0021 leaf pattern; the stateless matching
+// projection lives in capacity-match.js. This leaf owns storage
+// reconciliation, the armed/notified edge with its cooldown, and the pure
+// text a watch presents. No DOM, no network.
 (() => {
   "use strict";
 
   const STORAGE_KEY = "mocop.capacityWatch.v1";
   const NOTIFY_COOLDOWN_MS = 60_000;
-  const HOST_BLOCKERS = Object.freeze(
-    new Set(["connectivity", "gpu_availability", "gpu_count"]),
-  );
-  const GPU_BLOCKERS = Object.freeze(
-    new Set(["gpu_ecc", "gpu_memory_repair", "gpu_slowdown", "gpu_temperature"]),
-  );
-
-  function numeric(value, fallback = 0) {
-    return Number.isFinite(value) ? value : fallback;
-  }
-
-  function optionalMetric(record, key) {
-    const value = record?.[key];
-    return Number.isFinite(value) ? value : Number.NaN;
-  }
 
   function validRequest(request) {
     return request != null
@@ -34,121 +21,79 @@
       && request.minVramGiB <= 512
       && typeof request.model === "string"
       && request.model.length >= 1
-      && request.model.length <= 120;
+      // Match the probe's GPU-name bound so a watch on any real device model
+      // saves instead of failing silently.
+      && request.model.length <= 256;
+  }
+
+  // Pure presentation strings, kept in the leaf so app.js only assigns them
+  // to DOM nodes and the wording stays with the state that produces it.
+  function describeRequest(request) {
+    const model = request.model === "any" ? "不限型号" : request.model;
+    return `${request.gpuCount} 张 GPU · ${model} · 每卡空闲 ≥ ${request.minVramGiB} GiB`;
+  }
+
+  function controlText(watch, satisfiedCount) {
+    if (watch.state === "notified") {
+      return `已就绪 · ${satisfiedCount} 个节点满足 ${describeRequest(watch.request)}`;
+    }
+    return `守望中 · ${describeRequest(watch.request)}`;
+  }
+
+  function bannerText(watch, satisfiedCount) {
+    return `GPU 已就绪：${satisfiedCount} 个节点满足 ${describeRequest(watch.request)}`;
   }
 
   function create({ storage, now = () => Date.now() } = {}) {
-    function gpuHasBlocker(gpu, conditions) {
-      const identity = String(gpu.uuid || gpu.index);
-      const resourcePrefix = `GPU ${gpu.index}`;
-      return conditions.some((condition) => {
-        if (!GPU_BLOCKERS.has(condition.category)) return false;
-        const key = String(condition.conditionKey || "");
-        const resource = String(condition.resource || "");
-        return key.endsWith(`:${identity}`)
-          || resource === resourcePrefix
-          || resource.startsWith(`${resourcePrefix} `);
-      });
+    function parseWatch(raw) {
+      const stored = JSON.parse(raw || "null");
+      if (
+        stored == null
+        || typeof stored !== "object"
+        || stored.version !== 1
+        || !validRequest(stored.request)
+        || (stored.state !== "armed" && stored.state !== "notified")
+        || (stored.lastNotifiedAt !== null && !Number.isFinite(stored.lastNotifiedAt))
+      ) return null;
+      return {
+        version: 1,
+        request: {
+          gpuCount: stored.request.gpuCount,
+          minVramGiB: stored.request.minVramGiB,
+          model: stored.request.model,
+        },
+        state: stored.state,
+        lastNotifiedAt: stored.lastNotifiedAt,
+      };
     }
 
-    // Pure projection of the current snapshot: same-host, same-model groups
-    // ranked by fit. Maintenance hosts, host-level blockers, and GPUs with
-    // hardware alerts never become candidates.
-    function matches({ servers, activeConditions, request, busyPct, temperatureC }) {
-      const minimumFreeMiB = request.minVramGiB * 1024;
-      const conditionsByHost = new Map();
-      (Array.isArray(activeConditions) ? activeConditions : []).forEach((condition) => {
-        const group = conditionsByHost.get(condition.host) || [];
-        group.push(condition);
-        conditionsByHost.set(condition.host, group);
-      });
-      const candidates = [];
-      let excludedMaintenance = 0;
-      let excludedHealth = 0;
-
-      servers.forEach((server) => {
-        if (server.status !== "online" || server.stale) return;
-        if (server.maintenance) {
-          excludedMaintenance += 1;
-          return;
-        }
-        const conditions = conditionsByHost.get(server.host) || [];
-        if (conditions.some((condition) => HOST_BLOCKERS.has(condition.category))) {
-          excludedHealth += 1;
-          return;
-        }
-        const groups = new Map();
-        server.gpus.forEach((gpu) => {
-          const model = gpu.name || "Unknown NVIDIA GPU";
-          if (request.model !== "any" && model !== request.model) return;
-          const group = groups.get(model) || [];
-          group.push(gpu);
-          groups.set(model, group);
-        });
-        groups.forEach((gpus, model) => {
-          const available = gpus.filter((gpu) => {
-            const utilization = optionalMetric(gpu, "utilization_gpu_pct");
-            const freeMemory = optionalMetric(gpu, "memory_free_mib");
-            const temperature = optionalMetric(gpu, "temperature_c");
-            return Number.isFinite(utilization)
-              && utilization < busyPct
-              && Number.isFinite(freeMemory)
-              && freeMemory >= minimumFreeMiB
-              && (!Number.isFinite(temperature) || temperature < temperatureC)
-              && !gpuHasBlocker(gpu, conditions);
-          });
-          const freeValues = available.map((gpu) => numeric(gpu.memory_free_mib));
-          const utilizationValues = available.map((gpu) => numeric(gpu.utilization_gpu_pct));
-          candidates.push({
-            host: server.host,
-            model,
-            total: gpus.length,
-            available,
-            satisfies: available.length >= request.gpuCount,
-            deficit: Math.max(0, request.gpuCount - available.length),
-            minimumFreeMiB: freeValues.length ? Math.min(...freeValues) : 0,
-            averageUtilization: utilizationValues.length
-              ? utilizationValues.reduce((sum, value) => sum + value, 0) / utilizationValues.length
-              : 101,
-            cpuUsage: optionalMetric(server.system || {}, "cpu_usage_pct"),
-          });
-        });
-      });
-      candidates.sort((first, second) => (
-        Number(second.satisfies) - Number(first.satisfies)
-        || first.deficit - second.deficit
-        || second.available.length - first.available.length
-        || second.minimumFreeMiB - first.minimumFreeMiB
-        || first.averageUtilization - second.averageUtilization
-        || first.host.localeCompare(second.host)
-      ));
-      return { candidates, excludedMaintenance, excludedHealth };
+    // Distinguish "storage says no watch" from "storage is unavailable": only
+    // the former lets another tab authoritatively clear this one, while the
+    // latter must fall back to the in-memory watch.
+    function readStored() {
+      let raw;
+      try {
+        raw = storage.getItem(STORAGE_KEY);
+      } catch (_error) {
+        return { readable: false, watch: null };
+      }
+      try {
+        return { readable: true, watch: parseWatch(raw) };
+      } catch (_error) {
+        return { readable: true, watch: null };
+      }
     }
 
     function loadWatch() {
-      try {
-        const stored = JSON.parse(storage.getItem(STORAGE_KEY) || "null");
-        if (
-          stored == null
-          || typeof stored !== "object"
-          || stored.version !== 1
-          || !validRequest(stored.request)
-          || (stored.state !== "armed" && stored.state !== "notified")
-          || (stored.lastNotifiedAt !== null && !Number.isFinite(stored.lastNotifiedAt))
-        ) return null;
-        return {
-          version: 1,
-          request: {
-            gpuCount: stored.request.gpuCount,
-            minVramGiB: stored.request.minVramGiB,
-            model: stored.request.model,
-          },
-          state: stored.state,
-          lastNotifiedAt: stored.lastNotifiedAt,
-        };
-      } catch (_error) {
-        return null;
-      }
+      return readStored().watch;
+    }
+
+    function sameRequest(first, second) {
+      return (
+        first.gpuCount === second.gpuCount
+        && first.minVramGiB === second.minVramGiB
+        && first.model === second.model
+      );
     }
 
     function persist(watch) {
@@ -184,9 +129,27 @@
     // cooldown keeps a flapping fleet from turning edges into notification
     // spam; a rate-limited edge stays armed and retries on a later snapshot.
     function evaluateWatch(watch, satisfiedCount) {
+      // Reconcile with shared storage first so a persisted transition can
+      // never resurrect a watch another tab stopped, nor overwrite a newer
+      // request another tab saved. When storage is unreadable there is no
+      // sharing, so the in-memory watch stays authoritative.
+      const current = readStored();
+      if (current.readable) {
+        if (current.watch === null || !sameRequest(current.watch.request, watch.request)) {
+          return { watch: current.watch, shouldNotify: false };
+        }
+        watch = current.watch;
+      }
       if (watch.state === "armed" && satisfiedCount > 0) {
         const at = now();
-        if (watch.lastNotifiedAt !== null && at - watch.lastNotifiedAt < NOTIFY_COOLDOWN_MS) {
+        // A wall-clock rollback (NTP step, manual change) makes the elapsed
+        // difference negative; treat that as "cooldown elapsed" so the watch
+        // is not frozen until the clock catches back up to lastNotifiedAt.
+        const withinCooldown =
+          watch.lastNotifiedAt !== null
+          && at >= watch.lastNotifiedAt
+          && at - watch.lastNotifiedAt < NOTIFY_COOLDOWN_MS;
+        if (withinCooldown) {
           return { watch, shouldNotify: false };
         }
         return {
@@ -201,10 +164,9 @@
     }
 
     return Object.freeze({
-      hostBlockerCategories: HOST_BLOCKERS,
-      gpuBlockerCategories: GPU_BLOCKERS,
-      gpuHasBlocker,
-      matches,
+      describeRequest,
+      controlText,
+      bannerText,
       loadWatch,
       saveWatch,
       clearWatch,

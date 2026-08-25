@@ -341,7 +341,10 @@ class NotificationTests(unittest.TestCase):
         sink.close()
 
         self.assertEqual(sender.calls, [])
-        self.assertEqual(sink.status()["endpoints"][0]["droppedDeliveries"], 1)
+        endpoint = sink.status()["endpoints"][0]
+        # A deliberate suppression is counted separately, not as a failure.
+        self.assertEqual(endpoint["droppedDeliveries"], 0)
+        self.assertEqual(endpoint["suppressedDeliveries"], 1)
 
     def test_severity_transitions_deliver_and_pair_without_prior_open(self) -> None:
         sender = _ImmediateSender()
@@ -372,7 +375,8 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(states, ["escalated", "resolved"])
         status = sink.status()["endpoints"][0]
         self.assertEqual(status["deliveredEvents"], 2)
-        self.assertEqual(status["droppedDeliveries"], 1)
+        self.assertEqual(status["droppedDeliveries"], 0)
+        self.assertEqual(status["suppressedDeliveries"], 1)
 
     def test_pairing_saturation_stops_suppressing_unpaired_recoveries(self) -> None:
         # Capacity eviction discards pairing records whose opened events were

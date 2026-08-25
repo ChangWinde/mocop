@@ -440,6 +440,64 @@ class IncidentTrackerTests(unittest.TestCase):
             [(event["category"], event["state"]) for event in snapshot["events"]],
         )
 
+    def test_escalation_requires_consecutive_confirmable_samples(self) -> None:
+        # Symmetry with the open-confirmation rule: two critical observations
+        # split by a blind gap must not accumulate into an escalation.
+        warning = ProbeResult("node-a", "online", 1, (), system=system(85, 20))
+        self.tracker.update(warning)
+        self.tracker.update(warning)
+        self.assertEqual(
+            [item["severity"] for item in self.tracker.snapshot(20)["active"]],
+            ["warning"],
+        )
+
+        critical = ProbeResult("node-a", "online", 1, (), system=system(97, 20))
+        self.tracker.update(critical)
+        # A blind gap (unreachable) before the second critical observation.
+        self.tracker.update(ProbeResult("node-a", "unreachable", 5000))
+        self.tracker.update(critical)
+
+        cpu = next(
+            item
+            for item in self.tracker.snapshot(20)["active"]
+            if item["category"] == "cpu"
+        )
+        self.assertEqual(cpu["severity"], "warning")
+
+        # Two consecutive critical samples do escalate.
+        self.tracker.update(critical)
+        cpu = next(
+            item
+            for item in self.tracker.snapshot(20)["active"]
+            if item["category"] == "cpu"
+        )
+        self.assertEqual(cpu["severity"], "critical")
+
+    def test_malformed_gpu_output_freezes_conditions_like_a_query_failure(
+        self,
+    ) -> None:
+        # A malformed nvidia-smi payload degrades to zero GPUs with a distinct
+        # message. It must be treated as "GPU telemetry unavailable", not as an
+        # authoritative empty inventory that recovers every per-GPU alert.
+        hot = ProbeResult("node-a", "online", 1, (gpu(95),), system=system(20, 20))
+        self.tracker.update(hot)
+        self.tracker.update(hot)
+
+        malformed = ProbeResult(
+            "node-a",
+            "online",
+            1,
+            (),
+            system=system(20, 20),
+            message="nvidia-smi output was malformed",
+        )
+        for _ in range(5):
+            self.tracker.update(malformed)
+
+        categories = [item["category"] for item in self.tracker.snapshot(20)["active"]]
+        self.assertIn("gpu_temperature", categories)
+        self.assertIn("gpu_availability", categories)
+
     def test_failed_gpu_query_still_freezes_identity_conditions(self) -> None:
         # The absence rule above must not weaken the query-failure freeze: a
         # host whose nvidia-smi breaks says nothing about the old card.

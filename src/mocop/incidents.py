@@ -10,8 +10,17 @@ from .models import ProbeResult
 IncidentSeverity = Literal["warning", "critical"]
 IncidentState = Literal["opened", "resolved", "escalated", "deescalated"]
 
+# Every probe message that means "this sample cannot speak for the GPUs" must
+# be listed here. A malformed nvidia-smi payload degrades to zero GPUs with
+# this message; omitting it would let the empty inventory look authoritative
+# and, via the absence-recovery rule, silently resolve every per-GPU hardware
+# incident without opening a availability alert.
 _GPU_QUERY_FAILURE_MESSAGES = frozenset(
-    {"nvidia-smi is unavailable", "nvidia-smi query failed"}
+    {
+        "nvidia-smi is unavailable",
+        "nvidia-smi query failed",
+        "nvidia-smi output was malformed",
+    }
 )
 _SYSTEM_CATEGORIES = frozenset({"cpu", "memory", "swap", "disk", "pressure"})
 _GPU_HEALTH_CATEGORIES = frozenset({"gpu_ecc", "gpu_memory_repair", "gpu_slowdown"})
@@ -692,6 +701,12 @@ class IncidentTracker:
         # in the recovery loop below.
         for key in set(candidates) - set(observed):
             del candidates[key]
+        # A pending severity escalation is a confirmation requirement too: a
+        # sample that does not re-observe the condition (recovery or a blind
+        # spot) breaks the streak, so two critical observations separated by a
+        # gap cannot accumulate into an escalation any more than into an open.
+        for key in set(severity_changes) - set(observed):
+            del severity_changes[key]
 
         for key, new in observed.items():
             recoveries.pop(key, None)

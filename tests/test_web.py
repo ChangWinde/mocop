@@ -502,6 +502,8 @@ class WebTests(unittest.TestCase):
             search_script = response.read().decode("utf-8")
         with urlopen(f"{self.base}/capacity-watch.js", timeout=2) as response:
             watch_script = response.read().decode("utf-8")
+        with urlopen(f"{self.base}/capacity-match.js", timeout=2) as response:
+            match_script = response.read().decode("utf-8")
         with urlopen(f"{self.base}/format.js", timeout=2) as response:
             format_script = response.read().decode("utf-8")
         self.assertIn("Mocop", body)
@@ -579,6 +581,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("createProcessSearch", search_script)
         self.assertIn("MocopDashboardAuth", authentication_script)
         self.assertIn("MocopCapacityWatch", watch_script)
+        self.assertIn("MocopCapacityMatch", match_script)
         self.assertIn("MocopFormat", format_script)
         self.assertIn('id="authentication-dialog"', body)
         self.assertIn('id="capacity-watch-toggle"', body)
@@ -587,6 +590,7 @@ class WebTests(unittest.TestCase):
         self.assertIn('src="/dashboard-auth.js"', body)
         self.assertIn('src="/process-search.js"', body)
         self.assertIn('src="/capacity-watch.js"', body)
+        self.assertIn('src="/capacity-match.js"', body)
         self.assertIn('src="/format.js"', body)
         self.assertIn('src="/csv-export.js"', body)
 
