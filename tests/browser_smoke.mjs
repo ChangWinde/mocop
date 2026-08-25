@@ -360,7 +360,9 @@ try {
 
   const final = await cdp.evaluate(`(async () => {
     const snapshot = await fetch("/api/snapshot").then((response) => response.json());
+    const meta = await fetch("/api/meta").then((response) => response.json());
     return {
+      appVersion: meta.appVersion,
       selected: document.querySelector("#refresh-interval")?.value,
       interval: snapshot.pollIntervalSeconds,
       connection: document.querySelector("#connection")?.className,
@@ -381,7 +383,13 @@ try {
   assert.equal(final.selected, "2");
   assert.match(final.connection, /live/);
   assert.match(final.feedback, /2/);
-  assert.match(final.versionLabel, /v0\.9\.0/);
+  // The footer pins the running release; compare against /api/meta instead
+  // of a hardcoded number so release bumps cannot break this journey.
+  assert.match(final.appVersion, /^\d+\.\d+\.\d+$/);
+  assert.ok(
+    final.versionLabel.includes(`v${final.appVersion}`),
+    `poll info advertises v${final.appVersion}: ${final.versionLabel}`,
+  );
   assert.equal(final.serverRatio, "2 / 4");
   assert.equal(final.totalGpus, "8");
   assert.match(final.persistenceStatus, /仅内存/);

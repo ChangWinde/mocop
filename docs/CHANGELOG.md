@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-25
+
 ### Added
 
 - Added `mocop deploy` as the fresh-server fast path. After package installation, one
