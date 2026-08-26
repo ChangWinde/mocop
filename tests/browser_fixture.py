@@ -328,7 +328,7 @@ def gpu(
         (
             GpuProcess(
                 pid=10_000 + index,
-                name="/workspace/train.py",
+                name="/opt/conda/envs/llm/bin/python3.11",
                 used_memory_mib=max(512, memory_used - 1024),
                 workload=WorkloadMetadata(
                     kind="slurm",
@@ -336,8 +336,10 @@ def gpu(
                     name="llm-train",
                     owner="researcher",
                     queue="gpu-long",
-                    command="python train.py --config configs/llm-70b.yaml --stage sft",
+                    command="python -m train.sft --config configs/llm-70b.yaml --stage sft",
                     started_at=train_started_at,
+                    cpu_seconds=172_800.0,  # ≈16 busy cores over the 3h runtime
+                    rss_mib=98_304.0,
                 ),
             ),
             # One host-wide PID visible on every busy GPU: the owners view must

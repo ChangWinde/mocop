@@ -279,9 +279,11 @@ __CONTAINER_IDENTITY_AWK__
         # the stat line joined into a single record, so a comm containing
         # newlines cannot break the start-time field position.
         uid=""
+        rss_kib=""
         status_file = "/proc/" pid "/status"
         while ((getline proc_line < status_file) > 0) {
-          if (proc_line ~ /^Uid:/) { split(proc_line, uid_fields); uid=uid_fields[2]; break }
+          if (proc_line ~ /^Uid:/) { split(proc_line, uid_fields); uid=uid_fields[2] }
+          else if (proc_line ~ /^VmRSS:/) { split(proc_line, rss_fields); rss_kib=rss_fields[2] }
         }
         close(status_file)
         stat_buffer=""
@@ -291,9 +293,14 @@ __CONTAINER_IDENTITY_AWK__
         }
         close(stat_file)
         ticks=""
+        cpu_ticks=""
         if (sub(/^.*\) /, "", stat_buffer)) {
           split(stat_buffer, stat_fields, " ")
           ticks = stat_fields[20]
+          # utime/stime are stat fields 14/15; the "comm) " strip removes two.
+          if (stat_fields[12] ~ /^[0-9]+$/ && stat_fields[13] ~ /^[0-9]+$/) {
+            cpu_ticks = stat_fields[12] + stat_fields[13]
+          }
         }
         # A scheduler identifier is only trusted from an anchored cgroup
         # segment: systemd scopes like "job_1.scope" or "podcast.service" must
@@ -347,10 +354,16 @@ __CONTAINER_IDENTITY_AWK__
         if (boot ~ /^[0-9]+$/ && ticks ~ /^[0-9]+$/ && clock ~ /^[0-9]+$/ && clock + 0 > 0) {
           started = boot + int(ticks / clock)
         }
-        printf "WORKLOAD\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+        cpu_seconds=""
+        if (cpu_ticks != "" && clock ~ /^[0-9]+$/ && clock + 0 > 0) {
+          cpu_seconds = int(cpu_ticks / clock)
+        }
+        rss_mib=""
+        if (rss_kib ~ /^[0-9]+$/) { rss_mib = int(rss_kib / 1024) }
+        printf "WORKLOAD\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
           pid, kind, clean(workload_id), clean(workload_name), clean(owner),
           clean(workload_queue), clean(workload_namespace), started,
-          clean(command_line)
+          clean(command_line), cpu_seconds, rss_mib
       }
     '
   done

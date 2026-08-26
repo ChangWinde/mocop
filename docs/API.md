@@ -453,7 +453,7 @@ that resource.
 | `pid` | int | Remote PID. |
 | `name` | string | Process name from `nvidia-smi`. |
 | `used_memory_mib` | number \| null | VRAM used by this process. |
-| `workload` | object \| null | Present only with `workloads.mode` `identity`/`auto`: `{kind, workload_id, name, owner, queue, namespace, command, started_at}`; `kind` is `process`, `slurm`, `kubernetes`, `docker`, or `podman`, everything else nullable. `command` and `started_at` (true start time) are populated by both tiers; the container kinds and scheduler identifiers additionally require the `auto` tier's cgroup read. |
+| `workload` | object \| null | Present only with `workloads.mode` `identity`/`auto`: `{kind, workload_id, name, owner, queue, namespace, command, started_at, cpu_seconds, rss_mib}`; `kind` is `process`, `slurm`, `kubernetes`, `docker`, or `podman`, everything else nullable. `command`, `started_at` (true start time), `cpu_seconds` (cumulative host CPU time) and `rss_mib` (resident host memory) are populated by both tiers; the container kinds and scheduler identifiers additionally require the `auto` tier's cgroup read. |
 | `first_seen_at` | timestamp \| null | **Monitor-relative lower bound**: when this monitor first observed the `(pid, name)` pair on this device. Resets on monitor restart. When a PID is reused and the workload `started_at` changes, the server treats it as a new instance: a stop/start event pair is emitted and `first_seen_at` restarts. |
 
 The dashboard's global/selected-host program search is a bounded browser-side

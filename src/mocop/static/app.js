@@ -158,6 +158,7 @@ const {
 });
 
 const capacityMatch = globalThis.MocopCapacityMatch.create();
+const gpuTasks = globalThis.MocopGpuTasks.create();
 const capacityWatch = globalThis.MocopCapacityWatch.create({ storage: localStorage });
 
 const view = {
@@ -4796,65 +4797,25 @@ function gpuDetailMetric(label, value, title = "") {
   return metric;
 }
 
+// Function declarations: gpuProcessName is referenced above (process-search
+// wiring) before this point in the file, so these must hoist.
 function gpuProcessName(process) {
-  const fullName = String(process.name || "unknown process");
-  return fullName.replaceAll("\\", "/").split("/").at(-1) || fullName;
+  return gpuTasks.processName(process);
 }
 
 function gpuProcessStartMs(process) {
-  const timestamp = process.workload?.started_at || process.first_seen_at;
-  const parsed = timestamp ? Date.parse(timestamp) : NaN;
-  // Processes without any start signal sort behind every dated process.
-  return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+  return gpuTasks.processStartMs(process);
+}
+
+// Display name: the extracted entry point when argv0 is a bare interpreter.
+function gpuTaskDisplayName(process) {
+  return gpuTasks.taskEntry(process) || gpuProcessName(process);
 }
 
 function gpuProcessSummary(gpu) {
   const cached = gpuProcessSummaryCache.get(gpu);
   if (cached) return cached;
-  const processes = Array.isArray(gpu.processes) ? gpu.processes : [];
-  let knownMemoryMiB = 0;
-  let knownMemoryCount = 0;
-  let topProcess = null;
-  let topMemoryMiB = -1;
-  let ownedCount = 0;
-  let identifiedCount = 0;
-  let oldestProcess = null;
-  let oldestStartMs = Number.MAX_SAFE_INTEGER;
-  const owners = new Set();
-  processes.forEach((process) => {
-    const processMemory = Number(process.used_memory_mib);
-    if (process.used_memory_mib != null && Number.isFinite(processMemory)) {
-      knownMemoryMiB += processMemory;
-      knownMemoryCount += 1;
-      if (processMemory > topMemoryMiB) {
-        topMemoryMiB = processMemory;
-        topProcess = process;
-      }
-    } else if (!topProcess) {
-      topProcess = process;
-    }
-    if (process.workload) identifiedCount += 1;
-    if (process.workload?.owner) {
-      ownedCount += 1;
-      owners.add(String(process.workload.owner));
-    }
-    const startMs = gpuProcessStartMs(process);
-    if (startMs < oldestStartMs) {
-      oldestStartMs = startMs;
-      oldestProcess = process;
-    }
-  });
-  const summary = {
-    count: processes.length,
-    knownMemoryMiB,
-    knownMemoryCount,
-    topProcess,
-    topMemoryMiB,
-    ownedCount,
-    identifiedCount,
-    ownerCount: owners.size,
-    oldestProcess,
-  };
+  const summary = gpuTasks.summarize(gpu);
   gpuProcessSummaryCache.set(gpu, summary);
   return summary;
 }
@@ -4936,7 +4897,7 @@ function updateProgramSearchRow(row, record) {
   const fullName = String(process.name || "");
   const command = process.workload?.command
     || (fullName && fullName !== shortName ? fullName : "");
-  row.name.textContent = shortName;
+  row.name.textContent = gpuTaskDisplayName(process);
   row.name.title = fullName || "unknown process";
   row.command.textContent = command || "命令行未采集";
   if (command) row.command.title = command;
@@ -5066,7 +5027,9 @@ function gpuTaskRow() {
   const pid = create("span");
   const runtime = create("span", "gpu-task-duration");
   runtime.hidden = true;
-  metaInfo.append(pid, runtime);
+  const footprint = create("span", "gpu-task-footprint");
+  footprint.hidden = true;
+  metaInfo.append(pid, runtime, footprint);
   const track = create("div", "mini-track");
   const bar = create("i");
   track.append(bar);
@@ -5089,6 +5052,7 @@ function gpuTaskRow() {
     workload,
     pid,
     runtime,
+    footprint,
     bar,
     searchFleet,
     copyPid,
@@ -5107,7 +5071,7 @@ function filterCurrentGpuTasks(value) {
 }
 
 function searchFleetForProcess(process) {
-  const query = gpuProcessName(process).slice(0, MAX_SEARCH_QUERY_LENGTH);
+  const query = gpuTaskDisplayName(process).slice(0, MAX_SEARCH_QUERY_LENGTH);
   view.query = query;
   elements.search.value = query;
   elements.gpuDetailDialog.close();
@@ -5140,15 +5104,34 @@ async function copyGpuTaskText(value, successMessage) {
 
 function updateGpuTaskRow(row, process, gpu) {
   const shortName = gpuProcessName(process);
-  row.name.textContent = shortName;
+  // A bare interpreter name identifies nothing; lead with the actual entry
+  // point (module or script) extracted from the command line when available.
+  const entry = gpuTasks.taskEntry(process);
+  row.name.textContent = entry || shortName;
   row.name.title = process.name || "unknown process";
   const fullName = String(process.name || "");
   const command = process.workload?.command
     || (fullName && fullName !== shortName ? fullName : "");
   row.command.hidden = !command;
   row.command.textContent = command;
-  if (command) row.command.title = command;
-  else row.command.removeAttribute("title");
+  if (command) {
+    row.command.title = "点击展开或收起完整命令";
+    row.command.onclick = () => row.command.classList.toggle("expanded");
+  } else {
+    row.command.removeAttribute("title");
+    row.command.onclick = null;
+    row.command.classList.remove("expanded");
+  }
+  const footprint = gpuTasks.footprint(process, Date.now());
+  const footprintParts = [];
+  if (footprint.averageCores != null) {
+    footprintParts.push(`CPU 均值 ${format(footprint.averageCores, 1)} 核`);
+  }
+  if (footprint.memoryMiB != null) {
+    footprintParts.push(`主机内存 ${memory(footprint.memoryMiB)}`);
+  }
+  row.footprint.hidden = footprintParts.length === 0;
+  row.footprint.textContent = footprintParts.join(" · ");
   const usage = ratio(process.used_memory_mib, gpu.memory_total_mib);
   row.memoryValue.textContent = process.used_memory_mib == null
     ? "显存未知" : memory(process.used_memory_mib);
@@ -5175,6 +5158,7 @@ function updateGpuTaskRow(row, process, gpu) {
     row.runtime.removeAttribute("title");
   }
   const workload = process.workload;
+  const chips = [];
   if (workload && Object.hasOwn(WORKLOAD_KIND_LABELS, workload.kind)) {
     const kind = WORKLOAD_KIND_LABELS[workload.kind];
     const workloadIdentity = workload.name || workload.workload_id;
@@ -5188,7 +5172,7 @@ function updateGpuTaskRow(row, process, gpu) {
       identityChip.title = `筛选 ${workloadIdentity}`;
       identityChip.onclick = () => filterCurrentGpuTasks(workloadIdentity);
     }
-    const chips = [identityChip];
+    chips.push(identityChip);
     if (workload.name && workload.workload_id) {
       chips.push(create("span", "", `ID ${workload.workload_id}`));
     }
@@ -5204,12 +5188,12 @@ function updateGpuTaskRow(row, process, gpu) {
       chip.onclick = () => filterCurrentGpuTasks(value);
       chips.push(chip);
     });
-    row.workload.replaceChildren(...chips);
-    row.workload.hidden = false;
-  } else {
-    row.workload.hidden = true;
-    row.workload.replaceChildren();
   }
+  const environment = gpuTasks.environmentName(process);
+  if (environment) chips.push(create("span", "", `环境 ${environment}`));
+  if (entry) chips.push(create("span", "", `解释器 ${shortName}`));
+  row.workload.hidden = chips.length === 0;
+  row.workload.replaceChildren(...chips);
   row.searchFleet.setAttribute("aria-label", `在全部服务器查找 ${shortName}`);
   row.searchFleet.onclick = () => searchFleetForProcess(process);
   row.copyPid.setAttribute("aria-label", `复制 ${shortName} 的 PID ${process.pid}`);
@@ -5410,7 +5394,7 @@ function renderGpuDetail() {
     matchingProcesses.sort((a, b) => gpuProcessStartMs(a) - gpuProcessStartMs(b)
       || gpuProcessMemoryRank(a, b));
   } else if (sortByName) {
-    matchingProcesses.sort((a, b) => gpuProcessName(a).localeCompare(gpuProcessName(b))
+    matchingProcesses.sort((a, b) => gpuTaskDisplayName(a).localeCompare(gpuTaskDisplayName(b))
       || numeric(a.pid) - numeric(b.pid));
   } else {
     matchingProcesses.sort(gpuProcessMemoryRank);
@@ -5633,7 +5617,7 @@ function gpuProcessCell(gpu) {
     cell.append(content);
     return cell;
   }
-  const topName = summary.topProcess ? gpuProcessName(summary.topProcess) : "未知程序";
+  const topName = summary.topProcess ? gpuTaskDisplayName(summary.topProcess) : "未知程序";
   const sampleKind = gpu.processes_sampled === false ? "缓存" : "采样";
   const freshness = gpu.processes_observed_at ? age(gpu.processes_observed_at) : "时间未知";
   const memorySummary = summary.knownMemoryCount

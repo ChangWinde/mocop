@@ -504,6 +504,8 @@ class WebTests(unittest.TestCase):
             watch_script = response.read().decode("utf-8")
         with urlopen(f"{self.base}/capacity-match.js", timeout=2) as response:
             match_script = response.read().decode("utf-8")
+        with urlopen(f"{self.base}/gpu-tasks.js", timeout=2) as response:
+            self.assertIn("MocopGpuTasks", response.read().decode("utf-8"))
         with urlopen(f"{self.base}/format.js", timeout=2) as response:
             format_script = response.read().decode("utf-8")
         self.assertIn("Mocop", body)
@@ -589,6 +591,7 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="gpu-detail-ssh"', body)
         self.assertIn('src="/dashboard-auth.js"', body)
         self.assertIn('src="/process-search.js"', body)
+        self.assertIn('src="/gpu-tasks.js"', body)
         self.assertIn('src="/capacity-watch.js"', body)
         self.assertIn('src="/capacity-match.js"', body)
         self.assertIn('src="/format.js"', body)
