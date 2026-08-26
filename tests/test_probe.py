@@ -260,8 +260,8 @@ class ProbeTests(unittest.TestCase):
         self,
     ) -> None:
         workloads = parse_workload_records(
-            "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t\t\t\n"
-            "WORKLOAD\t4243\tkubernetes\tpod-uid\tinference\t1001\tbatch\tml\t\t"
+            "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t\t\t\t\t\n"
+            "WORKLOAD\t4243\tkubernetes\tpod-uid\tinference\t1001\tbatch\tml\t\t\t\t"
         )
 
         self.assertEqual(workloads[4242].kind, "slurm")
@@ -272,14 +272,16 @@ class ProbeTests(unittest.TestCase):
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
                 workload_payload=(
-                    "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t\t\t"
+                    "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t\t\t\t\t"
                 )
             )
         )
         self.assertEqual(gpus[0].processes[0].workload, workloads[4242])
 
         with self.assertRaisesRegex(ValueError, "workload kind"):
-            parse_workload_records("WORKLOAD\t4242\troot-shell\t1\tbad\troot\t\t\t\t")
+            parse_workload_records(
+                "WORKLOAD\t4242\troot-shell\t1\tbad\troot\t\t\t\t\t\t"
+            )
         # Legacy eight-column records died with the retired protocols.
         with self.assertRaisesRegex(ValueError, "invalid workload record"):
             parse_workload_records(
@@ -288,15 +290,20 @@ class ProbeTests(unittest.TestCase):
 
     def test_maps_container_runtime_workload_kinds(self) -> None:
         workloads = parse_workload_records(
-            "WORKLOAD\t4242\tdocker\tdeadbeef1234\t\talice\t\t\t1754000000\tpython\n"
-            "WORKLOAD\t4243\tpodman\tcafebabe5678\t\tbob\t\t\t\t"
+            "WORKLOAD\t4242\tdocker\tdeadbeef1234\t\talice\t\t\t1754000000\tpython"
+            "\t7200\t2048\n"
+            "WORKLOAD\t4243\tpodman\tcafebabe5678\t\tbob\t\t\t\t\t\t"
         )
 
         self.assertEqual(workloads[4242].kind, "docker")
         self.assertEqual(workloads[4242].workload_id, "deadbeef1234")
         self.assertEqual(workloads[4242].owner, "alice")
+        self.assertEqual(workloads[4242].cpu_seconds, 7200.0)
+        self.assertEqual(workloads[4242].rss_mib, 2048.0)
         self.assertEqual(workloads[4243].kind, "podman")
         self.assertEqual(workloads[4243].workload_id, "cafebabe5678")
+        self.assertIsNone(workloads[4243].cpu_seconds)
+        self.assertIsNone(workloads[4243].rss_mib)
 
     def test_parses_pressure_stall_records(self) -> None:
         raw, _, _ = parse_linux_resource_payload(
@@ -1527,6 +1534,47 @@ class ProbeTests(unittest.TestCase):
         # The injected file bind mount is dropped during parsing.
         self.assertEqual(sorted(disk.mountpoint for disk in raw.disks), ["/", "/data"])
 
+    def test_workload_records_carry_the_pid_cpu_and_memory_footprint(self) -> None:
+        # The identity pass reads /proc/<pid>/stat and status anyway; the
+        # footprint must ride along so a stalled data loader is visible from
+        # the dashboard without shelling into the node.
+        own_pid = os.getpid()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "nvidia-smi"
+            executable.write_text(
+                "#!/bin/sh\n"
+                'case "$1" in\n'
+                "  --query-gpu=*) printf '%s\\n' "
+                "'0, GPU-real, NVIDIA A100, 550.54, P0, 61, 93, 34, "
+                "81920, 40960, 40960, 287.5, 400' ;;\n"
+                "  --query-compute-apps=*) printf '%s\\n' "
+                f"'GPU-real, {own_pid}, python, 1024' ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            completed = _run_bounded_process(
+                ["sh", "-s"],
+                input_text=_remote_script("identity"),
+                timeout_seconds=10,
+                max_output_bytes=2_097_152,
+                environment={
+                    **os.environ,
+                    "LC_ALL": "C",
+                    "PATH": f"{root}:{os.environ['PATH']}",
+                },
+            )
+
+        self.assertEqual(completed.returncode, 0)
+        _, gpus, _ = parse_linux_resource_payload(completed.stdout)
+        workload = gpus[0].processes[0].workload
+        self.assertIsNotNone(workload)
+        self.assertIsNotNone(workload.cpu_seconds)
+        self.assertGreaterEqual(workload.cpu_seconds, 0.0)
+        # This test process is alive, so its resident set is never zero.
+        self.assertGreater(workload.rss_mib, 0.0)
+
     def test_malformed_process_row_keeps_the_core_sample_online(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
@@ -1620,18 +1668,30 @@ class ProbeTests(unittest.TestCase):
     def test_parses_v7_workload_records_with_start_and_command(self) -> None:
         workloads = parse_workload_records(
             "WORKLOAD\t4242\tslurm\t9182\ttrain-llm\talice\tgpu-long\t\t"
-            "1767225600\tpython train.py --epochs 3\n"
-            "WORKLOAD\t4243\tprocess\t\t\tbob\t\t\t\t"
+            "1767225600\tpython train.py --epochs 3\t86400\t40960\n"
+            "WORKLOAD\t4243\tprocess\t\t\tbob\t\t\t\t\t\t"
         )
 
         self.assertEqual(workloads[4242].started_at, "2026-01-01T00:00:00Z")
         self.assertEqual(workloads[4242].command, "python train.py --epochs 3")
         self.assertEqual(workloads[4242].kind, "slurm")
+        self.assertEqual(workloads[4242].cpu_seconds, 86400.0)
+        self.assertEqual(workloads[4242].rss_mib, 40960.0)
         self.assertIsNone(workloads[4243].started_at)
         self.assertIsNone(workloads[4243].command)
 
         with self.assertRaisesRegex(ValueError, "workload start"):
-            parse_workload_records("WORKLOAD\t1\tprocess\t\t\tx\t\t\tnot-a-number\tcmd")
+            parse_workload_records(
+                "WORKLOAD\t1\tprocess\t\t\tx\t\t\tnot-a-number\tcmd\t\t"
+            )
+        # A negative or non-numeric footprint rejects the overlay, and the
+        # display-only fields can never smuggle huge numbers past the bound.
+        with self.assertRaisesRegex(ValueError, "workload cpu time"):
+            parse_workload_records("WORKLOAD\t1\tprocess\t\t\tx\t\t\t\tcmd\t-5\t")
+        with self.assertRaisesRegex(ValueError, "workload memory"):
+            parse_workload_records(
+                "WORKLOAD\t1\tprocess\t\t\tx\t\t\t\tcmd\t\t99999999999"
+            )
 
     @patch(
         "mocop.probe.time.monotonic",

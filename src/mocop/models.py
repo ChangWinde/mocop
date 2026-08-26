@@ -32,6 +32,10 @@ class WorkloadMetadata:
     namespace: str | None = None
     command: str | None = None
     started_at: str | None = None
+    # Host-side resource footprint of the PID (not the GPU): cumulative CPU
+    # seconds and resident memory, so a stalled data loader is visible.
+    cpu_seconds: float | None = None
+    rss_mib: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -43,6 +47,8 @@ class WorkloadMetadata:
             "namespace": self.namespace,
             "command": self.command,
             "started_at": self.started_at,
+            "cpu_seconds": self.cpu_seconds,
+            "rss_mib": self.rss_mib,
         }
 
 

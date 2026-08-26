@@ -501,7 +501,7 @@ try {
   const programSearch = await cdp.evaluate(`(() => {
     const input = document.querySelector("#search");
     selectHost("all");
-    input.value = "train.py";
+    input.value = "train.sft";
     input.dispatchEvent(new Event("input", { bubbles: true }));
     const panel = document.querySelector("#program-search-panel");
     const globalRows = [...document.querySelectorAll(".program-search-result")];
@@ -522,7 +522,7 @@ try {
       rowReused,
       focusPreserved,
     };
-    input.value = "ＴＲＡＩＮ．ＰＹ";
+    input.value = "ＴＲＡＩＮ．ＳＦＴ";
     input.dispatchEvent(new Event("input", { bubbles: true }));
     const normalizedCount = document.querySelector("#program-search-count").textContent;
     input.value = "x".repeat(121);
@@ -614,7 +614,7 @@ try {
   assert.deepEqual([...new Set(programSearch.global.hosts)], [
     "atlas-01", "atlas-02", "atlas-03",
   ]);
-  assert(programSearch.global.names.every((name) => name === "train.py"));
+  assert(programSearch.global.names.every((name) => name === "train.sft"));
   assert.equal(programSearch.global.rowReused, true);
   assert.equal(programSearch.global.focusPreserved, true);
   assert.equal(programSearch.normalizedCount, "5");
@@ -1975,7 +1975,7 @@ try {
   assert(!personalization.taskNoteTitle.includes("workloads.mode=identity"));
   assert.equal(personalization.taskCount, "2");
   assert.equal(personalization.taskProcessRows, 2);
-  assert.match(personalization.taskNames, /train\.py/);
+  assert.match(personalization.taskNames, /train\.sft/);
   assert.match(personalization.taskNames, /PID 10000/);
   assert.match(personalization.taskMemoryTotal, /70\.5 GiB \/ 80 GiB/);
   assert.match(personalization.taskFirstMemoryShare, /87\.5%/);
@@ -2051,12 +2051,23 @@ try {
     const trainDuration = rowDuration("10000")?.textContent || "";
     const workerDuration = rowDuration("20000")?.textContent || "";
     const workerDurationTitle = rowDuration("20000")?.title || "";
-    const commandNode = document.querySelector(
-      '#gpu-task-list .gpu-task[data-process-key^="10000|"] .gpu-task-command',
+    const trainRow = document.querySelector(
+      '#gpu-task-list .gpu-task[data-process-key^="10000|"]',
     );
+    const commandNode = trainRow?.querySelector(".gpu-task-command");
     const command = commandNode?.textContent || "";
     const commandTitle = commandNode?.title || "";
     const commandHidden = commandNode ? commandNode.hidden : true;
+    const trainName = trainRow?.querySelector(".gpu-task-name")?.textContent || "";
+    const trainChips = trainRow
+      ? [...trainRow.querySelectorAll(".gpu-task-workload span, .gpu-task-workload button")]
+        .map((chip) => chip.textContent)
+      : [];
+    const trainFootprint = trainRow?.querySelector(".gpu-task-footprint")?.textContent || "";
+    commandNode?.click();
+    const commandExpanded = commandNode?.classList.contains("expanded") || false;
+    commandNode?.click();
+    const commandCollapsed = !commandNode?.classList.contains("expanded");
     const firstRowBefore = document.querySelector("#gpu-task-list .gpu-task");
     const barBefore = firstRowBefore.querySelector(".mini-track i");
     renderGpuDetail();
@@ -2132,13 +2143,14 @@ try {
       copiedText, copyFeedback,
       memoryOrder, trainDuration, workerDuration, workerDurationTitle,
       command, commandTitle, commandHidden, rowReused, freshNoteStale,
+      trainName, trainChips, trainFootprint, commandExpanded, commandCollapsed,
       ownerSearchOrder, ownerSearchCount, nameOrder, nameButtonActive,
       durationOrder, durationButtonActive, savedTaskSort, taskNote,
       staleNote, unavailableCount, unavailableText,
     };
   })()`, true);
   assert.match(gpuTasks.inventoryProcessText, /2/);
-  assert.match(gpuTasks.inventoryProcessText, /train\.py/);
+  assert.match(gpuTasks.inventoryProcessText, /train\.sft/);
   assert.equal(gpuTasks.processFirst, true);
   assert.match(gpuTasks.insightText, /2/);
   assert.deepEqual(gpuTasks.identityFilters, ["all", "owned", "unowned"]);
@@ -2149,12 +2161,12 @@ try {
   assert.equal(gpuTasks.processFilterCount, 4);
   assert.equal(gpuTasks.processFilterHasZero, false);
   assert.deepEqual(gpuTasks.unownedOrder, ["20000|python data_worker.py"]);
-  assert.deepEqual(gpuTasks.ownedOrder, ["10000|/workspace/train.py"]);
+  assert.deepEqual(gpuTasks.ownedOrder, ["10000|/opt/conda/envs/llm/bin/python3.11"]);
   assert.equal(gpuTasks.ownerChipQuery, "researcher");
-  assert.deepEqual(gpuTasks.ownerChipOrder, ["10000|/workspace/train.py"]);
-  assert.match(gpuTasks.copiedText, /python train\.py --config/);
+  assert.deepEqual(gpuTasks.ownerChipOrder, ["10000|/opt/conda/envs/llm/bin/python3.11"]);
+  assert.match(gpuTasks.copiedText, /python -m train\.sft --config/);
   assert.match(gpuTasks.copyFeedback, /已复制完整命令/);
-  assert.equal(gpuTasks.memoryOrder[0], "10000|/workspace/train.py");
+  assert.equal(gpuTasks.memoryOrder[0], "10000|/opt/conda/envs/llm/bin/python3.11");
   // "\u8fd0\u884c" = run-prefix, "\u5c0f\u65f6" = hours unit.
   assert.match(gpuTasks.trainDuration, /^\u8fd0\u884c /);
   assert.match(gpuTasks.trainDuration, /\u5c0f\u65f6/);
@@ -2167,12 +2179,21 @@ try {
   );
   assert.equal(gpuTasks.commandHidden, false);
   assert.match(gpuTasks.command, /--config configs\/llm-70b\.yaml/);
+  // The row leads with the real entry point, not the bare interpreter, and
+  // carries the environment/interpreter chips plus the host-side footprint.
+  assert.equal(gpuTasks.trainName, "train.sft");
+  assert(gpuTasks.trainChips.includes("\u73af\u5883 llm"));
+  assert(gpuTasks.trainChips.includes("\u89e3\u91ca\u5668 python3.11"));
+  assert.match(gpuTasks.trainFootprint, /CPU \u5747\u503c 1[56](\.[0-9])? \u6838/);
+  assert.match(gpuTasks.trainFootprint, /\u4e3b\u673a\u5185\u5b58 96(\.0)? GiB/);
+  assert.equal(gpuTasks.commandExpanded, true);
+  assert.equal(gpuTasks.commandCollapsed, true);
   assert.equal(
     gpuTasks.commandTitle,
-    "python train.py --config configs/llm-70b.yaml --stage sft",
+    "\u70b9\u51fb\u5c55\u5f00\u6216\u6536\u8d77\u5b8c\u6574\u547d\u4ee4",
   );
   assert.equal(gpuTasks.rowReused, true);
-  assert.deepEqual(gpuTasks.ownerSearchOrder, ["10000|/workspace/train.py"]);
+  assert.deepEqual(gpuTasks.ownerSearchOrder, ["10000|/opt/conda/envs/llm/bin/python3.11"]);
   assert.equal(gpuTasks.ownerSearchCount, "1 / 2");
   assert.equal(gpuTasks.nameOrder[0], "20000|python data_worker.py");
   assert.equal(gpuTasks.nameButtonActive, true);
@@ -2209,7 +2230,7 @@ try {
   })()`, true);
   assert.equal(gpuTaskFleetSearch.dialogOpen, false);
   assert.equal(gpuTaskFleetSearch.selectedHost, "all");
-  assert.equal(gpuTaskFleetSearch.query, "train.py");
+  assert.equal(gpuTaskFleetSearch.query, "train.sft");
   assert.equal(gpuTaskFleetSearch.resultCount, "5");
   assert.equal(gpuTaskFleetSearch.searchFocused, true);
 
@@ -2402,7 +2423,7 @@ try {
   const mobile = await cdp.evaluate(`(() => {
     selectHost("all");
     const search = document.querySelector("#search");
-    search.value = "train.py";
+    search.value = "train.sft";
     search.dispatchEvent(new Event("input", { bubbles: true }));
     const programSearchColumns = getComputedStyle(
       document.querySelector("#program-search-results"),

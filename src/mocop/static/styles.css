@@ -1308,7 +1308,9 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
 .gpu-task:focus-visible { outline: 0; border-color: color-mix(in srgb, var(--blue) 64%, var(--line)); box-shadow: var(--focus); }
 .gpu-task-identity { min-width: 0; display: grid; align-content: start; gap: 4px; }
 .gpu-task-name { min-width: 0; overflow: hidden; color: var(--text); font-family: var(--font-mono); font-size: 9px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
-.gpu-task-command { overflow: hidden; color: var(--muted-2); font-family: var(--font-mono); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+.gpu-task-command { overflow: hidden; color: var(--muted-2); font-family: var(--font-mono); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.gpu-task-command:hover { color: var(--muted); }
+.gpu-task-command.expanded { white-space: pre-wrap; word-break: break-all; text-overflow: clip; }
 .gpu-task-memory { display: grid; align-content: start; gap: 4px; color: var(--accent-2); font-family: var(--font-mono); text-align: right; }
 .gpu-task-memory strong { font-size: 9px; font-weight: 620; }
 .gpu-task-memory small { color: var(--muted-2); font-size: 7px; }
@@ -1333,7 +1335,8 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
 .gpu-task-sort-choice { height: 20px; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; font-size: 8px; }
 .gpu-task-sort-choice:hover { color: var(--text); background: var(--surface-hover); }
 .gpu-task-sort-choice.active { border-color: var(--line); color: var(--text); background: var(--surface-raised); }
-.gpu-task-meta-info { min-width: 0; display: flex; gap: 7px; white-space: nowrap; }
+.gpu-task-meta-info { min-width: 0; display: flex; flex-wrap: wrap; gap: 7px; white-space: nowrap; }
+.gpu-task-footprint { color: var(--muted); }
 .gpu-task-overview small.gpu-task-freshness-stale, .gpu-task-empty.gpu-task-freshness-stale { color: color-mix(in srgb, var(--amber) 64%, var(--muted)); }
 .incident-detail-content { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(260px, .88fr); gap: 1px; background: var(--line-soft); }
 .incident-diagnosis, .incident-actions { min-width: 0; padding: 20px; background: var(--panel-background); }

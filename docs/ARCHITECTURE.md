@@ -58,6 +58,7 @@ interfaces without a runtime plugin registry.
 | `inventory.py` | typed dashboard configuration projection and private atomic mutation |
 | `metrics.py` | deterministic OpenMetrics 1.0 snapshot exposition |
 | `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
+| `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
 | `models.py` | immutable resource result types |
 | `incidents.py` | condition evaluation, bounded transition history, and raw/actionable counts |

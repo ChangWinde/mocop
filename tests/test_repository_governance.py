@@ -27,17 +27,18 @@ TRACKED_ROOT_ENTRIES = {
 # These ceilings are a ratchet over the reviewed 0.9.0 tree, not a general style
 # rule. Extract a coherent leaf and lower the budget instead of raising it.
 CORE_MODULE_LINE_BUDGETS = {
-    "src/mocop/static/app.js": 6_825,
+    "src/mocop/static/app.js": 6_810,
     "src/mocop/static/capacity-match.js": 150,
     "src/mocop/static/capacity-watch.js": 200,
     "src/mocop/static/csv-export.js": 100,
     "src/mocop/static/dashboard-auth.js": 150,
     "src/mocop/static/format.js": 150,
+    "src/mocop/static/gpu-tasks.js": 175,
     "src/mocop/static/process-search.js": 225,
     "src/mocop/static/update-pill.js": 175,
     "src/mocop/service.py": 2_750,
     "src/mocop/web.py": 1_800,
-    "src/mocop/probe.py": 1_625,
+    "src/mocop/probe.py": 1_560,
     "src/mocop/config.py": 1_575,
 }
 

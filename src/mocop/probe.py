@@ -13,7 +13,6 @@ import weakref
 from collections import Counter
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from .config import MonitorConfig, ThresholdConfig, is_safe_alias
@@ -26,7 +25,6 @@ from .models import (
     PressureStallSample,
     ProbeResult,
     SystemMetrics,
-    WorkloadMetadata,
     utc_now,
 )
 from .remote_script import (
@@ -37,6 +35,7 @@ from .remote_script import (
     _SUPPORTED_PROTOCOL_VERSIONS,
     _remote_script,
 )
+from .workloads import parse_workload_records
 
 _UNAVAILABLE = {"", "n/a", "[n/a]", "not supported", "[not supported]"}
 _PROCESS_READ_CHUNK_BYTES = 65_536
@@ -476,79 +475,6 @@ def _parse_psi_records(rows: list[list[str]]) -> PressureStallMetrics | None:
         memory=samples.get("memory"),
         io=samples.get("io"),
     )
-
-
-_MAX_WORKLOAD_START_EPOCH = 4_102_444_800  # 2100-01-01T00:00:00Z
-
-
-def _workload_start_iso(value: str) -> str | None:
-    text = value.strip()
-    if not text:
-        return None
-    if not text.isdigit() or not 0 < int(text) <= _MAX_WORKLOAD_START_EPOCH:
-        raise ValueError("resource payload has an invalid workload start time")
-    return (
-        datetime.fromtimestamp(int(text), tz=timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-    )
-
-
-def _sanitized_workload_command(value: str) -> str | None:
-    """Bound the display-only command line without discarding the record."""
-    cleaned = "".join(
-        " " if ord(character) < 32 or 127 <= ord(character) <= 159 else character
-        for character in value.replace("\u2028", " ").replace("\u2029", " ")
-    ).strip()
-    return cleaned[:255] or None
-
-
-def parse_workload_records(payload: str) -> dict[int, WorkloadMetadata]:
-    workloads: dict[int, WorkloadMetadata] = {}
-    # ASCII newlines only: a Unicode line boundary inside a command line or
-    # environment-derived field must stay within its record instead of
-    # splitting it and discarding the whole workload overlay.
-    for row_number, line in enumerate(payload.split("\n"), start=1):
-        if not line.strip():
-            continue
-        fields = line.split("\t")
-        if len(fields) != 10 or fields[0] != "WORKLOAD":
-            raise ValueError(
-                f"resource payload has an invalid workload record on row {row_number}"
-            )
-        pid_value = _number(fields[1])
-        if (
-            pid_value is None
-            or not pid_value.is_integer()
-            or not 1 <= pid_value <= 2_147_483_647
-        ):
-            raise ValueError("resource payload has an invalid workload PID")
-        pid = int(pid_value)
-        if pid in workloads:
-            raise ValueError("resource payload has duplicate workload PIDs")
-        kind = fields[2].strip()
-        if kind not in {"process", "slurm", "kubernetes", "docker", "podman"}:
-            raise ValueError("resource payload has an invalid workload kind")
-
-        def optional_text(value: str, label: str) -> str | None:
-            text = value.strip()
-            if len(text) > 255 or any(ord(character) < 32 for character in text):
-                raise ValueError(f"resource payload has invalid workload {label}")
-            return text or None
-
-        workloads[pid] = WorkloadMetadata(
-            kind=kind,
-            workload_id=optional_text(fields[3], "identifier"),
-            name=optional_text(fields[4], "name"),
-            owner=optional_text(fields[5], "owner"),
-            queue=optional_text(fields[6], "queue"),
-            namespace=optional_text(fields[7], "namespace"),
-            started_at=_workload_start_iso(fields[8]),
-            command=_sanitized_workload_command(fields[9]),
-        )
-    if len(workloads) > _MAX_PROCESSES_PER_HOST:
-        raise ValueError("resource payload has too many workload records")
-    return workloads
 
 
 def _optional_health_boolean(value: str) -> bool | None:

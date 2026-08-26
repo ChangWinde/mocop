@@ -2,6 +2,33 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- GPU task rows now lead with the real entry point instead of a bare
+  interpreter name: when argv0 is `python`, `torchrun`, `bash` or another
+  generic launcher, the module after `-m` or the first script argument
+  becomes the row title, with the interpreter and the detected Python
+  environment (conda env, project venv, uv tool, poetry virtualenv) shown
+  as chips. The fleet-wide program search, the per-card top-process label
+  and the name sort follow the same display name.
+- The workload identity pass now also reports each PID's host-side
+  footprint — cumulative CPU seconds and resident memory from the same
+  `/proc` reads it already performs — and the task row renders it as
+  "CPU 均值 N 核 · 主机内存 N GiB", so a stalled data loader is visible
+  without shelling into the node. Snapshot `workload` objects gain
+  `cpu_seconds` and `rss_mib` (both nullable).
+- The truncated command line in a task row expands in place on click
+  instead of requiring copy-and-paste to read the training config.
+
+### Changed
+
+- Workload record parsing moved from `probe.py` into a new `workloads.py`
+  module, and the GPU task projections moved from `app.js` into the
+  `gpu-tasks.js` leaf ([ADR-0021](adr/0021-incremental-module-boundaries.md));
+  both budgets ratcheted down.
+
 ## [0.11.0] - 2026-08-25
 
 ### Added
