@@ -250,7 +250,7 @@ describe every flag.
 | `mocop deploy` | Create a private config and install the verified user service on a fresh host | `--host ALIAS` (repeatable), `--local-host ALIAS` / `--no-local`, `--display-name`, `--ssh-config`, `--auto-discover` / `--no-auto-discover` |
 | `mocop init` | Create a private config only, never overwriting one | `--host ALIAS` (repeatable) |
 | `mocop migrate` | Generate a new private config from another installation's config | `--from-config PATH` (required), the same identity flags as `deploy`, `--drop-local-host` |
-| `mocop config check` | Validate the configuration without a web server or SSH | — |
+| `mocop config check` | Validate the configuration without a web server or SSH | `--json` (one JSON document on stdout, also for a rejected configuration) |
 | `mocop doctor` | Read-only SSH reachability and connection-reuse diagnosis | `--host ALIAS` (repeatable filter), `--no-connect`, `--probe` (one production collection per alias), `--profile` (latency breakdown), `--json` |
 | `mocop service install` | Generate, enable, start, and verify the unit; print the capability URL | — |
 | `mocop service status` | `systemctl --user status` for the generated unit | — |
@@ -265,8 +265,8 @@ Exit codes are stable for automation:
 | `2` | Configuration or usage error: invalid or unreadable configuration, a `doctor` flag conflict or unknown `--host`, a lifecycle refusal (existing files, invalid alias), or a managed unit missing its generated arguments |
 | `75` | Supervised restart requested from the dashboard or self-update; systemd's restart policy starts the replacement |
 
-`doctor --json` and `mocop --once` write machine-readable reports to stdout;
-diagnostics and refusals go to stderr.
+`config check --json`, `doctor --json`, and `mocop --once` write machine-readable
+reports to stdout; text-mode diagnostics and refusals go to stderr.
 
 ## Related references
 

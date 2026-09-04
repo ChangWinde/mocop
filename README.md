@@ -172,19 +172,19 @@ disabled by default. After a manual edit, run `mocop config check` and follow th
 
 ## HTTP API
 
-Everything the dashboard shows is also a small JSON API with stable
-machine-readable error codes, a public self-describing `GET /api/meta` endpoint,
-and P/A/R/W access tiers. Telemetry, SSE, and OpenMetrics require the
-per-install Bearer capability; only API discovery and health/readiness are
-public. See the [API reference](docs/API.md) for authenticated curl examples,
-every endpoint and field, and why non-viewer automation must not send the
-`X-Monitor-Request: dashboard` header.
+Everything the dashboard shows is also a small JSON API with stable error codes
+and P/A/R/W access tiers. The public `GET /api/meta` manifest names every
+route's tier, query parameters and bounds, body cap, response type, and the
+documentation URL for the running release, and a `403` says where the
+capability lives, so an agent needs no out-of-band knowledge. Only discovery
+and health are public; see the [API reference](docs/API.md) for curl examples
+and why non-viewer automation must not send `X-Monitor-Request: dashboard`.
 
 ## Metrics and troubleshooting
 
 Authenticated `GET /metrics` exports the current snapshot as OpenMetrics 1.0
-without starting a probe. The [API reference](docs/API.md) owns the Prometheus
-configuration and metric contract. These commands cover the first diagnosis:
+without starting a probe; the [API reference](docs/API.md) owns the metric
+contract. First diagnosis:
 
 ```bash
 journalctl --user -u mocop -f              # follow the service logs live
@@ -194,19 +194,18 @@ mocop doctor --probe                       # one bounded production probe per al
 ```
 
 Hosts are scheduled independently; failed samples stay visibly stale and retry
-with bounded backoff. See [Operations](docs/OPERATIONS.md) for service recovery and
-exit codes, and [Performance](docs/PERFORMANCE.md) before changing cadence or
-concurrency.
+with bounded backoff. See [Operations](docs/OPERATIONS.md) for recovery and exit
+codes, and [Performance](docs/PERFORMANCE.md) before changing cadence.
 
 ## Security
 
 Mocop accepts only explicit SSH aliases and runs one fixed, read-only probe. It enforces host-key checking, batch mode, timeouts, output limits, bounded concurrency, private atomic configuration writes, and safe rendering of remote text.
 
-The service has no built-in user accounts and listens on `127.0.0.1` by default.
-A private per-install Bearer capability protects telemetry, metrics, SSE, and
-writes from unrelated local users, but grants one complete operator role. If you
-expose Mocop remotely, use authenticated TLS or a private VPN: a Bearer header
-over plain HTTP has no network confidentiality or server authentication.
+The service has no user accounts and listens on `127.0.0.1` by default. A
+private per-install Bearer capability protects every private route from other
+local users but grants one complete operator role. Expose Mocop remotely only
+behind authenticated TLS or a private VPN: Bearer over plain HTTP has no
+network confidentiality or server authentication.
 
 Read the [threat model](docs/SECURITY.md) and [security policy](.github/SECURITY.md) before changing a trust boundary.
 

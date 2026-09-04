@@ -71,6 +71,7 @@ interfaces without a runtime plugin registry.
 | `persistence.py` | optional bounded asynchronous SQLite history |
 | `notifications.py` | HTTPS webhook validation, deduplication, throttling, and delivery |
 | `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
+| `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query schemas, body caps; `/api/meta` and the handlers share it |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
 | `static_assets.py` | static asset route table, strong ETags, and conditional-delivery validators |
 | `lifecycle.py` | private config creation and user-level systemd management |
@@ -113,9 +114,12 @@ and record counts are bounded. [ADR-0003](adr/0003-gpu-reliability-and-authorita
 and [ADR-0011](adr/0011-bounded-operations-extensions.md) record the health and workload
 decisions. [ADR-0014](adr/0014-tiered-gpu-process-telemetry.md) records process pacing.
 
-The HTTP manifest assigns every route one of four explicit tiers: public API
-discovery/health (P), Bearer-authenticated automation reads (A), authenticated
-same-origin dashboard reads (R), or authenticated same-origin writes (W). The
+The HTTP manifest in `api_manifest.py` assigns every route one of four explicit
+tiers: public API discovery/health (P), Bearer-authenticated automation reads (A),
+authenticated same-origin dashboard reads (R), or authenticated same-origin writes
+(W). The same table declares each GET route's query parameters and each write's
+body cap; the handlers validate against it and `/api/meta` serializes it, so an
+agent can discover exactly how to call a deployment without the prose reference. The
 per-install capability and browser delivery trade-off are recorded in
 [ADR-0017](adr/0017-per-install-dashboard-capability.md). `/api/snapshot` supports
 cold start and diagnostics. `/metrics` renders the same current snapshot as

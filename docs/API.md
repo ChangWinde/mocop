@@ -186,7 +186,11 @@ Every API error response is a JSON object:
 `code` is stable and safe to branch on; `error` is for humans and may be
 reworded. One exception: the `POST /api/probe` conflict/rate-limit/unknown
 responses carry the probe status body *plus* a `code` field instead of an
-`error` key (see the endpoint entry).
+`error` key (see the endpoint entry). `403 AUTHENTICATION_REQUIRED` additionally
+carries `hint` (where the capability lives and which header to send) and
+`documentation` (this reference for the running release), so a cold client can
+recover without any out-of-band knowledge; the capability value itself is
+never included.
 
 | Code | HTTP | Meaning |
 |---|---|---|
@@ -626,29 +630,48 @@ Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_LIMIT`.
 
 ### GET /api/meta
 
-API self-description. Tier P. Query: rejected (`QUERY_NOT_ALLOWED`).
+API self-description. Tier P. Query: rejected (`QUERY_NOT_ALLOWED`). This is
+the one response an agent needs before calling anything else: it names the
+versions, the capabilities of this deployment, the exact parameters and body
+cap of every route, and where this document lives for the running release.
 
 ```json
 {
   "apiVersion": "2",
   "appVersion": "<release>",
   "schemaVersion": 1,
+  "documentation": "https://github.com/ChangWinde/mocop/blob/v<release>/docs/API.md",
   "capabilities": {
     "restartSupported": true,
     "manualProbeSupported": true,
     "configurationWriteSupported": true
   },
   "endpoints": [
-    {"method": "GET", "path": "/api/snapshot", "access": "authenticated"}
+    {"method": "GET", "path": "/api/history", "access": "authenticated",
+     "query": {"host": {"type": "alias", "required": true},
+               "limit": {"type": "integer", "required": false,
+                         "minimum": 2, "maximum": 300, "default": 120}},
+     "responseType": "application/json"},
+    {"method": "POST", "path": "/api/settings/hosts", "access": "writer",
+     "bodyLimitBytes": 512, "responseType": "application/json"}
   ]
 }
 ```
 
-`endpoints` lists every route with its access tier (`public`, `authenticated`,
-`reader`, `writer`). `restartSupported` is true only under the supervised user
-service; `manualProbeSupported` requires the live scheduler;
+`endpoints` lists every route in the manifest with its access tier (`public`,
+`authenticated`, `reader`, `writer`). GET routes carry `query`: the complete
+set of accepted parameter names (an empty object means the route rejects any
+query string), each with a `type` of `alias` (a safe SSH alias), `identity`
+(a bounded GPU identity), or `integer` (with `minimum`, `maximum`, and the
+`default` used when omitted), plus `required`. POST routes carry
+`bodyLimitBytes`, the hard cap on the JSON request body. `responseType` is
+`application/json` except for the `/api/events` stream and `/metrics`.
+`restartSupported` is true only under the supervised user service;
+`manualProbeSupported` requires the live scheduler;
 `configurationWriteSupported` reports whether the active configuration file
-is dashboard-writable (file metadata only, no SSH).
+is dashboard-writable (file metadata only, no SSH). The manifest is generated
+from the same table the request handlers validate against, so it cannot
+describe a parameter the server does not accept.
 
 ### GET /healthz
 

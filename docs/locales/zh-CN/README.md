@@ -173,10 +173,12 @@ mocop service uninstall
 ## HTTP API
 
 网页展示的一切也都可以通过一套小型 JSON API 获取：稳定的机器可读错误
-code、公开且自描述的 `GET /api/meta` 端点，以及 P/A/R/W 访问分级。遥测、
-SSE 和 OpenMetrics 均要求安装级 Bearer 能力；只有 API 发现、存活和就绪
-检查公开。带认证的 curl 示例、全部端点与字段表，以及非观众型自动化不应
-发送 `X-Monitor-Request: dashboard` 标记头的原因见 [API 参考](../../API.md)。
+code 与 P/A/R/W 访问分级。公开的 `GET /api/meta` 清单列出每个路由的分级、
+可接受的查询参数及取值范围、请求体上限、响应类型，以及当前版本对应的文档
+链接；`403` 响应会说明能力令牌存放在哪里——AI 代理无需任何额外知识即可
+驾驭一个部署。只有 API 发现与健康检查公开；带认证的 curl 示例，以及
+非观众型自动化不应发送 `X-Monitor-Request: dashboard` 标记头的原因见
+[API 参考](../../API.md)。
 
 ## 指标与故障排查
 

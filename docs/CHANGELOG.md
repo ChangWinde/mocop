@@ -26,6 +26,19 @@ All notable changes are documented here. This project follows Semantic Versionin
   now describe every flag and action, and help output names the program
   `mocop` instead of `__main__.py`. The operations runbook gained a command,
   flag, and exit-code reference (`0`, `1`, `2`, `75`).
+- `GET /api/meta` is now a complete machine-readable contract: every GET
+  route lists its accepted `query` parameters with type, bounds, and default,
+  every write lists its `bodyLimitBytes`, every route names its
+  `responseType`, and a `documentation` URL points at this reference for the
+  running release. The manifest is generated from the same declarative table
+  (`api_manifest.py`) the handlers validate against, replacing five
+  hand-written query parsers.
+- `403 AUTHENTICATION_REQUIRED` responses carry a `hint` naming the header to
+  send and where the capability file lives, plus the `documentation` URL, so
+  an agent can recover from a cold start without out-of-band knowledge.
+- `mocop config check --json` writes the validation report as one JSON
+  document on stdout (also for a rejected configuration), matching
+  `doctor --json`.
 - `tests/gpu_tasks_test.mjs` now runs in CI: the workflow globs every browser
   leaf and contract test instead of maintaining a list that had drifted.
 

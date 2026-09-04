@@ -13,10 +13,11 @@ from urllib.error import HTTPError
 from urllib.request import BaseHandler, Request, build_opener, install_opener, urlopen
 
 from mocop import __version__
+from mocop.api_manifest import API_ROUTES
 from mocop.inventory import InventoryRequestError
 from mocop.models import GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
 from mocop.service import StateStore
-from mocop.web import API_ROUTES, MonitorHttpServer, MonitorRequestHandler
+from mocop.web import MonitorHttpServer, MonitorRequestHandler
 
 # Every server in this module is Bearer-protected. Requests made through
 # urllib carry this capability unless they opt out with ANONYMOUS_HEADER,
@@ -346,7 +347,13 @@ class WebTests(unittest.TestCase):
             f"{base}/api/snapshot",
             headers={"X-Monitor-Request": "dashboard"},
         )
-        self.assert_json_error(marked, 403, "AUTHENTICATION_REQUIRED")
+        _, payload = self.assert_json_error(marked, 403, "AUTHENTICATION_REQUIRED")
+        # The refusal tells an agent where the capability lives and where the
+        # contract is documented, without leaking the capability itself.
+        self.assertIn("access-token", payload["hint"])
+        self.assertIn("Authorization: Bearer", payload["hint"])
+        self.assertNotIn(token, json.dumps(payload))
+        self.assertTrue(payload["documentation"].endswith("/docs/API.md"))
         self.assertFalse(protected.state.dashboard_attended())
 
         wrong = Request(
@@ -849,13 +856,57 @@ class WebTests(unittest.TestCase):
                 "configurationWriteSupported": True,
             },
         )
-        # The endpoint list is the module-level manifest, verbatim.
         self.assertEqual(
-            meta["endpoints"],
+            meta["documentation"],
+            f"https://github.com/ChangWinde/mocop/blob/v{__version__}/docs/API.md",
+        )
+        # The endpoint list is the module-level manifest plus what an agent
+        # needs to call each route without the prose reference: accepted
+        # query parameters with bounds and defaults, the body cap of every
+        # write, and the response media type.
+        by_path = {
+            (entry["method"], entry["path"]): entry for entry in meta["endpoints"]
+        }
+        self.assertEqual(
             [
-                {"method": method, "path": path, "access": access}
-                for method, path, access in API_ROUTES
+                (entry["method"], entry["path"], entry["access"])
+                for entry in meta["endpoints"]
             ],
+            list(API_ROUTES),
+        )
+        self.assertEqual(
+            by_path[("GET", "/api/history")]["query"],
+            {
+                "host": {"type": "alias", "required": True},
+                "limit": {
+                    "type": "integer",
+                    "required": False,
+                    "minimum": 2,
+                    "maximum": 300,
+                    "default": 120,
+                },
+            },
+        )
+        self.assertEqual(
+            by_path[("GET", "/api/diagnostics")]["query"]["host"]["required"], False
+        )
+        self.assertEqual(by_path[("GET", "/api/snapshot")]["query"], {})
+        self.assertEqual(
+            by_path[("GET", "/api/events")]["responseType"], "text/event-stream"
+        )
+        self.assertIn("openmetrics-text", by_path[("GET", "/metrics")]["responseType"])
+        self.assertEqual(
+            by_path[("POST", "/api/settings/hosts")]["bodyLimitBytes"], 512
+        )
+        self.assertNotIn("query", by_path[("POST", "/api/settings/hosts")])
+        response_types = {entry["responseType"] for entry in meta["endpoints"]}
+        self.assertEqual(
+            response_types,
+            {
+                "application/json",
+                "text/event-stream",
+                "application/openmetrics-text; version=1.0.0; charset=utf-8",
+            },
         )
 
         self.assert_json_error(f"{self.base}/api/meta?x=1", 400, "QUERY_NOT_ALLOWED")

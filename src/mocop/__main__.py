@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import secrets
 import shlex
@@ -10,7 +11,13 @@ import sys
 import threading
 from pathlib import Path
 
-from .config import ConfigError, load_config, load_private_config, resolve_config_path
+from .config import (
+    ConfigError,
+    MonitorConfig,
+    load_config,
+    load_private_config,
+    resolve_config_path,
+)
 from .discovery import OpenSshConfigHostSource
 from .doctor import run_doctor
 from .inventory import ConfigInventory
@@ -208,6 +215,9 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         default=argparse.SUPPRESS,
         help="configuration path to validate",
     )
+    check_parser.add_argument(
+        "--json", action="store_true", help="write a machine-readable report"
+    )
 
     service_parser = commands.add_parser(
         "service", help="manage the user-level systemd service"
@@ -365,8 +375,6 @@ def _run_monitor(args: argparse.Namespace) -> int:
         state=state,
     )
     if args.once:
-        import json
-
         monitor.poll_once()
         snapshot = state.snapshot()
         print(json.dumps(snapshot, ensure_ascii=False, indent=2))
@@ -489,47 +497,101 @@ def _environment_state(name: str) -> str:
     return "set" if os.environ.get(name) else "unset"
 
 
+def _config_check_report(config_path: Path, config: MonitorConfig) -> dict[str, object]:
+    """One report feeds both renderers; it names environment variables, never values."""
+    if config.topology is not None:
+        topology: dict[str, object] = {
+            "source": "configured",
+            "links": len(config.topology.links),
+        }
+    elif config.ssh_discovery.mode == "topology":
+        topology = {"source": "resolved", "links": None}
+    else:
+        topology = {"source": "none", "links": None}
+    return {
+        "configPath": str(config_path),
+        "hosts": len(config.hosts),
+        "localHost": config.local_host,
+        "sshDiscovery": {
+            "mode": config.ssh_discovery.mode,
+            "refreshSeconds": config.ssh_discovery.refresh_seconds,
+            "resolveTimeoutSeconds": config.ssh_discovery.resolve_timeout_seconds,
+        },
+        "persistence": config.persistence.enabled,
+        "workloads": config.workloads.mode,
+        "topology": topology,
+        "updates": config.updates.mode,
+        "listen": {"host": config.listen_host, "port": config.listen_port},
+        "webhooks": [
+            {
+                "name": webhook.name,
+                "urlEnv": webhook.url_env,
+                "urlEnvState": _environment_state(webhook.url_env),
+                "secretEnv": webhook.secret_env,
+                "secretEnvState": (
+                    _environment_state(webhook.secret_env)
+                    if webhook.secret_env is not None
+                    else None
+                ),
+            }
+            for webhook in config.webhooks
+        ],
+    }
+
+
+def _print_config_check_report(report: dict[str, object]) -> None:
+    print(f"configuration OK: {report['configPath']}")
+    local_note = f" (local: {report['localHost']})" if report["localHost"] else ""
+    print(f"hosts: {report['hosts']}{local_note}")
+    discovery = report["sshDiscovery"]
+    assert isinstance(discovery, dict)
+    print(
+        f"ssh discovery: {discovery['mode']} "
+        f"(refresh {discovery['refreshSeconds']}s, "
+        f"resolve timeout {discovery['resolveTimeoutSeconds']:g}s)"
+    )
+    print(f"persistence: {'enabled' if report['persistence'] else 'disabled'}")
+    print(f"workloads: {report['workloads']}")
+    print(f"updates: {report['updates']}")
+    topology = report["topology"]
+    assert isinstance(topology, dict)
+    if topology["source"] == "configured":
+        print(f"topology: configured ({topology['links']} links)")
+    elif topology["source"] == "resolved":
+        print("topology: resolved from SSH at runtime")
+    else:
+        print("topology: none")
+    webhooks = report["webhooks"]
+    assert isinstance(webhooks, list)
+    if not webhooks:
+        print("webhooks: none")
+        return
+    print(f"webhooks: {len(webhooks)}")
+    for webhook in webhooks:
+        references = [f"url_env {webhook['urlEnv']} ({webhook['urlEnvState']})"]
+        if webhook["secretEnv"] is not None:
+            references.append(
+                f"secret_env {webhook['secretEnv']} ({webhook['secretEnvState']})"
+            )
+        print(f"  {webhook['name']}: {', '.join(references)}")
+
+
 def _run_config_check(args: argparse.Namespace) -> int:
     """Parse and validate only: no web server, no SSH connections."""
     try:
         config_path = resolve_config_path(args.config)
         config = load_config(config_path)
     except ConfigError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
-    print(f"configuration OK: {config_path}")
-    local_note = f" (local: {config.local_host})" if config.local_host else ""
-    print(f"hosts: {len(config.hosts)}{local_note}")
-    print(
-        "ssh discovery: "
-        f"{config.ssh_discovery.mode} "
-        f"(refresh {config.ssh_discovery.refresh_seconds}s, "
-        f"resolve timeout {config.ssh_discovery.resolve_timeout_seconds:g}s)"
-    )
-    print(f"persistence: {'enabled' if config.persistence.enabled else 'disabled'}")
-    print(f"workloads: {config.workloads.mode}")
-    if config.topology is None:
-        print(
-            "topology: resolved from SSH at runtime"
-            if config.ssh_discovery.mode == "topology"
-            else "topology: none"
-        )
+    report = _config_check_report(config_path, config)
+    if args.json:
+        print(json.dumps({"ok": True, **report}, ensure_ascii=False, indent=2))
     else:
-        print(f"topology: configured ({len(config.topology.links)} links)")
-    if not config.webhooks:
-        print("webhooks: none")
-        return 0
-    print(f"webhooks: {len(config.webhooks)}")
-    for webhook in config.webhooks:
-        references = [
-            f"url_env {webhook.url_env} ({_environment_state(webhook.url_env)})"
-        ]
-        if webhook.secret_env is not None:
-            references.append(
-                f"secret_env {webhook.secret_env} "
-                f"({_environment_state(webhook.secret_env)})"
-            )
-        print(f"  {webhook.name}: {', '.join(references)}")
+        _print_config_check_report(report)
     return 0
 
 

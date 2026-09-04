@@ -473,6 +473,61 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIn("Configuration error", stderr.getvalue())
 
+    def test_config_check_json_mirrors_the_text_report_without_secrets(self) -> None:
+        config_path = write_config(
+            self.root / "config.json",
+            local_host="gpu-1",
+            webhooks=[
+                {
+                    "name": "ops",
+                    "url_env": "MOCOP_CLI_TEST_URL",
+                    "secret_env": "MOCOP_CLI_TEST_SECRET",
+                }
+            ],
+        )
+        secret_url = "https://hooks.example/secret-path"
+        stdout = io.StringIO()
+        with (
+            patch.dict("os.environ", {"MOCOP_CLI_TEST_URL": secret_url}),
+            redirect_stdout(stdout),
+        ):
+            result = main(["config", "check", "--json", "--config", str(config_path)])
+
+        self.assertEqual(result, 0)
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["ok"], True)
+        self.assertEqual(report["configPath"], str(config_path))
+        self.assertEqual(report["hosts"], 2)
+        self.assertEqual(report["localHost"], "gpu-1")
+        self.assertEqual(report["sshDiscovery"]["mode"], "aliases")
+        self.assertEqual(report["topology"], {"source": "none", "links": None})
+        self.assertEqual(report["listen"], {"host": "127.0.0.1", "port": 8787})
+        self.assertEqual(
+            report["webhooks"],
+            [
+                {
+                    "name": "ops",
+                    "urlEnv": "MOCOP_CLI_TEST_URL",
+                    "urlEnvState": "set",
+                    "secretEnv": "MOCOP_CLI_TEST_SECRET",
+                    "secretEnvState": "unset",
+                }
+            ],
+        )
+        self.assertNotIn(secret_url, stdout.getvalue())
+
+        # A rejected configuration is still one JSON document on stdout, so an
+        # agent never has to parse prose from stderr.
+        broken = self.root / "broken.json"
+        broken.write_text('{"hosts": []}', encoding="utf-8")
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            result = main(["config", "check", "--json", "--config", str(broken)])
+        self.assertEqual(result, 2)
+        failure = json.loads(stdout.getvalue())
+        self.assertEqual(failure["ok"], False)
+        self.assertIn("missing config keys", failure["error"])
+
     @patch("mocop.__main__.read_access_token", return_value="A" * 43)
     @patch("mocop.__main__.UserServiceManager")
     def test_install_verifies_activation_and_prints_dashboard(

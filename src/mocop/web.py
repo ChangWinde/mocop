@@ -11,9 +11,20 @@ from collections.abc import Callable, Iterable
 from contextlib import suppress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import SplitResult, parse_qs, urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from . import __version__
+from .api_manifest import (
+    API_SCHEMA_VERSION,
+    API_VERSION,
+    DOCUMENTATION_URL,
+    QUERY_SCHEMAS,
+    ROUTE_METHODS,
+    WRITE_BODY_LIMITS,
+    QueryError,
+    describe_endpoints,
+    parse_query,
+)
 from .config import (
     is_safe_alias,
     is_valid_host_group,
@@ -46,14 +57,6 @@ from .static_assets import (
 )
 from .updates import UpdateStatusSource
 
-_MAX_COLLECTOR_BODY_BYTES = 512
-_MAX_INVENTORY_BODY_BYTES = 512
-_MAX_MAINTENANCE_BODY_BYTES = 512
-_MAX_HOST_GROUP_BODY_BYTES = 512
-_MAX_RESTART_BODY_BYTES = 32
-_MAX_INCIDENT_ACTION_BODY_BYTES = 1024
-_MAX_PROBE_BODY_BYTES = 512
-_MAX_NOTIFICATION_TEST_BODY_BYTES = 32
 _COLLECTOR_SETTINGS_KEYS = {
     "pollIntervalSeconds",
     "probeTimeoutSeconds",
@@ -64,59 +67,6 @@ _COLLECTOR_NUMBER_BOUNDS = (
     ("probeTimeoutSeconds", 2, 300),
 )
 _MAX_COLLECTOR_WORKERS = 64
-_API_VERSION = "2"
-_API_SCHEMA_VERSION = 1
-# Single source of truth for the HTTP API surface. `/api/meta` serializes this
-# manifest and the JSON 404/405 fallbacks consult it, so a route change must
-# land here to stay visible; tests compare it against live routing behavior.
-# Access levels: public = unauthenticated health, authenticated = bearer read,
-# reader = bearer plus dashboard marker, writer = bearer same-origin write.
-API_ROUTES: tuple[tuple[str, str, str], ...] = (
-    ("GET", "/api/snapshot", "authenticated"),
-    ("GET", "/api/events", "authenticated"),
-    ("GET", "/api/history", "authenticated"),
-    ("GET", "/api/usage", "authenticated"),
-    ("GET", "/api/incidents", "authenticated"),
-    ("GET", "/api/meta", "public"),
-    ("GET", "/healthz", "public"),
-    ("GET", "/readyz", "public"),
-    ("GET", "/metrics", "authenticated"),
-    ("GET", "/api/gpu-history", "reader"),
-    ("GET", "/api/diagnostics", "reader"),
-    ("GET", "/api/inventory", "reader"),
-    ("GET", "/api/topology", "reader"),
-    ("GET", "/api/update", "reader"),
-    ("POST", "/api/update/apply", "writer"),
-    ("POST", "/api/settings/collector", "writer"),
-    ("POST", "/api/settings/hosts", "writer"),
-    ("POST", "/api/settings/maintenance", "writer"),
-    ("POST", "/api/settings/host-group", "writer"),
-    ("POST", "/api/settings/incident-action", "writer"),
-    ("POST", "/api/probe", "writer"),
-    ("POST", "/api/notifications/test", "writer"),
-    ("POST", "/api/service/restart", "writer"),
-)
-_API_ENDPOINTS: tuple[dict[str, str], ...] = tuple(
-    {"method": method, "path": path, "access": access}
-    for method, path, access in API_ROUTES
-)
-_ROUTE_METHODS: dict[str, frozenset[str]] = {
-    path: frozenset(
-        route_method for route_method, route_path, _ in API_ROUTES if route_path == path
-    )
-    for _, path, _ in API_ROUTES
-}
-_WRITE_BODY_LIMITS = {
-    "/api/settings/collector": _MAX_COLLECTOR_BODY_BYTES,
-    "/api/settings/hosts": _MAX_INVENTORY_BODY_BYTES,
-    "/api/settings/maintenance": _MAX_MAINTENANCE_BODY_BYTES,
-    "/api/settings/host-group": _MAX_HOST_GROUP_BODY_BYTES,
-    "/api/service/restart": _MAX_RESTART_BODY_BYTES,
-    "/api/update/apply": _MAX_RESTART_BODY_BYTES,
-    "/api/settings/incident-action": _MAX_INCIDENT_ACTION_BODY_BYTES,
-    "/api/probe": _MAX_PROBE_BODY_BYTES,
-    "/api/notifications/test": _MAX_NOTIFICATION_TEST_BODY_BYTES,
-}
 _SSE_HEARTBEAT_SECONDS = 15.0
 # SSE loops wake at this cadence to notice the server shutdown event.
 _SSE_STOP_POLL_SECONDS = 1.0
@@ -139,7 +89,7 @@ def _is_api_family_path(path: str) -> bool:
 
 
 def _allowed_methods_header(path: str) -> str:
-    methods = _ROUTE_METHODS[path]
+    methods = ROUTE_METHODS[path]
     allowed = []
     if "GET" in methods:
         allowed.append("GET")
@@ -434,10 +384,21 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return True
         if self._has_bearer_token():
             return True
-        self._send_error(
-            "dashboard authentication required",
+        # An agent that reaches this cold learns where the capability lives
+        # and where the contract is documented without leaving the response.
+        self._send_json(
+            {
+                "error": "dashboard authentication required",
+                "code": "AUTHENTICATION_REQUIRED",
+                "hint": (
+                    "Send 'Authorization: Bearer <capability>'. A managed "
+                    "service stores it in the private access-token file beside "
+                    "its configuration (~/.config/mocop/access-token by default); "
+                    "a foreground run prints it once as the URL fragment."
+                ),
+                "documentation": DOCUMENTATION_URL,
+            },
             HTTPStatus.FORBIDDEN,
-            code="AUTHENTICATION_REQUIRED",
         )
         return False
 
@@ -597,9 +558,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         server = self.monitor_server
         self._send_json(
             {
-                "apiVersion": _API_VERSION,
+                "apiVersion": API_VERSION,
                 "appVersion": __version__,
-                "schemaVersion": _API_SCHEMA_VERSION,
+                "schemaVersion": API_SCHEMA_VERSION,
+                "documentation": DOCUMENTATION_URL,
                 "capabilities": {
                     "restartSupported": server.restart is not None,
                     "manualProbeSupported": server.probe_control is not None,
@@ -607,7 +569,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                         self._configuration_write_supported()
                     ),
                 },
-                "endpoints": list(_API_ENDPOINTS),
+                "endpoints": describe_endpoints(),
             }
         )
 
@@ -621,7 +583,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         if not _is_api_family_path(path):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        methods = _ROUTE_METHODS.get(path)
+        methods = ROUTE_METHODS.get(path)
         if methods and method not in methods:
             self._send_error(
                 "method not allowed",
@@ -642,7 +604,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         if not self._require_authentication(request_url.path):
             return
-        body_limit = _WRITE_BODY_LIMITS.get(request_url.path)
+        body_limit = WRITE_BODY_LIMITS.get(request_url.path)
         if body_limit is None:
             self._send_route_fallback("POST", request_url.path)
             return
@@ -1340,36 +1302,19 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         )
         return False
 
-    def _send_history(self, query: str) -> None:
-        parameters = parse_qs(query, keep_blank_values=True)
-        if set(parameters) - {"host", "limit"}:
-            self._send_error(
-                "unknown query parameter",
-                HTTPStatus.BAD_REQUEST,
-                code="UNKNOWN_QUERY_PARAMETER",
-            )
-            return
-        hosts = parameters.get("host", [])
-        limits = parameters.get("limit", ["120"])
-        if len(hosts) != 1 or not is_safe_alias(hosts[0]) or len(limits) != 1:
-            self._send_error(
-                "invalid host or limit",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_QUERY",
-            )
-            return
+    def _parse_query(self, path: str, query: str) -> dict[str, object] | None:
+        """Validate a GET query against the manifest; None means responded."""
         try:
-            limit = int(limits[0])
-        except ValueError:
-            limit = 0
-        if not 2 <= limit <= 300:
-            self._send_error(
-                "limit must be between 2 and 300",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_LIMIT",
-            )
+            return parse_query(QUERY_SCHEMAS[path], query)
+        except QueryError as exc:
+            self._send_error(str(exc), HTTPStatus.BAD_REQUEST, code=exc.code)
+            return None
+
+    def _send_history(self, query: str) -> None:
+        values = self._parse_query("/api/history", query)
+        if values is None:
             return
-        history = self.monitor_server.state.history(hosts[0], limit)
+        history = self.monitor_server.state.history(values["host"], values["limit"])
         if history is None:
             self._send_error(
                 "unknown monitoring target",
@@ -1380,87 +1325,22 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self._send_json(history)
 
     def _send_usage(self, query: str) -> None:
-        parameters = parse_qs(query, keep_blank_values=True)
-        if set(parameters) - {"hours", "limit"}:
-            self._send_error(
-                "unknown query parameter",
-                HTTPStatus.BAD_REQUEST,
-                code="UNKNOWN_QUERY_PARAMETER",
-            )
+        values = self._parse_query("/api/usage", query)
+        if values is None:
             return
-        hours_values = parameters.get("hours", ["24"])
-        limit_values = parameters.get("limit", ["50"])
-        if len(hours_values) != 1 or len(limit_values) != 1:
-            self._send_error(
-                "invalid hours or limit",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_QUERY",
-            )
-            return
-        try:
-            hours = int(hours_values[0])
-        except ValueError:
-            hours = 0
-        if not 1 <= hours <= 720:
-            self._send_error(
-                "hours must be between 1 and 720",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_HOURS",
-            )
-            return
-        try:
-            limit = int(limit_values[0])
-        except ValueError:
-            limit = 0
-        if not 1 <= limit <= 500:
-            self._send_error(
-                "limit must be between 1 and 500",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_LIMIT",
-            )
-            return
-        self._send_json(self.monitor_server.state.usage(hours, limit))
+        self._send_json(
+            self.monitor_server.state.usage(values["hours"], values["limit"])
+        )
 
     def _send_gpu_history(self, query: str) -> None:
         if not self._require_dashboard_read():
             return
-        parameters = parse_qs(query, keep_blank_values=True)
-        if set(parameters) - {"host", "gpu", "limit"}:
-            self._send_error(
-                "unknown query parameter",
-                HTTPStatus.BAD_REQUEST,
-                code="UNKNOWN_QUERY_PARAMETER",
-            )
+        values = self._parse_query("/api/gpu-history", query)
+        if values is None:
             return
-        hosts = parameters.get("host", [])
-        gpu_ids = parameters.get("gpu", [])
-        limits = parameters.get("limit", ["120"])
-        if (
-            len(hosts) != 1
-            or not is_safe_alias(hosts[0])
-            or len(gpu_ids) != 1
-            or not 1 <= len(gpu_ids[0]) <= 128
-            or any(ord(character) < 32 for character in gpu_ids[0])
-            or len(limits) != 1
-        ):
-            self._send_error(
-                "invalid host, GPU, or limit",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_QUERY",
-            )
-            return
-        try:
-            limit = int(limits[0])
-        except ValueError:
-            limit = 0
-        if not 2 <= limit <= 300:
-            self._send_error(
-                "limit must be between 2 and 300",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_LIMIT",
-            )
-            return
-        history = self.monitor_server.state.gpu_history(hosts[0], gpu_ids[0], limit)
+        history = self.monitor_server.state.gpu_history(
+            values["host"], values["gpu"], values["limit"]
+        )
         if history is None:
             self._send_error(
                 "unknown GPU telemetry target",
@@ -1473,23 +1353,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def _send_diagnostics(self, query: str) -> None:
         if not self._require_dashboard_read():
             return
-        parameters = parse_qs(query, keep_blank_values=True)
-        if set(parameters) - {"host"}:
-            self._send_error(
-                "unknown query parameter",
-                HTTPStatus.BAD_REQUEST,
-                code="UNKNOWN_QUERY_PARAMETER",
-            )
+        values = self._parse_query("/api/diagnostics", query)
+        if values is None:
             return
-        hosts = parameters.get("host", [])
-        if len(hosts) > 1 or (hosts and not is_safe_alias(hosts[0])):
-            self._send_error(
-                "invalid host", HTTPStatus.BAD_REQUEST, code="INVALID_HOST"
-            )
-            return
-        bundle = self.monitor_server.state.diagnostic_bundle(
-            hosts[0] if hosts else None
-        )
+        bundle = self.monitor_server.state.diagnostic_bundle(values["host"])
         if bundle is None:
             self._send_error(
                 "unknown monitoring target",
@@ -1500,32 +1367,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self._send_json(bundle)
 
     def _send_incidents(self, query: str) -> None:
-        parameters = parse_qs(query, keep_blank_values=True)
-        if set(parameters) - {"limit"}:
-            self._send_error(
-                "unknown query parameter",
-                HTTPStatus.BAD_REQUEST,
-                code="UNKNOWN_QUERY_PARAMETER",
-            )
+        values = self._parse_query("/api/incidents", query)
+        if values is None:
             return
-        limits = parameters.get("limit", ["50"])
-        if len(limits) != 1:
-            self._send_error(
-                "invalid limit", HTTPStatus.BAD_REQUEST, code="INVALID_LIMIT"
-            )
-            return
-        try:
-            limit = int(limits[0])
-        except ValueError:
-            limit = 0
-        if not 1 <= limit <= 200:
-            self._send_error(
-                "limit must be between 1 and 200",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_LIMIT",
-            )
-            return
-        self._send_json(self.monitor_server.state.incidents(limit))
+        self._send_json(self.monitor_server.state.incidents(values["limit"]))
 
     def _send_inventory(self, query: str) -> None:
         if query:

@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from mocop.api_manifest import API_ROUTES, API_VERSION
 from mocop.config import _OPTIONAL_KEYS, _REQUIRED_KEYS
 from mocop.remote_script import _PROTOCOL_VERSION
-from mocop.web import _API_VERSION, API_ROUTES
 
 ROOT = Path(__file__).resolve().parents[1]
 ENGLISH_README = ROOT / "README.md"
@@ -80,20 +80,22 @@ class ApiReferenceDriftTests(unittest.TestCase):
     def test_stable_error_code_table_matches_web_implementation(self) -> None:
         import ast
 
-        source = (ROOT / "src" / "mocop" / "web.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        implemented = {
-            node.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and ERROR_LITERAL.fullmatch(node.value)
-            and node.value not in NON_ERROR_LITERALS
-        }
+        # The handler and the declarative manifest together own every code.
+        implemented: set[str] = set()
+        for module in ("web.py", "api_manifest.py"):
+            source = (ROOT / "src" / "mocop" / module).read_text(encoding="utf-8")
+            implemented.update(
+                node.value
+                for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and ERROR_LITERAL.fullmatch(node.value)
+                and node.value not in NON_ERROR_LITERALS
+            )
         self.assertEqual(implemented, set(ERROR_ROW.findall(self.reference)))
 
     def test_authentication_and_protocol_contracts_are_current(self) -> None:
-        self.assertIn(f"**API version:** `{_API_VERSION}`", self.reference)
+        self.assertIn(f"**API version:** `{API_VERSION}`", self.reference)
         self.assertIn("Authorization: Bearer ${MOCOP_TOKEN}", self.reference)
         self.assertIn("fetch()", self.reference)
         self.assertIn("never creates an ambient Cookie", self.reference)
