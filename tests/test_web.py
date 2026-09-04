@@ -581,7 +581,7 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="collector-settings-form"', body)
         self.assertIn('id="restart-service"', body)
         self.assertIn('id="restart-confirm-dialog"', body)
-        self.assertIn('fetch("/api/service/restart"', script)
+        self.assertIn('postJson("/api/service/restart"', script)
         self.assertIn('id="interface-density"', body)
         self.assertIn('id="default-server-filter"', body)
         self.assertIn('id="server-sort"', body)
@@ -605,8 +605,8 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="configured-host-list"', body)
         self.assertIn('id="available-host-list"', body)
         self.assertIn("维护窗口不会停止采集", body)
-        self.assertIn('fetch("/api/settings/maintenance"', script)
-        self.assertIn('fetch("/api/settings/host-group"', script)
+        self.assertIn('postJson("/api/settings/maintenance"', script)
+        self.assertIn('postJson("/api/settings/host-group"', script)
         self.assertIn('<option value="group">节点分组</option>', body)
         self.assertIn('id="gpu-detail-dialog"', body)
         self.assertIn('id="gpu-task-list"', body)
@@ -616,8 +616,8 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="probe-now"', body)
         self.assertIn('id="export-diagnostics"', body)
         self.assertIn('id="test-notifications"', body)
-        self.assertIn('fetch("/api/settings/incident-action"', script)
-        self.assertIn('fetch("/api/probe"', script)
+        self.assertIn('postJson("/api/settings/incident-action"', script)
+        self.assertIn('postJson("/api/probe"', script)
         self.assertIn('id="capacity-toggle"', body)
         self.assertIn('id="capacity-dialog"', body)
         self.assertIn('id="capacity-form"', body)
@@ -778,7 +778,10 @@ class WebTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         base = f"http://127.0.0.1:{server.server_port}"
 
-        with urlopen(f"{base}/api/update", timeout=2) as response:
+        with urlopen(
+            Request(f"{base}/api/update", headers={"X-Monitor-Request": "dashboard"}),
+            timeout=2,
+        ) as response:
             status = json.load(response)
         self.assertEqual(status["latestVersion"], "2.0.0")
         self.assertTrue(status["updateAvailable"])
@@ -817,7 +820,12 @@ class WebTests(unittest.TestCase):
         self.assert_json_error(rejected, 409, "UPDATE_NOT_APPLICABLE")
 
     def test_update_endpoints_stay_inert_without_a_manager(self) -> None:
-        with urlopen(f"{self.base}/api/update", timeout=2) as response:
+        with urlopen(
+            Request(
+                f"{self.base}/api/update", headers={"X-Monitor-Request": "dashboard"}
+            ),
+            timeout=2,
+        ) as response:
             status = json.load(response)
         self.assertEqual(status["mode"], "off")
 
@@ -898,6 +906,22 @@ class WebTests(unittest.TestCase):
                     )
                     # The same-origin gate proves the POST route exists.
                     self.assertEqual(status, 403)
+
+    def test_manifest_access_tiers_are_enforced_by_the_handlers(self) -> None:
+        # The manifest is what /api/meta advertises to agents, so a tier it
+        # promises must be the tier the route enforces: reader routes refuse
+        # a marker-less Bearer request, authenticated routes accept one.
+        for method, path, access in API_ROUTES:
+            if method != "GET" or access not in {"authenticated", "reader"}:
+                continue
+            with self.subTest(path=path, access=access):
+                if path == "/api/events":
+                    continue
+                url = f"{self.base}{path}"
+                if access == "reader":
+                    self.assert_json_error(url, 403, "UNTRUSTED_ORIGIN")
+                else:
+                    self.assertNotEqual(self.request_status(url), 403)
 
     def test_unknown_api_paths_and_method_mismatches_return_json(self) -> None:
         headers, _ = self.assert_json_error(

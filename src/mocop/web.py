@@ -933,6 +933,8 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 code="QUERY_NOT_ALLOWED",
             )
             return
+        if not self._require_dashboard_read():
+            return
         updates = self.monitor_server.updates
         self._send_json(
             updates.status()
@@ -1327,6 +1329,17 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             and fetch_site in {"", "same-origin", "none"}
         )
 
+    def _require_dashboard_read(self) -> bool:
+        """Enforce the reader tier; every manifested R route must call this."""
+        if self._is_dashboard_read_request():
+            return True
+        self._send_error(
+            "same-origin dashboard request required",
+            HTTPStatus.FORBIDDEN,
+            code="UNTRUSTED_ORIGIN",
+        )
+        return False
+
     def _send_history(self, query: str) -> None:
         parameters = parse_qs(query, keep_blank_values=True)
         if set(parameters) - {"host", "limit"}:
@@ -1409,12 +1422,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self._send_json(self.monitor_server.state.usage(hours, limit))
 
     def _send_gpu_history(self, query: str) -> None:
-        if not self._is_dashboard_read_request():
-            self._send_error(
-                "same-origin dashboard request required",
-                HTTPStatus.FORBIDDEN,
-                code="UNTRUSTED_ORIGIN",
-            )
+        if not self._require_dashboard_read():
             return
         parameters = parse_qs(query, keep_blank_values=True)
         if set(parameters) - {"host", "gpu", "limit"}:
@@ -1463,12 +1471,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self._send_json(history)
 
     def _send_diagnostics(self, query: str) -> None:
-        if not self._is_dashboard_read_request():
-            self._send_error(
-                "same-origin dashboard request required",
-                HTTPStatus.FORBIDDEN,
-                code="UNTRUSTED_ORIGIN",
-            )
+        if not self._require_dashboard_read():
             return
         parameters = parse_qs(query, keep_blank_values=True)
         if set(parameters) - {"host"}:
@@ -1532,12 +1535,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 code="QUERY_NOT_ALLOWED",
             )
             return
-        if not self._is_dashboard_read_request():
-            self._send_error(
-                "same-origin dashboard request required",
-                HTTPStatus.FORBIDDEN,
-                code="UNTRUSTED_ORIGIN",
-            )
+        if not self._require_dashboard_read():
             return
         inventory = self.monitor_server.inventory
         if inventory is None:
@@ -1566,12 +1564,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 code="QUERY_NOT_ALLOWED",
             )
             return
-        if not self._is_dashboard_read_request():
-            self._send_error(
-                "same-origin dashboard request required",
-                HTTPStatus.FORBIDDEN,
-                code="UNTRUSTED_ORIGIN",
-            )
+        if not self._require_dashboard_read():
             return
         inventory = self.monitor_server.inventory
         if inventory is None:
