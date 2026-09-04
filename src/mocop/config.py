@@ -859,7 +859,7 @@ def _read_config_bytes(descriptor: int, config_path: Path) -> bytes:
 
 def _read_config_path(config_path: Path) -> bytes:
     try:
-        descriptor = os.open(config_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        descriptor = os.open(config_path, os.O_RDONLY)
     except OSError as exc:
         raise ConfigError(f"cannot read config: {config_path}") from exc
     try:
@@ -883,10 +883,10 @@ def _validate_private_metadata(
 
 def _read_private_config_path(config_path: Path) -> bytes:
     """Open a managed config through a trusted parent and parse that same file."""
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
     try:
-        parent_descriptor = os.open(config_path.parent, directory_flags)
+        parent_descriptor = os.open(
+            config_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
     except OSError as exc:
         raise ConfigError(
             f"cannot open managed config directory: {config_path.parent}"
@@ -898,7 +898,7 @@ def _read_private_config_path(config_path: Path) -> bytes:
         try:
             descriptor = os.open(
                 config_path.name,
-                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | nofollow,
+                os.O_RDONLY | os.O_NOFOLLOW,
                 dir_fd=parent_descriptor,
             )
         except OSError as exc:

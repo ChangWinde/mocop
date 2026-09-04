@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import os
@@ -31,6 +30,11 @@ from .discovery import (
     resolve_host_discovery,
 )
 from .models import utc_after
+from .privatefiles import (
+    PRIVATE_FILE_MODE,
+    acquire_private_lock,
+    release_private_lock,
+)
 
 _MAX_CONFIG_BYTES = 1_048_576
 DASHBOARD_MAINTENANCE_DURATIONS = frozenset({0, 3_600, 14_400, 86_400, 604_800})
@@ -463,28 +467,14 @@ class ConfigInventory:
         """Serialize config transactions across threads and Mocop processes."""
         with self._lock:
             lock_path = self._config_path.with_name(f".{self._config_path.name}.lock")
-            flags = os.O_RDWR | os.O_CREAT
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            descriptor = -1
             try:
-                descriptor = os.open(lock_path, flags, 0o600)
-                metadata = os.fstat(descriptor)
-                if (
-                    not stat.S_ISREG(metadata.st_mode)
-                    or metadata.st_uid != os.geteuid()
-                    or metadata.st_mode & 0o077
-                ):
-                    raise OSError("configuration lock is not private")
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                descriptor = acquire_private_lock(lock_path)
             except OSError as exc:
-                if descriptor >= 0:
-                    os.close(descriptor)
                 raise InventoryError("configuration lock is unavailable") from exc
             try:
                 yield
             finally:
-                os.close(descriptor)
+                release_private_lock(descriptor)
 
     def _load(self) -> MonitorConfig:
         try:
@@ -493,12 +483,6 @@ class ConfigInventory:
             raise InventoryError(
                 "cluster configuration is unavailable or invalid"
             ) from exc
-
-    def _scan(self, config: MonitorConfig) -> tuple[str, ...]:
-        try:
-            return self._host_source.aliases(config)
-        except (OSError, ValueError) as exc:
-            raise InventoryError("OpenSSH aliases could not be scanned") from exc
 
     def _discover(self, config: MonitorConfig) -> HostDiscoverySnapshot:
         try:
@@ -569,10 +553,7 @@ class ConfigInventory:
     def _read_object(self) -> dict[str, object]:
         descriptor = -1
         try:
-            flags = os.O_RDONLY
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            descriptor = os.open(self._config_path, flags)
+            descriptor = os.open(self._config_path, os.O_RDONLY | os.O_NOFOLLOW)
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode):
                 raise InventoryError("cluster configuration is not a regular file")
@@ -602,9 +583,9 @@ class ConfigInventory:
             metadata = self._config_path.lstat()
         except OSError:
             return False
+        # lstat metadata already reports a symlink as non-regular.
         return (
             stat.S_ISREG(metadata.st_mode)
-            and not self._config_path.is_symlink()
             and metadata.st_uid == os.geteuid()
             and os.access(self._config_path, os.W_OK)
             and os.access(self._config_path.parent, os.W_OK)
@@ -647,7 +628,7 @@ class ConfigInventory:
                 dir=self._config_path.parent,
             )
             temporary_path = Path(temporary_name)
-            os.fchmod(descriptor, 0o600)
+            os.fchmod(descriptor, PRIVATE_FILE_MODE)
             with os.fdopen(descriptor, "wb") as stream:
                 descriptor = -1
                 stream.write(payload)
@@ -655,9 +636,9 @@ class ConfigInventory:
                 os.fsync(stream.fileno())
             updated = load_config(temporary_path)
             response = prepare(updated) if prepare is not None else None
+            # The private mode travels with the inode through the rename.
             os.replace(temporary_path, self._config_path)
             temporary_path = None
-            self._config_path.chmod(0o600)
             directory_descriptor = os.open(self._config_path.parent, os.O_RDONLY)
             try:
                 os.fsync(directory_descriptor)

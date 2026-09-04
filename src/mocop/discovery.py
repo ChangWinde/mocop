@@ -282,10 +282,7 @@ class OpenSshConfigHostSource:
     @staticmethod
     def _read_regular_file(path: Path, remaining_bytes: int) -> bytes:
         """Read one stable regular file under the aggregate byte budget."""
-        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(path, flags)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
         try:
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode):

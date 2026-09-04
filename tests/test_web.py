@@ -632,14 +632,13 @@ class WebTests(unittest.TestCase):
     def test_service_restart_capability_is_explicit_and_disabled_by_default(
         self,
     ) -> None:
-        with urlopen(f"{self.base}/api/service", timeout=2) as response:
-            capability = json.load(response)
-            # The endpoint survives as a compatible alias of /api/meta but
-            # advertises its deprecation.
-            self.assertEqual(response.headers["Deprecation"], "true")
-        self.assertEqual(capability, {"restartSupported": False})
+        with urlopen(f"{self.base}/api/meta", timeout=2) as response:
+            meta = json.load(response)
+        self.assertFalse(meta["capabilities"]["restartSupported"])
+        # The pre-0.9 alias is gone: only the manifest advertises capabilities.
+        self.assert_json_error(f"{self.base}/api/service", 404, "NOT_FOUND")
 
-        request = self.poll_interval_request(
+        request = self.write_request(
             b"{}",
             origin=self.base,
             path="/api/service/restart",
@@ -661,11 +660,11 @@ class WebTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         base = f"http://127.0.0.1:{server.server_port}"
 
-        with urlopen(f"{base}/api/service", timeout=2) as response:
-            capability = json.load(response)
-        self.assertEqual(capability, {"restartSupported": True})
+        with urlopen(f"{base}/api/meta", timeout=2) as response:
+            meta = json.load(response)
+        self.assertTrue(meta["capabilities"]["restartSupported"])
 
-        rejected = self.poll_interval_request(
+        rejected = self.write_request(
             b"{}",
             origin="https://attacker.example",
             path="/api/service/restart",
@@ -675,7 +674,7 @@ class WebTests(unittest.TestCase):
         self.assert_http_error(rejected, 403)
         self.assertFalse(requested.is_set())
 
-        invalid = self.poll_interval_request(
+        invalid = self.write_request(
             b'{"action":"restart"}',
             origin=base,
             path="/api/service/restart",
@@ -684,7 +683,7 @@ class WebTests(unittest.TestCase):
         self.assert_http_error(invalid, 400)
         self.assertFalse(requested.is_set())
 
-        accepted = self.poll_interval_request(
+        accepted = self.write_request(
             b"{}",
             origin=base,
             path="/api/service/restart",
@@ -736,7 +735,7 @@ class WebTests(unittest.TestCase):
 
         # The browser cannot name a version or pass options: only the fixed
         # empty same-origin POST is accepted.
-        cross = self.poll_interval_request(
+        cross = self.write_request(
             b"{}",
             origin="https://attacker.example",
             path="/api/update/apply",
@@ -746,16 +745,14 @@ class WebTests(unittest.TestCase):
         self.assert_http_error(cross, 403)
         self.assertEqual(updates.applied, 0)
 
-        invalid = self.poll_interval_request(
+        invalid = self.write_request(
             b'{"version":"9.9.9"}', origin=base, path="/api/update/apply"
         )
         invalid.full_url = f"{base}/api/update/apply"
         self.assert_http_error(invalid, 400)
         self.assertEqual(updates.applied, 0)
 
-        accepted = self.poll_interval_request(
-            b"{}", origin=base, path="/api/update/apply"
-        )
+        accepted = self.write_request(b"{}", origin=base, path="/api/update/apply")
         accepted.full_url = f"{base}/api/update/apply"
         with urlopen(accepted, timeout=2) as response:
             payload = json.load(response)
@@ -764,9 +761,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(updates.applied, 1)
 
         updates.accept = False
-        rejected = self.poll_interval_request(
-            b"{}", origin=base, path="/api/update/apply"
-        )
+        rejected = self.write_request(b"{}", origin=base, path="/api/update/apply")
         rejected.full_url = f"{base}/api/update/apply"
         self.assert_json_error(rejected, 409, "UPDATE_NOT_APPLICABLE")
 
@@ -775,9 +770,7 @@ class WebTests(unittest.TestCase):
             status = json.load(response)
         self.assertEqual(status["mode"], "off")
 
-        request = self.poll_interval_request(
-            b"{}", origin=self.base, path="/api/update/apply"
-        )
+        request = self.write_request(b"{}", origin=self.base, path="/api/update/apply")
         request.full_url = f"{self.base}/api/update/apply"
         self.assert_json_error(request, 409, "UPDATE_NOT_APPLICABLE")
 
@@ -921,38 +914,38 @@ class WebTests(unittest.TestCase):
         )
         self.assert_json_error(f"{self.base}/api/inventory", 403, "UNTRUSTED_ORIGIN")
 
-        cross_origin = self.poll_interval_request(
+        cross_origin = self.write_request(
             b'{"pollIntervalSeconds":10}',
             origin="https://attacker.example",
             fetch_site="cross-site",
         )
         self.assert_json_error(cross_origin, 403, "UNTRUSTED_ORIGIN")
 
-        wrong_type = self.poll_interval_request(
+        wrong_type = self.write_request(
             b'{"pollIntervalSeconds":10}',
             origin=self.base,
             content_type="text/plain",
         )
         self.assert_json_error(wrong_type, 415, "UNSUPPORTED_MEDIA_TYPE")
 
-        oversized = self.poll_interval_request(
-            b'{"pollIntervalSeconds":10,"padding":"' + b"x" * 129 + b'"}',
+        oversized = self.write_request(
+            b'{"pollIntervalSeconds":10,"padding":"' + b"x" * 513 + b'"}',
             origin=self.base,
         )
         self.assert_json_error(oversized, 413, "PAYLOAD_TOO_LARGE")
 
-        invalid_json = self.poll_interval_request(b"{", origin=self.base)
+        invalid_json = self.write_request(b"{", origin=self.base)
         self.assert_json_error(invalid_json, 400, "INVALID_JSON")
 
-        bad_schema = self.poll_interval_request(b'{"other":1}', origin=self.base)
+        bad_schema = self.write_request(b'{"other":1}', origin=self.base)
         self.assert_json_error(bad_schema, 400, "INVALID_SCHEMA")
 
-        out_of_bounds = self.poll_interval_request(
+        out_of_bounds = self.write_request(
             b'{"pollIntervalSeconds":1}', origin=self.base
         )
         self.assert_json_error(out_of_bounds, 400, "INVALID_SETTINGS")
 
-        stale_inventory = self.poll_interval_request(
+        stale_inventory = self.write_request(
             b'{"action":"add","host":"unknown"}',
             origin=self.base,
             path="/api/settings/hosts",
@@ -1053,7 +1046,7 @@ class WebTests(unittest.TestCase):
                 message="SSH failed",
             )
         )
-        action_request = self.poll_interval_request(
+        action_request = self.write_request(
             json.dumps(
                 {
                     "host": "gpu-01",
@@ -1073,7 +1066,7 @@ class WebTests(unittest.TestCase):
             action_result = json.load(response)
         self.assertEqual(action_result["incidentActions"][0]["action"], "acknowledged")
 
-        probe_request = self.poll_interval_request(
+        probe_request = self.write_request(
             b'{"host":"gpu-01"}', origin=self.base, path="/api/probe"
         )
         with urlopen(probe_request, timeout=2) as response:
@@ -1081,7 +1074,7 @@ class WebTests(unittest.TestCase):
         self.assertTrue(probe_result["accepted"])
         self.assertEqual(self.probe_control.hosts, ["gpu-01"])
 
-        cross_origin = self.poll_interval_request(
+        cross_origin = self.write_request(
             b'{"host":"gpu-01"}',
             origin="https://attacker.example",
             path="/api/probe",
@@ -1090,7 +1083,7 @@ class WebTests(unittest.TestCase):
         self.assert_http_error(cross_origin, 403)
 
     def test_rejects_incident_actions_for_future_inactive_conditions(self) -> None:
-        request = self.poll_interval_request(
+        request = self.write_request(
             json.dumps(
                 {
                     "host": "gpu-01",
@@ -1115,7 +1108,7 @@ class WebTests(unittest.TestCase):
             "host": "gpu-01",
             "retryAfterSeconds": 3.2,
         }
-        request = self.poll_interval_request(
+        request = self.write_request(
             b'{"host":"gpu-01"}', origin=self.base, path="/api/probe"
         )
 
@@ -1135,7 +1128,7 @@ class WebTests(unittest.TestCase):
 
     def test_notification_test_distinguishes_disabled_from_rate_limited(self) -> None:
         # Without a configured sink the endpoint is unavailable, not limited.
-        disabled = self.poll_interval_request(
+        disabled = self.write_request(
             b"{}", origin=self.base, path="/api/notifications/test"
         )
         self.assert_json_error(disabled, 503, "NOTIFICATIONS_DISABLED")
@@ -1148,14 +1141,12 @@ class WebTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         base = f"http://127.0.0.1:{server.server_port}"
 
-        limited = self.poll_interval_request(
-            b"{}", origin=base, path="/api/notifications/test"
-        )
+        limited = self.write_request(b"{}", origin=base, path="/api/notifications/test")
         limited.full_url = f"{base}/api/notifications/test"
         self.assert_json_error(limited, 429, "RATE_LIMITED")
 
         sink.queued = True
-        accepted = self.poll_interval_request(
+        accepted = self.write_request(
             b"{}", origin=base, path="/api/notifications/test"
         )
         accepted.full_url = f"{base}/api/notifications/test"
@@ -1215,7 +1206,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(inventory["maintenanceWindows"], {})
         self.assertEqual(inventory["hostGroups"], {})
 
-        add = self.poll_interval_request(
+        add = self.write_request(
             b'{"action":"add","host":"gpu-02"}',
             origin=self.base,
             path="/api/settings/hosts",
@@ -1224,7 +1215,7 @@ class WebTests(unittest.TestCase):
             changed = json.load(response)
         self.assertEqual(changed["configuredHosts"], ["gpu-01", "gpu-02"])
 
-        remove = self.poll_interval_request(
+        remove = self.write_request(
             b'{"action":"remove","host":"gpu-01"}',
             origin=self.base,
             path="/api/settings/hosts",
@@ -1234,7 +1225,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(changed["configuredHosts"], ["gpu-02"])
 
     def test_sets_and_clears_time_bounded_maintenance(self) -> None:
-        request = self.poll_interval_request(
+        request = self.write_request(
             json.dumps(
                 {
                     "host": "gpu-01",
@@ -1253,7 +1244,7 @@ class WebTests(unittest.TestCase):
             "Driver upgrade",
         )
 
-        clear = self.poll_interval_request(
+        clear = self.write_request(
             b'{"host":"gpu-01","durationSeconds":0,"reason":""}',
             origin=self.base,
             path="/api/settings/maintenance",
@@ -1263,7 +1254,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(cleared["maintenanceWindows"], {})
 
     def test_sets_and_clears_shared_host_groups(self) -> None:
-        request = self.poll_interval_request(
+        request = self.write_request(
             b'{"host":"gpu-01","group":"Training"}',
             origin=self.base,
             path="/api/settings/host-group",
@@ -1272,7 +1263,7 @@ class WebTests(unittest.TestCase):
             changed = json.load(response)
         self.assertEqual(changed["hostGroups"], {"gpu-01": "Training"})
 
-        clear = self.poll_interval_request(
+        clear = self.write_request(
             b'{"host":"gpu-01","group":""}',
             origin=self.base,
             path="/api/settings/host-group",
@@ -1293,7 +1284,7 @@ class WebTests(unittest.TestCase):
         )
         for payload, status in cases:
             with self.subTest(payload=payload):
-                request = self.poll_interval_request(
+                request = self.write_request(
                     payload,
                     origin=self.base,
                     path="/api/settings/host-group",
@@ -1320,7 +1311,7 @@ class WebTests(unittest.TestCase):
         )
         for payload, status in cases:
             with self.subTest(payload=payload):
-                request = self.poll_interval_request(
+                request = self.write_request(
                     payload,
                     origin=self.base,
                     path="/api/settings/maintenance",
@@ -1349,14 +1340,14 @@ class WebTests(unittest.TestCase):
         )
         for payload, status in cases:
             with self.subTest(payload=payload):
-                request = self.poll_interval_request(
+                request = self.write_request(
                     payload,
                     origin=self.base,
                     path="/api/settings/hosts",
                 )
                 self.assert_http_error(request, status)
 
-        cross_origin = self.poll_interval_request(
+        cross_origin = self.write_request(
             b'{"action":"add","host":"gpu-02"}',
             origin="https://attacker.example",
             path="/api/settings/hosts",
@@ -1364,14 +1355,14 @@ class WebTests(unittest.TestCase):
         )
         self.assert_http_error(cross_origin, 403)
 
-    def poll_interval_request(
+    def write_request(
         self,
         payload: bytes,
         *,
         origin: str | None = None,
         content_type: str = "application/json",
         marker: str | None = "dashboard",
-        path: str = "/api/settings/poll-interval",
+        path: str = "/api/settings/collector",
         fetch_site: str | None = None,
     ) -> Request:
         headers = {"Content-Type": content_type}
@@ -1389,7 +1380,7 @@ class WebTests(unittest.TestCase):
         )
 
     def test_updates_runtime_poll_interval_with_bounded_same_origin_json(self) -> None:
-        request = self.poll_interval_request(
+        request = self.write_request(
             b'{"pollIntervalSeconds":10}',
             origin=self.base,
         )
@@ -1397,18 +1388,17 @@ class WebTests(unittest.TestCase):
         with urlopen(request, timeout=2) as response:
             payload = json.load(response)
 
-        # The alias keeps its legacy response shape but flags its deprecation.
         self.assertEqual(
             set(payload),
             {
                 "version",
                 "startedAt",
-                "pollIntervalSeconds",
+                "collectorSettings",
                 "collectionStaleAfterSeconds",
             },
         )
-        self.assertEqual(response.headers["Deprecation"], "true")
-        self.assertEqual(payload["pollIntervalSeconds"], 10)
+        self.assertNotIn("Deprecation", response.headers)
+        self.assertEqual(payload["collectorSettings"]["pollIntervalSeconds"], 10)
         self.assertEqual(payload["collectionStaleAfterSeconds"], 30)
         self.assertIsInstance(payload["version"], int)
         self.assertIsInstance(payload["startedAt"], str)
@@ -1417,7 +1407,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.headers["Connection"], "close")
 
     def test_updates_all_persisted_collector_settings(self) -> None:
-        request = self.poll_interval_request(
+        request = self.write_request(
             json.dumps(
                 {
                     "pollIntervalSeconds": 2,
@@ -1444,7 +1434,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 2)
 
     def test_updates_a_collector_settings_subset(self) -> None:
-        request = self.poll_interval_request(
+        request = self.write_request(
             b'{"probeTimeoutSeconds":30}',
             origin=self.base,
             path="/api/settings/collector",
@@ -1466,28 +1456,52 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 5)
 
     def test_rejects_invalid_collector_settings(self) -> None:
+        # Shape and type problems are schema errors; documented per-field
+        # bounds are settings errors, matching every other write route.
         cases = (
-            b"{}",
-            b'{"connectTimeoutSeconds":9}',
-            b'{"pollIntervalSeconds":1,"probeTimeoutSeconds":24,"maxWorkers":8}',
-            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":true,"maxWorkers":8}',
-            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":2.5}',
-            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":65}',
-            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8,"extra":1}',
-            b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8,"maxWorkers":9}',
+            (b"{}", "INVALID_SCHEMA"),
+            (b'{"connectTimeoutSeconds":9}', "INVALID_SCHEMA"),
+            (
+                b'{"pollIntervalSeconds":1,"probeTimeoutSeconds":24,"maxWorkers":8}',
+                "INVALID_SETTINGS",
+            ),
+            (
+                b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":true,"maxWorkers":8}',
+                "INVALID_SCHEMA",
+            ),
+            (
+                b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":2.5}',
+                "INVALID_SCHEMA",
+            ),
+            (
+                b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":65}',
+                "INVALID_SETTINGS",
+            ),
+            (
+                b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":301,"maxWorkers":8}',
+                "INVALID_SETTINGS",
+            ),
+            (
+                b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8,"extra":1}',
+                "INVALID_SCHEMA",
+            ),
+            (
+                b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8,"maxWorkers":9}',
+                "INVALID_JSON",
+            ),
         )
         before = dict(self.inventory.collector_settings)
 
-        for payload in cases:
+        for payload, code in cases:
             with self.subTest(payload=payload):
-                request = self.poll_interval_request(
+                request = self.write_request(
                     payload,
                     origin=self.base,
                     path="/api/settings/collector",
                 )
-                self.assert_http_error(request, 400)
+                self.assert_json_error(request, 400, code)
 
-        cross_origin = self.poll_interval_request(
+        cross_origin = self.write_request(
             b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8}',
             origin="https://attacker.example",
             path="/api/settings/collector",
@@ -1495,7 +1509,7 @@ class WebTests(unittest.TestCase):
         )
         self.assert_http_error(cross_origin, 403)
 
-        oversized = self.poll_interval_request(
+        oversized = self.write_request(
             b'{"pollIntervalSeconds":2,"probeTimeoutSeconds":24,"maxWorkers":8,"padding":"'
             + b"x" * 512
             + b'"}',
@@ -1511,7 +1525,7 @@ class WebTests(unittest.TestCase):
         # connection arrives on 127.0.0.1 (DNS rebinding delivers exactly that).
         for fetch_site in ("same-origin", None):
             with self.subTest(fetch_site=fetch_site):
-                request = self.poll_interval_request(
+                request = self.write_request(
                     b'{"pollIntervalSeconds":2}',
                     origin="https://workspace-preview.example",
                     fetch_site=fetch_site,
@@ -1533,16 +1547,16 @@ class WebTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         self.assertIn("workspace-preview.example", server.trusted_hostnames)
 
-        request = self.poll_interval_request(
+        request = self.write_request(
             b'{"pollIntervalSeconds":2}',
             origin="https://workspace-preview.example",
         )
         request.full_url = (
-            f"http://127.0.0.1:{server.server_port}/api/settings/poll-interval"
+            f"http://127.0.0.1:{server.server_port}/api/settings/collector"
         )
         with urlopen(request, timeout=2) as response:
             payload = json.load(response)
-        self.assertEqual(payload["pollIntervalSeconds"], 2)
+        self.assertEqual(payload["collectorSettings"]["pollIntervalSeconds"], 2)
         self.assertEqual(state.snapshot()["pollIntervalSeconds"], 2)
 
     def test_trusted_https_origin_suffix_supports_ephemeral_proxy_hosts(self) -> None:
@@ -1562,16 +1576,16 @@ class WebTests(unittest.TestCase):
             server.trusted_origin_suffixes, frozenset({"fwd.memory.whalent.com"})
         )
 
-        allowed = self.poll_interval_request(
+        allowed = self.write_request(
             b'{"pollIntervalSeconds":2}',
             origin="https://35sc9ontjvbtfee57ow5sdynv.fwd.memory.whalent.com",
         )
         allowed.full_url = (
-            f"http://127.0.0.1:{server.server_port}/api/settings/poll-interval"
+            f"http://127.0.0.1:{server.server_port}/api/settings/collector"
         )
         with urlopen(allowed, timeout=2) as response:
             payload = json.load(response)
-        self.assertEqual(payload["pollIntervalSeconds"], 2)
+        self.assertEqual(payload["collectorSettings"]["pollIntervalSeconds"], 2)
 
         rejected_origins = (
             "http://35sc9ontjvbtfee57ow5sdynv.fwd.memory.whalent.com",
@@ -1581,11 +1595,11 @@ class WebTests(unittest.TestCase):
         )
         for origin in rejected_origins:
             with self.subTest(origin=origin):
-                request = self.poll_interval_request(
+                request = self.write_request(
                     b'{"pollIntervalSeconds":3}', origin=origin
                 )
                 request.full_url = (
-                    f"http://127.0.0.1:{server.server_port}/api/settings/poll-interval"
+                    f"http://127.0.0.1:{server.server_port}/api/settings/collector"
                 )
                 self.assert_http_error(request, 403)
         self.assertEqual(state.snapshot()["pollIntervalSeconds"], 2)
@@ -1602,7 +1616,7 @@ class WebTests(unittest.TestCase):
         write = self.open_connection(port)
         write.request(
             "POST",
-            "/api/settings/poll-interval",
+            "/api/settings/collector",
             body=b'{"pollIntervalSeconds":2}',
             headers={**rebound, "Content-Type": "application/json"},
         )
@@ -1619,7 +1633,7 @@ class WebTests(unittest.TestCase):
 
     def test_rejects_cross_origin_preflight_without_cors_permission(self) -> None:
         request = Request(
-            f"{self.base}/api/settings/poll-interval",
+            f"{self.base}/api/settings/collector",
             headers={
                 "Origin": "https://attacker.example",
                 "Access-Control-Request-Method": "POST",
@@ -1707,7 +1721,7 @@ class WebTests(unittest.TestCase):
                 400,
             ),
             (
-                b'{"pollIntervalSeconds":10,"padding":"' + b"x" * 129 + b'"}',
+                b'{"pollIntervalSeconds":10,"padding":"' + b"x" * 513 + b'"}',
                 self.base,
                 "application/json",
                 "dashboard",
@@ -1718,7 +1732,7 @@ class WebTests(unittest.TestCase):
             with self.subTest(
                 payload=payload, origin=origin, content_type=content_type
             ):
-                request = self.poll_interval_request(
+                request = self.write_request(
                     payload,
                     origin=origin,
                     content_type=content_type,
@@ -1728,17 +1742,17 @@ class WebTests(unittest.TestCase):
 
         for fetch_site in ("cross-site", "same-site", "invalid"):
             with self.subTest(fetch_site=fetch_site):
-                cross_site = self.poll_interval_request(
+                cross_site = self.write_request(
                     b'{"pollIntervalSeconds":10}',
                     origin="https://workspace-preview.example",
                     fetch_site=fetch_site,
                 )
                 self.assert_http_error(cross_site, 403)
 
-        query = self.poll_interval_request(
+        query = self.write_request(
             b'{"pollIntervalSeconds":10}',
             origin=self.base,
-            path="/api/settings/poll-interval?force=true",
+            path="/api/settings/collector?force=true",
         )
         self.assert_http_error(query, 400)
 
@@ -2017,20 +2031,20 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"400", rejected.split(b"\r\n", 1)[0])
 
         # An unbalanced-bracket Origin is a 403, not an unhandled ValueError.
-        bracket_origin = self.poll_interval_request(
+        bracket_origin = self.write_request(
             b'{"pollIntervalSeconds":10}', origin="http://["
         )
         self.assert_http_error(bracket_origin, 403)
 
         # Array-typed action fields are schema errors, not TypeErrors.
-        inventory_action = self.poll_interval_request(
+        inventory_action = self.write_request(
             b'{"action":["add"],"host":"gpu-02"}',
             origin=self.base,
             path="/api/settings/hosts",
         )
         self.assert_http_error(inventory_action, 400)
 
-        incident_action = self.poll_interval_request(
+        incident_action = self.write_request(
             json.dumps(
                 {
                     "host": "gpu-01",
@@ -2052,7 +2066,7 @@ class WebTests(unittest.TestCase):
             + b"9" * 400
             + b',"probeTimeoutSeconds":24,"maxWorkers":8}'
         )
-        huge_case = self.poll_interval_request(
+        huge_case = self.write_request(
             huge_number, origin=self.base, path="/api/settings/collector"
         )
         self.assert_http_error(huge_case, 400)
@@ -2109,7 +2123,7 @@ class WebTests(unittest.TestCase):
         body = b'{"pollIntervalSeconds":10}'
         connection.request(
             "POST",
-            "/api/settings/poll-interval",
+            "/api/settings/collector",
             body=body,
             headers={
                 "Content-Type": "application/json",
@@ -2121,7 +2135,7 @@ class WebTests(unittest.TestCase):
         payload = json.load(response)
 
         self.assertEqual(response.status, 200)
-        self.assertEqual(payload["pollIntervalSeconds"], 10)
+        self.assertEqual(payload["collectorSettings"]["pollIntervalSeconds"], 10)
 
 
 if __name__ == "__main__":

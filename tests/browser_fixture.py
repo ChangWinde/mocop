@@ -67,6 +67,9 @@ class DemoInventory:
         }
         self.incident_actions = []
 
+    def writable(self) -> bool:
+        return True
+
     def topology(self) -> dict[str, object]:
         return {
             "root": "monitor-console",

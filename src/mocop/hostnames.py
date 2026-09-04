@@ -16,6 +16,9 @@ from collections.abc import Iterable
 from urllib.parse import urlsplit
 
 _LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?")
+# Hostnames a browser can present when it genuinely reached this server over
+# the loopback interface. DNS rebinding presents the attacker's own domain in
+# Host/Origin instead, so pinning these names closes the rebinding bypass.
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 _WILDCARD_BIND_HOSTS = frozenset({"", "0.0.0.0", "::"})
 

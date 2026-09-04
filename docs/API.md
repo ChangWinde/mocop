@@ -17,10 +17,10 @@ document and the running server cannot drift apart silently.
 - **Collection protocol:** the bundled remote script and parser accept only
   current `MONITOR_V8`. It is an internal single-version contract, distinct
   from the HTTP API/schema versions; see [ADR-0016](adr/0016-single-version-protocol-and-agent-api.md).
-- **Deprecation policy:** a deprecated endpoint keeps working and answers
-  with a `Deprecation: true` response header. Deprecations and removals are
-  announced in [CHANGELOG.md](CHANGELOG.md). Currently deprecated:
-  `GET /api/service` and `POST /api/settings/poll-interval`.
+- **Deprecation policy:** a deprecated endpoint keeps working for at least
+  two minor releases and answers with a `Deprecation: true` response header.
+  Deprecations and removals are announced in [CHANGELOG.md](CHANGELOG.md).
+  No endpoint is currently deprecated.
 - **Self-description:** `GET /api/meta` returns the exact endpoint manifest
   (method, path, access tier) plus capability flags, so an agent can discover
   what this deployment supports before calling anything else.
@@ -161,7 +161,6 @@ cap:
 
 | Route | Body cap (bytes) |
 |---|---|
-| `POST /api/settings/poll-interval` | 128 |
 | `POST /api/settings/collector` | 512 |
 | `POST /api/settings/hosts` | 512 |
 | `POST /api/settings/maintenance` | 512 |
@@ -321,7 +320,6 @@ This table matches the server's route manifest exactly.
 | GET | `/api/usage` | A | Per-owner GPU occupancy and idle-occupancy rollup. |
 | GET | `/api/incidents` | A | Active conditions, transition events, correlations. |
 | GET | `/api/meta` | P | API self-description: versions, capabilities, endpoints. |
-| GET | `/api/service` | A | **Deprecated** alias of the `/api/meta` capabilities block. |
 | GET | `/healthz` | P | Liveness plus cumulative transport retries. |
 | GET | `/readyz` | P | Readiness; `503` until the first successful sample. |
 | GET | `/metrics` | A | OpenMetrics 1.0 exposition of the current snapshot. |
@@ -331,7 +329,6 @@ This table matches the server's route manifest exactly.
 | GET | `/api/topology` | R | Display-only connection tree. |
 | GET | `/api/update` | R | Release-currency status of this installation. |
 | POST | `/api/settings/collector` | W | Update any subset of the collector settings. |
-| POST | `/api/settings/poll-interval` | W | **Deprecated** single-field cadence alias. |
 | POST | `/api/settings/hosts` | W | Add or remove one monitored host. |
 | POST | `/api/settings/maintenance` | W | Start or clear one maintenance window. |
 | POST | `/api/settings/host-group` | W | Assign or clear one host's group. |
@@ -648,12 +645,6 @@ service; `manualProbeSupported` requires the live scheduler;
 `configurationWriteSupported` reports whether the active configuration file
 is dashboard-writable (file metadata only, no SSH).
 
-### GET /api/service
-
-**Deprecated** (`Deprecation: true` header) alias of the `/api/meta`
-capabilities block. Tier A. Query: rejected. Returns
-`{"restartSupported": bool}`. Use `GET /api/meta` instead.
-
 ### GET /healthz
 
 Liveness. Tier P. Always `200` while the process serves requests.
@@ -778,16 +769,9 @@ Omitted fields keep their current values. Response `200`:
 ```
 
 Errors: `INVALID_SCHEMA` (unknown key, empty object, `connectTimeoutSeconds`
-included, out-of-range type), `INVALID_SETTINGS` (bounds/cross-field),
+included, wrong value type), `INVALID_SETTINGS` (documented bounds or the
+`probeTimeoutSeconds > connectTimeoutSeconds` cross-field rule),
 `503 SERVICE_UNAVAILABLE`.
-
-### POST /api/settings/poll-interval
-
-**Deprecated** (`Deprecation: true` header) single-field alias of the
-collector route. Tier W. Body cap 128 bytes. Body: exactly
-`{"pollIntervalSeconds": 2–60}`. Response `200`: `{version, startedAt,
-pollIntervalSeconds, collectionStaleAfterSeconds}`. Use
-`POST /api/settings/collector` instead.
 
 ### POST /api/settings/hosts
 

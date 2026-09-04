@@ -423,7 +423,6 @@ class StateStore:
         self._collection_stale_after_seconds = (
             poll_interval_seconds * collection_stale_cycles
         )
-        self._schedule_changed = threading.Event()
         self._thresholds = thresholds or ThresholdConfig()
         self._history_points = history_points
         selected_policy = incident_policy or ThresholdIncidentPolicy(
@@ -620,8 +619,7 @@ class StateStore:
                     )
                     changed = True
             self._incidents.remove_hosts(desired)
-            if isinstance(self._incident_policy, ThresholdIncidentPolicy):
-                self._incident_policy.retain_hosts(desired)
+            self._incident_policy.retain_hosts(desired)
             self._sync_tracker_revision_locked()
             if changed:
                 self._publish_locked()
@@ -658,22 +656,14 @@ class StateStore:
             self._collection_stale_after_seconds = (
                 interval * self._collection_stale_cycles
             )
-            self._schedule_changed.set()
             self._publish_locked()
         return interval
-
-    def wait_for_poll_interval_change(self, timeout_seconds: float) -> bool:
-        return self.wait_for_schedule_change(timeout_seconds)
-
-    def notify_inventory_changed(self) -> None:
-        self._schedule_changed.set()
 
     def update_expected_gpu_counts(
         self, expected_gpu_counts: tuple[tuple[str, int], ...]
     ) -> None:
         with self._condition:
-            if isinstance(self._incident_policy, ThresholdIncidentPolicy):
-                self._incident_policy.update_expected_gpu_counts(expected_gpu_counts)
+            self._incident_policy.update_expected_gpu_counts(expected_gpu_counts)
 
     def set_maintenance_windows(
         self,
@@ -729,12 +719,11 @@ class StateStore:
             if updated == self._host_groups:
                 return
             self._host_groups = updated
-            if isinstance(self._incident_policy, ThresholdIncidentPolicy):
-                self._incident_policy.update_overrides(
-                    self._host_incident_overrides,
-                    self._group_incident_overrides,
-                    host_groups,
-                )
+            self._incident_policy.update_overrides(
+                self._host_incident_overrides,
+                self._group_incident_overrides,
+                host_groups,
+            )
             self._publish_locked()
 
     def set_incident_overrides(
@@ -751,10 +740,9 @@ class StateStore:
                 return
             self._host_incident_overrides = host_overrides
             self._group_incident_overrides = group_overrides
-            if isinstance(self._incident_policy, ThresholdIncidentPolicy):
-                self._incident_policy.update_overrides(
-                    host_overrides, group_overrides, host_groups
-                )
+            self._incident_policy.update_overrides(
+                host_overrides, group_overrides, host_groups
+            )
             self._incident_revision += 1
             self._publish_locked()
 
@@ -784,12 +772,6 @@ class StateStore:
             self.set_topology(config.topology)
             if hosts is not None:
                 self.set_hosts(hosts)
-
-    def wait_for_schedule_change(self, timeout_seconds: float) -> bool:
-        changed = self._schedule_changed.wait(max(0.0, timeout_seconds))
-        if changed:
-            self._schedule_changed.clear()
-        return changed
 
     def begin_poll(self, hosts: tuple[str, ...]) -> None:
         with self._condition:
@@ -1326,11 +1308,6 @@ class StateStore:
         # lock: result publication and SSE wakeups never wait on it.
         return copy.deepcopy(snapshot)
 
-    def has_active_incident(self, host: str, condition_key: str) -> bool:
-        """Return whether an action can bind to a currently active condition."""
-        with self._condition:
-            return self._incidents.has_active_condition(host, condition_key)
-
     def active_incident_started_at(self, host: str, condition_key: str) -> str | None:
         """Return the stable identity of the currently active condition."""
         with self._condition:
@@ -1555,7 +1532,7 @@ class StateStore:
             elif (
                 key in self._startup_action_candidates
                 and not self._incidents.has_pending_condition(*key)
-                and self._startup_action_condition_observed(result, key[1])
+                and self._incident_policy.condition_observed(result, key[1])
             ):
                 # The first authoritative live sample was healthy for this
                 # condition. Fail open: do not let an action from before the
@@ -1563,12 +1540,6 @@ class StateStore:
                 self._startup_action_candidates.discard(key)
             elif key in self._startup_action_bindings and started_at is None:
                 self._startup_action_bindings.pop(key, None)
-
-    def _startup_action_condition_observed(
-        self, result: ProbeResult, condition_key: str
-    ) -> bool:
-        observed = getattr(self._incident_policy, "condition_observed", None)
-        return bool(observed is not None and observed(result, condition_key))
 
     def _decorate_incident_locked(
         self,
@@ -2295,7 +2266,6 @@ class MonitorService:
                     self._apply_discovery_metadata(discovery)
                 self._config = config
                 self._config_generation += 1
-            self._state.notify_inventory_changed()
             self._scheduler_wakeup.set()
 
     def _config_snapshot(self) -> tuple[MonitorConfig, int]:

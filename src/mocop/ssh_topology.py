@@ -69,6 +69,8 @@ class SshRouteResolver(Protocol):
         timeout_seconds: float,
     ) -> SshRoute | None: ...
 
+    def cancel(self) -> None: ...
+
 
 def _environment() -> dict[str, str]:
     environment = os.environ.copy()
@@ -219,9 +221,7 @@ class SshTopologyPlanner:
         self._resolver = resolver or OpenSshRouteResolver()
 
     def cancel(self) -> None:
-        cancel = getattr(self._resolver, "cancel", None)
-        if callable(cancel):
-            cancel()
+        self._resolver.cancel()
 
     def resolve(
         self,

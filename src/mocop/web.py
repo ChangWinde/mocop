@@ -46,7 +46,6 @@ from .static_assets import (
 )
 from .updates import UpdateStatusSource
 
-_MAX_SETTINGS_BODY_BYTES = 128
 _MAX_COLLECTOR_BODY_BYTES = 512
 _MAX_INVENTORY_BODY_BYTES = 512
 _MAX_MAINTENANCE_BODY_BYTES = 512
@@ -60,6 +59,11 @@ _COLLECTOR_SETTINGS_KEYS = {
     "probeTimeoutSeconds",
     "maxWorkers",
 }
+_COLLECTOR_NUMBER_BOUNDS = (
+    ("pollIntervalSeconds", 2, 60),
+    ("probeTimeoutSeconds", 2, 300),
+)
+_MAX_COLLECTOR_WORKERS = 64
 _API_VERSION = "2"
 _API_SCHEMA_VERSION = 1
 # Single source of truth for the HTTP API surface. `/api/meta` serializes this
@@ -74,7 +78,6 @@ API_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/usage", "authenticated"),
     ("GET", "/api/incidents", "authenticated"),
     ("GET", "/api/meta", "public"),
-    ("GET", "/api/service", "authenticated"),
     ("GET", "/healthz", "public"),
     ("GET", "/readyz", "public"),
     ("GET", "/metrics", "authenticated"),
@@ -85,7 +88,6 @@ API_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/update", "reader"),
     ("POST", "/api/update/apply", "writer"),
     ("POST", "/api/settings/collector", "writer"),
-    ("POST", "/api/settings/poll-interval", "writer"),
     ("POST", "/api/settings/hosts", "writer"),
     ("POST", "/api/settings/maintenance", "writer"),
     ("POST", "/api/settings/host-group", "writer"),
@@ -105,7 +107,6 @@ _ROUTE_METHODS: dict[str, frozenset[str]] = {
     for _, path, _ in API_ROUTES
 }
 _WRITE_BODY_LIMITS = {
-    "/api/settings/poll-interval": _MAX_SETTINGS_BODY_BYTES,
     "/api/settings/collector": _MAX_COLLECTOR_BODY_BYTES,
     "/api/settings/hosts": _MAX_INVENTORY_BODY_BYTES,
     "/api/settings/maintenance": _MAX_MAINTENANCE_BODY_BYTES,
@@ -116,10 +117,6 @@ _WRITE_BODY_LIMITS = {
     "/api/probe": _MAX_PROBE_BODY_BYTES,
     "/api/notifications/test": _MAX_NOTIFICATION_TEST_BODY_BYTES,
 }
-_DEPRECATED_ENDPOINT_HEADERS = (("Deprecation", "true"),)
-# Hostnames a browser can present when it genuinely reached this server over
-# the loopback interface. DNS rebinding presents the attacker's own domain in
-# Host/Origin instead, so pinning these names closes the rebinding bypass.
 _SSE_HEARTBEAT_SECONDS = 15.0
 # SSE loops wake at this cadence to notice the server shutdown event.
 _SSE_STOP_POLL_SECONDS = 1.0
@@ -309,6 +306,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     # a slow client sending one byte at a time.
     request_deadline_seconds = 15.0
     _head_only = False
+    _header_deadline_timer: threading.Timer | None = None
 
     def send_error(
         self,
@@ -334,7 +332,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             self.connection.shutdown(socket.SHUT_RDWR)
 
     def _cancel_header_deadline(self) -> None:
-        timer = getattr(self, "_header_deadline_timer", None)
+        timer = self._header_deadline_timer
         if timer is not None:
             timer.cancel()
             if timer is not threading.current_thread():
@@ -535,20 +533,6 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/meta":
             self._send_meta(request_url.query)
             return
-        if path == "/api/service":
-            if request_url.query:
-                self._send_error(
-                    "query parameters are not allowed",
-                    HTTPStatus.BAD_REQUEST,
-                    code="QUERY_NOT_ALLOWED",
-                )
-                return
-            # Deprecated alias of the /api/meta capabilities block.
-            self._send_json(
-                {"restartSupported": self.monitor_server.restart is not None},
-                extra_headers=_DEPRECATED_ENDPOINT_HEADERS,
-            )
-            return
         if path == "/metrics":
             if request_url.query:
                 self._send_error(
@@ -631,13 +615,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def _configuration_write_supported(self) -> bool:
         """Writable-config capability without scanning or connecting over SSH."""
         inventory = self.monitor_server.inventory
-        if inventory is None:
-            return False
-        writable = getattr(inventory, "writable", None)
-        if not callable(writable):
-            # Controllers predating the lightweight check degrade to existence.
-            return True
-        return bool(writable())
+        return inventory is not None and inventory.writable()
 
     def _send_route_fallback(self, method: str, path: str) -> None:
         """JSON 404/405 for API-family paths; static paths keep the HTML page."""
@@ -745,34 +723,18 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "invalid JSON body", HTTPStatus.BAD_REQUEST, code="INVALID_JSON"
             )
             return
-        if request_url.path == "/api/settings/hosts":
-            self._change_inventory(payload)
-            return
-        if request_url.path == "/api/settings/collector":
-            self._change_collector_settings(payload)
-            return
-        if request_url.path == "/api/settings/maintenance":
-            self._change_maintenance(payload)
-            return
-        if request_url.path == "/api/settings/host-group":
-            self._change_host_group(payload)
-            return
-        if request_url.path == "/api/settings/incident-action":
-            self._change_incident_action(payload)
-            return
-        if request_url.path == "/api/probe":
-            self._request_probe(payload)
-            return
-        if request_url.path == "/api/notifications/test":
-            self._test_notifications(payload)
-            return
-        if request_url.path == "/api/service/restart":
-            self._restart_service(payload)
-            return
-        if request_url.path == "/api/update/apply":
-            self._apply_update(payload)
-            return
-        self._change_poll_interval(payload)
+        handlers: dict[str, Callable[[object], None]] = {
+            "/api/settings/hosts": self._change_inventory,
+            "/api/settings/collector": self._change_collector_settings,
+            "/api/settings/maintenance": self._change_maintenance,
+            "/api/settings/host-group": self._change_host_group,
+            "/api/settings/incident-action": self._change_incident_action,
+            "/api/probe": self._request_probe,
+            "/api/notifications/test": self._test_notifications,
+            "/api/service/restart": self._restart_service,
+            "/api/update/apply": self._apply_update,
+        }
+        handlers[request_url.path](payload)
 
     def _unsupported_method(self, method: str) -> None:
         self.close_connection = True
@@ -1137,52 +1099,18 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(snapshot)
 
-    def _change_poll_interval(self, payload: object) -> None:
-        """Deprecated single-field alias of the collector settings endpoint."""
-        if not isinstance(payload, dict) or set(payload) != {"pollIntervalSeconds"}:
-            self._send_error(
-                "invalid settings schema",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SCHEMA",
-            )
-            return
-        value = payload["pollIntervalSeconds"]
-        if not self._valid_number(value, 2, 60):
-            self._send_error(
-                "pollIntervalSeconds must be between 2 and 60",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SETTINGS",
-            )
-            return
-        applied = self._apply_collector_settings({"pollIntervalSeconds": value})
-        if applied is None:
-            return
-        _, interval = applied
-        snapshot = self.monitor_server.state.snapshot()
-        self._send_json(
-            {
-                "version": snapshot["version"],
-                "startedAt": snapshot["startedAt"],
-                "pollIntervalSeconds": interval,
-                "collectionStaleAfterSeconds": snapshot["collectionStaleAfterSeconds"],
-            },
-            extra_headers=_DEPRECATED_ENDPOINT_HEADERS,
-        )
-
     def _change_collector_settings(self, payload: object) -> None:
-        if not self._valid_collector_subset(payload):
-            self._send_error(
-                "invalid collector settings schema",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SCHEMA",
-            )
+        rejection = self._collector_settings_rejection(payload)
+        if rejection is not None:
+            code, message = rejection
+            self._send_error(message, HTTPStatus.BAD_REQUEST, code=code)
             return
         assert isinstance(payload, dict)
-        applied = self._apply_collector_settings(payload)
-        if applied is None:
+        settings = self._apply_collector_settings(payload)
+        if settings is None:
             return
-        settings, _ = applied
-        snapshot = self.monitor_server.state.snapshot()
+        # Three scalar fields do not justify deep-copying the whole projection.
+        snapshot = self.monitor_server.state.snapshot_view()
         self._send_json(
             {
                 "version": snapshot["version"],
@@ -1192,46 +1120,53 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             }
         )
 
-    def _valid_collector_subset(self, payload: object) -> bool:
-        """Accept any non-empty subset of the dashboard collector settings.
+    def _collector_settings_rejection(self, payload: object) -> tuple[str, str] | None:
+        """Validate a non-empty subset of the dashboard collector settings.
 
-        Per-field bounds match the full-payload rules; the cross-field
-        probe-timeout-vs-connect-timeout constraint is enforced by the
-        inventory against the merged effective configuration.
+        Returns ``(code, message)`` for a rejected payload: shape and type
+        problems are ``INVALID_SCHEMA``; documented per-field bounds are
+        ``INVALID_SETTINGS``. The cross-field probe-timeout-vs-connect-timeout
+        constraint is enforced by the inventory against the merged effective
+        configuration.
         """
+        schema = ("INVALID_SCHEMA", "invalid collector settings schema")
         if (
             not isinstance(payload, dict)
             or not payload
             or set(payload) - _COLLECTOR_SETTINGS_KEYS
         ):
-            return False
-        if "pollIntervalSeconds" in payload and not self._valid_number(
-            payload["pollIntervalSeconds"], 2, 60
-        ):
-            return False
-        if "probeTimeoutSeconds" in payload and not self._valid_number(
-            payload["probeTimeoutSeconds"], 2, 300
-        ):
-            return False
+            return schema
+        for key, minimum, maximum in _COLLECTOR_NUMBER_BOUNDS:
+            if key not in payload:
+                continue
+            value = payload[key]
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                return schema
+            if not self._within_bounds(value, minimum, maximum):
+                return (
+                    "INVALID_SETTINGS",
+                    f"{key} must be between {minimum} and {maximum}",
+                )
         if "maxWorkers" in payload:
             workers = payload["maxWorkers"]
-            if (
-                isinstance(workers, bool)
-                or not isinstance(workers, int)
-                or not 1 <= workers <= 64
-            ):
-                return False
-        return True
+            if isinstance(workers, bool) or not isinstance(workers, int):
+                return schema
+            if not 1 <= workers <= _MAX_COLLECTOR_WORKERS:
+                return (
+                    "INVALID_SETTINGS",
+                    f"maxWorkers must be between 1 and {_MAX_COLLECTOR_WORKERS}",
+                )
+        return None
 
     def _apply_collector_settings(
         self, payload: dict[str, object]
-    ) -> tuple[dict[str, object], float] | None:
+    ) -> dict[str, object] | None:
         """Persist settings and sync the runtime cadence; None means responded."""
         settings = self._persist_collector_settings(payload)
         if settings is None:
             return None
         try:
-            interval = self.monitor_server.state.set_poll_interval_seconds(
+            self.monitor_server.state.set_poll_interval_seconds(
                 settings["pollIntervalSeconds"]
             )
         except (KeyError, ValueError):
@@ -1241,12 +1176,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 code="SERVICE_UNAVAILABLE",
             )
             return None
-        return settings, interval
+        return settings
 
     @staticmethod
-    def _valid_number(value: object, minimum: float, maximum: float) -> bool:
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            return False
+    def _within_bounds(value: int | float, minimum: float, maximum: float) -> bool:
         try:
             numeric = float(value)
         except OverflowError:

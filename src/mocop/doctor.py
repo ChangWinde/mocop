@@ -826,9 +826,7 @@ def run_doctor(
     except BaseException:
         process_registry.cancel()
         if collection_probe is not None:
-            cancel_probe = getattr(collection_probe, "cancel", None)
-            if callable(cancel_probe):
-                cancel_probe()
+            collection_probe.cancel()
         for future in futures:
             future.cancel()
         if executor is not None:

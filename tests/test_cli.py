@@ -63,6 +63,22 @@ class CliTests(unittest.TestCase):
 
         self.assertTrue(args.managed_service)
 
+    def test_managed_service_requires_the_generated_unit_arguments(self) -> None:
+        # A unit that predates the capability must be regenerated instead of
+        # the service silently minting a token that nobody was shown.
+        config_path = write_config(self.root / "config.json")
+        for argv in (
+            ["--managed-service"],
+            ["--managed-service", "--config", str(config_path)],
+        ):
+            with self.subTest(argv=argv):
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    self.assertEqual(main(argv), 2)
+                self.assertIn("--access-token-file", stderr.getvalue())
+                self.assertIn("mocop service install", stderr.getvalue())
+                self.assertFalse((self.root / "access-token").exists())
+
     def test_foreground_http_server_receives_an_ephemeral_access_token(self) -> None:
         config_path = write_config(self.root / "config.json")
         observed = {}

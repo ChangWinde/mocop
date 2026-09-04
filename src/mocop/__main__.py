@@ -18,7 +18,6 @@ from .lifecycle import (
     LifecycleError,
     UserServiceManager,
     access_token_path,
-    ensure_access_token,
     initialize_config,
     read_access_token,
     user_config_path,
@@ -231,9 +230,13 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _run_monitor(args: argparse.Namespace) -> int:
-    if args.managed_service and args.config is None:
+    if args.managed_service and (args.config is None or args.access_token_file is None):
+        # The generated unit always passes both. A unit predating the
+        # capability (0.8.x) must be regenerated with `mocop service install`
+        # rather than silently minting a token nobody was shown.
         print(
-            "Configuration error: --managed-service requires --config",
+            "Configuration error: --managed-service requires --config and "
+            "--access-token-file; re-run `mocop service install`",
             file=sys.stderr,
         )
         return 2
@@ -252,19 +255,9 @@ def _run_monitor(args: argparse.Namespace) -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
     access_token = None
-    token_path = args.access_token_file
-    if args.managed_service and token_path is None:
-        # Units installed before capability authentication was introduced do
-        # not carry --access-token-file. Derive and create the same private
-        # per-install file so a package upgrade cannot crash-loop the service.
+    if args.access_token_file is not None:
         try:
-            token_path = ensure_access_token(config_path)
-        except LifecycleError as exc:
-            print(f"Configuration error: {exc}", file=sys.stderr)
-            return 2
-    if token_path is not None:
-        try:
-            access_token = read_access_token(token_path)
+            access_token = read_access_token(args.access_token_file)
         except LifecycleError as exc:
             print(f"Configuration error: {exc}", file=sys.stderr)
             return 2
