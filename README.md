@@ -230,13 +230,11 @@ canonical ownership, update triggers, language policy, and ADR lifecycle.
 
 ```bash
 python3 -m unittest discover -s tests -t . -p 'test_*.py'
-uvx --from ruff==0.12.11 ruff check .
-uvx --from ruff==0.12.11 ruff format --check .
-for t in capacity_match capacity_watch csv_export dashboard_auth process_search update_pill; do node "tests/${t}_test.mjs"; done
-node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-See [CONTRIBUTING.md](.github/CONTRIBUTING.md) before changing code, tests,
+[CONTRIBUTING.md](.github/CONTRIBUTING.md) owns the complete quality-gate list
+(lint, coverage, browser leaf contracts, and the real-browser smoke test) and
+the commit and documentation rules; read it before changing code, tests,
 documentation, or public contracts.
 
 ## License

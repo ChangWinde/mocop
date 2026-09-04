@@ -226,13 +226,11 @@ VPN；明文 HTTP 上的 Bearer 头不提供网络机密性或服务端身份认
 
 ```bash
 python3 -m unittest discover -s tests -t . -p 'test_*.py'
-uvx --from ruff==0.12.11 ruff check .
-uvx --from ruff==0.12.11 ruff format --check .
-for t in capacity_match capacity_watch csv_export dashboard_auth process_search update_pill; do node "tests/${t}_test.mjs"; done
-node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-修改代码、测试、文档或公开契约前，请阅读[贡献指南](../../../.github/CONTRIBUTING.md)。
+完整的质量门禁清单（lint、覆盖率、浏览器 leaf 契约测试、真实浏览器 smoke
+测试）以及提交与文档规则以[贡献指南](../../../.github/CONTRIBUTING.md)为准；
+修改代码、测试、文档或公开契约前请先阅读。
 
 ## 许可证
 
