@@ -108,13 +108,18 @@ def git_state_allows_generated_subject(subject: str) -> bool:
 
 def commit_allows_generated_subject(commit: str, subject: str) -> bool:
     if subject.startswith("Merge "):
+        # Read the raw object: in a shallow checkout (the default for
+        # pull-request test jobs) the graft hides parents from `git log %P`
+        # while the commit itself still records them.
         completed = subprocess.run(
-            ["git", "log", "-1", "--format=%P", commit],
+            ["git", "cat-file", "-p", commit],
             check=True,
             capture_output=True,
             text=True,
         )
-        return len(completed.stdout.split()) >= 2
+        header = completed.stdout.split("\n\n", 1)[0]
+        parents = [line for line in header.splitlines() if line.startswith("parent ")]
+        return len(parents) >= 2
     if subject.startswith("Revert "):
         completed = subprocess.run(
             ["git", "log", "-1", "--format=%B", commit],
