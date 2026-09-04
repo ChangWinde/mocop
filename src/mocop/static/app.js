@@ -148,11 +148,17 @@ const WORKLOAD_KIND_LABELS = {
   podman: "Podman",
 };
 
+// compareProcessSearchRecords and processSearchRank are not called by the
+// dashboard itself: the opt-in browser benchmark (tests/browser_smoke.mjs with
+// MOCOP_PROGRAM_SEARCH_BENCHMARK=1) evaluates them in this page to cross-check
+// the bounded heap against a full sort.
 const {
+  compareProcessSearchRecords,
   gpuRecordMatchesSearch,
   normalizedSearchTerms,
   processMatchesSearch,
   processMemoryRank,
+  processSearchRank,
   searchProcessRecords,
 } = globalThis.MocopProcessSearch.create({
   maxResults: MAX_PROGRAM_SEARCH_RESULTS,
@@ -5709,11 +5715,16 @@ function groupMetric(label, value) {
   return metric;
 }
 
+// A status filter or search query temporarily expands every matching group
+// without touching the operator's explicit expansion state.
+function groupsFocused() {
+  return view.filter !== "all" || view.query.trim() !== "";
+}
+
 function gpuGroup(group) {
   const { server, records } = group;
   const details = create("details", "gpu-server-group");
-  const focused = view.filter !== "all" || view.query.trim() !== "";
-  details.open = focused || view.expandedHosts.has(server.host);
+  details.open = groupsFocused() || view.expandedHosts.has(server.host);
   details.dataset.host = server.host;
   const summary = create("summary", "gpu-group-summary");
   const identity = create("span", "gpu-group-identity");
@@ -5752,12 +5763,10 @@ function gpuGroup(group) {
   );
   details.append(summary, gpuTable(records, true));
   details.addEventListener("toggle", () => {
-    if (focused) {
-      updateGroupToggle();
-      return;
+    if (!groupsFocused()) {
+      if (details.open) view.expandedHosts.add(server.host);
+      else view.expandedHosts.delete(server.host);
     }
-    if (details.open) view.expandedHosts.add(server.host);
-    else view.expandedHosts.delete(server.host);
     updateGroupToggle();
   });
   return details;
@@ -5769,7 +5778,6 @@ function tableSignature(server, records) {
     host: `${server.host}\u0000${server.displayName || ""}`,
     incidentVersion: view.incidentVersion,
     filter: view.filter,
-    query: view.query.trim(),
     sort: view.sort,
     status: server.status,
     stale: server.stale,
@@ -5862,7 +5870,14 @@ function renderTable() {
     [...view.groupCache.keys()].forEach((host) => {
       if (!activeHosts.has(host)) view.groupCache.delete(host);
     });
-    reconcileChildren(elements.gpuGroups, groups.map(cachedGpuGroup));
+    const nodes = groups.map(cachedGpuGroup);
+    reconcileChildren(elements.gpuGroups, nodes);
+    // Reused nodes keep their DOM; only the expansion state follows the query.
+    const focused = groupsFocused();
+    nodes.forEach((node) => {
+      const open = focused || view.expandedHosts.has(node.dataset.host);
+      if (node.open !== open) node.open = open;
+    });
   }
   if (focusedGpu && !document.activeElement?.isConnected) {
     [...elements.gpuGroups.querySelectorAll("tr[data-gpu-id]")]
@@ -6171,8 +6186,15 @@ elements.search.addEventListener("input", () => {
   const query = elements.search.value.slice(0, MAX_SEARCH_QUERY_LENGTH);
   if (elements.search.value !== query) elements.search.value = query;
   view.query = query;
-  render();
+  renderSearchResults();
 });
+
+// Only the program-search panel and the GPU table depend on the query.
+function renderSearchResults() {
+  if (!view.snapshot) return;
+  renderProgramSearch();
+  renderTable();
+}
 
 document.addEventListener("keydown", (event) => {
   if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -6186,7 +6208,7 @@ document.addEventListener("keydown", (event) => {
   if (elements.search.value) {
     elements.search.value = "";
     view.query = "";
-    render();
+    renderSearchResults();
   } else {
     elements.search.blur();
   }
