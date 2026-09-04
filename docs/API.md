@@ -1,10 +1,11 @@
 # Mocop HTTP API
 
 This is the complete reference for Mocop's HTTP API. It is written for both
-human operators and automation ("agents"): every route, header requirement,
-response field, and stable error code below is verified against the route
-manifest (`API_ROUTES` in `src/mocop/web.py`) by a repository test, so the
-document and the running server cannot drift apart silently.
+human operators and automation ("agents"). A repository test
+(`tests/test_docs.py`) checks every route, method, and access tier below against
+the live manifest (`API_ROUTES` in `src/mocop/web.py`), checks that every
+documented error code exists, and a second test proves each manifested tier is
+the tier its handler enforces. Field-level examples are maintained by hand.
 
 ## Scope and compatibility
 
@@ -57,10 +58,13 @@ document and the running server cannot drift apart silently.
 - **Authentication:** every API and OpenMetrics route except `/api/meta`,
   `/healthz`, and `/readyz` requires exactly one `Authorization: Bearer
   <capability>` header.
-  `mocop service install` creates the capability as a private `0600` file and
-  prints a fragment URL; a foreground `mocop` process creates an ephemeral
-  capability and prints its fragment URL. URL fragments are never sent over
-  HTTP. The dashboard scrubs the fragment immediately and retains it only in
+  `mocop service install` creates the capability as a private `0600` file
+  named `access-token` beside the configuration it was given
+  (`~/.config/mocop/access-token` for the default layout, or next to the
+  `--config` path) and prints a fragment URL; a foreground `mocop` process
+  creates an ephemeral capability that exists only in its terminal output.
+  A missing or wrong capability answers `403 AUTHENTICATION_REQUIRED`. URL
+  fragments are never sent over HTTP. The dashboard scrubs the fragment immediately and retains it only in
   tab-scoped `sessionStorage`; it never creates an ambient Cookie or persistent
   `localStorage`/IndexedDB credential. When no fragment or stored capability is
   available, the dashboard presents a non-dismissible token prompt. It stores
@@ -169,6 +173,7 @@ cap:
 | `POST /api/probe` | 512 |
 | `POST /api/notifications/test` | 32 |
 | `POST /api/service/restart` | 32 |
+| `POST /api/update/apply` | 32 |
 
 ### Error envelope and stable codes
 
@@ -350,7 +355,7 @@ Top-level fields:
 | Field | Type | Description |
 |---|---|---|
 | `version` | int | Monotonic state revision; increases on every observable change. |
-| `appVersion` | string | Mocop release, e.g. `"0.9.0"`. |
+| `appVersion` | string | Mocop release, e.g. `"0.12.0"`; compare it with the tag you installed. |
 | `incidentVersion` | int | Incident-view revision; also advances on action/maintenance expiry. |
 | `generatedAt` | timestamp | When this snapshot projection was assembled (per state revision, not per request). |
 | `startedAt` | timestamp | Process start; changes prove a restart happened. |
@@ -557,8 +562,9 @@ Response fields:
 
 Owner attribution requires `workloads.mode` `identity` or `auto`; with
 `disabled` everything aggregates under `owner: null`. Idle classification
-skips sample gaps longer than four poll cycles (offline stretches are never
-counted as measured activity).
+skips sample gaps longer than 60 seconds; the bound is fixed and independent of
+the poll cadence, so a later cadence change cannot rewrite historical rollups,
+and offline stretches are never counted as measured activity.
 
 Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_HOURS`,
 `INVALID_LIMIT`.
@@ -625,7 +631,7 @@ API self-description. Tier P. Query: rejected (`QUERY_NOT_ALLOWED`).
 ```json
 {
   "apiVersion": "2",
-  "appVersion": "0.9.0",
+  "appVersion": "<release>",
   "schemaVersion": 1,
   "capabilities": {
     "restartSupported": true,

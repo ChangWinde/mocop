@@ -22,7 +22,7 @@ local JSON configuration
         │ + bounded worker pool     │
         ▼                           │
  ResourceProbe Protocol             │
-   openssh-linux-v6                 │
+   OpenSshLinuxResourceProbe        │
         │ fixed argv and script     │
         ▼                           │
  local shell or OpenSSH → /proc + /sys + df + nvidia-smi
@@ -52,12 +52,16 @@ interfaces without a runtime plugin registry.
 | Module | Responsibility |
 |---|---|
 | `config.py` | configuration discovery, strict schema validation, safe defaults |
+| `privatefiles.py` | private lock and `0600` file primitives shared by the lifecycle and configuration controller |
+| `hostnames.py` | canonical Host/Origin hostname normalization and the trusted web policy |
 | `discovery_policy.py` | dependency-free SSH discovery policy parsing and bounds |
 | `discovery.py` | explicit inventory and optional OpenSSH alias discovery |
 | `ssh_topology.py` | bounded effective-route resolution, infrastructure classification, topology and grouping projection |
 | `inventory.py` | typed dashboard configuration projection and private atomic mutation |
 | `metrics.py` | deterministic OpenMetrics 1.0 snapshot exposition |
 | `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
+| `remote_script.py` | the fixed `MONITOR_V8` collection script: protocol constants, template, rendering |
+| `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |
 | `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
 | `models.py` | immutable resource result types |
@@ -68,9 +72,10 @@ interfaces without a runtime plugin registry.
 | `notifications.py` | HTTPS webhook validation, deduplication, throttling, and delivery |
 | `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
+| `static_assets.py` | static asset route table, strong ETags, and conditional-delivery validators |
 | `lifecycle.py` | private config creation and user-level systemd management |
 | `migration.py` | non-destructive cross-machine config transformation and private target creation |
-| `static/` | dependency-free dashboard assets, including authentication and process-search leaves |
+| `static/` | dependency-free dashboard: `app.js` plus the browser leaves listed under [Maintainability boundary](#maintainability-boundary) |
 
 ## Boundaries and canonical formats
 
@@ -238,13 +243,10 @@ records the composition and rejected remote-script alternative.
 
 The user service is intentional because OpenSSH configuration, `known_hosts`, keys,
 and agent sockets belong to that identity. The unit invokes `systemctl --user` without
-a shell and applies enforceable, portable controls: `NoNewPrivileges=true`, restricted
-address families, `UMask=0077`, and `StateDirectory=mocop` with mode `0700` for
-optional SQLite. It deliberately does not advertise a user-manager mount-namespace
-filesystem sandbox, which is systemd-version-dependent and can deny required SSH
-agent or ControlMaster paths. Selected configuration files and directories instead
-rely on validated ownership and private Unix modes. An optional private `environment`
-file beside `config.json` supplies webhook URL and signing-secret variables.
+a shell and applies only enforceable, portable hardening directives; the exact unit
+contents, the reason it claims no mount-namespace sandbox, and the private
+`environment` file for webhook secrets are owned by
+[OPERATIONS.md](OPERATIONS.md#installed-state-and-ownership).
 
 The generated unit also marks the process as supervised. Only this mode exposes the
 bounded dashboard restart capability: the HTTP handler acknowledges an exact
@@ -293,7 +295,7 @@ workload, and notification boundaries.
 
 ## Performance decision
 
-SSH connection and network wait dominate current collection cost. Existing evidence does not justify a Rust rewrite because it would not remove those round trips. Re-evaluate the language or agent architecture only after profiling a fixed workload that exceeds 200 hosts, requires a sustained interval below 2 seconds, saturates one CPU core, or exceeds 512 MiB resident memory.
+SSH connection and network wait dominate current collection cost. Existing evidence does not justify a Rust rewrite because it would not remove those round trips. Re-evaluate the language or agent architecture only when one of the [architecture thresholds](PERFORMANCE.md#architecture-thresholds) that PERFORMANCE.md owns becomes real.
 
 The reproducible measurement contract lives in [PERFORMANCE.md](PERFORMANCE.md).
 Security boundaries live in [SECURITY.md](SECURITY.md); deployment, upgrade, and
@@ -327,13 +329,22 @@ ratchet, not a target. A change that would cross one extracts a coherent leaf an
 lowers the ceiling instead of increasing it. Browser leaves remain dependency-free
 classic scripts loaded before `app.js`, expose one frozen namespace/factory, and
 consume the authenticated snapshot rather than creating a second API or state
-store. `dashboard-auth.js` owns capability ingestion, fragment scrubbing,
-tab-scoped retention, and the explicit token prompt; `format.js` owns pure
-numeric/time formatting; `capacity-watch.js` owns capacity matching and the
-armed/notified watch state machine with its notification cooldown, while
-`app.js` still owns request transport, notification delivery, and dashboard
-lifecycle. Python extraction must keep each lock-owned invariant inside one
-module.
+store. `app.js` keeps request transport, notification delivery, DOM rendering,
+and dashboard lifecycle; each leaf owns one concern and is unit-tested in Node
+by `tests/<leaf>_test.mjs`:
+
+| Leaf | Owns |
+|---|---|
+| `dashboard-auth.js` | capability ingestion, fragment scrubbing, tab-scoped retention, the token prompt |
+| `format.js` | pure numeric, memory, rate, and relative-time formatting; SSE chunk normalization |
+| `process-search.js` | NFKC term normalization, bounded process/GPU matching, ranking and memory ordering |
+| `gpu-tasks.js` | entry point, environment, footprint, and per-card summary projections of a GPU process |
+| `capacity-match.js` | ranking same-host, same-model GPU candidates against a demand |
+| `capacity-watch.js` | the durable watch, its armed/notified edge, cooldown, and presented text |
+| `csv-export.js` | CSV cell escaping (including formula-injection defense) and row building |
+| `update-pill.js` | release-currency polling cadence, pill state, and the fixed apply action |
+
+Python extraction must keep each lock-owned invariant inside one module.
 
 [ADR-0021](adr/0021-incremental-module-boundaries.md) compares immediate splitting,
 incremental leaf extraction, and adding a build/registry layer. It selects the

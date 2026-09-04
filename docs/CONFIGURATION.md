@@ -41,7 +41,7 @@ The ten fields marked required must be present, even when empty.
 |---|---:|---|---|
 | `ssh_config` | yes | non-empty string | OpenSSH config path; `~` expands, relative paths resolve beside the JSON file, and control/surrogate characters are rejected. |
 | `auto_discover` | yes | boolean | Add eligible literal aliases discovered in `ssh_config`; `exclude_hosts` still wins. |
-| `ssh_discovery` | no | alias-only compatibility policy | `{mode, refresh_seconds, resolve_timeout_seconds}`. `mode` is `aliases` or `topology`; see below. Newly generated configurations select topology mode. |
+| `ssh_discovery` | no | omitted ⇒ `aliases` mode | `{mode, refresh_seconds, resolve_timeout_seconds}`. `mode` is `aliases` (alias-only scan) or `topology` (resolved routes; see below). Files written by `init`, `deploy`, and `migrate` set `topology`. |
 | `hosts` | yes | string array | Explicit allowlist; unique after trimming, at most 1,024 safe aliases. |
 | `exclude_hosts` | yes | string array | Deny-list; unique after trimming, at most 1,024 safe aliases. |
 | `poll_interval_seconds` | yes | number | 1–3,600. Dashboard writes intentionally narrow this to 2–60. |

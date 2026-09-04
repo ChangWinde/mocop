@@ -2,8 +2,9 @@
 
 ## Status
 
-Superseded by ADR-0022 for installations using resolved SSH discovery. The
-configured-topology contract remains accepted for alias-only discovery.
+Accepted. [ADR-0022](0022-resolved-ssh-topology-discovery.md) adds an inferred
+topology for installations without a configured one; a configured `topology`
+remains authoritative in both discovery modes, so nothing here is superseded.
 
 ## Context
 

@@ -126,11 +126,11 @@ rendering.
 
 ## Fresh-host fast deployment
 
-After installing the package on a server with a user-level systemd manager and an
-operator-owned OpenSSH configuration, deploy Mocop with one local command:
+After installing the release pinned in the [README quick start](../README.md#quick-start)
+on a server with a user-level systemd manager and an operator-owned OpenSSH
+configuration, deploy Mocop with one local command:
 
 ```bash
-uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.11.0"
 "$(uv tool dir --bin)/mocop" deploy --display-name monitor-0
 ```
 
@@ -140,7 +140,8 @@ the local target, enables automatic alias admission and resolved topology discov
 then installs and health-checks the user service. Use repeatable `--host SSH_ALIAS` for
 targets absent from OpenSSH discovery, `--local-host ALIAS` to choose the internal local
 identity, `--no-local` for a controller-only monitor, and `--no-auto-discover` for an
-explicit-only inventory.
+explicit-only inventory. `--display-name` labels the local target and therefore
+requires one: it is rejected together with `--no-local`.
 
 Fresh deployment refuses an existing config, sibling `access-token`, or sibling
 `environment`; it never overwrites or silently adopts an old installation. Use
@@ -235,6 +236,37 @@ file, SQLite state, browser storage, journal entries, SSH material/control socke
 the installed Python package, and the login linger policy. Review and back up those
 items before any separate manual cleanup; clearing them is not part of uninstall and
 may be irreversible.
+
+## Command reference and exit codes
+
+Every command accepts `--config PATH`; without it Mocop uses `MOCOP_CONFIG`, then
+`~/.config/mocop/config.json`, then a development-only `./config/mocop.json`, then
+the bundled empty configuration. `mocop --help` and `mocop <command> --help`
+describe every flag.
+
+| Command | Purpose | Notable flags |
+|---|---|---|
+| `mocop` | Foreground monitor with an ephemeral capability printed once | `--once` (print one JSON snapshot and exit), `--strict` (with `--once`, fail unless every host is online) |
+| `mocop deploy` | Create a private config and install the verified user service on a fresh host | `--host ALIAS` (repeatable), `--local-host ALIAS` / `--no-local`, `--display-name`, `--ssh-config`, `--auto-discover` / `--no-auto-discover` |
+| `mocop init` | Create a private config only, never overwriting one | `--host ALIAS` (repeatable) |
+| `mocop migrate` | Generate a new private config from another installation's config | `--from-config PATH` (required), the same identity flags as `deploy`, `--drop-local-host` |
+| `mocop config check` | Validate the configuration without a web server or SSH | — |
+| `mocop doctor` | Read-only SSH reachability and connection-reuse diagnosis | `--host ALIAS` (repeatable filter), `--no-connect`, `--probe` (one production collection per alias), `--profile` (latency breakdown), `--json` |
+| `mocop service install` | Generate, enable, start, and verify the unit; print the capability URL | — |
+| `mocop service status` | `systemctl --user status` for the generated unit | — |
+| `mocop service uninstall` | Stop and remove only the generated unit | — |
+
+Exit codes are stable for automation:
+
+| Code | Meaning |
+|---|---|
+| `0` | Success; for `doctor`, every selected alias is usable |
+| `1` | Runtime failure: `doctor` found at least one unusable alias, `--once --strict` found a host without an online sample, the listener could not bind, the collector stopped, or `service install` could not verify the service |
+| `2` | Configuration or usage error: invalid or unreadable configuration, a `doctor` flag conflict or unknown `--host`, a lifecycle refusal (existing files, invalid alias), or a managed unit missing its generated arguments |
+| `75` | Supervised restart requested from the dashboard or self-update; systemd's restart policy starts the replacement |
+
+`doctor --json` and `mocop --once` write machine-readable reports to stdout;
+diagnostics and refusals go to stderr.
 
 ## Related references
 

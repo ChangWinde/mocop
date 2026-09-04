@@ -48,6 +48,8 @@ Cons: preserves duplicated policy, inconsistent severity, alert flapping, and th
 
 Choose Option A. Advance the fixed collection contract to `MONITOR_V4` with an independently fallible `GPU_HEALTH` section keyed by UUID. Represent health as an optional immutable value nested under each GPU. Keep the existing base GPU query authoritative when the health query is unavailable.
 
+> **Update:** `MONITOR_V4` records the historical decision; the protocol is now `MONITOR_V8` and, per [ADR-0016](0016-single-version-protocol-and-agent-api.md), the parser accepts only the current version.
+
 Add validated `expected_gpu_counts` and `incidents` objects to configuration. `ThresholdIncidentPolicy` remains the only condition evaluator. `IncidentTracker` applies condition-specific activation and recovery cycles: connectivity opens immediately but requires stable recovery, ordinary resource conditions require repeated samples, and idle-with-VRAM requires a longer sustained window. Active conditions retain the value that opened or changed severity until resolution, keeping the incident version transition-based and avoiding an extra HTTP request per telemetry update.
 
 The browser consumes `/api/incidents` for the attention view and event history. It may group conditions that share a backend-provided `groupKey`, but it does not decide whether a condition exists or what its severity is.

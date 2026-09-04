@@ -113,13 +113,9 @@ instead of copying device utilization onto a process.
 
 Reconsider a separate paginated process API or compressed transport only after
 measurement shows snapshot transfer or browser parsing is the active bottleneck.
-Re-profile the complete architecture before any of these conditions is real:
-
-- more than 200 monitored hosts;
-- sustained collection below two seconds;
-- one CPU core remains saturated;
-- resident memory exceeds 512 MiB; or
-- SSH connection time is no longer the dominant cost.
+Re-profile the complete architecture before any of the
+[architecture thresholds](PERFORMANCE.md#architecture-thresholds) owned by
+PERFORMANCE.md becomes real.
 
 Until then, the highest-value operational improvements are connection reuse,
 representative live soak evidence, and enabling workload identity only where the

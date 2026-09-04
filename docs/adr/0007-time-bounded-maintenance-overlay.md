@@ -42,6 +42,8 @@ Choose Option C. `maintenance_windows` maps an explicit host alias to a strict U
 
 The active maintenance signature participates in the incident-view revision. Starting, changing, clearing, or naturally expiring a window therefore causes consumers to refresh the overlay even when no underlying condition transitions. The canonical configuration remains the durable source; expired records are inert and may be replaced or removed by the next operator change.
 
+> **Update:** configuration-authored windows may alternatively carry a weekly `recurrence` (`{weekday, start, duration_minutes}`, UTC); the dashboard still creates only fixed-duration windows, and every window is delivered with an `active` flag so planned recurrences stay visible outside their live period.
+
 ## Impact
 
 - A planned outage remains visible as a real connectivity or resource condition but leaves the attention queue until the window ends.

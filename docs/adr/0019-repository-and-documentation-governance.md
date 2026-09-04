@@ -2,8 +2,11 @@
 
 ## Status
 
-Accepted; the root-level package layout is superseded by
-[ADR-0025](0025-src-package-layout.md)
+Accepted
+
+> **Update:** the root-level `mocop/` package location decided here was moved to
+> `src/mocop/` by [ADR-0025](0025-src-package-layout.md); the documentation
+> governance, root allowlist, and `MANIFEST.in` decisions are unchanged.
 
 ## Context
 

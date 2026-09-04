@@ -45,3 +45,7 @@ Choose Option B. Persist one validated `visualStyle` and one validated `accent`.
 - Existing browser preferences migrate on read and are rewritten in the new form after the next preference change.
 - Appearance remains local to one browser and never enters HTTP, collection configuration, or remote commands.
 - Adding a style requires responsive and browser coverage; adding an accent requires a bounded palette-difference and contrast review.
+
+> **Update:** the read-time migration of the five pre-0.9 `theme` values was
+> removed in 0.9.0; a preference record without `visualStyle`/`accent` now
+> simply receives the defaults.

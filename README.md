@@ -28,7 +28,7 @@
 
 Mocop is a local web dashboard for NVIDIA GPU clusters. It uses existing OpenSSH aliases to collect GPU, CPU, memory, swap, disk, and network data, then streams each host result to the browser as soon as it completes.
 
-Remote hosts need no agent, database, Python installation, or monitoring port. They need Linux `/proc` and `nvidia-smi` for NVIDIA GPU data. Mocop itself uses the Python standard library and the system OpenSSH client.
+Remote hosts need no agent, database, Python installation, or monitoring port. They need Linux `/proc`; `nvidia-smi` is required only for NVIDIA GPU data, and a host without it reports its system metrics with GPU status `no_nvidia_smi`. Mocop itself uses the Python standard library and the system OpenSSH client.
 
 Here, **AI-native** means that the interface is built around GPU capacity, task placement, and failure diagnosis. Mocop does not call an AI service or upload telemetry.
 
@@ -100,7 +100,11 @@ ssh gpu-node-01 true
 ssh -o BatchMode=yes gpu-node-01 true
 ```
 
-Keep `ProxyJump`, `ProxyCommand`, ports, users, and identities in OpenSSH. New configurations use bounded, connection-free `ssh -G` resolution to identify proxy aliases, keep automatically discovered jump hosts out of the probe inventory, build the display topology, and group targets by their closest jump alias. Direct targets sharing a numbered alias prefix (such as `gpu-1` and `gpu-2`) form a fallback group. Explicit hosts, exclusions, groups, and configured topology override inference. Git remotes remain filtered separately.
+Keep `ProxyJump`, `ProxyCommand`, ports, users, and identities in OpenSSH. New configurations resolve aliases with bounded, connection-free `ssh -G` and infer from the result:
+
+- automatically discovered jump hosts stay out of the probe inventory;
+- targets are grouped by their closest jump alias, or by a shared numbered prefix (`gpu-1`, `gpu-2`) when direct;
+- explicit hosts, exclusions, groups, and a configured topology always override inference; Git remotes are filtered separately.
 
 ### 2. Install and deploy
 
@@ -109,7 +113,7 @@ uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.11.0"
 "$(uv tool dir --bin)/mocop" deploy --display-name monitor-0
 ```
 
-`mocop deploy` needs no inventory JSON on a fresh server: it creates a `0600` config, monitors the current machine locally, discovers safe aliases from `~/.ssh/config`, excludes resolved jump hosts, enables topology grouping, and installs and verifies the user service. The explicit bin path works before a new shell picks up uv's tool directory. The command refuses existing config or capability state; use `mocop service install` for an existing setup.
+`mocop deploy` needs no inventory JSON on a fresh server: it creates a `0600` config, monitors the current machine locally, discovers safe aliases from `~/.ssh/config`, and installs and verifies the user service. The explicit bin path works before a new shell picks up uv's tool directory; later commands assume a new shell (or `uv tool update-shell`). Deploy refuses an existing `config.json`, `access-token`, or `environment` file — use `mocop service install` for an existing setup — and without a systemd user manager (containers, some WSL setups) run `mocop init` plus a foreground `mocop` instead.
 
 ### 3. Validate the deployment and SSH path
 
@@ -118,23 +122,17 @@ mocop config check
 mocop doctor
 ```
 
-`mocop config check` parses and validates the configuration without starting the web server or opening any SSH connection. It reports the resolved config path, host count, persistence/workload/topology state, and each webhook's environment-variable names with their set/unset status — never their values. It exits `0` when the configuration is valid and `2` when it is not.
+`mocop config check` validates the configuration without starting the web server or opening any SSH connection, reports the resolved path, host count, and persistence/workload/topology/webhook state (never secret values), and exits `0` when valid or `2` when not.
 
-`mocop doctor` then verifies non-interactive SSH reachability and connection reuse for every monitored alias (exit `0` when every alias is usable, `1` otherwise).
+`mocop doctor` then verifies non-interactive SSH reachability and connection reuse for every monitored alias: exit `0` when every alias is usable, `1` when at least one failed, `2` for a configuration or usage error. Add `--json` for a machine-readable report; the [operations runbook](docs/OPERATIONS.md#command-reference-and-exit-codes) lists every command, flag, and exit code.
 
 ### 4. Open the dashboard
 
-Open the exact `Dashboard:` capability URL printed by `mocop deploy`, for example `http://127.0.0.1:8787/#access_token=...`. The fragment is not sent over HTTP;
-the page removes it immediately and keeps the capability in tab-scoped
-`sessionStorage`, so reloads and the managed restart flow remain authenticated.
-Closing the tab or opening an independent tab requires the printed URL again. Deployment installs,
-enables, starts, and verifies a user-level systemd service. It does not change
-the system linger policy.
-
-A bare dashboard or trusted forwarded URL now opens a token prompt instead of an
-empty dashboard. Paste the contents of the managed `access-token` file; Mocop
-validates it before storing it in the tab session. Invalid credentials are neither
-retained nor retried automatically.
+Open the exact `Dashboard:` capability URL printed by `mocop deploy`, for example `http://127.0.0.1:8787/#access_token=...`. The page keeps the capability in tab-scoped
+`sessionStorage`, so reloads stay authenticated; a new tab either needs the printed
+URL again or prompts for the contents of the `access-token` file beside the
+configuration (`~/.config/mocop/access-token` by default). The
+[API reference](docs/API.md#scope-and-compatibility) owns the capability rules.
 
 Run `mocop` for a foreground process, or manage the service with:
 
@@ -162,7 +160,9 @@ disabled by default. After a manual edit, run `mocop config check` and follow th
 - Search from **All servers** for programs across the fleet, or select a server to
   scope by process, command, PID, owner, workload, queue, host, model, or UUID.
 - Scan process count, largest allocation, memory coverage, and freshness in the
-  main GPU table; open a GPU for bounded process filters, sorting, and copy actions.
+  main GPU table; open a GPU for task rows led by the real entry point (for example
+  `train.dragon_video2motion` rather than `python`), environment and footprint
+  chips, click-to-expand command lines, bounded filters, sorting, and copy actions.
 - Open incidents for evidence and acknowledgement/silence, or schedule maintenance
   while collection continues.
 - Use **Probe now**, **Match capacity**, and **Settings → Monitored nodes** for the

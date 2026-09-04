@@ -110,9 +110,11 @@ uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.11.0"
 ```
 
 全新服务器无需手写资产 JSON：`mocop deploy` 会创建 `0600` 配置、默认采集本机、从
-`~/.ssh/config` 自动发现安全 alias、排除识别出的跳板机、启用拓扑分组，并安装和验证
-用户服务。显式 bin 路径不依赖当前 shell 的 PATH。已有配置或 token 时命令会拒绝；
-已有部署请使用 `mocop service install`。
+`~/.ssh/config` 自动发现安全 alias，并安装和验证用户服务。显式 bin 路径不依赖当前
+shell 的 PATH；后续命令假定已开启新 shell（或执行过 `uv tool update-shell`）。
+已存在 `config.json`、`access-token` 或 `environment` 文件时命令会拒绝，已有部署请使用
+`mocop service install`；没有 systemd 用户管理器的环境（容器、部分 WSL）请改用
+`mocop init` 加前台 `mocop`。
 
 ### 3. 校验部署与 SSH 路径
 
@@ -121,22 +123,18 @@ mocop config check
 mocop doctor
 ```
 
-`mocop config check` 只解析并校验配置，不启动网页服务，也不打开任何 SSH 连接。它报告解析到的配置路径、主机数量、持久化/工作负载/拓扑状态，以及每个 webhook 引用的环境变量名及其 set/unset 状态——绝不输出变量值。配置有效时退出码为 `0`，无效时为 `2`。
+`mocop config check` 只校验配置，不启动网页服务，也不打开任何 SSH 连接；它报告解析到的路径、主机数量以及持久化/工作负载/拓扑/webhook 状态（绝不输出密钥值），有效时退出 `0`，无效时退出 `2`。
 
-随后 `mocop doctor` 验证每个受监控别名的非交互式 SSH 可达性与连接复用（全部别名可用时退出 `0`，否则为 `1`）。
+随后 `mocop doctor` 验证每个受监控别名的非交互式 SSH 可达性与连接复用：全部可用退出 `0`，至少一个失败退出 `1`，配置或用法错误退出 `2`。加 `--json` 可输出机器可读报告；[运维手册](../../OPERATIONS.md#command-reference-and-exit-codes)列出了全部命令、参数和退出码。
 
 ### 4. 打开控制台
 
 打开 `mocop deploy` 打印的完整 `Dashboard:` 能力 URL，例如
-`http://127.0.0.1:8787/#access_token=...`。URL 片段不会随 HTTP 请求发送；
-页面会立即清除它，并把能力保存在当前标签页的 `sessionStorage` 中，刷新和
-服务重启流程仍可继续认证；关闭标签页或新开独立标签页后，需要再次使用
-打印的完整 URL。该命令会安装、启用、启动并验证用户级
-systemd 服务，但不会修改系统的 linger 策略。
-
-直接打开控制台裸地址或受信任的转发地址时，页面会显示令牌输入框，而不会
-停留在空白数据状态。粘贴托管 `access-token` 文件的内容即可；Mocop 仅在
-验证成功后将其保存到当前标签页，错误凭据不会被保留或自动重试。
+`http://127.0.0.1:8787/#access_token=...`。页面把能力保存在当前标签页的
+`sessionStorage` 中，刷新后仍保持认证；新开标签页需要再次使用打印的 URL，
+或在弹出的输入框中粘贴配置旁 `access-token` 文件（默认为
+`~/.config/mocop/access-token`）的内容。能力的完整规则由
+[API 参考](../../API.md#scope-and-compatibility)负责说明。
 
 直接运行 `mocop` 可使用前台模式。后台服务可通过以下命令管理：
 
@@ -163,8 +161,9 @@ mocop service uninstall
 
 - 在“全部服务器”中搜索整个集群；先选择服务器后，可按程序、命令、PID、
   用户、workload、队列、主机、型号或 UUID 限定范围。
-- 主 GPU 表直接展示进程数、最大分配、显存覆盖和新鲜度；打开单卡后可进行
-  有界筛选、排序、复制和归属下钻。
+- 主 GPU 表直接展示进程数、最大分配、显存覆盖和新鲜度；打开单卡后，任务行以
+  真实入口（例如 `train.dragon_video2motion` 而非 `python`）开头，附带环境与
+  资源占用标签，命令行可点击展开，并支持有界筛选、排序、复制和归属下钻。
 - 打开告警查看证据并确认/静默，或设置维护窗口；采集不会因此停止。
 - “立即探测”“匹配算力”和“设置 → 监控节点”覆盖常用操作。容量匹配只是
   当前观测，不代表资源预留。

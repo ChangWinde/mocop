@@ -19,8 +19,25 @@
     "gpu-node-01": 8,
     "gpu-node-02": 8
   },
-  "host_overrides": {},
-  "maintenance_windows": {},
+  "host_overrides": {
+    "monitor-host": {
+      "display_name": "monitor-0"
+    },
+    "gpu-node-02": {
+      "poll_interval_seconds": 15,
+      "probe_timeout_seconds": 30
+    }
+  },
+  "maintenance_windows": {
+    "gpu-node-02": {
+      "reason": "Weekly firmware inspection",
+      "recurrence": {
+        "weekday": 6,
+        "start": "02:00",
+        "duration_minutes": 120
+      }
+    }
+  },
   "host_groups": {
     "gpu-node-01": "training",
     "gpu-node-02": "inference"
@@ -67,6 +84,10 @@
   },
   "workloads": {
     "mode": "disabled"
+  },
+  "updates": {
+    "mode": "off",
+    "check_interval_seconds": 21600
   },
   "webhooks": [],
   "incident_actions": [],

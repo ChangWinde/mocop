@@ -79,3 +79,9 @@ Two related policies:
 - Legacy probe registry names are gone; `openssh-linux-v6` remains the single
   registered collector implementation name (it names the probe, not the
   payload protocol).
+
+> **Update:** the registry itself was removed in 0.9.0, so no collector name
+> exists any more; the entrypoint constructs `OpenSshLinuxResourceProbe`
+> directly. The protocol also advanced through `MONITOR_V7` between this
+> decision and the current `MONITOR_V8`, so the removed compatibility range is
+> V4 through V7 as the Changelog records.

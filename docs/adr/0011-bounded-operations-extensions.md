@@ -59,6 +59,12 @@ Choose Option C.
   bounded queueing, event deduplication, throttling, and finite jittered retries.
   Maintenance-silenced transitions are not delivered.
 
+> **Update:** since 0.10.0 a `resolved` transition always reaches the delivery
+> queue so a receiver's open alert is never left hanging when a condition
+> recovers inside a maintenance window or silence; withheld recoveries are
+> counted as `suppressedDeliveries` in the notification status (0.10.2). Only
+> new `opened` transitions remain suppressed by maintenance and silence.
+
 The storage and notification implementations conform to `TelemetryPersistence` and
 `IncidentNotificationSink`; disabled implementations preserve the same call sites.
 

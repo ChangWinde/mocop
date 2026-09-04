@@ -32,11 +32,10 @@ secrets.
 
 **Local lifecycle boundary:** `mocop init` creates a `0600` configuration without
 overwrite. Service management writes only the fixed user unit path and invokes
-`systemctl --user` with fixed arguments, never a shell. The unit applies
-`NoNewPrivileges=true`, restricted address families, `UMask=0077`, and a private
-`StateDirectory=mocop`. It intentionally makes no mount-namespace filesystem-isolation
-claim in a user manager; private ownership/modes protect configuration and secrets
-without breaking required SSH agent or multiplex-socket paths. Installation rejects
+`systemctl --user` with fixed arguments, never a shell. The generated unit's
+hardening directives and the deliberate absence of a mount-namespace claim are
+documented in [OPERATIONS.md](OPERATIONS.md#installed-state-and-ownership); private
+ownership and modes remain the filesystem boundary. Installation rejects
 symlink, non-regular, foreign-owned, or group/other-accessible capability and optional
 environment files before systemd may read them.
 Cross-machine migration reads one private, valid source config and creates one
