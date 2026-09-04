@@ -24,10 +24,10 @@ TRACKED_ROOT_ENTRIES = {
     "tests",
 }
 
-# These ceilings are a ratchet over the reviewed 0.9.0 tree, not a general style
+# These ceilings are a ratchet over the reviewed tree, not a general style
 # rule. Extract a coherent leaf and lower the budget instead of raising it.
 CORE_MODULE_LINE_BUDGETS = {
-    "src/mocop/static/app.js": 6_810,
+    "src/mocop/static/app.js": 6_700,
     "src/mocop/static/capacity-match.js": 150,
     "src/mocop/static/capacity-watch.js": 200,
     "src/mocop/static/csv-export.js": 100,
@@ -36,10 +36,10 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/static/gpu-tasks.js": 175,
     "src/mocop/static/process-search.js": 225,
     "src/mocop/static/update-pill.js": 175,
-    "src/mocop/service.py": 2_750,
-    "src/mocop/web.py": 1_800,
-    "src/mocop/probe.py": 1_560,
-    "src/mocop/config.py": 1_575,
+    "src/mocop/service.py": 2_725,
+    "src/mocop/web.py": 1_700,
+    "src/mocop/probe.py": 1_540,
+    "src/mocop/config.py": 1_550,
 }
 
 

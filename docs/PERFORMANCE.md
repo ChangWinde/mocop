@@ -4,6 +4,11 @@ Mocop spends most collection time waiting for SSH connection and network I/O. Py
 
 This document defines reproducible measurement conditions and architecture thresholds. It contains no production inventory or telemetry.
 
+Every measurement below is dated and names its Python or browser build; unless a
+paragraph says otherwise, the dated figures were taken on the 0.9.0 tree
+(2026-08-10 to 2026-08-15). [QUALITY.md](QUALITY.md) carries the most recent
+re-run of the runtime profile against the current tree.
+
 ## Hot-path design
 
 - One bounded transport process collects system metrics, GPU metrics, compute tasks, and optional GPU health for one host per cycle; remote targets use one logical SSH session and the optional local target bypasses SSH.

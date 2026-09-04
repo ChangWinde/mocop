@@ -22,12 +22,67 @@ All notable changes are documented here. This project follows Semantic Versionin
 - The truncated command line in a task row expands in place on click
   instead of requiring copy-and-paste to read the training config.
 
+- `mocop deploy --help`, `mocop migrate --help`, and `mocop service --help`
+  now describe every flag and action, and help output names the program
+  `mocop` instead of `__main__.py`. The operations runbook gained a command,
+  flag, and exit-code reference (`0`, `1`, `2`, `75`).
+- `tests/gpu_tasks_test.mjs` now runs in CI: the workflow globs every browser
+  leaf and contract test instead of maintaining a list that had drifted.
+
 ### Changed
 
 - Workload record parsing moved from `probe.py` into a new `workloads.py`
   module, and the GPU task projections moved from `app.js` into the
   `gpu-tasks.js` leaf ([ADR-0021](adr/0021-incremental-module-boundaries.md));
   both budgets ratcheted down.
+- Every HTTP server instance now requires the Bearer capability: the
+  unauthenticated server mode that only tests used is gone, `GET /api/meta`
+  no longer reports the constant `authenticationRequired` flag, and the
+  dashboard prompts for a missing capability without a `/api/meta` round trip.
+- `GET /api/update` now enforces the reader tier its manifest entry always
+  advertised (a marker-less request answers `403 UNTRUSTED_ORIGIN`), and a
+  test proves every manifested tier against its handler.
+- `POST /api/settings/collector` distinguishes `INVALID_SCHEMA` (shape or
+  type) from `INVALID_SETTINGS` (documented bounds) as the API reference
+  always described.
+- A managed unit that omits `--access-token-file` now exits `2` with a
+  message pointing at `mocop service install` instead of minting a token
+  nobody was shown; units generated since 0.9.0 always pass the flag.
+- The dashboard search box re-renders only the program-search panel and GPU
+  table, and GPU groups are keyed on the rows they show rather than on the
+  query text, so typing no longer rebuilds every visible group. Active
+  incidents are indexed by host on acceptance, the GPU history dialog is
+  render-keyed like the trend panel, and the per-second tick compares before
+  it writes and skips cosmetic updates while the tab is hidden.
+- Documentation gives each fact one owner: CONTRIBUTING.md owns the quality
+  gate list, OPERATIONS.md the systemd unit and pinned install command,
+  PERFORMANCE.md the architecture thresholds, API.md the capability rules.
+  The architecture table lists every module and browser leaf, QUALITY.md
+  re-measures the runtime profile and coverage against the current tree, and
+  six ADRs record how later releases changed their decisions.
+
+### Fixed
+
+- The capacity-watch notification and title marker now fire while the tab is
+  in the background. They were evaluated inside the `requestAnimationFrame`
+  render, which browsers pause for hidden documents, so the alert the feature
+  exists for arrived only when the operator returned to the tab.
+- The release pill now starts on the polling recovery path, not only when the
+  first snapshot arrives over the live stream.
+- The owners dialog shows when its data was last collected instead of a
+  static "实时更新" label.
+
+### Removed
+
+- `GET /api/service` and `POST /api/settings/poll-interval`, deprecated in
+  0.9.0. Use the `capabilities` block of `GET /api/meta` and
+  `POST /api/settings/collector` (any non-empty subset) instead.
+- Dashboard fallbacks for server shapes that cannot occur (older snapshot,
+  collector, maintenance, and capability payloads, the native `EventSource`
+  transport, browser-side threshold defaults, and the `createImageBitmap`
+  and `indexedDB` feature probes), plus unused leaf exports, dead CSS, and
+  Python methods, protocol duck-typing, and Linux flag probes with no callers
+  or purpose.
 
 ## [0.11.0] - 2026-08-25
 

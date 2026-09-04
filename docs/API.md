@@ -355,7 +355,7 @@ Top-level fields:
 | Field | Type | Description |
 |---|---|---|
 | `version` | int | Monotonic state revision; increases on every observable change. |
-| `appVersion` | string | Mocop release, e.g. `"0.12.0"`; compare it with the tag you installed. |
+| `appVersion` | string | The running Mocop release; compare it with the tag you installed. |
 | `incidentVersion` | int | Incident-view revision; also advances on action/maintenance expiry. |
 | `generatedAt` | timestamp | When this snapshot projection was assembled (per state revision, not per request). |
 | `startedAt` | timestamp | Process start; changes prove a restart happened. |
