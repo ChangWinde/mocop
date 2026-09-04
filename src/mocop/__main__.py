@@ -40,9 +40,49 @@ from .updates import UpdateManager
 from .web import MonitorHttpServer
 
 
+def _add_target_identity_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    local_host_help: str,
+    without_local_flag: str,
+    without_local_help: str,
+    auto_discover_default: bool | None,
+) -> None:
+    """Options shared by ``deploy`` and ``migrate`` for the new machine's identity."""
+    identity = parser.add_mutually_exclusive_group()
+    identity.add_argument("--local-host", metavar="ALIAS", help=local_host_help)
+    identity.add_argument(
+        without_local_flag, action="store_true", help=without_local_help
+    )
+    parser.add_argument(
+        "--display-name",
+        help="dashboard label for the local host; presentation only",
+    )
+    parser.add_argument(
+        "--ssh-config",
+        default="~/.ssh/config",
+        help="OpenSSH client configuration to scan for aliases (default: %(default)s)",
+    )
+    admission = parser.add_mutually_exclusive_group()
+    admission.add_argument(
+        "--auto-discover",
+        dest="auto_discover",
+        action="store_true",
+        help="admit safe aliases from the SSH config automatically",
+    )
+    admission.add_argument(
+        "--no-auto-discover",
+        dest="auto_discover",
+        action="store_false",
+        help="monitor only the explicitly listed hosts",
+    )
+    parser.set_defaults(auto_discover=auto_discover_default)
+
+
 def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="mocop: AI-native GPU cluster monitor over OpenSSH."
+        prog="mocop",
+        description="mocop: AI-native GPU cluster monitor over OpenSSH.",
     )
     parser.add_argument(
         "--config",
@@ -113,43 +153,43 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="SSH_ALIAS",
         help="explicit SSH alias to monitor; repeat for multiple servers",
     )
-    deploy_identity = deploy_parser.add_mutually_exclusive_group()
-    deploy_identity.add_argument("--local-host", metavar="ALIAS")
-    deploy_identity.add_argument(
-        "--no-local", action="store_true", help="do not monitor this server locally"
+    _add_target_identity_arguments(
+        deploy_parser,
+        local_host_help=(
+            "safe alias that identifies this machine in the inventory "
+            "(default: the current hostname)"
+        ),
+        without_local_flag="--no-local",
+        without_local_help="do not monitor this server locally",
+        auto_discover_default=True,
     )
-    deploy_parser.add_argument("--display-name")
-    deploy_parser.add_argument("--ssh-config", default="~/.ssh/config")
-    deploy_admission = deploy_parser.add_mutually_exclusive_group()
-    deploy_admission.add_argument(
-        "--auto-discover", dest="auto_discover", action="store_true"
-    )
-    deploy_admission.add_argument(
-        "--no-auto-discover", dest="auto_discover", action="store_false"
-    )
-    deploy_parser.set_defaults(auto_discover=True)
 
     migrate_parser = commands.add_parser(
         "migrate", help="generate a new private config from another installation"
     )
-    migrate_parser.add_argument("--from-config", type=Path, required=True)
+    migrate_parser.add_argument(
+        "--from-config",
+        type=Path,
+        required=True,
+        help="existing configuration to migrate; it is read, never modified",
+    )
     migrate_parser.add_argument(
         "--config",
         type=Path,
         default=argparse.SUPPRESS,
         help="new configuration path; it must not already exist",
     )
-    local_identity = migrate_parser.add_mutually_exclusive_group()
-    local_identity.add_argument("--local-host", metavar="ALIAS")
-    local_identity.add_argument("--drop-local-host", action="store_true")
-    migrate_parser.add_argument("--display-name")
-    migrate_parser.add_argument("--ssh-config", default="~/.ssh/config")
-    admission = migrate_parser.add_mutually_exclusive_group()
-    admission.add_argument("--auto-discover", dest="auto_discover", action="store_true")
-    admission.add_argument(
-        "--no-auto-discover", dest="auto_discover", action="store_false"
+    # None keeps the source installation's auto_discover policy.
+    _add_target_identity_arguments(
+        migrate_parser,
+        local_host_help=(
+            "safe alias for this machine when the source monitored itself "
+            "(default: the current hostname)"
+        ),
+        without_local_flag="--drop-local-host",
+        without_local_help="the new monitor must not collect from itself",
+        auto_discover_default=None,
     )
-    migrate_parser.set_defaults(auto_discover=None)
 
     config_parser = commands.add_parser(
         "config", help="inspect the monitor configuration"
@@ -173,7 +213,13 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "service", help="manage the user-level systemd service"
     )
     service_actions = service_parser.add_subparsers(dest="action", required=True)
-    install_parser = service_actions.add_parser("install")
+    install_parser = service_actions.add_parser(
+        "install",
+        help=(
+            "generate, enable, start, and verify the user unit, then print the "
+            "dashboard capability URL"
+        ),
+    )
     install_parser.add_argument(
         "--config",
         type=Path,
@@ -181,8 +227,12 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="configuration used by the service",
     )
     # status and uninstall operate on the fixed unit; they take no --config.
-    service_actions.add_parser("status")
-    service_actions.add_parser("uninstall")
+    service_actions.add_parser(
+        "status", help="show systemd status for the generated unit"
+    )
+    service_actions.add_parser(
+        "uninstall", help="stop and remove the generated unit only"
+    )
 
     doctor_parser = commands.add_parser(
         "doctor",
