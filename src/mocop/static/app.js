@@ -210,6 +210,7 @@ const view = {
   singleTableCache: null,
   selectedPanelKey: "",
   incidents: null,
+  incidentsByHost: new Map(),
   attentionRenderKey: "",
   incidentRenderKey: "",
   incidentVersion: -1,
@@ -230,6 +231,7 @@ const view = {
   selectedGpu: null,
   gpuHistory: null,
   gpuHistoryKey: "",
+  gpuHistoryRenderKey: "",
   gpuHistoryFetchKey: null,
   gpuHistoryRequest: 0,
   gpuHistoryLoading: false,
@@ -1081,9 +1083,11 @@ function renderConnectionStatus() {
       title = `最近采集批次完成于 ${age(view.snapshot.lastPollCompletedAt)}`;
     }
   }
-  elements.connection.className = `connection ${kind}`;
-  elements.connectionText.textContent = label;
-  elements.connection.title = title;
+  // Runs every second: unchanged values must not invalidate style or layout.
+  const className = `connection ${kind}`;
+  if (elements.connection.className !== className) elements.connection.className = className;
+  if (elements.connectionText.textContent !== label) elements.connectionText.textContent = label;
+  if (elements.connection.title !== title) elements.connection.title = title;
 }
 
 function syncRefreshControl() {
@@ -2261,10 +2265,37 @@ function incidentConditionMessage(condition) {
   return condition.detail || resource;
 }
 
+// Validate the incidents envelope once and index active conditions by host,
+// so per-server and per-GPU renderers never rescan the whole fleet list.
+function acceptIncidents(incidents) {
+  if (
+    !incidents
+    || typeof incidents !== "object"
+    || !Number.isSafeInteger(incidents.version)
+    || !Array.isArray(incidents.active)
+    || !Array.isArray(incidents.events)
+    || !Array.isArray(incidents.correlations)
+  ) {
+    throw new TypeError("Invalid incidents envelope");
+  }
+  const byHost = new Map();
+  incidents.active.forEach((condition) => {
+    const conditions = byHost.get(condition.host);
+    if (conditions) conditions.push(condition);
+    else byHost.set(condition.host, [condition]);
+  });
+  view.incidents = incidents;
+  view.incidentsByHost = byHost;
+  view.incidentVersion = incidents.version;
+}
+
+function hostConditions(host) {
+  return view.incidentsByHost.get(host) || [];
+}
+
 function serverConditions(server) {
-  if (!Array.isArray(view.incidents?.active)) return [];
-  return view.incidents.active
-    .filter((condition) => condition.host === server.host && condition.actionable !== false)
+  return hostConditions(server.host)
+    .filter((condition) => condition.actionable !== false)
     .map((condition) => ({
       id: condition.conditionKey,
       kind: condition.category,
@@ -2282,7 +2313,7 @@ function serverConditions(server) {
 }
 
 function incidentsSyncedWithSnapshot() {
-  return Array.isArray(view.incidents?.active)
+  return view.incidents != null
     && view.snapshot != null
     && view.incidentVersion === numeric(view.snapshot.incidentVersion, 0);
 }
@@ -2784,7 +2815,8 @@ function renderCapacityWatchBanner() {
     watch && watch.state === "notified" && !view.capacityWatchBannerDismissed,
   );
   banner.hidden = !show;
-  document.title = show ? `● ${view.baseDocumentTitle}` : view.baseDocumentTitle;
+  const title = show ? `● ${view.baseDocumentTitle}` : view.baseDocumentTitle;
+  if (document.title !== title) document.title = title;
   if (show) {
     elements.capacityWatchBannerText.textContent = capacityWatch.bannerText(
       watch,
@@ -2833,8 +2865,7 @@ function attentionIssues() {
   );
   const consumed = new Set();
   const issues = [];
-  const correlations = Array.isArray(view.incidents?.correlations)
-    ? view.incidents.correlations : [];
+  const correlations = view.incidents?.correlations || [];
   correlations.forEach((correlation) => {
     if (
       correlation?.kind !== "configured_shared_path"
@@ -3032,10 +3063,9 @@ function incidentDescription(event) {
 }
 
 function selectedIncidentRecord() {
-  if (!view.selectedIncident || !Array.isArray(view.incidents?.active)) return null;
-  return view.incidents.active.find((condition) =>
-    condition.host === view.selectedIncident.host
-      && condition.conditionKey === view.selectedIncident.conditionKey) || null;
+  if (!view.selectedIncident) return null;
+  return hostConditions(view.selectedIncident.host).find((condition) =>
+    condition.conditionKey === view.selectedIncident.conditionKey) || null;
 }
 
 function diagnosticEvidenceLabel(label) {
@@ -3264,8 +3294,8 @@ function renderIncidents() {
       observedAge,
     );
     item.addEventListener("click", () => {
-      const active = view.incidents.active?.find((condition) =>
-        condition.host === event.host && condition.conditionKey === event.conditionKey);
+      const active = hostConditions(event.host).find((condition) =>
+        condition.conditionKey === event.conditionKey);
       if (active) openIncidentDetail(active);
       else selectHost(event.host);
     });
@@ -4656,11 +4686,8 @@ function miniMetric(value, suffix, usage, className = "") {
 function gpuState(gpu, server) {
   if (server.stale) return ["历史数据", "stale"];
   const identity = String(gpu.uuid || gpu.index);
-  const activeConditions = Array.isArray(view.incidents?.active)
-    ? view.incidents.active : [];
-  const gpuConditions = activeConditions.filter(
-    (condition) => condition.host === server.host
-      && String(condition.conditionKey || "").endsWith(`:${identity}`),
+  const gpuConditions = hostConditions(server.host).filter(
+    (condition) => String(condition.conditionKey || "").endsWith(`:${identity}`),
   );
   if (gpuConditions.some((condition) => [
     "gpu_ecc", "gpu_memory_repair", "gpu_slowdown",
@@ -5119,6 +5146,15 @@ function selectedGpuRecord() {
 
 function renderGpuHistory() {
   const points = view.gpuHistory?.points || [];
+  // Mirror renderTrends: the cards and timeline only change when the fetched
+  // history does, not on every snapshot that arrives while the dialog is open.
+  const eventCount = view.gpuHistory?.processEvents?.length ?? 0;
+  const renderKey = [
+    view.gpuHistoryKey, view.gpuHistoryLoading, view.gpuHistoryError,
+    points.length, points.at(-1)?.observedAt || "none", eventCount,
+  ].join(":");
+  if (renderKey === view.gpuHistoryRenderKey) return;
+  view.gpuHistoryRenderKey = renderKey;
   if (view.gpuHistoryLoading && !view.gpuHistory) {
     elements.gpuHistoryRange.textContent = "正在读取";
     elements.gpuHistoryGrid.replaceChildren(
@@ -5470,6 +5506,7 @@ function openGpuDetail(server, gpu, { processQuery = "", processKey = "" } = {})
   elements.gpuTaskSearch.value = view.gpuTaskQuery;
   view.gpuHistory = null;
   view.gpuHistoryKey = "";
+  view.gpuHistoryRenderKey = "";
   view.gpuHistoryFetchKey = null;
   view.gpuHistoryError = false;
   view.gpuHistoryRetryDelayMs = 0;
@@ -5985,8 +6022,7 @@ async function syncIncidents() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const incidents = await response.json();
     if (request !== view.incidentRequest) return;
-    view.incidents = incidents;
-    view.incidentVersion = numeric(incidents.version, 0);
+    acceptIncidents(incidents);
     view.incidentRetryDelayMs = 0;
     view.incidentSyncFailed = false;
     // The watch waits for incidents that match the snapshot revision, so
@@ -6325,6 +6361,7 @@ elements.gpuDetailDialog.addEventListener("close", () => {
   clearGpuHistoryRetry();
   view.gpuHistory = null;
   view.gpuHistoryKey = "";
+  view.gpuHistoryRenderKey = "";
   view.gpuHistoryFetchKey = null;
   view.gpuHistoryError = false;
   view.gpuHistoryRetryDelayMs = 0;
@@ -6562,9 +6599,16 @@ elements.groupToggle.addEventListener("click", () => {
 
 setInterval(() => {
   if (!view.dashboardStarted) return;
-  if (view.snapshot) elements.lastSync.textContent = age(view.snapshot.lastPollCompletedAt);
-  refreshRelativeTimes();
-  renderConnectionStatus();
+  if (!document.hidden) {
+    // Relative-time text is cosmetic; a hidden document repaints nothing,
+    // but the staleness gate below must keep running to recover the stream.
+    if (view.snapshot) {
+      const lastSync = age(view.snapshot.lastPollCompletedAt);
+      if (elements.lastSync.textContent !== lastSync) elements.lastSync.textContent = lastSync;
+    }
+    refreshRelativeTimes();
+    renderConnectionStatus();
+  }
   const elapsed = Date.now() - view.lastEventAt;
   const fallbackAfter = Math.max(2000, numeric(view.snapshot?.pollIntervalSeconds, 5) * 1000);
   // Consecutive failures widen the poll gate up to 30s so an outage is not
