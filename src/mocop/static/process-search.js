@@ -184,11 +184,9 @@
     }
 
     return Object.freeze({
-      compareProcessSearchRecords,
       gpuRecordMatchesSearch,
       normalizedSearchTerms,
       processMatchesSearch,
-      processSearchRank,
       searchProcessRecords,
     });
   }

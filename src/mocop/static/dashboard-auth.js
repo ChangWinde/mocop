@@ -117,8 +117,6 @@
         return value;
       },
       forget,
-      isValid,
-      remember,
     });
   }
 

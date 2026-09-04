@@ -110,12 +110,7 @@
       return { candidates, excludedMaintenance, excludedHealth };
     }
 
-    return Object.freeze({
-      hostBlockerCategories: HOST_BLOCKERS,
-      gpuBlockerCategories: GPU_BLOCKERS,
-      gpuHasBlocker,
-      matches,
-    });
+    return Object.freeze({ matches });
   }
 
   globalThis.MocopCapacityMatch = Object.freeze({ create });

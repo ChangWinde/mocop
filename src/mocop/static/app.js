@@ -133,6 +133,12 @@ const fetch = (url, options = {}) => nativeFetch(url, {
       ? { Authorization: `Bearer ${dashboardAuthentication.token}` } : {}),
   },
 });
+// Every write route takes one JSON object and nothing else.
+const postJson = (url, body) => fetch(url, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
 
 const WORKLOAD_KIND_LABELS = {
   process: "进程",
@@ -143,11 +149,9 @@ const WORKLOAD_KIND_LABELS = {
 };
 
 const {
-  compareProcessSearchRecords,
   gpuRecordMatchesSearch,
   normalizedSearchTerms,
   processMatchesSearch,
-  processSearchRank,
   searchProcessRecords,
 } = globalThis.MocopProcessSearch.create({
   maxResults: MAX_PROGRAM_SEARCH_RESULTS,
@@ -474,6 +478,24 @@ const elements = {
   incidentOpenMaintenance: $("#incident-open-maintenance"),
   incidentActionFeedback: $("#incident-action-feedback"),
 };
+
+// The six feature dialogs are mutually exclusive modals; the authentication
+// prompt is deliberately not in this set so nothing can dismiss it.
+const FEATURE_DIALOGS = [
+  elements.settingsDialog,
+  elements.topologyDialog,
+  elements.gpuDetailDialog,
+  elements.capacityDialog,
+  elements.ownersDialog,
+  elements.incidentDetailDialog,
+];
+
+function openExclusiveDialog(dialog) {
+  FEATURE_DIALOGS.forEach((other) => {
+    if (other !== dialog && other.open) other.close();
+  });
+  if (!dialog.open) dialog.showModal();
+}
 const styleChoiceButtons = [...document.querySelectorAll("[data-style-choice]")];
 const accentChoiceButtons = [...document.querySelectorAll("[data-accent-choice]")];
 
@@ -487,10 +509,6 @@ function create(tag, className, text) {
 // Binary presentation assets stay out of both synchronous preferences and the service.
 function openVisualAssetDatabase() {
   return new Promise((resolve, reject) => {
-    if (!("indexedDB" in window)) {
-      reject(new Error("IndexedDB unavailable"));
-      return;
-    }
     const request = indexedDB.open(VISUAL_ASSET_DATABASE, 1);
     let settled = false;
     const finish = (callback, value) => {
@@ -557,38 +575,14 @@ function deleteStoredBackground() {
   return transactVisualAsset("readwrite", (store) => store.delete(BACKGROUND_ASSET_KEY));
 }
 
-function decodeImage(blob) {
-  if (typeof createImageBitmap === "function") {
-    return createImageBitmap(blob).then((bitmap) => {
-      return {
-        source: bitmap,
-        width: bitmap.width,
-        height: bitmap.height,
-        release: () => bitmap.close(),
-      };
-    });
-  }
-  return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(blob);
-    const image = new Image();
-    let settled = false;
-    const finish = (callback, value) => {
-      if (settled) return;
-      settled = true;
-      callback(value);
-    };
-    image.onload = () => finish(resolve, {
-      source: image,
-      width: image.naturalWidth,
-      height: image.naturalHeight,
-      release: () => URL.revokeObjectURL(objectUrl),
-    });
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      finish(reject, new Error("无法解析图片内容"));
-    };
-    image.src = objectUrl;
-  });
+async function decodeImage(blob) {
+  const bitmap = await createImageBitmap(blob);
+  return {
+    source: bitmap,
+    width: bitmap.width,
+    height: bitmap.height,
+    release: () => bitmap.close(),
+  };
 }
 
 async function decodeImageSize(blob) {
@@ -1061,11 +1055,7 @@ function collectionHealth() {
     0,
     (Date.now() - completedAt) / 1000,
   );
-  const fallback = Math.max(15, numeric(view.snapshot.pollIntervalSeconds) * 3);
-  const staleAfterSeconds = numeric(
-    view.snapshot.collectionStaleAfterSeconds,
-    fallback,
-  );
+  const staleAfterSeconds = view.snapshot.collectionStaleAfterSeconds;
   return {
     state: elapsedSeconds > staleAfterSeconds ? "delayed" : "fresh",
     elapsedSeconds,
@@ -1114,14 +1104,21 @@ function syncRefreshControl() {
 }
 
 function acceptSnapshot(snapshot) {
-  // servers is part of the envelope: renderers dereference it unguarded, so
-  // a structurally broken snapshot must be rejected here instead of
+  // Renderers dereference the envelope unguarded: the server-owned
+  // thresholds replace any threshold policy in this file, stats always carry
+  // the actionable counts, and servers is the spine of every view. A
+  // structurally broken snapshot must therefore be rejected here instead of
   // replacing good state and freezing every later render.
   if (
     !snapshot
     || typeof snapshot !== "object"
     || !Number.isSafeInteger(snapshot.version)
     || typeof snapshot.startedAt !== "string"
+    || typeof snapshot.collectionStaleAfterSeconds !== "number"
+    || !snapshot.thresholds
+    || typeof snapshot.thresholds !== "object"
+    || !snapshot.stats
+    || typeof snapshot.stats !== "object"
     || !Array.isArray(snapshot.servers)
     || snapshot.servers.some(
       (server) => !server || typeof server.host !== "string" || !Array.isArray(server.gpus),
@@ -1175,21 +1172,10 @@ async function updatePollInterval() {
   try {
     // The collector endpoint accepts a field subset; the poll-interval
     // endpoint is deprecated and only kept server-side for older pages.
-    const response = await fetch("/api/settings/collector", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pollIntervalSeconds: requested }),
-    });
+    const response = await postJson("/api/settings/collector", { pollIntervalSeconds: requested });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
-    // Newer services answer with the collector envelope; older ones with the
-    // flat poll-interval settings object. Both carry version/startedAt.
-    const settings = (
-      payload.collectorSettings
-      && typeof payload.collectorSettings === "object"
-      && !Array.isArray(payload.collectorSettings)
-    ) ? payload.collectorSettings : payload;
-    const pollIntervalSeconds = settings.pollIntervalSeconds;
+    const pollIntervalSeconds = payload.collectorSettings?.pollIntervalSeconds;
     if (
       !Number.isSafeInteger(payload.version)
       || typeof payload.startedAt !== "string"
@@ -1225,9 +1211,9 @@ function normalizeCollectorSettings(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new TypeError("Invalid collector settings response");
   }
-  const pollIntervalSeconds = payload.pollIntervalSeconds;
-  const probeTimeoutSeconds = payload.probeTimeoutSeconds;
-  const maxWorkers = payload.maxWorkers;
+  const {
+    pollIntervalSeconds, probeTimeoutSeconds, connectTimeoutSeconds, maxWorkers,
+  } = payload;
   if (
     typeof pollIntervalSeconds !== "number"
     || !Number.isFinite(pollIntervalSeconds)
@@ -1237,24 +1223,19 @@ function normalizeCollectorSettings(payload) {
     || !Number.isFinite(probeTimeoutSeconds)
     || probeTimeoutSeconds < 2
     || probeTimeoutSeconds > 300
+    // Read-only: the service reports it so the dialog can explain the
+    // probe-timeout lower bound.
+    || typeof connectTimeoutSeconds !== "number"
+    || !Number.isFinite(connectTimeoutSeconds)
+    || connectTimeoutSeconds <= 0
+    || connectTimeoutSeconds > 300
     || !Number.isSafeInteger(maxWorkers)
     || maxWorkers < 1
     || maxWorkers > 64
   ) {
     throw new TypeError("Invalid collector settings response");
   }
-  const settings = { pollIntervalSeconds, probeTimeoutSeconds, maxWorkers };
-  // Read-only field on newer services; older ones simply omit it.
-  const connectTimeoutSeconds = payload.connectTimeoutSeconds;
-  if (
-    typeof connectTimeoutSeconds === "number"
-    && Number.isFinite(connectTimeoutSeconds)
-    && connectTimeoutSeconds > 0
-    && connectTimeoutSeconds <= 300
-  ) {
-    settings.connectTimeoutSeconds = connectTimeoutSeconds;
-  }
-  return settings;
+  return { pollIntervalSeconds, probeTimeoutSeconds, connectTimeoutSeconds, maxWorkers };
 }
 
 function normalizeInventory(payload) {
@@ -1558,10 +1539,7 @@ async function fetchTopology() {
   view.topologyError = "";
   renderTopology();
   try {
-    const response = await fetch("/api/topology", {
-      cache: "no-store",
-      headers: { "X-Monitor-Request": "dashboard" },
-    });
+    const response = await fetch("/api/topology");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     view.topology = normalizeTopology(await response.json());
     view.topologyRevision += 1;
@@ -1613,8 +1591,9 @@ function normalizeMaintenanceWindows(payload, configuredHosts) {
       || !keys.includes("until")
       || !keys.includes("reason")
       || keys.some((key) => !allowedKeys.has(key))
+      // recurring is only emitted for recurring windows; active always is.
       || (keys.includes("recurring") && typeof window.recurring !== "boolean")
-      || (keys.includes("active") && typeof window.active !== "boolean")
+      || typeof window.active !== "boolean"
       || typeof window.until !== "string"
       || !Number.isFinite(Date.parse(window.until))
       || typeof window.reason !== "string"
@@ -1627,8 +1606,7 @@ function normalizeMaintenanceWindows(payload, configuredHosts) {
       until: window.until,
       reason: window.reason,
       recurring: window.recurring === true,
-      // Older services only ever delivered live windows and omit the flag.
-      active: window.active !== false,
+      active: window.active,
     };
   });
   return windows;
@@ -1694,27 +1672,16 @@ async function saveCollectorSettings(event) {
   view.collectorSettingsSaving = true;
   syncCollectorSettings();
   try {
-    const response = await fetch("/api/settings/collector", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify(settings),
-    });
+    const response = await postJson("/api/settings/collector", settings);
     if (response.status === 400) {
-      // The service enforces probeTimeoutSeconds > connect_timeout_seconds.
-      // Newer services expose the value read-only via the inventory payload;
-      // older ones keep it server-side, so fall back to naming the config key.
-      const connectTimeout = view.inventory?.collectorSettings?.connectTimeoutSeconds;
+      // The service enforces probeTimeoutSeconds > connect_timeout_seconds
+      // and reports the read-only floor through the inventory payload.
+      const connectTimeout = view.inventory.collectorSettings.connectTimeoutSeconds;
       setCollectorSettingsStatus(
         "error",
-        `保存失败：单轮探测超时必须大于 SSH 连接超时（${
-          connectTimeout
-            ? `当前 ${format(connectTimeout, 1)} 秒`
-            : "connect_timeout_seconds，默认 5 秒"
-        }），且数值需在允许范围内`,
+        `保存失败：单轮探测超时必须大于 SSH 连接超时（当前 ${
+          format(connectTimeout, 1)
+        } 秒），且数值需在允许范围内`,
       );
       return;
     }
@@ -2039,10 +2006,7 @@ async function refreshInventory() {
   view.inventoryMessageKind = "";
   renderInventory();
   try {
-    const response = await fetch("/api/inventory", {
-      cache: "no-store",
-      headers: { "X-Monitor-Request": "dashboard" },
-    });
+    const response = await fetch("/api/inventory");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     view.inventory = normalizeInventory(await response.json());
   } catch (_error) {
@@ -2063,15 +2027,7 @@ async function changeHostGroup(host, group) {
   view.inventoryMessageKind = "";
   renderInventory();
   try {
-    const response = await fetch("/api/settings/host-group", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify({ host, group }),
-    });
+    const response = await postJson("/api/settings/host-group", { host, group });
     if (response.status === 409) throw new RangeError("stale inventory");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     view.inventory = normalizeInventory(await response.json());
@@ -2100,15 +2056,7 @@ async function changeMaintenance(host, durationSeconds, reason) {
   view.inventoryMessageKind = "";
   renderInventory();
   try {
-    const response = await fetch("/api/settings/maintenance", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify({ host, durationSeconds, reason }),
-    });
+    const response = await postJson("/api/settings/maintenance", { host, durationSeconds, reason });
     if (response.status === 409) throw new RangeError("stale inventory");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     view.inventory = normalizeInventory(await response.json());
@@ -2139,15 +2087,7 @@ async function changeInventory(action, host) {
   view.inventoryMessageKind = "";
   renderInventory();
   try {
-    const response = await fetch("/api/settings/hosts", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify({ action, host }),
-    });
+    const response = await postJson("/api/settings/hosts", { action, host });
     if (response.status === 409) {
       throw new RangeError("stale inventory");
     }
@@ -2195,17 +2135,9 @@ function requestInventoryRemoval(host) {
   renderInventory();
 }
 
+// Threshold policy lives on the server; the accepted envelope guarantees it.
 function limits() {
-  return view.snapshot?.thresholds || {
-    cpu_warning_pct: 85,
-    memory_warning_pct: 90,
-    swap_warning_pct: 50,
-    disk_warning_pct: 85,
-    psi_memory_some_pct: 20,
-    psi_io_some_pct: 30,
-    gpu_temperature_warning_c: 80,
-    gpu_busy_pct: 10,
-  };
+  return view.snapshot.thresholds;
 }
 
 function serverStatus(server) {
@@ -2479,11 +2411,12 @@ function sshCopyButton(host) {
 }
 
 function renderOwners() {
-  if (!elements.ownersDialog?.open) return;
+  if (!elements.ownersDialog.open) return;
   if (!view.snapshot) {
     elements.ownersSummary.textContent = "等待 GPU 快照";
     return;
   }
+  elements.ownersUpdated.textContent = age(view.snapshot.lastPollCompletedAt);
   const owners = new Map();
   const hostLabels = new Map();
   let excludedOfflineHosts = 0;
@@ -2660,7 +2593,7 @@ async function fetchOwnersUsage() {
 }
 
 function renderOwnersUsage() {
-  if (!elements.ownersDialog?.open) return;
+  if (!elements.ownersDialog.open) return;
   elements.ownersUsageResults.replaceChildren();
   if (view.ownersUsageLoading) {
     elements.ownersUsageSummary.textContent = "正在统计占用账单…";
@@ -2770,9 +2703,17 @@ function renderCapacityMatcher() {
   }
 }
 
-// One watch, evaluated on every accepted snapshot regardless of dialog
-// visibility. The leaf owns the armed/notified edge and its cooldown; this
-// layer only projects the result into the banner, title, and notification.
+// One watch, settled synchronously at every data-acceptance site rather than
+// inside the requestAnimationFrame render: browsers pause rAF for hidden
+// documents, and a background tab is exactly where the notification and the
+// title marker must still fire. The leaf owns the armed/notified edge and its
+// cooldown; this layer only projects the result into banner, title, and
+// notification.
+function settleCapacityWatch() {
+  evaluateCapacityWatch();
+  renderCapacityWatchBanner();
+}
+
 function evaluateCapacityWatch() {
   const watch = view.capacityWatch;
   if (!watch || !view.snapshot || !incidentsSyncedWithSnapshot()) return;
@@ -3227,9 +3168,7 @@ function openIncidentDetail(condition) {
   };
   elements.incidentActionFeedback.textContent = "";
   elements.incidentActionFeedback.className = "incident-action-feedback";
-  if (elements.settingsDialog.open) elements.settingsDialog.close();
-  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
-  if (!elements.incidentDetailDialog.open) elements.incidentDetailDialog.showModal();
+  openExclusiveDialog(elements.incidentDetailDialog);
   renderIncidentDetail();
 }
 
@@ -3243,21 +3182,14 @@ async function updateIncidentAction(action) {
   const duration = action === "clear"
     ? 0 : Number.parseInt(elements.incidentActionDuration.value, 10);
   try {
-    const response = await fetch("/api/settings/incident-action", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify({
-        host: condition.host,
-        conditionKey: condition.conditionKey,
-        incidentStartedAt: action === "clear"
-          ? null : (condition.firstObservedAt || condition.observedAt),
-        action,
-        durationSeconds: duration,
-        reason: action === "clear" ? "" : elements.incidentActionReason.value,
-      }),
+    const response = await postJson("/api/settings/incident-action", {
+      host: condition.host,
+      conditionKey: condition.conditionKey,
+      incidentStartedAt: action === "clear"
+        ? null : (condition.firstObservedAt || condition.observedAt),
+      action,
+      durationSeconds: duration,
+      reason: action === "clear" ? "" : elements.incidentActionReason.value,
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "保存失败");
@@ -3558,14 +3490,8 @@ function renderSummary() {
     -Infinity,
     ...currentGpus.map((gpu) => numeric(gpu.temperature_c, -Infinity)),
   );
-  const actionableIssues = numeric(
-    snapshot.stats.actionableIssueServers,
-    snapshot.stats.issueServers,
-  );
-  const actionableCritical = numeric(
-    snapshot.stats.actionableCriticalIncidents,
-    snapshot.stats.criticalIncidents,
-  );
+  const actionableIssues = numeric(snapshot.stats.actionableIssueServers);
+  const actionableCritical = numeric(snapshot.stats.actionableCriticalIncidents);
   const maintenanceServers = numeric(snapshot.stats.maintenanceServers);
   const serverCritical = actionableCritical > 0
     || (actionableIssues > 0
@@ -3611,7 +3537,7 @@ function renderSummary() {
     }
   } else {
     elements.serverDetail.textContent = actionableIssues
-      ? `${actionableIssues} 台需关注 · ${numeric(snapshot.stats.actionableIncidents, snapshot.stats.activeIncidents)} 个待处理问题`
+      ? `${actionableIssues} 台需关注 · ${numeric(snapshot.stats.actionableIncidents)} 个待处理问题`
       : maintenanceServers && snapshot.stats.activeIncidents
         ? `${maintenanceServers} 台维护中 · ${snapshot.stats.activeIncidents} 个活动问题已静默`
         : maintenanceServers
@@ -3685,21 +3611,11 @@ function renderServiceRestartStatus(message = "", kind = "") {
 }
 
 async function fetchRestartCapability() {
-  // Newer services describe themselves via /api/meta; the deprecated
-  // /api/service endpoint remains the fallback for older services.
-  const metaResponse = await fetch("/api/meta", { cache: "no-store" }).catch(() => null);
-  if (metaResponse?.ok) {
-    const meta = await metaResponse.json().catch(() => null);
-    const supported = meta?.capabilities?.restartSupported;
-    if (typeof supported === "boolean") return supported;
-  }
-  const response = await fetch("/api/service", { cache: "no-store" });
+  const response = await fetch("/api/meta");
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const capability = await response.json();
-  if (typeof capability.restartSupported !== "boolean") {
-    throw new TypeError("Invalid service capability");
-  }
-  return capability.restartSupported;
+  const supported = (await response.json()).capabilities?.restartSupported;
+  if (typeof supported !== "boolean") throw new TypeError("Invalid service capability");
+  return supported;
 }
 
 async function fetchServiceCapability() {
@@ -3725,7 +3641,7 @@ async function waitForServiceRestart(previousStartedAt) {
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch("/api/snapshot", { cache: "no-store" });
+      const response = await fetch("/api/snapshot");
       if (response.ok) {
         const snapshot = await response.json();
         if (
@@ -3758,15 +3674,7 @@ async function restartManagedService() {
   renderServiceRestartStatus();
   setConnection("connecting", "正在重启");
   try {
-    const response = await fetch("/api/service/restart", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: "{}",
-    });
+    const response = await postJson("/api/service/restart", {});
     if (!response.ok) {
       view.serviceRestarting = false;
       renderServiceRestartStatus("服务拒绝了重启请求，请刷新状态后重试", "error");
@@ -3884,10 +3792,7 @@ async function exportDiagnostics() {
   try {
     const query = view.selectedHost === "all"
       ? "" : `?host=${encodeURIComponent(view.selectedHost)}`;
-    const response = await fetch(`/api/diagnostics${query}`, {
-      cache: "no-store",
-      headers: { "X-Monitor-Request": "dashboard" },
-    });
+    const response = await fetch(`/api/diagnostics${query}`);
     const bundle = await response.json();
     if (!response.ok) throw new Error(bundle.error || "诊断导出失败");
     const scope = view.selectedHost === "all" ? "fleet" : view.selectedHost;
@@ -3905,14 +3810,7 @@ async function testNotifications() {
   elements.notificationTest.disabled = true;
   elements.notificationTestStatus.textContent = "正在加入安全投递队列…";
   try {
-    const response = await fetch("/api/notifications/test", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: "{}",
-    });
+    const response = await postJson("/api/notifications/test", {});
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "测试投递失败");
     elements.notificationTestStatus.textContent = "测试通知已排队，请查看最新投递状态";
@@ -3931,14 +3829,7 @@ async function requestManualProbe() {
   elements.probeNow.disabled = true;
   elements.probeNow.textContent = "正在排队";
   try {
-    const response = await fetch("/api/probe", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify({ host }),
-    });
+    const response = await postJson("/api/probe", { host });
     const result = await response.json();
     if (!response.ok && result.status !== "in_progress") {
       throw new Error(result.error || result.status || "探测请求失败");
@@ -4687,7 +4578,7 @@ async function syncHistory() {
   renderTrends();
   const request = ++view.historyRequest;
   try {
-    const response = await fetch(`/api/history?host=${encodeURIComponent(server.host)}&limit=120`, { cache: "no-store" });
+    const response = await fetch(`/api/history?host=${encodeURIComponent(server.host)}&limit=120`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const history = await response.json();
     if (request !== view.historyRequest || view.selectedHost !== history.host) return;
@@ -5584,11 +5475,7 @@ function openGpuDetail(server, gpu, { processQuery = "", processKey = "" } = {})
   view.gpuHistoryRetryDelayMs = 0;
   clearGpuHistoryRetry();
   view.gpuHistoryRequest += 1;
-  if (elements.settingsDialog.open) elements.settingsDialog.close();
-  if (elements.capacityDialog.open) elements.capacityDialog.close();
-  if (elements.ownersDialog.open) elements.ownersDialog.close();
-  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
-  if (!elements.gpuDetailDialog.open) elements.gpuDetailDialog.showModal();
+  openExclusiveDialog(elements.gpuDetailDialog);
   renderGpuDetail();
   const target = view.selectedProcessKey
     ? view.gpuTaskRowCache.get(view.selectedProcessKey)?.item : null;
@@ -6015,7 +5902,6 @@ function render() {
   renderTable();
   renderGpuDetail();
   renderIncidentDetail();
-  evaluateCapacityWatch();
   renderCapacityMatcher();
   renderCapacityWatchControls();
   renderCapacityWatchBanner();
@@ -6042,7 +5928,7 @@ async function fetchSnapshot() {
   if (view.snapshotFetchInFlight) return view.snapshotFetchInFlight;
   const request = (async () => {
     try {
-      const response = await fetch("/api/snapshot", { cache: "no-store" });
+      const response = await fetch("/api/snapshot");
       if (response.status === 403) {
         dashboardAuthentication.forget();
         requestDashboardAuthentication("访问令牌不正确或已失效，请重新输入");
@@ -6059,6 +5945,7 @@ async function fetchSnapshot() {
       if (!acceptSnapshot(snapshot)) return true;
       view.lastEventAt = Date.now();
       normalizeSelection();
+      settleCapacityWatch();
       render();
       syncHistory();
       syncIncidents();
@@ -6094,7 +5981,7 @@ async function syncIncidents() {
   const request = ++view.incidentRequest;
   let failed = false;
   try {
-    const response = await fetch("/api/incidents?limit=50", { cache: "no-store" });
+    const response = await fetch("/api/incidents?limit=50");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const incidents = await response.json();
     if (request !== view.incidentRequest) return;
@@ -6102,6 +5989,9 @@ async function syncIncidents() {
     view.incidentVersion = numeric(incidents.version, 0);
     view.incidentRetryDelayMs = 0;
     view.incidentSyncFailed = false;
+    // The watch waits for incidents that match the snapshot revision, so
+    // this is the moment a snapshot-triggered evaluation was deferred to.
+    settleCapacityWatch();
     renderIncidents();
     renderAttention();
     renderServers();
@@ -6109,6 +5999,7 @@ async function syncIncidents() {
     renderGpuDetail();
     renderIncidentDetail();
     renderCapacityMatcher();
+    renderCapacityWatchControls();
   } catch (_error) {
     // Current telemetry remains usable if the optional transition feed is unavailable.
     failed = request === view.incidentRequest;
@@ -6160,6 +6051,7 @@ function acceptStreamFrame(frame, markLive) {
     view.lastEventAt = Date.now();
     markLive();
     normalizeSelection();
+    settleCapacityWatch();
     scheduleRender();
     syncIncidents();
   } catch (_error) {
@@ -6218,6 +6110,11 @@ function connect() {
   if (view.connectStarted) return;
   view.connectStarted = true;
   connectAuthenticatedStream();
+  // Polling a reader route only starts once this document is authenticated,
+  // which the accepted snapshot that led here proves. Starting the pill here
+  // rather than in startDashboard also covers the recovery path, where the
+  // first snapshot only arrives through the polling fallback.
+  updatePill.start();
 }
 
 document.querySelectorAll(".filter").forEach((button) => {
@@ -6293,51 +6190,31 @@ elements.gpuSort.addEventListener("change", () => {
 
 elements.settingsToggle.addEventListener("click", () => {
   syncPreferenceControls();
-  if (elements.topologyDialog.open) elements.topologyDialog.close();
-  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
-  if (elements.capacityDialog.open) elements.capacityDialog.close();
-  if (elements.ownersDialog.open) elements.ownersDialog.close();
-  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
-  elements.settingsDialog.showModal();
+  openExclusiveDialog(elements.settingsDialog);
   refreshInventory();
   fetchServiceCapability();
 });
 
 elements.topologyToggle.addEventListener("click", () => {
-  if (elements.settingsDialog.open) elements.settingsDialog.close();
-  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
-  if (elements.capacityDialog.open) elements.capacityDialog.close();
-  if (elements.ownersDialog.open) elements.ownersDialog.close();
-  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
-  elements.topologyDialog.showModal();
+  openExclusiveDialog(elements.topologyDialog);
   renderTopology();
   if (!view.topology && !view.topologyLoading) fetchTopology();
 });
 
 elements.capacityToggle.addEventListener("click", () => {
   if (!view.snapshot) return;
-  if (elements.settingsDialog.open) elements.settingsDialog.close();
-  if (elements.topologyDialog.open) elements.topologyDialog.close();
-  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
-  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
-  if (elements.ownersDialog.open) elements.ownersDialog.close();
   elements.capacityGpuCount.value = String(view.capacityRequest.gpuCount);
   elements.capacityVram.value = String(view.capacityRequest.minVramGiB);
   syncCapacityModels();
   elements.capacityModel.value = view.capacityRequest.model;
-  elements.capacityDialog.showModal();
+  openExclusiveDialog(elements.capacityDialog);
   renderCapacityMatcher();
   renderCapacityWatchControls();
 });
 
 elements.ownersToggle.addEventListener("click", () => {
   if (!view.snapshot) return;
-  if (elements.settingsDialog.open) elements.settingsDialog.close();
-  if (elements.topologyDialog.open) elements.topologyDialog.close();
-  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
-  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
-  if (elements.capacityDialog.open) elements.capacityDialog.close();
-  elements.ownersDialog.showModal();
+  openExclusiveDialog(elements.ownersDialog);
   renderOwners();
   fetchOwnersUsage();
 });
@@ -6739,8 +6616,6 @@ async function startDashboard() {
   if (view.authenticationFailed || !snapshotLoaded) return false;
   fetchTopology();
   connect();
-  // Polling a reader route only starts once this document is authenticated.
-  updatePill.start();
   return true;
 }
 
