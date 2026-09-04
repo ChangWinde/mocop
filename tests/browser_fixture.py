@@ -269,7 +269,6 @@ class DemoRequestHandler(MonitorRequestHandler):
                     "apiVersion": "2",
                     "appVersion": __version__,
                     "schemaVersion": 1,
-                    "authenticationRequired": True,
                     "capabilities": {
                         "restartSupported": self.monitor_server.restart is not None,
                     },

@@ -10,18 +10,65 @@ from contextlib import suppress
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import BaseHandler, Request, build_opener, install_opener, urlopen
 
 from mocop import __version__
 from mocop.inventory import InventoryRequestError
 from mocop.models import GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
 from mocop.service import StateStore
-from mocop.web import (
-    API_ROUTES,
-    MonitorHttpServer,
-    MonitorRequestHandler,
-    serve_in_thread,
-)
+from mocop.web import API_ROUTES, MonitorHttpServer, MonitorRequestHandler
+
+# Every server in this module is Bearer-protected. Requests made through
+# urllib carry this capability unless they opt out with ANONYMOUS_HEADER,
+# which the injecting handler strips before the request leaves the client.
+TEST_TOKEN = "T" * 43
+AUTHORIZATION = {"Authorization": f"Bearer {TEST_TOKEN}"}
+RAW_AUTHORIZATION = f"Authorization: Bearer {TEST_TOKEN}\r\n".encode()
+ANONYMOUS_HEADER = "X-Mocop-Test-Anonymous"
+
+
+class _BearerHandler(BaseHandler):
+    def http_request(self, request: Request) -> Request:
+        if request.has_header(ANONYMOUS_HEADER):
+            request.remove_header(ANONYMOUS_HEADER)
+        elif not request.has_header("Authorization"):
+            request.add_unredirected_header("Authorization", f"Bearer {TEST_TOKEN}")
+        return request
+
+
+def anonymous(url: str, **kwargs) -> Request:
+    """Build a request that deliberately omits the Bearer capability."""
+    headers = {ANONYMOUS_HEADER: "1", **kwargs.pop("headers", {})}
+    return Request(url, headers=headers, **kwargs)
+
+
+def serve_in_thread(
+    host: str,
+    port: int,
+    state: StateStore,
+    inventory=None,
+    *,
+    restart=None,
+    probe_control=None,
+    trusted_hosts=None,
+    access_token: str = TEST_TOKEN,
+    updates=None,
+) -> tuple[MonitorHttpServer, threading.Thread]:
+    server = MonitorHttpServer(
+        (host, port),
+        state,
+        inventory,
+        restart,
+        probe_control,
+        trusted_hosts=trusted_hosts,
+        access_token=access_token,
+        updates=updates,
+    )
+    thread = threading.Thread(
+        target=server.serve_forever, name="mocop-http", daemon=True
+    )
+    thread.start()
+    return server, thread
 
 
 class _Inventory:
@@ -176,6 +223,8 @@ class _StubNotificationSink:
 
 class WebTests(unittest.TestCase):
     def setUp(self) -> None:
+        install_opener(build_opener(_BearerHandler()))
+        self.addCleanup(install_opener, build_opener())
         self.state = StateStore(5)
         self.inventory = _Inventory()
         self.probe_control = _ProbeControl()
@@ -266,11 +315,13 @@ class WebTests(unittest.TestCase):
         # operational surfaces are inaccessible to another local UID.
         for path in ("/", "/healthz", "/readyz"):
             with self.subTest(path=path):
-                self.assertIn(self.request_status(f"{base}{path}"), {200, 503})
+                self.assertIn(
+                    self.request_status(anonymous(f"{base}{path}")), {200, 503}
+                )
         for path in ("/api/snapshot", "/api/events", "/metrics"):
             with self.subTest(path=path):
                 self.assert_json_error(
-                    Request(f"{base}{path}"), 403, "AUTHENTICATION_REQUIRED"
+                    anonymous(f"{base}{path}"), 403, "AUTHENTICATION_REQUIRED"
                 )
         protected_fallbacks = (
             ("POST", "/api/snapshot", b"{}"),
@@ -287,11 +338,11 @@ class WebTests(unittest.TestCase):
         for method, path, data in protected_fallbacks:
             with self.subTest(method=method, path=path):
                 self.assert_json_error(
-                    Request(f"{base}{path}", data=data, method=method),
+                    anonymous(f"{base}{path}", data=data, method=method),
                     403,
                     "AUTHENTICATION_REQUIRED",
                 )
-        marked = Request(
+        marked = anonymous(
             f"{base}/api/snapshot",
             headers={"X-Monitor-Request": "dashboard"},
         )
@@ -354,7 +405,7 @@ class WebTests(unittest.TestCase):
         sock.sendall(
             b"GET /api/events HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
-            b"Accept: text/event-stream\r\n\r\n"
+            b"Accept: text/event-stream\r\n" + RAW_AUTHORIZATION + b"\r\n"
         )
         return sock
 
@@ -1606,11 +1657,14 @@ class WebTests(unittest.TestCase):
 
     def test_rejects_dns_rebinding_hosts_despite_loopback_delivery(self) -> None:
         port = self.server.server_port
+        # A rebound page that somehow holds the capability is still refused:
+        # the Host/Origin check is independent of authentication.
         rebound = {
             "Host": f"monitor.attacker.example:{port}",
             "Origin": f"http://monitor.attacker.example:{port}",
             "X-Monitor-Request": "dashboard",
             "Sec-Fetch-Site": "same-origin",
+            **AUTHORIZATION,
         }
 
         write = self.open_connection(port)
@@ -1622,14 +1676,14 @@ class WebTests(unittest.TestCase):
         )
         response = write.getresponse()
         self.assertEqual(response.status, 403)
-        response.read()
+        self.assertEqual(json.load(response)["code"], "UNTRUSTED_ORIGIN")
         self.assertEqual(self.state.snapshot()["pollIntervalSeconds"], 5)
 
         read = self.open_connection(port)
         read.request("GET", "/api/inventory", headers=dict(rebound))
         response = read.getresponse()
         self.assertEqual(response.status, 403)
-        response.read()
+        self.assertEqual(json.load(response)["code"], "UNTRUSTED_ORIGIN")
 
     def test_rejects_cross_origin_preflight_without_cors_permission(self) -> None:
         request = Request(
@@ -1811,10 +1865,13 @@ class WebTests(unittest.TestCase):
         )
         self.addCleanup(sock.close)
         sock.sendall(
-            b"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            b"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+            + RAW_AUTHORIZATION
+            + b"\r\n"
         )
 
         headers = self.read_until(sock, b"\r\n\r\n").split(b"\r\n\r\n", 1)[0]
+        self.assertTrue(headers.startswith(b"HTTP/1.1 200"), headers)
 
         self.assertEqual(headers.lower().count(b"\r\nconnection:"), 1)
         self.assertIn(b"\r\nConnection: close\r\n", headers + b"\r\n")
@@ -1901,7 +1958,9 @@ class WebTests(unittest.TestCase):
                 self.assertIn(b"400", response.split(b"\r\n", 1)[0])
 
     def test_posts_reject_ambiguous_http_framing(self) -> None:
-        headers = b"Host: 127.0.0.1\r\nContent-Type: application/json\r\n"
+        headers = (
+            b"Host: 127.0.0.1\r\nContent-Type: application/json\r\n" + RAW_AUTHORIZATION
+        )
         cases = (
             headers + b"Transfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n{}",
             headers + b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
@@ -1934,7 +1993,10 @@ class WebTests(unittest.TestCase):
                 b"POST /api/notifications/test HTTP/1.1\r\n"
                 b"Host: 127.0.0.1\r\nContent-Type: application/json\r\n"
                 b"Origin: http://127.0.0.1\r\nX-Monitor-Request: dashboard\r\n"
-                b"Content-Length: " + huge + b"\r\n\r\n",
+                + RAW_AUTHORIZATION
+                + b"Content-Length: "
+                + huge
+                + b"\r\n\r\n",
                 b"413",
             ),
         ):
@@ -1960,7 +2022,7 @@ class WebTests(unittest.TestCase):
         ):
             with self.subTest(method=method):
                 connection = self.open_connection(self.server.server_port)
-                connection.request(method, "/api/snapshot")
+                connection.request(method, "/api/snapshot", headers=AUTHORIZATION)
                 response = connection.getresponse()
                 payload = json.load(response)
                 self.assertEqual(response.status, 405)
@@ -1972,7 +2034,7 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(payload["code"], "METHOD_NOT_ALLOWED")
 
         connection = self.open_connection(self.server.server_port)
-        connection.request("FOO", "/api/unknown")
+        connection.request("FOO", "/api/unknown", headers=AUTHORIZATION)
         response = connection.getresponse()
         payload = json.load(response)
         self.assertEqual(response.status, 404)
@@ -2097,12 +2159,12 @@ class WebTests(unittest.TestCase):
         self.assertGreater(int(static.getheader("Content-Length")), 0)
         self.assertEqual(static.read(), b"")
 
-        conn.request("HEAD", "/metrics")
+        conn.request("HEAD", "/metrics", headers=AUTHORIZATION)
         metrics = conn.getresponse()
         self.assertEqual(metrics.status, 200)
         self.assertEqual(metrics.read(), b"")
 
-        conn.request("HEAD", "/api/events")
+        conn.request("HEAD", "/api/events", headers=AUTHORIZATION)
         events = conn.getresponse()
         self.assertEqual(events.status, 405)
         self.assertEqual(events.getheader("Allow"), "GET")
@@ -2129,6 +2191,7 @@ class WebTests(unittest.TestCase):
                 "Content-Type": "application/json",
                 "Origin": self.base,
                 "X-Monitor-Request": "dashboard",
+                **AUTHORIZATION,
             },
         )
         response = connection.getresponse()

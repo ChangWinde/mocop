@@ -585,11 +585,7 @@ class UserServiceManager:
                 payload = response.read(4097)
                 if response.status == 200 and len(payload) <= 4096:
                     meta = json.loads(payload)
-                    if (
-                        isinstance(meta, dict)
-                        and meta.get("apiVersion") == "2"
-                        and meta.get("authenticationRequired") is True
-                    ):
+                    if isinstance(meta, dict) and meta.get("apiVersion") == "2":
                         connection.request("GET", "/api/snapshot")
                         protected = connection.getresponse()
                         protected.read()

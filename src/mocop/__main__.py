@@ -254,16 +254,16 @@ def _run_monitor(args: argparse.Namespace) -> int:
     except (ConfigError, RuntimeError, UnicodeError, OSError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
-    access_token = None
     if args.access_token_file is not None:
         try:
             access_token = read_access_token(args.access_token_file)
         except LifecycleError as exc:
             print(f"Configuration error: {exc}", file=sys.stderr)
             return 2
-    elif not args.once:
+    else:
         # Foreground servers receive an ephemeral per-process capability. It
         # is printed only in the operator's terminal and is never persisted.
+        # (--once never starts the server, so the value is simply unused.)
         access_token = secrets.token_urlsafe(32)
 
     persistence = DisabledPersistence()

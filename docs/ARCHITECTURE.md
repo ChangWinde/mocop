@@ -280,9 +280,9 @@ rejected notification-only and bootstrap-script alternatives.
 - Maintenance windows never change scheduling; their UTC expiry automatically restores active conditions to the actionable view.
 - Raw SSH stderr is classified locally and never crosses the browser boundary.
 - Failed hosts keep their last successful data, marked stale and excluded from current totals.
-- SSE sends a named heartbeat every 15 seconds. With a capability, the dashboard uses
-  fetch streaming so it can attach Bearer authentication; native `EventSource` is only
-  the no-token compatibility path.
+- SSE sends a named heartbeat every 15 seconds. The dashboard consumes it through
+  fetch streaming because native `EventSource` cannot attach the Bearer capability;
+  the server has no unauthenticated mode.
 - `/healthz` reports process liveness; `/readyz` requires a discovered target and one successful sample.
 - The default listener is loopback. Remote access requires external TLS and authenticated authorization.
 - A fatal collector scheduler failure exits the process non-zero so the user service restarts it.

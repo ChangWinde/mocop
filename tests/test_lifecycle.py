@@ -479,7 +479,7 @@ class LifecycleTests(unittest.TestCase):
         manager = self.build_manager(lambda _arguments: 0)
         connection = Mock()
         meta = Mock(status=200)
-        meta.read.return_value = b'{"apiVersion":"2","authenticationRequired":true}'
+        meta.read.return_value = b'{"apiVersion":"2"}'
         protected = Mock(status=403)
         protected.read.return_value = b""
         connection.getresponse.side_effect = (meta, protected)
@@ -505,7 +505,7 @@ class LifecycleTests(unittest.TestCase):
         manager = self.build_manager(lambda _arguments: 0)
         connection = Mock()
         meta = Mock(status=200)
-        meta.read.return_value = b'{"apiVersion":"2","authenticationRequired":true}'
+        meta.read.return_value = b'{"apiVersion":"2"}'
         protected = Mock(status=200)
         protected.read.return_value = b""
         connection.getresponse.side_effect = (meta, protected)

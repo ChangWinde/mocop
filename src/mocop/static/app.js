@@ -220,7 +220,6 @@ const view = {
   transportLabel: "连接中",
   refreshFeedbackTimer: null,
   cadenceSnapshotFloor: null,
-  connectionErrorTimer: null,
   snapshotFetchInFlight: null,
   draggedHost: null,
   suppressServerClick: false,
@@ -6218,57 +6217,7 @@ async function connectAuthenticatedStream() {
 function connect() {
   if (view.connectStarted) return;
   view.connectStarted = true;
-  if (dashboardAuthentication.token) {
-    connectAuthenticatedStream();
-    return;
-  }
-  const events = new EventSource("/api/events");
-  const markLive = () => {
-    if (view.connectionErrorTimer != null) {
-      clearTimeout(view.connectionErrorTimer);
-      view.connectionErrorTimer = null;
-    }
-    // Stream liveness resets the poll backoff the same way a poll success
-    // would, so a recovered stream does not keep a stale failure streak.
-    view.snapshotFailureStreak = 0;
-    setConnection("live", "实时连接");
-  };
-  events.addEventListener("open", markLive);
-  // Newer services send named heartbeats between snapshots. Counting them as
-  // liveness keeps the 15s staleness fallback from issuing redundant
-  // /api/snapshot polls while the stream is healthy but idle. Older services
-  // only send SSE comments, which never reach this listener — the polling
-  // fallback then behaves exactly as before.
-  events.addEventListener("heartbeat", () => {
-    view.lastEventAt = Date.now();
-    markLive();
-  });
-  events.addEventListener("snapshot", (event) => {
-    try {
-      if (!acceptSnapshot(JSON.parse(event.data))) return;
-      view.lastEventAt = Date.now();
-      markLive();
-      normalizeSelection();
-      scheduleRender();
-      syncIncidents();
-    } catch (_error) {
-      setConnection("offline", "数据异常");
-    }
-  });
-  events.addEventListener("error", () => {
-    if (view.connectionErrorTimer != null) return;
-    view.connectionErrorTimer = setTimeout(async () => {
-      view.connectionErrorTimer = null;
-      const reachable = await fetchSnapshot();
-      if (events.readyState === EventSource.OPEN) {
-        markLive();
-      } else if (reachable) {
-        setConnection("delayed", "轮询同步");
-      } else {
-        setConnection("offline", "服务不可达");
-      }
-    }, 1200);
-  });
+  connectAuthenticatedStream();
 }
 
 document.querySelectorAll(".filter").forEach((button) => {
@@ -6779,17 +6728,11 @@ async function startDashboard() {
     requestDashboardAuthentication("URL 中的访问令牌格式无效，请重新输入");
     return false;
   }
-  try {
-    const response = await fetch("/api/meta", { cache: "no-store" });
-    if (response.ok) {
-      const meta = await response.json();
-      if (meta.authenticationRequired === true && !dashboardAuthentication.token) {
-        requestDashboardAuthentication("请输入此 Mocop 实例的访问令牌");
-        return false;
-      }
-    }
-  } catch (_error) {
-    // Snapshot/SSE reconnect logic owns transient reachability handling.
+  // Every private route requires the capability, so a document without one
+  // prompts immediately instead of spending a round trip to confirm that.
+  if (!dashboardAuthentication.token) {
+    requestDashboardAuthentication("请输入此 Mocop 实例的访问令牌");
+    return false;
   }
   view.dashboardStarted = true;
   const snapshotLoaded = await fetchSnapshot();

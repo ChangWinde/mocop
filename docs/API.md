@@ -489,10 +489,9 @@ rejected with `405`.
 - At most 16 concurrent stream clients; the next connect receives
   `503 SERVICE_UNAVAILABLE`.
 
-The authenticated dashboard uses `fetch()` and incrementally decodes the SSE
-stream because the browser `EventSource` API cannot attach an `Authorization`
-header. Native `EventSource` is used only when the server was explicitly
-started without an access token (for compatibility/testing).
+The dashboard uses `fetch()` and incrementally decodes the SSE stream because
+the browser `EventSource` API cannot attach an `Authorization` header. Every
+Mocop server requires the capability, so there is no unauthenticated stream.
 
 ### GET /api/history
 

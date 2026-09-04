@@ -179,10 +179,14 @@ class MonitorHttpServer(ThreadingHTTPServer):
         restart: Callable[[], None] | None = None,
         probe_control: ProbeControl | None = None,
         *,
+        access_token: str,
         trusted_hosts: Iterable[str] | None = None,
-        access_token: str | None = None,
         updates: UpdateStatusSource | None = None,
     ) -> None:
+        # Every private route is Bearer-protected; there is no unauthenticated
+        # server mode, so an empty capability is a programming error.
+        if not access_token:
+            raise ValueError("the HTTP server requires a non-empty access token")
         try:
             socket.inet_pton(socket.AF_INET6, address[0].split("%", 1)[0])
         except OSError:
@@ -410,8 +414,6 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def _has_bearer_token(self) -> bool:
         """Authenticate a bootstrap request without accepting ambiguity."""
         expected = self.monitor_server.access_token
-        if expected is None:
-            return True
         values = self.headers.get_all("Authorization") or []
         if len(values) != 1 or not values[0].startswith("Bearer "):
             return False
@@ -426,8 +428,6 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
 
     def _require_authentication(self, path: str) -> bool:
         """Protect every non-health API surface from other local users."""
-        if self.monitor_server.access_token is None:
-            return True
         if path in {"/healthz", "/readyz", "/api/meta"}:
             return True
         if not (_is_api_family_path(path) or path == "/metrics"):
@@ -600,7 +600,6 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "apiVersion": _API_VERSION,
                 "appVersion": __version__,
                 "schemaVersion": _API_SCHEMA_VERSION,
-                "authenticationRequired": server.access_token is not None,
                 "capabilities": {
                     "restartSupported": server.restart is not None,
                     "manualProbeSupported": server.probe_control is not None,
@@ -1698,32 +1697,3 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         # Avoid putting URL query strings or browser-controlled values in logs.
         return
-
-
-def serve_in_thread(
-    host: str,
-    port: int,
-    state: StateStore,
-    inventory: DashboardConfigController | None = None,
-    *,
-    restart: Callable[[], None] | None = None,
-    probe_control: ProbeControl | None = None,
-    trusted_hosts: Iterable[str] | None = None,
-    access_token: str | None = None,
-    updates: UpdateStatusSource | None = None,
-) -> tuple[MonitorHttpServer, threading.Thread]:
-    server = MonitorHttpServer(
-        (host, port),
-        state,
-        inventory,
-        restart,
-        probe_control,
-        trusted_hosts=trusted_hosts,
-        access_token=access_token,
-        updates=updates,
-    )
-    thread = threading.Thread(
-        target=server.serve_forever, name="mocop-http", daemon=True
-    )
-    thread.start()
-    return server, thread
