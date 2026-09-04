@@ -70,7 +70,7 @@ Scopes use lowercase path-like names such as `repo`, `core`, `config`, `probe`, 
 [tests/fix]: stabilize browser smoke test
 ```
 
-The complete subject must be at most 72 characters, and the imperative summary must not end with a period. Use a body when the rationale or trade-offs are not evident from the diff. The local `commit-msg` hook checks new commits, and CI validates the complete reachable history. Git-generated merge and revert subjects are accepted only when their commit metadata proves their origin.
+The complete subject must be at most 72 characters, and the imperative summary must not end with a period. Use a body when the rationale or trade-offs are not evident from the diff. The local `commit-msg` hook checks new commits, and CI validates the complete reachable history. Git-generated merge and revert subjects are accepted only when their commit metadata proves their origin. A commit that reached the protected branch before its rule was enforced is listed by full SHA with a reason in `HISTORICAL_EXEMPTIONS` inside `.github/scripts/check_commit_message.py`; a repository test pins that list, so adding to it is a reviewed change, never a silent one.
 
 Do not mix generated output, unrelated formatting, or local configuration into a commit. Before committing, inspect staged paths and run the checks relevant to the change.
 
