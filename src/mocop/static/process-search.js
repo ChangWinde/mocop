@@ -187,6 +187,7 @@
       gpuRecordMatchesSearch,
       normalizedSearchTerms,
       processMatchesSearch,
+      processMemoryRank,
       searchProcessRecords,
     });
   }

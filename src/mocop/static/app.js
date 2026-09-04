@@ -152,6 +152,7 @@ const {
   gpuRecordMatchesSearch,
   normalizedSearchTerms,
   processMatchesSearch,
+  processMemoryRank,
   searchProcessRecords,
 } = globalThis.MocopProcessSearch.create({
   maxResults: MAX_PROGRAM_SEARCH_RESULTS,
@@ -1967,9 +1968,7 @@ function focusPendingMaintenanceHost() {
   const row = [...elements.configuredHostList.querySelectorAll(".inventory-host")]
     .find((item) => item.dataset.host === host);
   if (!row) return;
-  if (typeof row.scrollIntoView === "function") {
-    row.scrollIntoView({ block: "center" });
-  }
+  row.scrollIntoView({ block: "center" });
   const target = row.querySelector('.maintenance-editor input[type="text"]')
     || row.querySelector(".maintenance-action");
   target?.focus();
@@ -2092,9 +2091,7 @@ async function changeInventory(action, host) {
   renderInventory();
   try {
     const response = await postJson("/api/settings/hosts", { action, host });
-    if (response.status === 409) {
-      throw new RangeError("stale inventory");
-    }
+    if (response.status === 409) throw new RangeError("stale inventory");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     view.inventory = normalizeInventory(await response.json());
     view.inventoryMessage = action === "add"
@@ -2104,18 +2101,16 @@ async function changeInventory(action, host) {
     if (action === "remove" && view.selectedHost === host) selectHost("all");
     await Promise.all([fetchSnapshot(), fetchTopology()]);
   } catch (error) {
-    view.inventoryMessage = error instanceof RangeError
-      ? "节点清单已变化，已重新扫描，请再试一次"
-      : "节点配置更新失败，请重新扫描并检查服务权限";
-    view.inventoryMessageKind = "error";
     if (error instanceof RangeError) {
+      // The service refused a stale view of the inventory: rescan now so
+      // the operator's retry runs against the current one.
       view.inventoryPendingHost = null;
       await refreshInventory();
       view.inventoryMessage = "节点清单已变化，已重新扫描，请再试一次";
-      view.inventoryMessageKind = "error";
-      renderInventory();
-      return;
+    } else {
+      view.inventoryMessage = "节点配置更新失败，请重新扫描并检查服务权限";
     }
+    view.inventoryMessageKind = "error";
   } finally {
     view.inventoryPendingHost = null;
     renderInventory();
@@ -2786,7 +2781,6 @@ function deliverCapacityWatchNotification(satisfied) {
 }
 
 function renderCapacityWatchControls() {
-  if (!elements.capacityWatchToggle) return;
   const watch = view.capacityWatch;
   if (!watch) {
     elements.capacityWatchToggle.textContent = "空闲时提醒我";
@@ -2809,7 +2803,6 @@ function renderCapacityWatchControls() {
 
 function renderCapacityWatchBanner() {
   const banner = elements.capacityWatchBanner;
-  if (!banner) return;
   const watch = view.capacityWatch;
   const show = Boolean(
     watch && watch.state === "notified" && !view.capacityWatchBannerDismissed,
@@ -3467,15 +3460,13 @@ function enableServerDrag(item, host) {
   item.addEventListener("dragstart", (event) => {
     view.draggedHost = host;
     item.classList.add("dragging");
-    if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", host);
-    }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", host);
   });
   item.addEventListener("dragover", (event) => {
     if (!view.draggedHost || view.draggedHost === host) return;
     event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    event.dataTransfer.dropEffect = "move";
     item.classList.add("drag-target");
   });
   item.addEventListener("dragleave", () => item.classList.remove("drag-target"));
@@ -3484,7 +3475,7 @@ function enableServerDrag(item, host) {
     item.classList.remove("drag-target");
     view.suppressServerClick = true;
     reorderServer(
-      view.draggedHost || event.dataTransfer?.getData("text/plain"),
+      view.draggedHost || event.dataTransfer.getData("text/plain"),
       host,
     );
   });
@@ -3604,7 +3595,7 @@ function renderSummary() {
   const cycleMilliseconds = snapshot.lastPollDurationMs;
   const cycleText = cycleMilliseconds == null
     ? "等待首批完成"
-    : `最近批次 ${(numeric(cycleMilliseconds) / 1000).toLocaleString("zh-CN", { maximumFractionDigits: 1 })} 秒`;
+    : `最近批次 ${format(numeric(cycleMilliseconds) / 1000, 1)} 秒`;
   const cycleSlow = cycleMilliseconds != null
     && numeric(cycleMilliseconds) > numeric(snapshot.pollIntervalSeconds) * 1000;
   const collectionDelayed = collectionHealth().state === "delayed";
@@ -3802,10 +3793,7 @@ function renderNotificationEndpoints(notifications) {
   elements.notificationEndpoints.hidden = false;
 }
 
-function downloadJson(value, filename) {
-  const blob = new Blob([`${JSON.stringify(value, null, 2)}\n`], {
-    type: "application/json;charset=utf-8",
-  });
+function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -3815,6 +3803,13 @@ function downloadJson(value, filename) {
   anchor.click();
   anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function downloadJson(value, filename) {
+  downloadBlob(
+    new Blob([`${JSON.stringify(value, null, 2)}\n`], { type: "application/json;charset=utf-8" }),
+    filename,
+  );
 }
 
 async function exportDiagnostics() {
@@ -4056,7 +4051,7 @@ function renderServers() {
   [...view.fleetGroupCache.keys()].forEach((group) => {
     if (!visibleGroupKeys.has(group)) view.fleetGroupCache.delete(group);
   });
-  const focusedHost = document.activeElement?.closest?.(".server-item")?.dataset.host;
+  const focusedHost = document.activeElement?.closest(".server-item")?.dataset.host;
   reconcileChildren(elements.serverList, desired);
   if (focusedHost && !document.activeElement?.isConnected) {
     [...elements.serverList.querySelectorAll(".server-item")]
@@ -4435,23 +4430,31 @@ function chartPositions(points) {
   };
 }
 
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+
+function svgElement(tag, attributes) {
+  const element = document.createElementNS(SVG_NAMESPACE, tag);
+  Object.entries(attributes).forEach(([name, value]) => element.setAttribute(name, value));
+  return element;
+}
+
+// Every trend chart shares one 220x54 canvas with a baseline at y=50.
+function chartCanvas() {
+  const svg = svgElement("svg", {
+    viewBox: "0 0 220 54", preserveAspectRatio: "none", "aria-hidden": "true",
+  });
+  svg.append(svgElement("line", {
+    x1: "0", x2: "220", y1: "50", y2: "50", class: "chart-baseline",
+  }));
+  return svg;
+}
+
 function sparkline(points, accessor, color, maximum = null) {
-  const namespace = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(namespace, "svg");
-  svg.setAttribute("viewBox", "0 0 220 54");
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.setAttribute("aria-hidden", "true");
+  const svg = chartCanvas();
   const values = points.map(accessor);
   const finite = values.filter((value) => Number.isFinite(value));
   const ceiling = maximum ?? Math.max(1, ...finite);
   const { xs, gapBefore } = chartPositions(points);
-  const baseline = document.createElementNS(namespace, "line");
-  baseline.setAttribute("x1", "0");
-  baseline.setAttribute("x2", "220");
-  baseline.setAttribute("y1", "50");
-  baseline.setAttribute("y2", "50");
-  baseline.setAttribute("class", "chart-baseline");
-  svg.append(baseline);
   const segments = [];
   let current = [];
   values.forEach((value, index) => {
@@ -4470,24 +4473,18 @@ function sparkline(points, accessor, color, maximum = null) {
   if (current.length) segments.push(current);
   segments.forEach((segment) => {
     if (segment.length === 1) {
-      const dot = document.createElementNS(namespace, "circle");
-      dot.setAttribute("cx", segment[0][0].toFixed(1));
-      dot.setAttribute("cy", segment[0][1].toFixed(1));
-      dot.setAttribute("r", "1.6");
-      dot.setAttribute("fill", color);
-      svg.append(dot);
+      svg.append(svgElement("circle", {
+        cx: segment[0][0].toFixed(1), cy: segment[0][1].toFixed(1), r: "1.6", fill: color,
+      }));
       return;
     }
-    const line = document.createElementNS(namespace, "polyline");
-    line.setAttribute(
-      "points",
-      segment.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "),
-    );
-    line.setAttribute("fill", "none");
-    line.setAttribute("stroke", color);
-    line.setAttribute("stroke-width", "2");
-    line.setAttribute("vector-effect", "non-scaling-stroke");
-    svg.append(line);
+    svg.append(svgElement("polyline", {
+      points: segment.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "),
+      fill: "none",
+      stroke: color,
+      "stroke-width": "2",
+      "vector-effect": "non-scaling-stroke",
+    }));
   });
   return svg;
 }
@@ -4518,28 +4515,17 @@ function transportRetryCard(points) {
     create("span", "", "链路重试"),
     create("strong", "", `${format(retriedXs.length)} 次`),
   );
-  const namespace = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(namespace, "svg");
-  svg.setAttribute("viewBox", "0 0 220 54");
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.setAttribute("aria-hidden", "true");
-  const baseline = document.createElementNS(namespace, "line");
-  baseline.setAttribute("x1", "0");
-  baseline.setAttribute("x2", "220");
-  baseline.setAttribute("y1", "50");
-  baseline.setAttribute("y2", "50");
-  baseline.setAttribute("class", "chart-baseline");
-  svg.append(baseline);
+  const svg = chartCanvas();
   retriedXs.forEach((x) => {
-    const marker = document.createElementNS(namespace, "line");
-    marker.setAttribute("x1", x.toFixed(1));
-    marker.setAttribute("x2", x.toFixed(1));
-    marker.setAttribute("y1", "18");
-    marker.setAttribute("y2", "50");
-    marker.setAttribute("stroke", "#f5b95f");
-    marker.setAttribute("stroke-width", "2");
-    marker.setAttribute("vector-effect", "non-scaling-stroke");
-    svg.append(marker);
+    svg.append(svgElement("line", {
+      x1: x.toFixed(1),
+      x2: x.toFixed(1),
+      y1: "18",
+      y2: "50",
+      stroke: "#f5b95f",
+      "stroke-width": "2",
+      "vector-effect": "non-scaling-stroke",
+    }));
   });
   card.append(
     top,
@@ -4758,11 +4744,6 @@ function gpuProcessSummarySignature(gpu) {
     topName: summary.topProcess?.name,
     topMemory: summary.topMemoryMiB,
   };
-}
-
-function gpuProcessMemoryRank(a, b) {
-  return numeric(b.used_memory_mib, -1) - numeric(a.used_memory_mib, -1)
-    || numeric(a.pid) - numeric(b.pid);
 }
 
 function programSearchKey({ server, gpu, process }) {
@@ -5318,12 +5299,12 @@ function renderGpuDetail() {
   const sortByName = preferences.gpuTaskSort === "name";
   if (sortByDuration) {
     matchingProcesses.sort((a, b) => gpuProcessStartMs(a) - gpuProcessStartMs(b)
-      || gpuProcessMemoryRank(a, b));
+      || processMemoryRank(a, b));
   } else if (sortByName) {
     matchingProcesses.sort((a, b) => gpuTaskDisplayName(a).localeCompare(gpuTaskDisplayName(b))
       || numeric(a.pid) - numeric(b.pid));
   } else {
-    matchingProcesses.sort(gpuProcessMemoryRank);
+    matchingProcesses.sort(processMemoryRank);
   }
   let visibleProcesses = matchingProcesses.slice(0, MAX_GPU_DETAIL_PROCESSES);
   const selectedProcess = view.selectedProcessKey
@@ -5679,22 +5660,16 @@ const { buildCsv } = globalThis.MocopCsvExport.create({
 function exportVisibleCsv() {
   const records = visibleOrderedRecords();
   if (!records.length) return;
-  const blob = new Blob([buildCsv(records)], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
   const now = new Date();
   const date = [
     now.getFullYear(),
     String(now.getMonth() + 1).padStart(2, "0"),
     String(now.getDate()).padStart(2, "0"),
   ].join("-");
-  anchor.href = url;
-  anchor.download = `gpu-monitor-${view.selectedHost}-${date}.csv`;
-  anchor.hidden = true;
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  downloadBlob(
+    new Blob([buildCsv(records)], { type: "text/csv;charset=utf-8" }),
+    `gpu-monitor-${view.selectedHost}-${date}.csv`,
+  );
 }
 
 function groupedRecords(records) {
@@ -5857,7 +5832,7 @@ function updateGroupToggle() {
 }
 
 function renderTable() {
-  const focusedRow = document.activeElement?.closest?.("tr[data-gpu-id]");
+  const focusedRow = document.activeElement?.closest("tr[data-gpu-id]");
   const focusedGpu = focusedRow
     ? [focusedRow.dataset.host, focusedRow.dataset.gpuId]
     : null;
@@ -6072,7 +6047,7 @@ async function syncIncidents() {
 function acceptStreamFrame(frame, markLive) {
   let eventName = "message";
   const data = [];
-  frame.replaceAll("\r", "").split("\n").forEach((line) => {
+  frame.split("\n").forEach((line) => {
     if (line.startsWith("event:")) eventName = line.slice(6).trim();
     else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
   });
