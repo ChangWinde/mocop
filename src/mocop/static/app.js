@@ -5626,32 +5626,18 @@ function renderTable() {
   elements.emptyState.hidden = records.length !== 0;
 }
 
-// Stable scalar key for the selected host: the single-host resource panel
-// and node notice only need a rebuild when that host's data version moves,
-// not on every fleet snapshot (avoids JSON.stringify over the full record).
+// Stable scalar key for the resource panel and node notice. A host's
+// `system` record is replaced only by a successful probe, so lastSuccessAt
+// is its data version; the fleet view keys on the version of every online
+// focused host plus the thresholds that colour the tiles, and the
+// single-host view adds the reachability fields the node notice shows.
 function selectedHostPanelKey() {
+  const thresholds = JSON.stringify(limits());
   if (view.selectedHost === "all") {
-    const servers = focusedServers(view.snapshot.servers).filter(
-      (server) => server.status === "online" && server.system,
-    );
-    return [
-      "all",
-      view.serverFilter,
-      view.incidentVersion,
-      servers.length,
-      ...servers.map((server) => {
-        const system = server.system;
-        return [
-          server.host,
-          system.cpu_usage_pct,
-          system.memory_used_mib,
-          system.disk_used_mib,
-          system.network_rx_bps,
-          system.disk_read_bps,
-          system.pressure?.memory?.some_avg10,
-        ].join(":");
-      }),
-    ].join("\u0000");
+    const versions = focusedServers(view.snapshot.servers)
+      .filter((server) => server.status === "online" && server.system)
+      .map((server) => `${server.host}:${server.lastSuccessAt}`);
+    return ["all", view.serverFilter, thresholds, ...versions].join("\u0000");
   }
   const server = view.snapshot.servers.find(
     (candidate) => candidate.host === view.selectedHost,
@@ -5661,7 +5647,7 @@ function selectedHostPanelKey() {
     `${server.host}\u0000${server.displayName || ""}`, server.status, server.stale, server.polling,
     server.lastAttemptAt, server.lastSuccessAt, server.nextRetryAt,
     server.consecutiveFailures, server.message,
-    view.incidentVersion,
+    view.incidentVersion, thresholds,
   ].join("\u0000");
 }
 

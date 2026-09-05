@@ -2336,10 +2336,23 @@ try {
     const panelReused = tile != null
       && tile === document.querySelector("#resource-grid .resource-tile");
     selectHost("all");
+    render();
+    const fleetTile = document.querySelector("#resource-grid .resource-tile");
+    render();
+    const fleetPanelReused = fleetTile != null
+      && fleetTile === document.querySelector("#resource-grid .resource-tile");
+    // A successful probe replaces a host's system record and stamps
+    // lastSuccessAt; the fleet aggregates must follow that version.
+    const sampled = view.snapshot.servers.find((server) => server.host === "atlas-01");
+    const previousSuccess = sampled.lastSuccessAt;
+    sampled.lastSuccessAt = new Date().toISOString();
+    render();
+    const fleetPanelRebuilt = fleetTile !== document.querySelector("#resource-grid .resource-tile");
+    sampled.lastSuccessAt = previousSuccess;
     return {
       failureText, timelineText, errorFlag, retryScheduled, retryDelayMs,
       cleanedUp, attentionError, attentionVisible, attentionErrorCleared,
-      panelReused,
+      panelReused, fleetPanelReused, fleetPanelRebuilt,
     };
   })()`, true);
   // "\u5386\u53f2\u8bfb\u53d6\u5931\u8d25\uff0c\u7a0d\u540e\u91cd\u8bd5"
@@ -2359,6 +2372,16 @@ try {
     resilience.panelReused,
     true,
     "selected-host resource panel skips rebuild without a data change",
+  );
+  assert.equal(
+    resilience.fleetPanelReused,
+    true,
+    "fleet resource panel skips rebuild without a new sample",
+  );
+  assert.equal(
+    resilience.fleetPanelRebuilt,
+    true,
+    "fleet resource panel rebuilds when a host publishes a new sample",
   );
 
   const reloaded = cdp.waitFor("Page.loadEventFired", 30_000);

@@ -856,10 +856,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run_lifecycle(args)
     except LifecycleError as exc:
         return _cli_failure(
-            str(exc),
-            as_json=getattr(args, "json", False),
-            code=exc.code,
-            prefix="Setup error",
+            str(exc), as_json=args.json, code=exc.code, prefix="Setup error"
         )
 
 
