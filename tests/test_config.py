@@ -696,8 +696,8 @@ class ConfigTests(unittest.TestCase):
             dict(config.host_groups),
             {"gpu-1": "Training", "gpu-2": "Inference"},
         )
-        self.assertEqual(config.host_group("gpu-1"), "Training")
-        self.assertIsNone(config.host_group("unknown"))
+        self.assertEqual(dict(config.host_groups).get("gpu-1"), "Training")
+        self.assertIsNone(dict(config.host_groups).get("unknown"))
 
         for invalid in (
             {"unknown": "Training"},
@@ -759,14 +759,14 @@ class ConfigTests(unittest.TestCase):
         )
 
         self.assertIsNone(updated.host_override("gpu-1"))
-        self.assertIsNone(updated.maintenance_window("gpu-1"))
-        self.assertIsNone(updated.host_group("gpu-1"))
+        self.assertIsNone(dict(updated.maintenance_windows).get("gpu-1"))
+        self.assertIsNone(dict(updated.host_groups).get("gpu-1"))
         self.assertEqual(updated.host_override("gpu-2").poll_interval_seconds, 20)
         self.assertEqual(
-            updated.maintenance_window("gpu-2").to_dict()["until"],
+            dict(updated.maintenance_windows).get("gpu-2").to_dict()["until"],
             "2031-06-15T12:30:00Z",
         )
-        self.assertEqual(updated.host_group("gpu-2"), "Inference")
+        self.assertEqual(dict(updated.host_groups).get("gpu-2"), "Inference")
 
     def test_validates_incident_stability_configuration(self) -> None:
         value = valid_config()
@@ -834,7 +834,7 @@ class ConfigTests(unittest.TestCase):
 
         config = load_config(self.write(value))
 
-        window = config.maintenance_window("gpu-1")
+        window = dict(config.maintenance_windows).get("gpu-1")
         self.assertIsNotNone(window)
         self.assertEqual(window.reason, "Driver upgrade")
         self.assertEqual(window.to_dict()["until"], "2030-06-15T12:30:00Z")
@@ -844,7 +844,7 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(
             window.is_active(datetime(2030, 6, 15, 12, 30, tzinfo=timezone.utc))
         )
-        self.assertIsNone(config.maintenance_window("gpu-2"))
+        self.assertIsNone(dict(config.maintenance_windows).get("gpu-2"))
 
         invalid_windows = (
             {"unknown": {"until": "2030-06-15T12:30:00Z"}},
@@ -878,7 +878,7 @@ class ConfigTests(unittest.TestCase):
             }
         }
 
-        window = load_config(self.write(value)).maintenance_window("gpu-1")
+        window = dict(load_config(self.write(value)).maintenance_windows)["gpu-1"]
 
         self.assertTrue(window.recurring)
         # 2030-06-19 is a Wednesday (weekday 2). Active inside the window,
@@ -909,7 +909,7 @@ class ConfigTests(unittest.TestCase):
                 },
             }
         }
-        overnight = load_config(self.write(value)).maintenance_window("gpu-1")
+        overnight = dict(load_config(self.write(value)).maintenance_windows)["gpu-1"]
         # 2030-06-21 is a Friday (weekday 4); 01:00 Saturday is inside.
         saturday_early = datetime(2030, 6, 22, 1, 0, tzinfo=timezone.utc)
         self.assertTrue(overnight.is_active(saturday_early))
@@ -1020,7 +1020,7 @@ class ConfigTests(unittest.TestCase):
             }
         }
 
-        window = load_config(self.write(value)).maintenance_window("gpu-1")
+        window = dict(load_config(self.write(value)).maintenance_windows)["gpu-1"]
 
         self.assertEqual(window.duration_minutes, 10_079)
         # 2030-06-17 is a Monday; the instance ends 23:59 on Sunday the 23rd,

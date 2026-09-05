@@ -264,28 +264,12 @@ class MonitorConfig:
     _host_override_index: Mapping[str, HostOverrideConfig] = field(
         init=False, repr=False, compare=False, hash=False
     )
-    _maintenance_window_index: Mapping[str, MaintenanceWindowConfig] = field(
-        init=False, repr=False, compare=False, hash=False
-    )
-    _host_group_index: Mapping[str, str] = field(
-        init=False, repr=False, compare=False, hash=False
-    )
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "_host_override_index",
             MappingProxyType(dict(self.host_overrides)),
-        )
-        object.__setattr__(
-            self,
-            "_maintenance_window_index",
-            MappingProxyType(dict(self.maintenance_windows)),
-        )
-        object.__setattr__(
-            self,
-            "_host_group_index",
-            MappingProxyType(dict(self.host_groups)),
         )
 
     def host_override(self, host: str) -> HostOverrideConfig | None:
@@ -297,12 +281,6 @@ class MonitorConfig:
             for alias, override in self.host_overrides
             if override.display_name is not None
         )
-
-    def maintenance_window(self, host: str) -> MaintenanceWindowConfig | None:
-        return self._maintenance_window_index.get(host)
-
-    def host_group(self, host: str) -> str | None:
-        return self._host_group_index.get(host)
 
 
 DISPLAY_NAME_MAX_LENGTH = 64
