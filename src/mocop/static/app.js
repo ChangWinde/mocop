@@ -3190,32 +3190,34 @@ function serverStatusRank(server) {
 function orderedServers(servers) {
   const original = syncServerOrder(view.snapshot.servers);
   const order = new Map(original.map((host, index) => [host, index]));
-  return servers.slice().sort((a, b) => {
+  const position = (server) => numeric(order.get(server.host), Number.MAX_SAFE_INTEGER);
+  // Derived metrics are computed once per server, not once per comparison.
+  const keyed = servers.map((server) => ({
+    server,
+    group: view.serverSort === "group" ? hostGroupName(server) : "",
+    status: view.serverSort === "status" ? serverStatusRank(server) : 0,
+    gpu: view.serverSort === "gpu" ? numeric(serverGpuUsage(server), -1) : 0,
+    cpu: view.serverSort === "cpu" ? numeric(server.system?.cpu_usage_pct, -1) : 0,
+  }));
+  keyed.sort((a, b) => {
     if (view.serverSort === "group") {
-      const firstGroup = hostGroupName(a);
-      const secondGroup = hostGroupName(b);
-      if (!firstGroup && secondGroup) return 1;
-      if (firstGroup && !secondGroup) return -1;
-      return firstGroup.localeCompare(secondGroup)
-        || numeric(order.get(a.host), Number.MAX_SAFE_INTEGER)
-        - numeric(order.get(b.host), Number.MAX_SAFE_INTEGER);
+      if (!a.group && b.group) return 1;
+      if (a.group && !b.group) return -1;
+      return a.group.localeCompare(b.group) || position(a.server) - position(b.server);
     }
-    if (view.serverSort === "host") return a.host.localeCompare(b.host);
+    if (view.serverSort === "host") return a.server.host.localeCompare(b.server.host);
     if (view.serverSort === "status") {
-      return serverStatusRank(a) - serverStatusRank(b)
-        || a.host.localeCompare(b.host);
+      return a.status - b.status || a.server.host.localeCompare(b.server.host);
     }
     if (view.serverSort === "gpu") {
-      return numeric(serverGpuUsage(b), -1) - numeric(serverGpuUsage(a), -1)
-        || a.host.localeCompare(b.host);
+      return b.gpu - a.gpu || a.server.host.localeCompare(b.server.host);
     }
     if (view.serverSort === "cpu") {
-      return numeric(b.system?.cpu_usage_pct, -1) - numeric(a.system?.cpu_usage_pct, -1)
-        || a.host.localeCompare(b.host);
+      return b.cpu - a.cpu || a.server.host.localeCompare(b.server.host);
     }
-    return numeric(order.get(a.host), Number.MAX_SAFE_INTEGER)
-      - numeric(order.get(b.host), Number.MAX_SAFE_INTEGER);
+    return position(a.server) - position(b.server);
   });
+  return keyed.map((entry) => entry.server);
 }
 
 function hostGroupName(server) {
@@ -5418,12 +5420,16 @@ function groupedRecords(records) {
     groups.get(record.server.host).push(record);
   });
   return [...groups.entries()]
-    .map(([host, items]) => ({ host, server: items[0].server, records: sortedRecords(items) }))
+    .map(([host, items]) => {
+      const sorted = sortedRecords(items);
+      // The group's score is its best GPU; compute it once, not per comparison.
+      const score = view.sort === "host"
+        ? 0 : Math.max(...sorted.map((record) => gpuSortValue(record.gpu)));
+      return { host, server: items[0].server, records: sorted, score };
+    })
     .sort((a, b) => {
       if (view.sort === "host") return a.host.localeCompare(b.host);
-      const aScore = Math.max(...a.records.map((record) => gpuSortValue(record.gpu)));
-      const bScore = Math.max(...b.records.map((record) => gpuSortValue(record.gpu)));
-      return bScore - aScore || a.host.localeCompare(b.host);
+      return b.score - a.score || a.host.localeCompare(b.host);
     });
 }
 
