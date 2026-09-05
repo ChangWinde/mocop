@@ -67,13 +67,17 @@ interfaces without a runtime plugin registry.
 | `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |
 | `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
+| `telemetry_points.py` | compact in-memory history records: struct-packed host and GPU samples, process transitions |
 | `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage` |
 | `models.py` | immutable resource result types |
-| `incidents.py` | condition evaluation, bounded transition history, and raw/actionable counts |
+| `incidents.py` | condition evaluation, bounded transition history, restored generations, and raw/actionable counts |
+| `incident_domains.py` | which telemetry domains a condition's recovery needs and when a sample is blind to them |
 | `correlation.py` | possible shared-path grouping without changing incident truth |
 | `diagnostics.py` | deterministic incident guidance and redacted support bundles |
-| `persistence.py` | optional bounded asynchronous SQLite history |
-| `notifications.py` | HTTPS webhook validation, deduplication, throttling, and delivery |
+| `persistence.py` | optional bounded asynchronous SQLite history, restore of open incidents |
+| `persistence_schema.py` | the history database's DDL, column contracts, and row validity filters |
+| `notifications.py` | webhook endpoint validation, deduplication, throttling, pairing, and retry policy |
+| `webhook_transport.py` | one bounded HTTPS delivery attempt: pinned DNS, SSRF guards, response bound |
 | `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
 | `api_schema.py` | query-parameter and body-field types with their JSON descriptions, and the two validators that turn a raw query or parsed body into accepted values with stable codes and the rejected field |
 | `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query and body schemas, body caps, error catalog; `/api/meta` publishes it and every GET query and POST body is validated through it |
@@ -191,10 +195,17 @@ retaining recovery delivery; silence suppresses new notifications for that condi
 Snapshots retain raw active and critical counts and add actionable counts that exclude
 maintained, acknowledged, or silenced conditions. Action changes and natural expiry
 advance the incident-view revision without inventing an incident transition.
-Active conditions are rebuilt only from live post-start probes. A durable
-generation-bound action gets one startup rebinding opportunity for a matching
-condition; a healthy observation or subsequent recovery consumes it, preventing
-the action from suppressing a later recurrence.
+With history persistence, the conditions that were open at shutdown resume
+their generation at startup: each condition's latest persisted transition decides
+whether it was open and with which severity, its last `opened` transition supplies
+`firstObservedAt`, and the first live sample confirms, recovers, or freezes it
+under the same rules as any later sample. No duplicate `opened` is emitted, bound
+actions keep applying, and webhook workers are primed so the eventual `resolved`
+of a restored condition pairs with the `opened` an earlier process delivered.
+Without persistence, active conditions are rebuilt from live post-start probes,
+and a durable generation-bound action gets one startup rebinding opportunity for
+a matching condition; a healthy observation or subsequent recovery consumes it,
+preventing the action from suppressing a later recurrence.
 [ADR-0007](adr/0007-time-bounded-maintenance-overlay.md) records the rejected
 pause-collection and drop-incident alternatives; [ADR-0013](adr/0013-operational-diagnostics-and-gpu-history.md)
 records the condition-action, GPU-history, manual-probe, and diagnostic boundaries.

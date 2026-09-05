@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 from .config import IncidentConfig, IncidentScopeOverrideConfig, ThresholdConfig
+from .incident_domains import condition_domains, telemetry_unknown
 from .models import ProbeResult
 
 IncidentSeverity = Literal["warning", "critical"]
@@ -22,8 +23,6 @@ _GPU_QUERY_FAILURE_MESSAGES = frozenset(
         "nvidia-smi output was malformed",
     }
 )
-_SYSTEM_CATEGORIES = frozenset({"cpu", "memory", "swap", "disk", "pressure"})
-_GPU_HEALTH_CATEGORIES = frozenset({"gpu_ecc", "gpu_memory_repair", "gpu_slowdown"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +72,20 @@ class IncidentEvent:
             }
         )
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class OpenIncident:
+    """A condition that was still active when the previous process stopped.
+
+    ``condition`` carries the severity and values of its latest transition;
+    ``opened_at`` is the generation's first observation, which the incident
+    reports as ``firstObservedAt`` and incident actions are bound to.
+    """
+
+    host: str
+    condition: IncidentCondition
+    opened_at: str
 
 
 class IncidentPolicy(Protocol):
@@ -512,10 +525,7 @@ class ThresholdIncidentPolicy:
             return True
         category = key.partition(":")[0]
         domains = self.observed_domains(result)
-        return all(
-            domain in domains
-            for domain in _condition_domains_for_category(category, key)
-        )
+        return all(domain in domains for domain in condition_domains(category, key))
 
     def _add_percentage(
         self,
@@ -549,76 +559,6 @@ class ThresholdIncidentPolicy:
         )
 
 
-def _condition_domains(condition: IncidentCondition, key: str) -> tuple[str, ...]:
-    """Telemetry domains a condition needs before its recovery may advance."""
-    return _condition_domains_for_category(condition.category, key)
-
-
-def _condition_domains_for_category(category: str, key: str) -> tuple[str, ...]:
-    if category == "cpu":
-        return ("system", "system_cpu")
-    if category == "pressure":
-        return ("system", key)
-    if category in _SYSTEM_CATEGORIES:
-        return ("system",)
-    if category in {"gpu_availability", "gpu_count"}:
-        return ("gpu_query",)
-    identity = key.partition(":")[2]
-    if category in _GPU_HEALTH_CATEGORIES:
-        return (f"gpu_present:{identity}", f"gpu_health:{identity}")
-    if category == "gpu_processes":
-        return ("gpu_processes",)
-    if category == "gpu_temperature":
-        return (f"gpu_present:{identity}", f"gpu_temperature:{identity}")
-    if category == "gpu_memory":
-        return (f"gpu_present:{identity}", f"gpu_memory:{identity}")
-    if category == "gpu_idle_memory":
-        return (
-            f"gpu_present:{identity}",
-            f"gpu_memory:{identity}",
-            f"gpu_utilization:{identity}",
-        )
-    return ()
-
-
-_PER_IDENTITY_GPU_DOMAINS = frozenset(
-    {"gpu_present", "gpu_health", "gpu_temperature", "gpu_memory", "gpu_utilization"}
-)
-
-
-def _telemetry_unknown(
-    condition: IncidentCondition,
-    key: str,
-    observed_domains: frozenset[str],
-) -> bool:
-    """True when the sample carried no fresh telemetry for this condition."""
-    missing = [
-        domain
-        for domain in _condition_domains(condition, key)
-        if domain not in observed_domains
-    ]
-    if not missing:
-        return False
-    # A fully observed GPU inventory is authoritative about absence: when a
-    # device identity has left a complete inventory (a replaced or renumbered
-    # card), its per-identity domains can never be observed again. Freezing
-    # would pin the ghost condition and its counts forever, so recovery may
-    # advance instead. A failed GPU query never reaches this branch because
-    # it does not observe ``gpu_inventory``.
-    if "gpu_inventory" in observed_domains:
-        identities = set()
-        for domain in missing:
-            prefix, _, identity = domain.partition(":")
-            if prefix not in _PER_IDENTITY_GPU_DOMAINS:
-                return True
-            identities.add(identity)
-        if all(
-            f"gpu_present:{identity}" not in observed_domains for identity in identities
-        ):
-            return False
-    return True
-
-
 class IncidentTracker:
     """Tracks active conditions and a bounded transition log.
 
@@ -632,6 +572,7 @@ class IncidentTracker:
         policy: IncidentPolicy,
         history_points: int,
         historical_events: tuple[IncidentEvent, ...] = (),
+        open_incidents: tuple[OpenIncident, ...] = (),
     ) -> None:
         self._policy = policy
         self._active: dict[str, dict[str, IncidentCondition]] = {}
@@ -648,6 +589,22 @@ class IncidentTracker:
         last_event_id = max((event.event_id for event in retained_events), default=0)
         self._version = last_event_id
         self._next_event_id = last_event_id + 1
+        # Conditions open at shutdown resume their generation instead of
+        # opening again: no duplicate transition, firstObservedAt survives,
+        # and the first live sample confirms, recovers, or freezes them under
+        # the same rules as any later sample. A host with restored conditions
+        # therefore skips first-sample initialization.
+        for restored in open_incidents:
+            host, key = restored.host, restored.condition.key
+            self._active.setdefault(host, {})[key] = restored.condition
+            self._candidates.setdefault(host, {})
+            self._recoveries.setdefault(host, {})
+            self._severity_changes.setdefault(host, {})
+            self._opened_at.setdefault(host, {})[key] = restored.opened_at
+            self._last_observed_at.setdefault(host, {})[key] = (
+                restored.condition.observed_at
+            )
+            self._initialized.add(host)
 
     @property
     def version(self) -> int:
@@ -773,7 +730,7 @@ class IncidentTracker:
         if result.status == "online":
             for key in set(previous) - set(observed):
                 old = previous[key]
-                if _telemetry_unknown(old, key, observed_domains):
+                if telemetry_unknown(old.category, key, observed_domains):
                     # The sample carried no fresh data for this domain, so it
                     # can neither advance nor reset the recovery count.
                     continue

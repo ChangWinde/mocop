@@ -731,7 +731,7 @@ Response fields:
 | `observedAt` | timestamp | Sample that produced the current state. |
 | `detail` | string \| null | Bounded extra context. |
 | `groupKey` | string \| null | Set for shared network filesystems so one backend outage groups visually. |
-| `firstObservedAt`, `lastObservedAt` | timestamp | When the condition opened / was last confirmed. |
+| `firstObservedAt`, `lastObservedAt` | timestamp | When the condition opened / was last confirmed. With history persistence, `firstObservedAt` survives service restarts (the condition resumes its generation rather than opening again). |
 | `maintenanceSilenced` | bool | Host is inside an active maintenance window. |
 | `silenced` | bool | `maintenanceSilenced` **or** an active `silenced` action on this condition. |
 | `acknowledged` | bool | An active `acknowledged` action exists on this condition. |
@@ -1153,7 +1153,9 @@ shared-path group (`GET /api/incidents` `correlations[]`). `POST
   signature, so a receiver that recorded the id can drop the duplicate.
 - Only actionable transitions are sent (`actionable` under
   `GET /api/incidents`); an event that is silenced or acknowledged while it
-  waits is withdrawn, counted as suppressed, not as dropped. When an endpoint
+  waits is withdrawn, counted as suppressed, not as dropped. A service restart
+  does not repeat `opened` for incidents that were open before it when history
+  persistence is enabled; their later `resolved` is still delivered. When an endpoint
   subscribes to both `opened` and `resolved`, a `resolved` for a condition
   whose `opened` it never received (for example one that began inside a
   maintenance window) is suppressed for the same reason.

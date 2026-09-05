@@ -8,6 +8,7 @@ from mocop.incidents import (
     IncidentCondition,
     IncidentEvent,
     IncidentTracker,
+    OpenIncident,
     ThresholdIncidentPolicy,
 )
 from mocop.models import (
@@ -268,6 +269,135 @@ class IncidentTrackerTests(unittest.TestCase):
             [event["eventId"] for event in tracker.snapshot(20)["events"]],
             [8, 7],
         )
+
+    def test_restored_open_conditions_resume_their_generation(self) -> None:
+        # Before the restart: a disk warning and a critical connectivity
+        # condition are open on node-a (disk needs its two confirming samples).
+        before = IncidentTracker(ThresholdIncidentPolicy(ThresholdConfig()), 20)
+        degraded = ProbeResult(
+            "node-a",
+            "online",
+            1,
+            system=system(20, 90),
+            observed_at="2026-08-09T00:00:00Z",
+        )
+        before.update(degraded)
+        before.update(replace(degraded, observed_at="2026-08-09T00:00:10Z"))
+        before.update(
+            ProbeResult(
+                "node-a",
+                "unreachable",
+                1,
+                message="SSH connection timed out",
+                observed_at="2026-08-09T00:00:20Z",
+            )
+        )
+        snapshot = before.snapshot(20)
+        self.assertEqual(
+            {
+                (item["conditionKey"], item["firstObservedAt"])
+                for item in snapshot["active"]
+            },
+            {
+                ("disk:/dev/a:/", "2026-08-09T00:00:10Z"),
+                ("connectivity", "2026-08-09T00:00:20Z"),
+            },
+        )
+        restored = tuple(
+            OpenIncident(
+                "node-a",
+                before._active["node-a"][item["conditionKey"]],
+                item["firstObservedAt"],
+            )
+            for item in snapshot["active"]
+        )
+        history = tuple(before._events)
+
+        # After the restart, the first live sample still shows both problems:
+        # no transition is created and firstObservedAt is unchanged, so an
+        # action bound to that timestamp keeps applying.
+        after = IncidentTracker(
+            ThresholdIncidentPolicy(ThresholdConfig()),
+            20,
+            historical_events=history,
+            open_incidents=restored,
+        )
+        still_down = ProbeResult(
+            "node-a",
+            "unreachable",
+            1,
+            message="SSH connection timed out",
+            observed_at="2026-08-09T01:00:00Z",
+        )
+        self.assertEqual(after.update(still_down), ())
+        self.assertEqual(after.version, before.version)
+        self.assertEqual(
+            {
+                (item["conditionKey"], item["firstObservedAt"])
+                for item in after.snapshot(20)["active"]
+            },
+            {
+                ("disk:/dev/a:/", "2026-08-09T00:00:10Z"),
+                ("connectivity", "2026-08-09T00:00:20Z"),
+            },
+        )
+        self.assertEqual(
+            after.active_started_at("node-a", "connectivity"), "2026-08-09T00:00:20Z"
+        )
+        # The unreachable sample froze the disk condition; recovery still needs
+        # its confirming online samples, then resolves exactly once each.
+        healthy = ProbeResult(
+            "node-a",
+            "online",
+            1,
+            system=system(20, 20),
+            observed_at="2026-08-09T01:00:10Z",
+        )
+        first = after.update(healthy)
+        second = after.update(replace(healthy, observed_at="2026-08-09T01:00:20Z"))
+        self.assertEqual([event.state for event in first], [])
+        self.assertEqual(
+            sorted((event.condition.key, event.state) for event in second),
+            [("connectivity", "resolved"), ("disk:/dev/a:/", "resolved")],
+        )
+        self.assertEqual(after.snapshot(20)["active"], [])
+
+    def test_restored_conditions_recover_or_open_by_the_usual_rules(self) -> None:
+        restored = OpenIncident(
+            "node-a",
+            IncidentCondition(
+                key="disk:/dev/a:/",
+                category="disk",
+                resource="/",
+                severity="warning",
+                value=90.0,
+                threshold=85.0,
+                observed_at="2026-08-09T00:00:10Z",
+            ),
+            "2026-08-09T00:00:10Z",
+        )
+        tracker = IncidentTracker(
+            ThresholdIncidentPolicy(ThresholdConfig()), 20, open_incidents=(restored,)
+        )
+        # A healthy first sample recovers with the usual confirmation, while a
+        # newly observed condition opens with its own confirmation count.
+        hot = ProbeResult(
+            "node-a",
+            "online",
+            1,
+            (gpu(86),),
+            system=system(20, 20),
+            observed_at="2026-08-09T01:00:00Z",
+        )
+        self.assertEqual(tracker.update(hot), ())
+        events = tracker.update(replace(hot, observed_at="2026-08-09T01:00:10Z"))
+        self.assertEqual(
+            sorted((event.condition.key, event.state) for event in events),
+            [("disk:/dev/a:/", "resolved"), ("gpu_temperature:GPU-1", "opened")],
+        )
+        # A host no longer configured drops its restored conditions.
+        tracker.remove_hosts({"node-b"})
+        self.assertEqual(tracker.snapshot(20)["active"], [])
 
     def test_only_condition_and_severity_transitions_create_events(self) -> None:
         warning = ProbeResult("node-a", "online", 1, (gpu(82),), system=system(90, 90))

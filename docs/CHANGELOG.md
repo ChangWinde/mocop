@@ -6,6 +6,19 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Incidents that were open when the service stopped resume their generation
+  at startup instead of opening again. A live deployment had re-emitted
+  `opened` for every persisting condition after each restart — 17 per restart
+  for 14 full filesystems and 3 unreachable hosts — which duplicated webhook
+  deliveries, reset `firstObservedAt`, and filled the transition log with
+  restart noise. With history persistence, each condition's latest persisted
+  transition (read across the whole retained table, not just the display
+  window) decides whether it was open, its last `opened` supplies
+  `firstObservedAt`, the first live sample confirms or recovers it under the
+  usual rules, bound acknowledgements keep applying, and webhook workers are
+  primed so the eventual `resolved` still pairs with the `opened` an earlier
+  process delivered.
+
 - The startup `VACUUM` that returns expired pages is best-effort: when it
   cannot run (typically a full disk, since it needs temporary space up to the
   file's size) the service starts anyway, reclaims what the bounded online
@@ -19,6 +32,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Four modules crossed their line ceilings with the incident-restore fix and were split along
+  existing seams instead: the struct-packed history records moved from
+  `service.py` into `telemetry_points.py`, the bounded HTTPS delivery
+  transport (pinned DNS, SSRF guards) from `notifications.py` into
+  `webhook_transport.py`, the telemetry-domain rules from `incidents.py` into
+  `incident_domains.py`, and the SQLite DDL and row contracts from
+  `persistence.py` into `persistence_schema.py`. Every ceiling ratchets down.
 - A connectivity incident's `diagnosis.nextSteps` (and the dashboard's
   incident dialog) now open with the step that follows from the failure
   classification — check the jump host's forwarding, the node's `sshd`

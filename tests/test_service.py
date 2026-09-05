@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
 import unittest
@@ -15,6 +16,7 @@ from mocop.config import (
     IncidentActionConfig,
     MaintenanceWindowConfig,
     MonitorConfig,
+    PersistenceConfig,
     TopologyLinkConfig,
 )
 from mocop.discovery import HostDiscoverySnapshot
@@ -26,7 +28,11 @@ from mocop.models import (
     SystemMetrics,
     WorkloadMetadata,
 )
-from mocop.persistence import DisabledPersistence, LoadedTelemetry
+from mocop.persistence import (
+    DisabledPersistence,
+    LoadedTelemetry,
+    SqliteTelemetryPersistence,
+)
 from mocop.service import _MAX_GPU_IDENTITIES_PER_HOST, MonitorService, StateStore
 
 
@@ -107,6 +113,80 @@ class StateStoreTests(unittest.TestCase):
         persistence.record_history.assert_not_called()
         persistence.record_gpu_telemetry.assert_not_called()
         persistence.record_incidents.assert_not_called()
+
+    def test_restart_resumes_open_incidents_instead_of_reopening_them(self) -> None:
+        # A live deployment re-emitted "opened" for every persisting condition
+        # after each restart (17 per restart), which duplicates webhook
+        # deliveries and resets firstObservedAt. With persistence, the store
+        # restores the conditions open at shutdown and the first live sample
+        # continues their generation.
+        # Retention is enforced against the wall clock at every open, so the
+        # timestamps are anchored to now.
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        opened_at = (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        resumed_at = now.isoformat().replace("+00:00", "Z")
+
+        def clock() -> datetime:
+            return now
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "history.sqlite3"
+        config = PersistenceConfig(
+            enabled=True, retention_hours=24, max_bytes=8_388_608
+        )
+        down = ProbeResult(
+            "offline",
+            "unreachable",
+            5000,
+            message="SSH connection timed out",
+            observed_at=opened_at,
+        )
+
+        first = SqliteTelemetryPersistence(config, path)
+        before = StateStore(5, persistence=first, utc_clock=clock)
+        before.set_hosts(("offline",))
+        before.apply(down)
+        self.assertEqual(
+            [e["state"] for e in before.incidents(10)["events"]], ["opened"]
+        )
+        self.assertTrue(first.flush())
+        first.close()
+
+        second = SqliteTelemetryPersistence(config, path)
+        self.addCleanup(second.close)
+        restored = second.load(history_points=720, incident_points=500)
+        self.assertEqual(len(restored.open_incidents), 1)
+        acknowledged = IncidentActionConfig(
+            host="offline",
+            condition_key="connectivity",
+            action="acknowledged",
+            until=now + timedelta(days=1),
+            reason="owner notified",
+            incident_started_at=opened_at,
+        )
+        notifications = _RecordingNotifications()
+        after = StateStore(
+            5,
+            persistence=second,
+            restored=restored,
+            incident_actions=(acknowledged,),
+            notifications=notifications,
+            utc_clock=clock,
+        )
+        after.set_hosts(("offline",))
+        after.apply(replace(down, observed_at=resumed_at))
+
+        incidents = after.incidents(10)
+        self.assertEqual([e["state"] for e in incidents["events"]], ["opened"])
+        self.assertEqual(incidents["events"][0]["observedAt"], opened_at)
+        (condition,) = incidents["active"]
+        self.assertEqual(condition["firstObservedAt"], opened_at)
+        self.assertEqual(condition["lastObservedAt"], resumed_at)
+        self.assertTrue(condition["acknowledged"])
+        self.assertFalse(condition["actionable"])
+        self.assertEqual(notifications.published, [])
+        self.assertEqual(after.snapshot()["stats"]["activeIncidents"], 1)
 
     def test_condition_action_changes_actionable_counts_and_diagnosis(self) -> None:
         def clock() -> datetime:

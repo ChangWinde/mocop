@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -234,6 +235,85 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         status = store.status()
         self.assertTrue(status["healthy"])
         self.assertEqual(status["droppedWrites"], 0)
+
+    def test_restores_the_conditions_open_at_shutdown_beyond_the_event_window(
+        self,
+    ) -> None:
+        # Each condition's latest transition decides whether it was open, its
+        # severity comes from that transition, and firstObservedAt from the
+        # generation's opened event. The decision reads the whole retained
+        # table: the event window handed back for display is far smaller.
+        def transition(
+            event_id: int, key: str, state: str, severity: str, observed_at: str
+        ) -> IncidentEvent:
+            base = incident_event(event_id, observed_at)
+            return replace(
+                base,
+                state=state,
+                condition=replace(
+                    base.condition, key=key, category="disk", severity=severity
+                ),
+            )
+
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+        store.record_incidents(
+            (
+                transition(
+                    1, "disk:/dev/a:/", "opened", "warning", "2026-08-10T00:00:00Z"
+                ),
+                transition(
+                    2, "disk:/dev/b:/data", "opened", "warning", "2026-08-10T00:00:05Z"
+                ),
+                transition(
+                    3,
+                    "disk:/dev/b:/data",
+                    "resolved",
+                    "warning",
+                    "2026-08-10T00:00:10Z",
+                ),
+                transition(
+                    4,
+                    "disk:/dev/c:/scratch",
+                    "opened",
+                    "warning",
+                    "2026-08-10T00:00:15Z",
+                ),
+                transition(
+                    5,
+                    "disk:/dev/c:/scratch",
+                    "escalated",
+                    "critical",
+                    "2026-08-10T00:00:20Z",
+                ),
+                transition(
+                    6, "disk:/dev/b:/data", "opened", "warning", "2026-08-10T00:00:25Z"
+                ),
+                transition(
+                    7,
+                    "disk:/dev/b:/data",
+                    "resolved",
+                    "warning",
+                    "2026-08-10T00:00:30Z",
+                ),
+            )
+        )
+        self.assertTrue(store.flush())
+
+        loaded = store.load(history_points=10, incident_points=2)
+
+        self.assertEqual([event.event_id for event in loaded.incident_events], [6, 7])
+        self.assertEqual(
+            [
+                (item.condition.key, item.condition.severity, item.opened_at)
+                for item in loaded.open_incidents
+            ],
+            [
+                ("disk:/dev/a:/", "warning", "2026-08-10T00:00:00Z"),
+                ("disk:/dev/c:/scratch", "critical", "2026-08-10T00:00:15Z"),
+            ],
+        )
+        self.assertTrue(all(item.host == "gpu-01" for item in loaded.open_incidents))
 
     def test_roundtrips_gpu_samples_and_process_transitions_as_one_batch(self) -> None:
         store = SqliteTelemetryPersistence(self.config, self.path)

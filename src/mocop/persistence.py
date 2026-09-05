@@ -16,13 +16,25 @@ from pathlib import Path
 from typing import Protocol
 
 from .config import PersistenceConfig
-from .incidents import IncidentCondition, IncidentEvent
+from .incidents import IncidentCondition, IncidentEvent, OpenIncident
+from .persistence_schema import (
+    CREATE_SCHEMA_STATEMENTS,
+    GPU_ROW_FILTER,
+    GPU_TABLE_STATEMENTS,
+    HISTORY_FIELDS,
+    HISTORY_ROW_FILTER,
+    INCIDENT_ROW_FILTER,
+    INCIDENT_SEVERITIES,
+    INCIDENT_STATES,
+    PROCESS_ROW_FILTER,
+    REQUIRED_HISTORY_FIELDS,
+    SCHEMA_VERSION,
+)
 
 # Keep the released v3 process_events table byte-for-byte compatible.  Older
 # writers use positional INSERTs, so even an appended nullable column would
 # break package rollback.  Same-timestamp transitions are ordered
 # deterministically at read time, with ``stopped`` before ``started``.
-_SCHEMA_VERSION = 3
 _QUEUE_CAPACITY = 4096
 _WRITE_BATCH_SIZE = 128
 _PRUNE_INTERVAL_SECONDS = 60.0
@@ -34,189 +46,8 @@ _VACUUM_PAGES_PER_PRUNE = 2048
 _VACUUM_CHUNK_PAGES = 1024
 _VACUUM_CALLS_PER_PRUNE = 64
 _SQLITE_FULL_ERRORCODE = 13  # sqlite3.SQLITE_FULL is unavailable on Python 3.10
-_HISTORY_FIELDS = (
-    "cpuUsagePct",
-    "memoryUsagePct",
-    "swapUsagePct",
-    "diskUsagePct",
-    "networkRxBps",
-    "networkTxBps",
-    "diskReadBps",
-    "diskWriteBps",
-    "gpuUsagePct",
-    "gpuMemoryUsagePct",
-    "gpuTemperatureC",
-)
-_INCIDENT_STATES = frozenset({"opened", "resolved", "escalated", "deescalated"})
-_INCIDENT_SEVERITIES = frozenset({"warning", "critical"})
 _INTERNAL_USAGE_HOST = "\x00mocop-process-usage-v1"
 _INTERNAL_USAGE_KEY = "_mocopProcessUsageV1"
-
-# Rows whose stored types cannot round-trip are excluded in SQL before any
-# restore limit applies, so corrupt rows never displace older valid records.
-_NUMERIC_COLUMN_TYPES = "('integer', 'real', 'null')"
-# The in-memory history point requires these three percentages, so a NULL
-# written by a foreign or corrupted database must not survive the restore:
-# it would crash host initialization on every service start.
-_REQUIRED_NUMERIC_COLUMN_TYPES = "('integer', 'real')"
-_REQUIRED_HISTORY_COLUMNS = frozenset(
-    {"memory_usage_pct", "swap_usage_pct", "disk_usage_pct"}
-)
-_REQUIRED_HISTORY_FIELDS = frozenset({"memoryUsagePct", "swapUsagePct", "diskUsagePct"})
-_HISTORY_ROW_FILTER = " AND ".join(
-    (
-        "typeof(host) = 'text'",
-        "typeof(observed_at) = 'text'",
-        *(
-            f"typeof({column}) IN "
-            + (
-                _REQUIRED_NUMERIC_COLUMN_TYPES
-                if column in _REQUIRED_HISTORY_COLUMNS
-                else _NUMERIC_COLUMN_TYPES
-            )
-            for column in (
-                "cpu_usage_pct",
-                "memory_usage_pct",
-                "swap_usage_pct",
-                "disk_usage_pct",
-                "network_rx_bps",
-                "network_tx_bps",
-                "disk_read_bps",
-                "disk_write_bps",
-                "gpu_usage_pct",
-                "gpu_memory_usage_pct",
-                "gpu_temperature_c",
-            )
-        ),
-        "transport_retried IN (0, 1)",
-    )
-)
-_INCIDENT_ROW_FILTER = " AND ".join(
-    (
-        "typeof(event_id) = 'integer'",
-        "event_id >= 1",
-        "typeof(host) = 'text'",
-        "typeof(condition_key) = 'text'",
-        "typeof(category) = 'text'",
-        "typeof(resource) = 'text'",
-        f"typeof(value) IN {_NUMERIC_COLUMN_TYPES}",
-        f"typeof(threshold) IN {_NUMERIC_COLUMN_TYPES}",
-        "typeof(condition_observed_at) = 'text'",
-        "typeof(detail) IN ('text', 'null')",
-        "typeof(group_key) IN ('text', 'null')",
-        "typeof(observed_at) = 'text'",
-    )
-)
-_GPU_ROW_FILTER = " AND ".join(
-    (
-        "typeof(host) = 'text'",
-        "typeof(gpu_id) = 'text'",
-        "typeof(gpu_index) = 'integer'",
-        "typeof(observed_at) = 'text'",
-        *(
-            f"typeof({column}) IN {_NUMERIC_COLUMN_TYPES}"
-            for column in (
-                "utilization_gpu_pct",
-                "memory_used_mib",
-                "memory_total_mib",
-                "temperature_c",
-                "power_draw_w",
-            )
-        ),
-    )
-)
-_PROCESS_ROW_FILTER = " AND ".join(
-    (
-        "typeof(p.host) = 'text'",
-        "typeof(p.gpu_id) = 'text'",
-        "typeof(p.gpu_index) = 'integer'",
-        "typeof(p.observed_at) = 'text'",
-        "p.event_type IN ('started', 'stopped')",
-        "typeof(p.pid) = 'integer'",
-        "typeof(p.name) = 'text'",
-        f"typeof(p.used_memory_mib) IN {_NUMERIC_COLUMN_TYPES}",
-        "typeof(p.workload_json) IN ('text', 'null')",
-    )
-)
-
-_GPU_TABLE_STATEMENTS = (
-    """
-    CREATE TABLE IF NOT EXISTS gpu_history (
-        host TEXT NOT NULL,
-        gpu_id TEXT NOT NULL,
-        gpu_index INTEGER NOT NULL,
-        observed_at TEXT NOT NULL,
-        utilization_gpu_pct REAL,
-        memory_used_mib REAL,
-        memory_total_mib REAL,
-        temperature_c REAL,
-        power_draw_w REAL,
-        PRIMARY KEY (host, gpu_id, observed_at)
-    ) WITHOUT ROWID
-    """,
-    "CREATE INDEX IF NOT EXISTS gpu_history_observed_at ON gpu_history(observed_at)",
-    """
-    CREATE TABLE IF NOT EXISTS process_events (
-        host TEXT NOT NULL,
-        gpu_id TEXT NOT NULL,
-        gpu_index INTEGER NOT NULL,
-        observed_at TEXT NOT NULL,
-        event_type TEXT NOT NULL CHECK (event_type IN ('started', 'stopped')),
-        pid INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        used_memory_mib REAL,
-        workload_json TEXT,
-        PRIMARY KEY (
-            host, gpu_id, observed_at, event_type, pid, name
-        )
-    ) WITHOUT ROWID
-    """,
-    "CREATE INDEX IF NOT EXISTS process_events_observed_at"
-    " ON process_events(observed_at)",
-)
-_CREATE_SCHEMA_STATEMENTS = (
-    """
-    CREATE TABLE IF NOT EXISTS history (
-        host TEXT NOT NULL,
-        observed_at TEXT NOT NULL,
-        cpu_usage_pct REAL,
-        memory_usage_pct REAL,
-        swap_usage_pct REAL,
-        disk_usage_pct REAL,
-        network_rx_bps REAL,
-        network_tx_bps REAL,
-        disk_read_bps REAL,
-        disk_write_bps REAL,
-        gpu_usage_pct REAL,
-        gpu_memory_usage_pct REAL,
-        gpu_temperature_c REAL,
-        transport_retried INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (host, observed_at)
-    ) WITHOUT ROWID
-    """,
-    "CREATE INDEX IF NOT EXISTS history_observed_at ON history(observed_at)",
-    """
-    CREATE TABLE IF NOT EXISTS incident_events (
-        event_id INTEGER PRIMARY KEY,
-        host TEXT NOT NULL,
-        condition_key TEXT NOT NULL,
-        category TEXT NOT NULL,
-        resource TEXT NOT NULL,
-        severity TEXT NOT NULL CHECK (severity IN ('warning', 'critical')),
-        value REAL,
-        threshold REAL,
-        condition_observed_at TEXT NOT NULL,
-        detail TEXT,
-        group_key TEXT,
-        state TEXT NOT NULL CHECK (
-            state IN ('opened', 'resolved', 'escalated', 'deescalated')
-        ),
-        observed_at TEXT NOT NULL
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS incident_events_observed_at"
-    " ON incident_events(observed_at)",
-) + _GPU_TABLE_STATEMENTS
 
 
 def _free_pages(connection: sqlite3.Connection) -> int:
@@ -341,6 +172,7 @@ class LoadedTelemetry:
     process_events: dict[tuple[str, str], tuple[dict[str, object], ...]] = field(
         default_factory=dict
     )
+    open_incidents: tuple[OpenIncident, ...] = ()
 
 
 class TelemetryPersistence(Protocol):
@@ -488,7 +320,7 @@ class SqliteTelemetryPersistence:
                            gpu_usage_pct, gpu_memory_usage_pct, gpu_temperature_c,
                            transport_retried
                     FROM history
-                    WHERE host = ? AND {_HISTORY_ROW_FILTER}
+                    WHERE host = ? AND {HISTORY_ROW_FILTER}
                     ORDER BY observed_at DESC LIMIT ?
                     """,
                     history_points,
@@ -500,12 +332,39 @@ class SqliteTelemetryPersistence:
                            detail, group_key, state, observed_at
                     FROM (
                         SELECT * FROM incident_events
-                        WHERE {_INCIDENT_ROW_FILTER}
+                        WHERE {INCIDENT_ROW_FILTER}
                         ORDER BY event_id DESC LIMIT ?
                     )
                     ORDER BY event_id
                     """,
                     (incident_points,),
+                ).fetchall()
+                # Which conditions were open at shutdown is decided by each
+                # condition's latest transition over the whole retained
+                # table, not the event window above: a disk that has been
+                # full for a week must not reopen because gpu_memory churn
+                # pushed its opened event out of the window.
+                open_rows = connection.execute(
+                    f"""
+                    SELECT event_id, host, condition_key, category, resource,
+                           severity, value, threshold, condition_observed_at,
+                           detail, group_key, state, observed_at
+                    FROM incident_events
+                    WHERE event_id IN (
+                        SELECT MAX(event_id) FROM incident_events
+                        GROUP BY host, condition_key
+                    ) AND state != 'resolved' AND {INCIDENT_ROW_FILTER}
+                    ORDER BY event_id
+                    """
+                ).fetchall()
+                opened_rows = connection.execute(
+                    """
+                    SELECT host, condition_key, observed_at FROM incident_events
+                    WHERE event_id IN (
+                        SELECT MAX(event_id) FROM incident_events
+                        WHERE state = 'opened' GROUP BY host, condition_key
+                    )
+                    """
                 ).fetchall()
                 gpu_rows = _newest_per_partition(
                     connection,
@@ -516,7 +375,7 @@ class SqliteTelemetryPersistence:
                            utilization_gpu_pct, memory_used_mib,
                            memory_total_mib, temperature_c, power_draw_w
                     FROM gpu_history
-                    WHERE host = ? AND gpu_id = ? AND {_GPU_ROW_FILTER}
+                    WHERE host = ? AND gpu_id = ? AND {GPU_ROW_FILTER}
                     ORDER BY observed_at DESC LIMIT ?
                     """,
                     history_points,
@@ -531,7 +390,7 @@ class SqliteTelemetryPersistence:
                     SELECT host, gpu_id, gpu_index, observed_at, event_type,
                            pid, name, used_memory_mib, workload_json
                     FROM process_events AS p
-                    WHERE p.host = ? AND p.gpu_id = ? AND {_PROCESS_ROW_FILTER}
+                    WHERE p.host = ? AND p.gpu_id = ? AND {PROCESS_ROW_FILTER}
                     ORDER BY p.observed_at DESC, p.event_type ASC,
                              p.pid DESC, p.name DESC
                     LIMIT ?
@@ -544,7 +403,7 @@ class SqliteTelemetryPersistence:
         history: dict[str, list[dict[str, object]]] = {}
         for row in history_rows:
             host, observed_at, *values, transport_retried = row
-            fields = dict(zip(_HISTORY_FIELDS, values, strict=True))
+            fields = dict(zip(HISTORY_FIELDS, values, strict=True))
             if (
                 not isinstance(host, str)
                 or not 0 < len(host) <= 253
@@ -552,7 +411,7 @@ class SqliteTelemetryPersistence:
                 or not 0 < len(observed_at) <= 64
                 or transport_retried not in (0, 1)
                 or not all(_is_optional_finite_number(value) for value in values)
-                or any(fields[field] is None for field in _REQUIRED_HISTORY_FIELDS)
+                or any(fields[field] is None for field in REQUIRED_HISTORY_FIELDS)
             ):
                 continue
             point: dict[str, object] = {"observedAt": observed_at}
@@ -563,6 +422,22 @@ class SqliteTelemetryPersistence:
         events = tuple(
             event
             for row in event_rows
+            if (event := self._event_from_row(row)) is not None
+        )
+        opened_at = {
+            (host, key): observed
+            for host, key, observed in opened_rows
+            if isinstance(host, str)
+            and isinstance(key, str)
+            and isinstance(observed, str)
+        }
+        open_incidents = tuple(
+            OpenIncident(
+                event.host,
+                event.condition,
+                opened_at.get((event.host, event.condition.key), event.observed_at),
+            )
+            for row in open_rows
             if (event := self._event_from_row(row)) is not None
         )
         gpu_history: dict[tuple[str, str], list[dict[str, object]]] = {}
@@ -680,6 +555,7 @@ class SqliteTelemetryPersistence:
             incident_events=events,
             gpu_history={key: tuple(points) for key, points in gpu_history.items()},
             process_events=restored_process_events,
+            open_incidents=open_incidents,
         )
 
     def record_history(self, host: str, point: dict[str, object]) -> None:
@@ -777,7 +653,7 @@ class SqliteTelemetryPersistence:
                     version = int(
                         connection.execute("PRAGMA user_version").fetchone()[0]
                     )
-                    if version not in {0, 1, 2, _SCHEMA_VERSION}:
+                    if version not in {0, 1, 2, SCHEMA_VERSION}:
                         raise PersistenceError(
                             f"unsupported history schema version: {version}"
                         )
@@ -821,11 +697,11 @@ class SqliteTelemetryPersistence:
 
     @classmethod
     def _create_schema(cls, connection: sqlite3.Connection) -> None:
-        cls._apply_schema(connection, _CREATE_SCHEMA_STATEMENTS)
+        cls._apply_schema(connection, CREATE_SCHEMA_STATEMENTS)
 
     @classmethod
     def _migrate_v1(cls, connection: sqlite3.Connection) -> None:
-        cls._apply_schema(connection, _GPU_TABLE_STATEMENTS)
+        cls._apply_schema(connection, GPU_TABLE_STATEMENTS)
 
     @classmethod
     def _migrate_v2(cls, connection: sqlite3.Connection) -> None:
@@ -868,7 +744,7 @@ class SqliteTelemetryPersistence:
                 connection.execute(
                     "ALTER TABLE process_events RENAME TO process_events_sequenced"
                 )
-                for statement in _GPU_TABLE_STATEMENTS[2:4]:
+                for statement in GPU_TABLE_STATEMENTS[2:4]:
                     connection.execute(statement)
                 connection.execute(
                     """
@@ -891,7 +767,7 @@ class SqliteTelemetryPersistence:
             connection.execute("DROP TRIGGER IF EXISTS gpu_history_prune_usage_events")
             connection.execute("DROP TABLE IF EXISTS process_event_order")
             connection.execute("DROP TABLE IF EXISTS process_usage_events")
-            connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         except Exception:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
@@ -1025,7 +901,7 @@ class SqliteTelemetryPersistence:
                 (
                     item.host,
                     point.get("observedAt"),
-                    *(point.get(field) for field in _HISTORY_FIELDS),
+                    *(point.get(field) for field in HISTORY_FIELDS),
                     1 if point.get("transportRetried") else 0,
                 ),
             )
@@ -1245,8 +1121,8 @@ class SqliteTelemetryPersistence:
                     observed_at,
                 )
             )
-            or severity not in _INCIDENT_SEVERITIES
-            or state not in _INCIDENT_STATES
+            or severity not in INCIDENT_SEVERITIES
+            or state not in INCIDENT_STATES
             or not _is_optional_finite_number(value)
             or not _is_optional_finite_number(threshold)
             or (

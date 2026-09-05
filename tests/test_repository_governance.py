@@ -45,7 +45,8 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/static/gpu-tasks.js": 175,
     "src/mocop/static/process-search.js": 225,
     "src/mocop/static/update-pill.js": 175,
-    "src/mocop/service.py": 2_423,
+    "src/mocop/service.py": 2_225,
+    "src/mocop/telemetry_points.py": 250,
     "src/mocop/usage.py": 350,
     "src/mocop/web.py": 1_300,
     "src/mocop/api_manifest.py": 300,
@@ -54,11 +55,14 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/ssh_failures.py": 125,
     "src/mocop/config.py": 350,
     "src/mocop/config_loader.py": 1_300,
-    "src/mocop/persistence.py": 1_325,
+    "src/mocop/persistence.py": 1_200,
+    "src/mocop/persistence_schema.py": 225,
     "src/mocop/doctor.py": 985,
     "src/mocop/__main__.py": 950,
-    "src/mocop/incidents.py": 875,
-    "src/mocop/notifications.py": 860,
+    "src/mocop/incidents.py": 835,
+    "src/mocop/incident_domains.py": 100,
+    "src/mocop/notifications.py": 560,
+    "src/mocop/webhook_transport.py": 375,
 }
 
 

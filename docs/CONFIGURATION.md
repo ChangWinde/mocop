@@ -128,12 +128,14 @@ generation so a later recurrence cannot inherit a stale acknowledgement. Legacy
 records without it remain readable. Only one item per host/condition pair is
 accepted; the dashboard normally owns these records.
 
-Current active state is deliberately re-established from live probes after a
-service restart, not trusted from historical events. A pre-existing bound action
-may therefore bind once to the first matching condition confirmed after startup;
-an initial healthy sample consumes that allowance, and any later recurrence is
-actionable. This preserves a continuous outage across a supervised restart while
-failing open if recovery happened during downtime.
+With history persistence enabled, conditions that were open at shutdown resume
+their generation after a restart — same `firstObservedAt`, no repeated `opened`
+transition — so a bound action keeps applying directly. Without persistence,
+active state is re-established from live probes: a pre-existing bound action may
+bind once to the first matching condition confirmed after startup, an initial
+healthy sample consumes that allowance, and any later recurrence is actionable.
+Either way a continuous outage survives a supervised restart while recovery
+during downtime fails open.
 
 ## Topology
 

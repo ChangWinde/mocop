@@ -14,14 +14,16 @@ from urllib.parse import urlsplit
 from mocop.config import WebhookConfig
 from mocop.incidents import IncidentCondition, IncidentEvent
 from mocop.notifications import (
-    DeliveryResult,
     NotificationEnvelope,
-    NotificationError,
-    PinnedHttpsWebhookSender,
     WebhookNotificationSink,
-    _Endpoint,
     _WebhookWorker,
     create_notification_sink,
+)
+from mocop.webhook_transport import (
+    DeliveryResult,
+    Endpoint,
+    NotificationError,
+    PinnedHttpsWebhookSender,
 )
 
 
@@ -350,6 +352,42 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(endpoint["droppedDeliveries"], 0)
         self.assertEqual(endpoint["suppressedDeliveries"], 1)
 
+    def test_recoveries_of_conditions_restored_at_startup_are_delivered(self) -> None:
+        # The opened transition went out from the process before the restart,
+        # so its resolved must reach the receiver; a recovery for a condition
+        # nobody delivered an open for stays suppressed.
+        sender = _ImmediateSender()
+        sink = create_notification_sink(
+            (self.config(events=("opened", "resolved")),),
+            environ={
+                "MOCOP_WEBHOOK_URL": "https://hooks.example.test/events",
+                "MOCOP_WEBHOOK_SECRET": "top-secret",
+            },
+            resolver=resolver_for("8.8.8.8"),
+            sender=sender,
+            known_conditions=(("gpu-01", "connectivity"),),
+        )
+        restored_recovery = replace(incident(), event_id=60, state="resolved")
+        unknown_recovery = replace(
+            incident(),
+            event_id=61,
+            state="resolved",
+            condition=replace(incident().condition, key="cpu", category="cpu"),
+        )
+
+        sink.publish((restored_recovery,), ())
+        sink.publish((unknown_recovery,), ())
+        sink.close()
+
+        delivered = [json.loads(call[1])["event"] for call in sender.calls]
+        self.assertEqual(
+            [(event["conditionKey"], event["state"]) for event in delivered],
+            [("connectivity", "resolved")],
+        )
+        status = sink.status()["endpoints"][0]
+        self.assertEqual(status["deliveredEvents"], 1)
+        self.assertEqual(status["suppressedDeliveries"], 1)
+
     def test_severity_transitions_deliver_and_pair_without_prior_open(self) -> None:
         sender = _ImmediateSender()
         sink = create_notification_sink(
@@ -459,7 +497,7 @@ class NotificationTests(unittest.TestCase):
 
     def test_queue_full_event_can_be_retried_after_capacity_returns(self) -> None:
         sender = _GateSender()
-        endpoint = _Endpoint(
+        endpoint = Endpoint(
             self.config(max_attempts=1),
             urlsplit("https://hooks.example.test/events"),
             None,
@@ -494,7 +532,7 @@ class NotificationTests(unittest.TestCase):
 
     def test_worker_close_uses_one_deadline_and_reports_a_stuck_sender(self) -> None:
         sender = _GateSender()
-        endpoint = _Endpoint(
+        endpoint = Endpoint(
             self.config(max_attempts=1),
             urlsplit("https://hooks.example.test/events"),
             None,
@@ -517,10 +555,10 @@ class NotificationTests(unittest.TestCase):
         self.assertFalse(worker._thread.is_alive())
 
     def test_multi_endpoint_test_is_queued_atomically(self) -> None:
-        endpoint_a = _Endpoint(
+        endpoint_a = Endpoint(
             self.config(name="a"), urlsplit("https://a.example.test/events"), None
         )
-        endpoint_b = _Endpoint(
+        endpoint_b = Endpoint(
             self.config(name="b"), urlsplit("https://b.example.test/events"), None
         )
         sink = WebhookNotificationSink(
@@ -549,7 +587,7 @@ class NotificationTests(unittest.TestCase):
             if thread.name.startswith("mocop-webhook-resolver-")
         }
         sender = PinnedHttpsWebhookSender(resolver=stuck_resolver)
-        endpoint = _Endpoint(
+        endpoint = Endpoint(
             self.config(timeout_seconds=0.02),
             urlsplit("https://hooks.example.test/events"),
             None,
@@ -591,7 +629,7 @@ class NotificationTests(unittest.TestCase):
             connect=lambda address, timeout=None: client,
         )
         self.addCleanup(sender.close)
-        endpoint = _Endpoint(
+        endpoint = Endpoint(
             self.config(timeout_seconds=0.2),
             urlsplit("https://hooks.example.test/events"),
             None,
@@ -638,7 +676,7 @@ class NotificationTests(unittest.TestCase):
 
         sender = PinnedHttpsWebhookSender(resolver=stuck_resolver)
         self.addCleanup(sender.close)
-        endpoint = _Endpoint(
+        endpoint = Endpoint(
             self.config(timeout_seconds=0.2),
             urlsplit("https://hooks.example.test/events"),
             None,
@@ -665,7 +703,7 @@ class NotificationTests(unittest.TestCase):
             connect=lambda address, timeout=None: _ScriptedRawSocket(),
         )
         self.addCleanup(sender.close)
-        endpoint = _Endpoint(
+        endpoint = Endpoint(
             self.config(timeout_seconds=0.3),
             urlsplit("https://hooks.example.test/events"),
             None,
@@ -704,7 +742,7 @@ class NotificationTests(unittest.TestCase):
             resolver=resolver, tls_context=context, connect=connect
         )
         self.addCleanup(sender.close)
-        endpoint = _Endpoint(
+        endpoint = Endpoint(
             self.config(), urlsplit("https://hooks.example.test/events"), None
         )
 
