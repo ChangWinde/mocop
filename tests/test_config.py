@@ -79,6 +79,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.incidents.resource_open_cycles, 2)
         self.assertEqual(config.incidents.recovery_cycles, 2)
         self.assertEqual(config.incidents.gpu_idle_memory_cycles, 12)
+        self.assertEqual(config.incidents.resource_open_seconds, 60)
+        self.assertEqual(config.incidents.gpu_idle_memory_seconds, 300)
 
     def test_validates_resolved_ssh_discovery_policy(self) -> None:
         value = valid_config()
@@ -774,6 +776,7 @@ class ConfigTests(unittest.TestCase):
             "resource_open_cycles": 3,
             "recovery_cycles": 4,
             "gpu_idle_memory_cycles": 20,
+            "resource_open_seconds": 0,
         }
 
         config = load_config(self.write(value))
@@ -781,6 +784,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.incidents.resource_open_cycles, 3)
         self.assertEqual(config.incidents.recovery_cycles, 4)
         self.assertEqual(config.incidents.gpu_idle_memory_cycles, 20)
+        self.assertEqual(config.incidents.resource_open_seconds, 0)
+        value["incidents"]["resource_open_seconds"] = 90.5
+        self.assertEqual(
+            load_config(self.write(value)).incidents.resource_open_seconds, 90.5
+        )
+
+        for invalid in (-1, 3601, True, "60", float("nan")):
+            with self.subTest(invalid=invalid):
+                value["incidents"]["resource_open_seconds"] = invalid
+                with self.assertRaisesRegex(
+                    ConfigError, "incidents.resource_open_seconds"
+                ):
+                    load_config(self.write(value))
+        value["incidents"]["resource_open_seconds"] = 60
+        value["incidents"]["gpu_idle_memory_seconds"] = 0
+        self.assertEqual(
+            load_config(self.write(value)).incidents.gpu_idle_memory_seconds, 0
+        )
+        value["incidents"]["gpu_idle_memory_seconds"] = -5
+        with self.assertRaisesRegex(ConfigError, "incidents.gpu_idle_memory_seconds"):
+            load_config(self.write(value))
+        del value["incidents"]["gpu_idle_memory_seconds"]
 
         for invalid in (0, 61, 2.5, True):
             with self.subTest(invalid=invalid):

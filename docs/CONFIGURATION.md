@@ -93,6 +93,17 @@ All threshold fields are numbers. Defaults and inclusive ranges are:
 
 `incidents.resource_open_cycles` (2), `recovery_cycles` (2), and
 `gpu_idle_memory_cycles` (12) are integers from 1 through 60.
+`incidents.resource_open_seconds` (60) is a number from 0 through 3600: a
+resource condition (CPU, memory, swap, filesystem, pressure, GPU memory,
+temperature, idle-memory, hardware health) opens or changes severity only once
+its confirming samples also span this many seconds, so sensitivity does not
+depend on the poll interval — at a five-second cadence, two samples alone would
+open an incident for a ten-second VRAM spike. Connectivity and GPU-availability
+conditions open immediately regardless. `0` confirms by sample count alone.
+`incidents.gpu_idle_memory_seconds` (300, same range) is the corresponding
+floor for the idle-VRAM condition, which also needs `gpu_idle_memory_cycles`
+samples: checkpoint and evaluation pauses idle a GPU for a minute or two and
+should not read as a held-but-unused device.
 
 `incident_overrides` may contain only `hosts` and `groups`, each with at most
 256 entries. A scope object is non-empty and may contain `thresholds` and/or
@@ -128,12 +139,14 @@ generation so a later recurrence cannot inherit a stale acknowledgement. Legacy
 records without it remain readable. Only one item per host/condition pair is
 accepted; the dashboard normally owns these records.
 
-Current active state is deliberately re-established from live probes after a
-service restart, not trusted from historical events. A pre-existing bound action
-may therefore bind once to the first matching condition confirmed after startup;
-an initial healthy sample consumes that allowance, and any later recurrence is
-actionable. This preserves a continuous outage across a supervised restart while
-failing open if recovery happened during downtime.
+With history persistence enabled, conditions that were open at shutdown resume
+their generation after a restart — same `firstObservedAt`, no repeated `opened`
+transition — so a bound action keeps applying directly. Without persistence,
+active state is re-established from live probes: a pre-existing bound action may
+bind once to the first matching condition confirmed after startup, an initial
+healthy sample consumes that allowance, and any later recurrence is actionable.
+Either way a continuous outage survives a supervised restart while recovery
+during downtime fails open.
 
 ## Topology
 

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, replace
-from typing import Literal, Protocol
+from dataclasses import replace
 
 from .config import IncidentConfig, IncidentScopeOverrideConfig, ThresholdConfig
-from .models import ProbeResult
-
-IncidentSeverity = Literal["warning", "critical"]
-IncidentState = Literal["opened", "resolved", "escalated", "deescalated"]
+from .incident_domains import condition_domains, telemetry_unknown
+from .incident_types import (
+    IncidentCondition,
+    IncidentEvent,
+    IncidentPolicy,
+    IncidentSeverity,
+    IncidentState,
+    OpenIncident,
+)
+from .models import ProbeResult, epoch_seconds
 
 # Every probe message that means "this sample cannot speak for the GPUs" must
 # be listed here. A malformed nvidia-smi payload degrades to zero GPUs with
@@ -22,80 +27,6 @@ _GPU_QUERY_FAILURE_MESSAGES = frozenset(
         "nvidia-smi output was malformed",
     }
 )
-_SYSTEM_CATEGORIES = frozenset({"cpu", "memory", "swap", "disk", "pressure"})
-_GPU_HEALTH_CATEGORIES = frozenset({"gpu_ecc", "gpu_memory_repair", "gpu_slowdown"})
-
-
-@dataclass(frozen=True, slots=True)
-class IncidentCondition:
-    key: str
-    category: str
-    resource: str
-    severity: IncidentSeverity
-    value: float | None
-    threshold: float | None
-    observed_at: str
-    detail: str | None = None
-    open_after_cycles: int = 2
-    recovery_cycles: int = 2
-    group_key: str | None = None
-
-    def active_dict(self, host: str) -> dict[str, object]:
-        return {
-            "host": host,
-            "conditionKey": self.key,
-            "category": self.category,
-            "resource": self.resource,
-            "severity": self.severity,
-            "value": self.value,
-            "threshold": self.threshold,
-            "observedAt": self.observed_at,
-            "detail": self.detail,
-            "groupKey": self.group_key,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class IncidentEvent:
-    event_id: int
-    host: str
-    condition: IncidentCondition
-    state: IncidentState
-    observed_at: str
-
-    def to_dict(self) -> dict[str, object]:
-        value = self.condition.active_dict(self.host)
-        value.update(
-            {
-                "eventId": self.event_id,
-                "state": self.state,
-                "observedAt": self.observed_at,
-            }
-        )
-        return value
-
-
-class IncidentPolicy(Protocol):
-    """Everything ``IncidentTracker`` and ``StateStore`` require of a policy."""
-
-    def conditions(self, result: ProbeResult) -> dict[str, IncidentCondition]: ...
-
-    def observed_domains(self, result: ProbeResult) -> frozenset[str]: ...
-
-    def condition_observed(self, result: ProbeResult, key: str) -> bool: ...
-
-    def update_expected_gpu_counts(
-        self, expected_gpu_counts: tuple[tuple[str, int], ...]
-    ) -> None: ...
-
-    def update_overrides(
-        self,
-        host_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...],
-        group_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...],
-        host_groups: tuple[tuple[str, str], ...],
-    ) -> None: ...
-
-    def retain_hosts(self, hosts: set[str]) -> None: ...
 
 
 class ThresholdIncidentPolicy:
@@ -350,6 +281,7 @@ class ThresholdIncidentPolicy:
                 observed_at=result.observed_at,
                 detail="GPU process telemetry is unavailable",
                 open_after_cycles=self._incidents.resource_open_cycles,
+                open_after_seconds=self._incidents.resource_open_seconds,
                 recovery_cycles=self._incidents.recovery_cycles,
             )
 
@@ -367,6 +299,7 @@ class ThresholdIncidentPolicy:
                     threshold=temperature_threshold,
                     observed_at=result.observed_at,
                     open_after_cycles=self._incidents.resource_open_cycles,
+                    open_after_seconds=self._incidents.resource_open_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
 
@@ -389,6 +322,7 @@ class ThresholdIncidentPolicy:
                     threshold=memory_threshold,
                     observed_at=result.observed_at,
                     open_after_cycles=self._incidents.resource_open_cycles,
+                    open_after_seconds=self._incidents.resource_open_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
             utilization = gpu.utilization_gpu_pct
@@ -410,6 +344,7 @@ class ThresholdIncidentPolicy:
                     observed_at=result.observed_at,
                     detail=f"GPU utilization is {round(utilization, 2)}%",
                     open_after_cycles=self._incidents.gpu_idle_memory_cycles,
+                    open_after_seconds=self._incidents.gpu_idle_memory_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
             health = gpu.health
@@ -427,6 +362,7 @@ class ThresholdIncidentPolicy:
                     observed_at=result.observed_at,
                     detail="Volatile uncorrected ECC errors detected",
                     open_after_cycles=self._incidents.resource_open_cycles,
+                    open_after_seconds=self._incidents.resource_open_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
             if health.retired_pages_pending or health.remapped_rows_pending:
@@ -441,6 +377,7 @@ class ThresholdIncidentPolicy:
                     observed_at=result.observed_at,
                     detail="GPU memory repair is pending",
                     open_after_cycles=self._incidents.resource_open_cycles,
+                    open_after_seconds=self._incidents.resource_open_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
             if health.thermal_slowdown or health.power_brake_slowdown:
@@ -460,9 +397,13 @@ class ThresholdIncidentPolicy:
                     observed_at=result.observed_at,
                     detail=f"Hardware slowdown active: {', '.join(causes)}",
                     open_after_cycles=self._incidents.resource_open_cycles,
+                    open_after_seconds=self._incidents.resource_open_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
         return conditions
+
+    def recovery_cycles(self) -> int:
+        return self._incidents.recovery_cycles
 
     def observed_domains(self, result: ProbeResult) -> frozenset[str]:
         """Telemetry domains for which this sample carries fresh, valid data.
@@ -512,10 +453,7 @@ class ThresholdIncidentPolicy:
             return True
         category = key.partition(":")[0]
         domains = self.observed_domains(result)
-        return all(
-            domain in domains
-            for domain in _condition_domains_for_category(category, key)
-        )
+        return all(domain in domains for domain in condition_domains(category, key))
 
     def _add_percentage(
         self,
@@ -544,79 +482,24 @@ class ThresholdIncidentPolicy:
             observed_at=observed_at,
             detail=detail,
             open_after_cycles=self._incidents.resource_open_cycles,
+            open_after_seconds=self._incidents.resource_open_seconds,
             recovery_cycles=self._incidents.recovery_cycles,
             group_key=group_key,
         )
 
 
-def _condition_domains(condition: IncidentCondition, key: str) -> tuple[str, ...]:
-    """Telemetry domains a condition needs before its recovery may advance."""
-    return _condition_domains_for_category(condition.category, key)
+def _sustained(since: str, condition: IncidentCondition) -> bool:
+    """Whether the condition has been observed for its required duration.
 
-
-def _condition_domains_for_category(category: str, key: str) -> tuple[str, ...]:
-    if category == "cpu":
-        return ("system", "system_cpu")
-    if category == "pressure":
-        return ("system", key)
-    if category in _SYSTEM_CATEGORIES:
-        return ("system",)
-    if category in {"gpu_availability", "gpu_count"}:
-        return ("gpu_query",)
-    identity = key.partition(":")[2]
-    if category in _GPU_HEALTH_CATEGORIES:
-        return (f"gpu_present:{identity}", f"gpu_health:{identity}")
-    if category == "gpu_processes":
-        return ("gpu_processes",)
-    if category == "gpu_temperature":
-        return (f"gpu_present:{identity}", f"gpu_temperature:{identity}")
-    if category == "gpu_memory":
-        return (f"gpu_present:{identity}", f"gpu_memory:{identity}")
-    if category == "gpu_idle_memory":
-        return (
-            f"gpu_present:{identity}",
-            f"gpu_memory:{identity}",
-            f"gpu_utilization:{identity}",
-        )
-    return ()
-
-
-_PER_IDENTITY_GPU_DOMAINS = frozenset(
-    {"gpu_present", "gpu_health", "gpu_temperature", "gpu_memory", "gpu_utilization"}
-)
-
-
-def _telemetry_unknown(
-    condition: IncidentCondition,
-    key: str,
-    observed_domains: frozenset[str],
-) -> bool:
-    """True when the sample carried no fresh telemetry for this condition."""
-    missing = [
-        domain
-        for domain in _condition_domains(condition, key)
-        if domain not in observed_domains
-    ]
-    if not missing:
-        return False
-    # A fully observed GPU inventory is authoritative about absence: when a
-    # device identity has left a complete inventory (a replaced or renumbered
-    # card), its per-identity domains can never be observed again. Freezing
-    # would pin the ghost condition and its counts forever, so recovery may
-    # advance instead. A failed GPU query never reaches this branch because
-    # it does not observe ``gpu_inventory``.
-    if "gpu_inventory" in observed_domains:
-        identities = set()
-        for domain in missing:
-            prefix, _, identity = domain.partition(":")
-            if prefix not in _PER_IDENTITY_GPU_DOMAINS:
-                return True
-            identities.add(identity)
-        if all(
-            f"gpu_present:{identity}" not in observed_domains for identity in identities
-        ):
-            return False
-    return True
+    Unparsable timestamps fall back to confirmation by cycles alone.
+    """
+    if condition.open_after_seconds <= 0:
+        return True
+    started = epoch_seconds(since)
+    now = epoch_seconds(condition.observed_at)
+    if started is None or now is None:
+        return True
+    return now - started >= condition.open_after_seconds
 
 
 class IncidentTracker:
@@ -632,12 +515,15 @@ class IncidentTracker:
         policy: IncidentPolicy,
         history_points: int,
         historical_events: tuple[IncidentEvent, ...] = (),
+        open_incidents: tuple[OpenIncident, ...] = (),
     ) -> None:
         self._policy = policy
         self._active: dict[str, dict[str, IncidentCondition]] = {}
-        self._candidates: dict[str, dict[str, tuple[IncidentCondition, int]]] = {}
+        self._candidates: dict[str, dict[str, tuple[IncidentCondition, int, str]]] = {}
         self._recoveries: dict[str, dict[str, int]] = {}
-        self._severity_changes: dict[str, dict[str, tuple[IncidentSeverity, int]]] = {}
+        self._severity_changes: dict[
+            str, dict[str, tuple[IncidentSeverity, int, str]]
+        ] = {}
         self._opened_at: dict[str, dict[str, str]] = {}
         self._last_observed_at: dict[str, dict[str, str]] = {}
         self._initialized: set[str] = set()
@@ -648,6 +534,27 @@ class IncidentTracker:
         last_event_id = max((event.event_id for event in retained_events), default=0)
         self._version = last_event_id
         self._next_event_id = last_event_id + 1
+        # Conditions open at shutdown resume their generation instead of
+        # opening again: no duplicate transition, firstObservedAt survives,
+        # and the first live sample confirms, recovers, or freezes them under
+        # the same rules as any later sample. A host with restored conditions
+        # therefore skips first-sample initialization.
+        recovery_cycles = policy.recovery_cycles()
+        for restored in open_incidents:
+            host, key = restored.host, restored.condition.key
+            # The persisted transition does not carry cycle counts; recovery
+            # of a restored condition follows the configured policy.
+            self._active.setdefault(host, {})[key] = replace(
+                restored.condition, recovery_cycles=recovery_cycles
+            )
+            self._candidates.setdefault(host, {})
+            self._recoveries.setdefault(host, {})
+            self._severity_changes.setdefault(host, {})
+            self._opened_at.setdefault(host, {})[key] = restored.opened_at
+            self._last_observed_at.setdefault(host, {})[key] = (
+                restored.condition.observed_at
+            )
+            self._initialized.add(host)
 
     @property
     def version(self) -> int:
@@ -681,7 +588,7 @@ class IncidentTracker:
             }
             self._active[result.host] = immediate
             self._candidates[result.host] = {
-                key: (condition, 1)
+                key: (condition, 1, condition.observed_at)
                 for key, condition in observed.items()
                 if condition.open_after_cycles > 1
             }
@@ -735,14 +642,16 @@ class IncidentTracker:
                     severity_changes.pop(key, None)
                     current[key] = new
                     continue
-                pending_severity, count = severity_changes.get(key, (new.severity, 0))
+                pending_severity, count, since = severity_changes.get(
+                    key, (new.severity, 0, new.observed_at)
+                )
                 if pending_severity != new.severity:
-                    count = 0
+                    count, since = 0, new.observed_at
                 count += 1
-                if count < new.open_after_cycles:
+                if count < new.open_after_cycles or not _sustained(since, new):
                     # Debounce severity flapping: keep the confirmed severity
                     # until the change is sustained, mirroring open cycles.
-                    severity_changes[key] = (new.severity, count)
+                    severity_changes[key] = (new.severity, count, since)
                     current[key] = replace(new, severity=old.severity)
                     continue
                 severity_changes.pop(key, None)
@@ -755,11 +664,11 @@ class IncidentTracker:
                 )
                 continue
 
-            candidate, count = candidates.get(key, (new, 0))
+            candidate, count, since = candidates.get(key, (new, 0, new.observed_at))
             if candidate.severity != new.severity:
-                count = 0
+                count, since = 0, new.observed_at
             count += 1
-            if count >= new.open_after_cycles:
+            if count >= new.open_after_cycles and _sustained(since, new):
                 candidates.pop(key, None)
                 current[key] = new
                 opened_at[key] = new.observed_at
@@ -768,12 +677,12 @@ class IncidentTracker:
                     self._append(result.host, new, "opened", result.observed_at)
                 )
             else:
-                candidates[key] = (new, count)
+                candidates[key] = (new, count, since)
 
         if result.status == "online":
             for key in set(previous) - set(observed):
                 old = previous[key]
-                if _telemetry_unknown(old, key, observed_domains):
+                if telemetry_unknown(old.category, key, observed_domains):
                     # The sample carried no fresh data for this domain, so it
                     # can neither advance nor reset the recovery count.
                     continue

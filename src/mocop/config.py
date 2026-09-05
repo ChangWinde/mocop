@@ -4,13 +4,14 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 
 from .discovery_policy import (
     SshDiscoveryConfig,
 )
+from .maintenance import MaintenanceWindowConfig
 from .updates import UpdatesConfig
 
 CONFIG_ENV_VAR = "MOCOP_CONFIG"
@@ -66,6 +67,15 @@ class IncidentConfig:
     resource_open_cycles: int = 2
     recovery_cycles: int = 2
     gpu_idle_memory_cycles: int = 12
+    # Confirmation in samples alone scales with the poll interval: two samples
+    # are ten seconds at a five-second cadence, so a VRAM spike of that length
+    # opens an incident that resolves twenty seconds later. The floor makes a
+    # resource condition sustained by the clock as well.
+    resource_open_seconds: float = 60
+    # Idle VRAM is a claim about a workload, not a spike: checkpoint and
+    # evaluation pauses idle a GPU for a minute or two, so the idle-memory
+    # condition has its own, longer floor.
+    gpu_idle_memory_seconds: float = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,69 +140,6 @@ class HostOverrideConfig:
     poll_interval_seconds: float | None = None
     probe_timeout_seconds: float | None = None
     display_name: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class MaintenanceWindowConfig:
-    """One-shot (absolute `until`) or weekly recurring silence window.
-
-    Recurring windows are defined in UTC: `weekday` follows Python's Monday=0
-    convention, `start_minutes` counts from UTC midnight, and the duration is
-    bounded below one week so instances can never overlap themselves.
-    """
-
-    reason: str
-    until: datetime | None = None
-    weekday: int | None = None
-    start_minutes: int | None = None
-    duration_minutes: int | None = None
-
-    @property
-    def recurring(self) -> bool:
-        return self.weekday is not None
-
-    def _instance_end(self, now: datetime) -> datetime:
-        """Return the end of the active instance, or of the next one."""
-        assert self.weekday is not None
-        assert self.start_minutes is not None
-        assert self.duration_minutes is not None
-        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        days_back = (now.weekday() - self.weekday) % 7
-        start = (
-            midnight - timedelta(days=days_back) + timedelta(minutes=self.start_minutes)
-        )
-        if start > now:
-            start -= timedelta(days=7)
-        end = start + timedelta(minutes=self.duration_minutes)
-        if end <= now:
-            end = start + timedelta(days=7, minutes=self.duration_minutes)
-        return end
-
-    def is_active(self, at: datetime | None = None) -> bool:
-        now = at or datetime.now(timezone.utc)
-        if not self.recurring:
-            assert self.until is not None
-            return self.until > now
-        assert self.duration_minutes is not None
-        end = self._instance_end(now)
-        return end - timedelta(minutes=self.duration_minutes) <= now < end
-
-    def to_dict(self, at: datetime | None = None) -> dict[str, object]:
-        if not self.recurring:
-            assert self.until is not None
-            return {
-                "until": self.until.isoformat(timespec="seconds").replace(
-                    "+00:00", "Z"
-                ),
-                "reason": self.reason,
-            }
-        now = at or datetime.now(timezone.utc)
-        end = self._instance_end(now)
-        return {
-            "until": end.isoformat(timespec="seconds").replace("+00:00", "Z"),
-            "reason": self.reason,
-            "recurring": True,
-        }
 
 
 @dataclass(frozen=True, slots=True)

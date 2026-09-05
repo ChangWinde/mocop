@@ -6,6 +6,18 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Incidents that were open when the service stopped resume their generation
+  at startup instead of opening again. A live deployment had re-emitted
+  `opened` for every persisting condition after each restart — 17 per restart
+  for 14 full filesystems and 3 unreachable hosts — which duplicated webhook
+  deliveries, reset `firstObservedAt`, and filled the transition log with
+  restart noise. With history persistence, each condition's latest persisted
+  transition (read across the whole retained table, not just the display
+  window) decides whether it was open, its last `opened` supplies
+  `firstObservedAt`, the first live sample confirms or recovers it under the
+  usual rules, bound acknowledgements keep applying, and webhook workers are
+  primed so the eventual `resolved` still pairs with the `opened` an earlier
+  process delivered.
 - The startup `VACUUM` that returns expired pages is best-effort: when it
   cannot run (typically a full disk, since it needs temporary space up to the
   file's size) the service starts anyway, reclaims what the bounded online
@@ -19,6 +31,32 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Resource conditions must now be sustained by the clock as well as by
+  sample count: `incidents.resource_open_seconds` (default 60, range 0–3600)
+  is the minimum span the confirming samples must cover before a CPU, memory,
+  swap, filesystem, pressure, GPU-memory, temperature, idle-memory, or
+  hardware-health condition opens or changes severity. On a live deployment
+  polling every five seconds, VRAM spikes of ten to fifteen seconds satisfied
+  `resource_open_cycles: 2` and produced 43 `gpu_memory` incidents in five
+  hours, 42 of them shorter than ten minutes and most resolved within twenty
+  seconds. The idle-VRAM condition gets its own floor,
+  `incidents.gpu_idle_memory_seconds` (default 300), because the same
+  deployment logged sixteen two-minute `gpu_idle_memory` incidents from
+  checkpoint and evaluation pauses. Connectivity and GPU-availability
+  conditions still open immediately; set either floor to `0` to confirm by
+  cycles alone as before.
+- Seven modules crossed their line ceilings during this round and were split
+  along existing seams instead: the struct-packed history records moved from
+  `service.py` into `telemetry_points.py`, the bounded HTTPS delivery
+  transport (pinned DNS, SSRF guards) from `notifications.py` into
+  `webhook_transport.py`, the telemetry-domain rules from `incidents.py` into
+  `incident_domains.py`, and the SQLite DDL and row contracts from
+  `persistence.py` into `persistence_schema.py`; the duration floor then
+  pushed two more over, so the incident vocabulary (`incident_types.py`) left
+  `incidents.py` and the integration section parsers
+  (`config_integrations.py`) left `config_loader.py`, and the maintenance
+  window type (`maintenance.py`) left `config.py`. Every ceiling ratchets
+  down.
 - A connectivity incident's `diagnosis.nextSteps` (and the dashboard's
   incident dialog) now open with the step that follows from the failure
   classification — check the jump host's forwarding, the node's `sshd`

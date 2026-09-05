@@ -14,7 +14,6 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from heapq import nsmallest
-from struct import Struct
 from typing import Protocol
 
 from . import __version__
@@ -23,7 +22,6 @@ from .config import (
     IncidentActionConfig,
     IncidentConfig,
     IncidentScopeOverrideConfig,
-    MaintenanceWindowConfig,
     MonitorConfig,
     ThresholdConfig,
 )
@@ -35,7 +33,9 @@ from .discovery import (
     HostSource,
     resolve_host_discovery,
 )
-from .incidents import IncidentPolicy, IncidentTracker, ThresholdIncidentPolicy
+from .incident_types import IncidentPolicy
+from .incidents import IncidentTracker, ThresholdIncidentPolicy
+from .maintenance import MaintenanceWindowConfig
 from .models import GpuProcess, ProbeResult, ServerState, utc_after, utc_now
 from .notifications import DisabledNotificationSink, IncidentNotificationSink
 from .persistence import (
@@ -48,6 +48,13 @@ from .probe import (
     CancellableResourceProbe,
     InventoryAwareResourceProbe,
     ResourceProbe,
+)
+from .telemetry_points import (
+    GPU_HISTORY_VALUES,
+    GpuHistoryPoint,
+    GpuProcessTransition,
+    HostHistoryPoint,
+    unpacked_optional_float,
 )
 from .usage import aggregate_usage
 
@@ -62,8 +69,6 @@ _MAX_RUNTIME_POLL_INTERVAL_SECONDS = 3600.0
 # identities (UUID churn) cannot grow per-identity telemetry without bound,
 # while briefly absent GPUs keep their displayable history.
 _MAX_GPU_IDENTITIES_PER_HOST = 256
-_HOST_HISTORY_VALUES = Struct("<12d")
-_GPU_HISTORY_VALUES = Struct("<i5d")
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -116,216 +121,6 @@ class _ProbeBatch:
     remaining: int
 
 
-@dataclass(frozen=True, slots=True)
-class _HostHistoryPoint:
-    observed_at: str
-    values: bytes
-
-    @classmethod
-    def create(
-        cls,
-        observed_at: str,
-        cpu_usage_pct: float | None,
-        memory_usage_pct: float,
-        swap_usage_pct: float,
-        disk_usage_pct: float,
-        network_rx_bps: float | None,
-        network_tx_bps: float | None,
-        disk_read_bps: float | None,
-        disk_write_bps: float | None,
-        gpu_usage_pct: float | None,
-        gpu_memory_usage_pct: float | None,
-        gpu_temperature_c: float | None,
-        transport_retried: bool = False,
-    ) -> _HostHistoryPoint:
-        return cls(
-            observed_at,
-            _HOST_HISTORY_VALUES.pack(
-                _packed_optional_float(cpu_usage_pct),
-                memory_usage_pct,
-                swap_usage_pct,
-                disk_usage_pct,
-                _packed_optional_float(network_rx_bps),
-                _packed_optional_float(network_tx_bps),
-                _packed_optional_float(disk_read_bps),
-                _packed_optional_float(disk_write_bps),
-                _packed_optional_float(gpu_usage_pct),
-                _packed_optional_float(gpu_memory_usage_pct),
-                _packed_optional_float(gpu_temperature_c),
-                float(transport_retried),
-            ),
-        )
-
-    @classmethod
-    def from_dict(cls, point: dict[str, object]) -> _HostHistoryPoint:
-        return cls.create(
-            observed_at=str(point["observedAt"]),
-            cpu_usage_pct=_optional_float(point.get("cpuUsagePct")),
-            memory_usage_pct=float(point["memoryUsagePct"]),
-            swap_usage_pct=float(point["swapUsagePct"]),
-            disk_usage_pct=float(point["diskUsagePct"]),
-            network_rx_bps=_optional_float(point.get("networkRxBps")),
-            network_tx_bps=_optional_float(point.get("networkTxBps")),
-            disk_read_bps=_optional_float(point.get("diskReadBps")),
-            disk_write_bps=_optional_float(point.get("diskWriteBps")),
-            gpu_usage_pct=_optional_float(point.get("gpuUsagePct")),
-            gpu_memory_usage_pct=_optional_float(point.get("gpuMemoryUsagePct")),
-            gpu_temperature_c=_optional_float(point.get("gpuTemperatureC")),
-            transport_retried=bool(point.get("transportRetried")),
-        )
-
-    def to_dict(self) -> dict[str, object]:
-        (
-            cpu_usage_pct,
-            memory_usage_pct,
-            swap_usage_pct,
-            disk_usage_pct,
-            network_rx_bps,
-            network_tx_bps,
-            disk_read_bps,
-            disk_write_bps,
-            gpu_usage_pct,
-            gpu_memory_usage_pct,
-            gpu_temperature_c,
-            transport_retried,
-        ) = _HOST_HISTORY_VALUES.unpack(self.values)
-        return {
-            "observedAt": self.observed_at,
-            "cpuUsagePct": _unpacked_optional_float(cpu_usage_pct),
-            "memoryUsagePct": memory_usage_pct,
-            "swapUsagePct": swap_usage_pct,
-            "diskUsagePct": disk_usage_pct,
-            "networkRxBps": _unpacked_optional_float(network_rx_bps),
-            "networkTxBps": _unpacked_optional_float(network_tx_bps),
-            "diskReadBps": _unpacked_optional_float(disk_read_bps),
-            "diskWriteBps": _unpacked_optional_float(disk_write_bps),
-            "gpuUsagePct": _unpacked_optional_float(gpu_usage_pct),
-            "gpuMemoryUsagePct": _unpacked_optional_float(gpu_memory_usage_pct),
-            "gpuTemperatureC": _unpacked_optional_float(gpu_temperature_c),
-            "transportRetried": bool(transport_retried),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class _GpuHistoryPoint:
-    observed_at: str
-    values: bytes
-
-    @classmethod
-    def create(
-        cls,
-        observed_at: str,
-        index: int,
-        utilization_gpu_pct: float | None,
-        memory_used_mib: float | None,
-        memory_total_mib: float | None,
-        temperature_c: float | None,
-        power_draw_w: float | None,
-    ) -> _GpuHistoryPoint:
-        return cls(
-            observed_at,
-            _GPU_HISTORY_VALUES.pack(
-                index,
-                _packed_optional_float(utilization_gpu_pct),
-                _packed_optional_float(memory_used_mib),
-                _packed_optional_float(memory_total_mib),
-                _packed_optional_float(temperature_c),
-                _packed_optional_float(power_draw_w),
-            ),
-        )
-
-    @classmethod
-    def from_dict(cls, point: dict[str, object]) -> _GpuHistoryPoint:
-        return cls.create(
-            observed_at=str(point["observedAt"]),
-            index=int(point["index"]),
-            utilization_gpu_pct=_optional_float(point.get("utilizationGpuPct")),
-            memory_used_mib=_optional_float(point.get("memoryUsedMiB")),
-            memory_total_mib=_optional_float(point.get("memoryTotalMiB")),
-            temperature_c=_optional_float(point.get("temperatureC")),
-            power_draw_w=_optional_float(point.get("powerDrawW")),
-        )
-
-    def to_dict(self, gpu_id: str) -> dict[str, object]:
-        (
-            index,
-            utilization_gpu_pct,
-            memory_used_mib,
-            memory_total_mib,
-            temperature_c,
-            power_draw_w,
-        ) = _GPU_HISTORY_VALUES.unpack(self.values)
-        return {
-            "observedAt": self.observed_at,
-            "gpuId": gpu_id,
-            "index": index,
-            "utilizationGpuPct": _unpacked_optional_float(utilization_gpu_pct),
-            "memoryUsedMiB": _unpacked_optional_float(memory_used_mib),
-            "memoryTotalMiB": _unpacked_optional_float(memory_total_mib),
-            "temperatureC": _unpacked_optional_float(temperature_c),
-            "powerDrawW": _unpacked_optional_float(power_draw_w),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class _GpuProcessTransition:
-    observed_at: str
-    gpu_id: str
-    index: int
-    event: str
-    pid: int
-    name: str
-    used_memory_mib: float | None
-    workload: dict[str, object] | None
-    visible: bool = True
-
-    @classmethod
-    def from_dict(cls, event: dict[str, object]) -> _GpuProcessTransition:
-        workload = event.get("workload")
-        return cls(
-            observed_at=str(event["observedAt"]),
-            gpu_id=str(event["gpuId"]),
-            index=int(event["index"]),
-            event=str(event["event"]),
-            pid=int(event["pid"]),
-            name=str(event["name"]),
-            used_memory_mib=_optional_float(event.get("usedMemoryMiB")),
-            workload=dict(workload) if isinstance(workload, dict) else None,
-            visible=event.get("_visible") is not False,
-        )
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "observedAt": self.observed_at,
-            "gpuId": self.gpu_id,
-            "index": self.index,
-            "event": self.event,
-            "pid": self.pid,
-            "name": self.name,
-            "usedMemoryMiB": self.used_memory_mib,
-            "workload": dict(self.workload) if self.workload is not None else None,
-        }
-
-    def persistence_dict(self) -> dict[str, object]:
-        value = self.to_dict()
-        value["_visible"] = self.visible
-        return value
-
-
-def _optional_float(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    return float(value)
-
-
-def _packed_optional_float(value: float | None) -> float:
-    return math.nan if value is None else value
-
-
-def _unpacked_optional_float(value: float) -> float | None:
-    return None if math.isnan(value) else value
-
-
 class ProbeControl(Protocol):
     def request_probe(self, host: str) -> dict[str, object]: ...
 
@@ -363,9 +158,9 @@ class StateStore:
         self._servers: dict[str, ServerState] = {}
         self._host_incarnations: dict[str, int] = {}
         self._next_host_incarnation = 1
-        self._history: dict[str, deque[_HostHistoryPoint]] = {}
-        self._gpu_history: dict[tuple[str, str], deque[_GpuHistoryPoint]] = {}
-        self._process_events: dict[tuple[str, str], deque[_GpuProcessTransition]] = {}
+        self._history: dict[str, deque[HostHistoryPoint]] = {}
+        self._gpu_history: dict[tuple[str, str], deque[GpuHistoryPoint]] = {}
+        self._process_events: dict[tuple[str, str], deque[GpuProcessTransition]] = {}
         self._active_gpu_processes: dict[
             tuple[str, str], dict[tuple[int, str], GpuProcess]
         ] = {}
@@ -405,7 +200,7 @@ class StateStore:
         self._restored_history = dict(restored_telemetry.history)
         self._gpu_history = {
             key: deque(
-                (_GpuHistoryPoint.from_dict(point) for point in points),
+                (GpuHistoryPoint.from_dict(point) for point in points),
                 maxlen=history_points,
             )
             for key, points in restored_telemetry.gpu_history.items()
@@ -413,7 +208,7 @@ class StateStore:
         }
         self._process_events = {
             key: deque(
-                (_GpuProcessTransition.from_dict(point) for point in points),
+                (GpuProcessTransition.from_dict(point) for point in points),
                 maxlen=incident_history_points,
             )
             for key, points in restored_telemetry.process_events.items()
@@ -443,6 +238,7 @@ class StateStore:
             selected_policy,
             incident_history_points,
             historical_events=restored_telemetry.incident_events,
+            open_incidents=restored_telemetry.open_incidents,
         )
         self._utc_clock = utc_clock or (lambda: datetime.now(timezone.utc))
         self._maintenance_windows = dict(maintenance_windows)
@@ -572,7 +368,7 @@ class StateStore:
                     self._next_host_incarnation += 1
                     self._history[host] = deque(
                         (
-                            _HostHistoryPoint.from_dict(point)
+                            HostHistoryPoint.from_dict(point)
                             for point in self._restored_history.pop(host, ())
                         ),
                         maxlen=self._history_points,
@@ -751,9 +547,9 @@ class StateStore:
         poll_cycle_duration_seconds: float | None = None,
         expected_incarnation: int | None = None,
     ) -> bool:
-        history_point: _HostHistoryPoint | None = None
-        gpu_history_points: tuple[tuple[str, _GpuHistoryPoint], ...] = ()
-        process_events: tuple[_GpuProcessTransition, ...] = ()
+        history_point: HostHistoryPoint | None = None
+        gpu_history_points: tuple[tuple[str, GpuHistoryPoint], ...] = ()
+        process_events: tuple[GpuProcessTransition, ...] = ()
         incident_events = ()
         notification_events = ()
         correlations: tuple[dict[str, object], ...] = ()
@@ -945,8 +741,8 @@ class StateStore:
                 key: [
                     (
                         point.observed_at,
-                        _unpacked_optional_float(
-                            _GPU_HISTORY_VALUES.unpack(point.values)[1]
+                        unpacked_optional_float(
+                            GPU_HISTORY_VALUES.unpack(point.values)[1]
                         ),
                     )
                     for point in points
@@ -1279,13 +1075,13 @@ class StateStore:
     def _track_gpu_telemetry_locked(
         self, result: ProbeResult
     ) -> tuple[
-        tuple[tuple[str, _GpuHistoryPoint], ...],
-        tuple[_GpuProcessTransition, ...],
+        tuple[tuple[str, GpuHistoryPoint], ...],
+        tuple[GpuProcessTransition, ...],
     ]:
-        captured_points: list[tuple[str, _GpuHistoryPoint]] | None = (
+        captured_points: list[tuple[str, GpuHistoryPoint]] | None = (
             [] if self._persistence_enabled else None
         )
-        captured_transitions: list[_GpuProcessTransition] | None = (
+        captured_transitions: list[GpuProcessTransition] | None = (
             [] if self._persistence_enabled else None
         )
         observed_gpu_ids: set[str] = set()
@@ -1300,7 +1096,7 @@ class StateStore:
             observed_gpu_ids.add(gpu_id)
             identities.pop(gpu_id, None)
             identities[gpu_id] = None
-            point = _GpuHistoryPoint.create(
+            point = GpuHistoryPoint.create(
                 result.observed_at,
                 gpu.index,
                 gpu.utilization_gpu_pct,
@@ -1426,7 +1222,7 @@ class StateStore:
             if not replaced_instances and current.keys() == previous.keys():
                 self._active_gpu_processes[key] = current
                 continue
-            gpu_transitions: list[_GpuProcessTransition] = []
+            gpu_transitions: list[GpuProcessTransition] = []
             for process_key in sorted(current.keys() - previous.keys()):
                 gpu_transitions.append(
                     self._process_transition(
@@ -1499,9 +1295,9 @@ class StateStore:
 
     def _invalidate_process_inventory_locked(
         self, host: str
-    ) -> tuple[_GpuProcessTransition, ...]:
+    ) -> tuple[GpuProcessTransition, ...]:
         """Close confirmed occupancy at its last successful process sample."""
-        transitions: list[_GpuProcessTransition] = []
+        transitions: list[GpuProcessTransition] = []
         for gpu_id in self._process_inventory_initialized.pop(host, ()):
             transitions.extend(
                 self._close_unobservable_inventory_locked((host, gpu_id))
@@ -1510,7 +1306,7 @@ class StateStore:
 
     def _close_unobservable_inventory_locked(
         self, key: tuple[str, str], gpu_index: int | None = None
-    ) -> tuple[_GpuProcessTransition, ...]:
+    ) -> tuple[GpuProcessTransition, ...]:
         """Close a GPU's confirmed occupancy once its process table is gone.
 
         The process query failed, the device vanished from an online host, or
@@ -1521,7 +1317,7 @@ class StateStore:
         if gpu_index is None:
             history = self._gpu_history.get(key)
             gpu_index = (
-                int(_GPU_HISTORY_VALUES.unpack(history[-1].values)[0]) if history else 0
+                int(GPU_HISTORY_VALUES.unpack(history[-1].values)[0]) if history else 0
             )
         closed = self._close_process_inventory_locked(
             key, gpu_index, self._process_last_observed_at.pop(key, None)
@@ -1539,7 +1335,7 @@ class StateStore:
         key: tuple[str, str],
         gpu_index: int,
         observed_at: str | None,
-    ) -> tuple[_GpuProcessTransition, ...]:
+    ) -> tuple[GpuProcessTransition, ...]:
         previous = self._active_gpu_processes.pop(key, None)
         if not previous or observed_at is None:
             return ()
@@ -1561,9 +1357,9 @@ class StateStore:
         current: dict[tuple[int, str], GpuProcess],
         observed_at: str,
         previous_gpu_observed_at: str | None,
-    ) -> tuple[_GpuProcessTransition, ...]:
+    ) -> tuple[GpuProcessTransition, ...]:
         """Reconcile restored open transitions with the first live sample."""
-        open_events: dict[tuple[int, str], _GpuProcessTransition] = {}
+        open_events: dict[tuple[int, str], GpuProcessTransition] = {}
         for event in self._process_events.get(key, ()):
             process_key = (event.pid, event.name)
             if event.event == "started":
@@ -1571,7 +1367,7 @@ class StateStore:
             else:
                 open_events.pop(process_key, None)
 
-        transitions: list[_GpuProcessTransition] = []
+        transitions: list[GpuProcessTransition] = []
         close_at = previous_gpu_observed_at or observed_at
         for process_key, event in sorted(open_events.items()):
             process = current.get(process_key)
@@ -1592,7 +1388,7 @@ class StateStore:
 
     @staticmethod
     def _transition_matches_process(
-        event: _GpuProcessTransition, process: GpuProcess
+        event: GpuProcessTransition, process: GpuProcess
     ) -> bool:
         event_start = (
             event.workload.get("started_at")
@@ -1650,8 +1446,8 @@ class StateStore:
         process: GpuProcess,
         *,
         visible: bool = True,
-    ) -> _GpuProcessTransition:
-        return _GpuProcessTransition(
+    ) -> GpuProcessTransition:
+        return GpuProcessTransition(
             observed_at=observed_at,
             gpu_id=gpu_id,
             index=gpu_index,
@@ -1664,7 +1460,7 @@ class StateStore:
         )
 
     @staticmethod
-    def _history_point(result: ProbeResult) -> _HostHistoryPoint:
+    def _history_point(result: ProbeResult) -> HostHistoryPoint:
         system = result.system
         if system is None:
             raise ValueError("successful history points require system metrics")
@@ -1689,7 +1485,7 @@ class StateStore:
         temperatures = [
             gpu.temperature_c for gpu in result.gpus if gpu.temperature_c is not None
         ]
-        return _HostHistoryPoint.create(
+        return HostHistoryPoint.create(
             result.observed_at,
             system.cpu_usage_pct,
             percentage(system.memory_used_mib, system.memory_total_mib),

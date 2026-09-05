@@ -415,7 +415,12 @@ def _run_monitor(args: argparse.Namespace) -> int:
     notifications = DisabledNotificationSink()
     if not args.once:
         try:
-            notifications = create_notification_sink(config.webhooks)
+            notifications = create_notification_sink(
+                config.webhooks,
+                known_conditions=(
+                    (item.host, item.condition.key) for item in restored.open_incidents
+                ),
+            )
         except NotificationError as exc:
             persistence.close()
             print(f"Notification error: {exc}", file=sys.stderr)
