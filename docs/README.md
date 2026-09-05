@@ -22,6 +22,7 @@ detailed contracts and operating procedures.
 | Release maintainer | [Release procedure](../.github/RELEASING.md) | Version alignment, immutable tags, artifacts, and post-release verification |
 | Decision reviewer | [Architecture decision index](adr/README.md) | Accepted, superseded, and proposed structural decisions |
 | Contributor | [Contributing guide](../.github/CONTRIBUTING.md) | Development gates, writing rules, commit policy, and change requirements |
+| AI coding agent | [Agent entry point](../AGENTS.md) | Reading order, the drift tests that enforce each contract, the boundaries that must hold, and how to operate a deployment |
 | Community member | [Code of conduct](../.github/CODE_OF_CONDUCT.md) | Participation and enforcement expectations |
 | Vulnerability reporter | [Security policy](../.github/SECURITY.md) | Supported versions and private reporting process |
 

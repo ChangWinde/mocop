@@ -14,6 +14,7 @@ TRACKED_ROOT_ENTRIES = {
     ".githooks",
     ".github",
     ".gitignore",
+    "AGENTS.md",
     "LICENSE",
     "MANIFEST.in",
     "README.md",

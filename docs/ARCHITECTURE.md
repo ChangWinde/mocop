@@ -321,8 +321,11 @@ tests/     unit, contract, fixture, and browser coverage
 The package lives under `src/` so the checkout can never shadow an installed
 release and packaging stays isolated. `tests/__init__.py` prepends `src` to
 `sys.path`, which preserves direct, dependency-free test execution from a
-source checkout. Standard build and project entry files stay at the root; local
-agent configuration, caches, build output, and dependency-solver state are not
+source checkout. Standard build and project entry files stay at the root:
+`README.md` is the human entry point and `AGENTS.md` the entry point AI coding
+agents read by convention, pointing at the governed documents rather than
+repeating them. Local agent configuration, caches, build output, and
+dependency-solver state are not
 repository structure. [The documentation portal](README.md) owns the audience
 map and update triggers. [ADR-0025](adr/0025-src-package-layout.md) records the
 `src/` migration; [ADR-0019](adr/0019-repository-and-documentation-governance.md)

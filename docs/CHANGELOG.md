@@ -64,6 +64,10 @@ All notable changes are documented here. This project follows Semantic Versionin
   the locale so both agree everywhere.
 - `tests/gpu_tasks_test.mjs` now runs in CI: the workflow globs every browser
   leaf and contract test instead of maintaining a list that had drifted.
+- `AGENTS.md` at the repository root is the entry point AI coding agents read
+  by convention: the reading order, the drift tests that enforce each
+  contract, the boundaries that must hold, and how to operate a deployment,
+  each pointing at the document that owns the detail.
 
 ### Changed
 
