@@ -162,6 +162,14 @@ const {
 });
 
 const capacityMatch = globalThis.MocopCapacityMatch.create();
+// The localizer is a hoisted function declaration, so the leaf can take it
+// before its definition site.
+const attention = globalThis.MocopAttention.create({
+  format,
+  numeric,
+  safeStoredHosts,
+  conditionMessage: (condition) => incidentConditionMessage(condition),
+});
 const gpuTasks = globalThis.MocopGpuTasks.create();
 const capacityWatch = globalThis.MocopCapacityWatch.create({ storage: localStorage });
 
@@ -1751,22 +1759,7 @@ function hostConditions(host) {
 }
 
 function serverConditions(server) {
-  return hostConditions(server.host)
-    .filter((condition) => condition.actionable !== false)
-    .map((condition) => ({
-      id: condition.conditionKey,
-      kind: condition.category,
-      severity: condition.severity,
-      priority: condition.category === "connectivity"
-        ? 3 : condition.severity === "critical" ? 2 : 1,
-      message: condition.category === "connectivity" && server.status === "online"
-        ? "SSH 已恢复，等待稳定确认"
-        : incidentConditionMessage(condition),
-      device: String(condition.resource || ""),
-      usage: condition.value == null ? -1 : numeric(condition.value, -1),
-      sharedKey: condition.groupKey || null,
-      source: condition,
-    }));
+  return attention.serverConditions(server, hostConditions(server.host));
 }
 
 function incidentsSyncedWithSnapshot() {
@@ -2298,118 +2291,17 @@ function renderCapacityWatchBanner() {
   }
 }
 
-function conditionCategory(condition) {
-  if (condition.kind === "connectivity") return "connection";
-  if (condition.kind === "disk") return "storage";
-  return "compute";
-}
-
-function issueFromConditions(server, conditions) {
-  if (!conditions.length) return null;
-  const disks = conditions
-    .filter((condition) => condition.kind === "disk")
-    .sort((a, b) => b.usage - a.usage);
-  const messages = conditions
-    .filter((condition) => condition.kind !== "disk")
-    .map((condition) => condition.message);
-  if (disks.length) {
-    messages.unshift(`${disks[0].message}${disks.length > 1 ? ` +${disks.length - 1}` : ""}`);
-  }
-  const priority = Math.max(...conditions.map((condition) => condition.priority));
-  return {
-    server,
-    hosts: [server.host],
-    severity: conditions.some((condition) => condition.severity === "critical") ? "critical" : "warning",
-    priority,
-    messages,
-    categories: [...new Set(conditions.map(conditionCategory))].sort(),
-    sortName: server.host,
-    conditions,
-  };
-}
-
 function serverIssue(server) {
-  return issueFromConditions(server, serverConditions(server));
+  return attention.issueFromConditions(server, serverConditions(server));
 }
 
 function attentionIssues() {
-  const conditionsByHost = new Map(
-    view.snapshot.servers.map((server) => [server.host, serverConditions(server)]),
-  );
-  const consumed = new Set();
-  const issues = [];
-  const correlations = view.incidents?.correlations || [];
-  correlations.forEach((correlation) => {
-    if (
-      correlation?.kind !== "configured_shared_path"
-      || correlation.confidence !== "possible"
-    ) return;
-    const anchor = safeStoredHosts([correlation.anchor])[0];
-    const hosts = safeStoredHosts(correlation.hosts).filter((host) =>
-      conditionsByHost.get(host)?.some((condition) => condition.kind === "connectivity"));
-    if (!anchor || hosts.length < 2) return;
-    hosts.forEach((host) => {
-      conditionsByHost.get(host)
-        .filter((condition) => condition.kind === "connectivity")
-        .forEach((condition) => consumed.add(`${host}|${condition.id}`));
-    });
-    issues.push({
-      shared: true,
-      sharedLabel: "可能的共享链路",
-      hosts,
-      severity: "critical",
-      priority: 3,
-      messages: [`${hosts.length} 台节点不可达 · 配置路径经过 ${anchor}`],
-      categories: ["connection"],
-      sortName: anchor,
-    });
-  });
-  const sharedGroups = new Map();
-  conditionsByHost.forEach((conditions, host) => {
-    conditions.filter((condition) => condition.sharedKey).forEach((condition) => {
-      const group = sharedGroups.get(condition.sharedKey) || [];
-      group.push({ host, condition });
-      sharedGroups.set(condition.sharedKey, group);
-    });
-  });
-
-  sharedGroups.forEach((occurrences) => {
-    const byHost = new Map();
-    occurrences.forEach((occurrence) => {
-      const current = byHost.get(occurrence.host);
-      if (!current || occurrence.condition.usage > current.condition.usage) {
-        byHost.set(occurrence.host, occurrence);
-      }
-    });
-    if (byHost.size < 2) return;
-    occurrences.forEach(({ host, condition }) => consumed.add(`${host}|${condition.id}`));
-    const unique = [...byHost.values()];
-    const hottest = unique.reduce(
-      (current, candidate) => candidate.condition.usage > current.condition.usage ? candidate : current,
-    );
-    const hosts = unique.map(({ host }) => host).sort((a, b) => a.localeCompare(b));
-    issues.push({
-      shared: true,
-      sharedLabel: "共享存储",
-      hosts,
-      severity: unique.some(({ condition }) => condition.severity === "critical") ? "critical" : "warning",
-      priority: Math.max(...unique.map(({ condition }) => condition.priority)),
-      messages: [`${hottest.condition.device} ${format(hottest.condition.usage)}% · 影响 ${hosts.length} 台`],
-      categories: ["storage"],
-      sortName: hottest.condition.device,
-    });
-  });
-  view.snapshot.servers.forEach((server) => {
-    const remaining = conditionsByHost.get(server.host).filter(
-      (condition) => !consumed.has(`${server.host}|${condition.id}`),
-    );
-    const issue = issueFromConditions(server, remaining);
-    if (issue) issues.push(issue);
-  });
-  return issues.sort((a, b) => {
-    if (a.priority !== b.priority) return b.priority - a.priority;
-    if (a.severity !== b.severity) return a.severity === "critical" ? -1 : 1;
-    return a.sortName.localeCompare(b.sortName);
+  return attention.issues({
+    servers: view.snapshot.servers,
+    conditionsByHost: new Map(
+      view.snapshot.servers.map((server) => [server.host, serverConditions(server)]),
+    ),
+    correlations: view.incidents?.correlations || [],
   });
 }
 

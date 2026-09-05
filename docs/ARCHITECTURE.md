@@ -356,6 +356,7 @@ by `tests/<leaf>_test.mjs`:
 | `capacity-watch.js` | the durable watch, its armed/notified edge, cooldown, and presented text |
 | `csv-export.js` | CSV cell escaping (including formula-injection defense) and row building |
 | `update-pill.js` | release-currency polling cadence, pill state, and the fixed apply action |
+| `attention.js` | the attention panel's decisions: which active conditions a host contributes, shared-path and shared-storage grouping that consumes the conditions it explains, per-host issues, and ranking |
 | `background-asset.js` | the custom background: IndexedDB storage of one asset, container sniffing that refuses animated or mislabelled files, size and dimension caps, and the WebP quality bisection and shrink loop, over injected browser primitives |
 
 A repository test compares the leaf directory with the static route table, the

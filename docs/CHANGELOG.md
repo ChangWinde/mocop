@@ -108,7 +108,12 @@ All notable changes are documented here. This project follows Semantic Versionin
   bisection and shrink loop are tested in Node for the first time; `format.js`
   gained the contract test the leaf pattern always required, and a repository
   test now checks that every leaf is routed, loaded before `app.js`, and
-  tested. The `app.js` ceiling ratcheted down to 6,100 lines.
+  tested. The attention panel's decisions — which active conditions a host
+  contributes, the shared-path and shared-storage grouping that consumes the
+  conditions it explains, per-host issues, and ranking — moved into the
+  `attention.js` leaf with a contract test that pins every grouping rule
+  previously exercised only through the browser journey. The `app.js` ceiling
+  ratcheted down to 6,000 lines.
 - Every HTTP server instance now requires the Bearer capability: the
   unauthenticated server mode that only tests used is gone, `GET /api/meta`
   no longer reports the constant `authenticationRequired` flag, and the
