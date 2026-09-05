@@ -102,6 +102,19 @@ def _fetch_bounded(url: str, limit: int) -> bytes:
     return payload
 
 
+def _uv_executable() -> str | None:
+    """The ``uv`` that installed a tool environment without pip.
+
+    A user service does not inherit the shell's PATH additions, so the
+    standalone installer's default location is the fallback.
+    """
+    found = shutil.which("uv")
+    if found is not None:
+        return found
+    default = Path.home() / ".local" / "bin" / "uv"
+    return str(default) if default.exists() else None
+
+
 def _utc_now_iso() -> str:
     return (
         datetime.now(tz=timezone.utc)
@@ -328,8 +341,8 @@ class UpdateManager:
                 self._fail(f"pip install failed: {result.stderr.strip()[-300:]}")
                 return False
             return True
-        uv = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
-        if not Path(uv).exists():
+        uv = _uv_executable()
+        if uv is None:
             self._fail("neither pip nor uv is available to install the wheel")
             return False
         result = self._run(
