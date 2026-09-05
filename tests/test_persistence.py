@@ -531,13 +531,12 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
             free_after_bounded = int(
                 connection.execute("PRAGMA freelist_count").fetchone()[0]
             )
-            store._prune(connection, reclaim_pages=None)
-            free_after_full = int(
-                connection.execute("PRAGMA freelist_count").fetchone()[0]
-            )
+            # A second bounded pass keeps draining the backlog by the same step.
+            store._prune(connection, reclaim_pages=16)
+            after_second = int(connection.execute("PRAGMA page_count").fetchone()[0])
         self.assertEqual(before - after_bounded, 16)
-        self.assertGreater(free_after_bounded, 16)
-        self.assertEqual(free_after_full, 0)
+        self.assertEqual(after_bounded - after_second, 16)
+        self.assertGreater(free_after_bounded, 32)
 
     def test_removes_transient_companion_triggers_before_retention_pruning(
         self,

@@ -176,9 +176,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   filesystem: a live 476 MB file held 130 MB of data, and because the startup
   cap check counts free pages, lowering `persistence.max_bytes` below the
   file's high-water mark refused to start even though the live data fitted.
-  Startup now reclaims every free page before the cap is compared, and each
-  60-second prune reclaims up to 8 MiB so the writer's transaction stays
-  short.
+  Startup now rebuilds a file that has free pages with `VACUUM` before the
+  cap is compared (0.5 s for that 476 MB file, which came back at 115 MB), and
+  each 60-second prune reclaims up to 8 MiB online in a bounded number of
+  pragma calls, because CPython 3.11's `sqlite3` frees one page per call
+  regardless of how the cursor is consumed.
 - Restoring history at startup no longer scans the whole SQLite database: the
   newest points of each host and GPU are read through the tables' primary
   keys instead of a window function that SQLite executed as a full scan plus

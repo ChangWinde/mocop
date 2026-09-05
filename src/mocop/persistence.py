@@ -26,10 +26,13 @@ _SCHEMA_VERSION = 3
 _QUEUE_CAPACITY = 4096
 _WRITE_BATCH_SIZE = 128
 _PRUNE_INTERVAL_SECONDS = 60.0
-# Steady-state retention frees a few dozen pages a minute; this bound (8 MiB at
-# the 4 KiB page size) keeps the writer's prune transaction short while still
-# draining a large backlog within the hour. Startup reclaims everything.
+# Steady-state retention frees a few dozen pages a minute. The online reclaim
+# after each prune is bounded in pages (8 MiB at the 4 KiB page size) and in
+# pragma calls, so the writer's transaction stays short on every interpreter;
+# a backlog left by a long downtime or a lowered cap is rebuilt away at startup.
 _VACUUM_PAGES_PER_PRUNE = 2048
+_VACUUM_CHUNK_PAGES = 1024
+_VACUUM_CALLS_PER_PRUNE = 64
 _SQLITE_FULL_ERRORCODE = 13  # sqlite3.SQLITE_FULL is unavailable on Python 3.10
 _HISTORY_FIELDS = (
     "cpuUsagePct",
@@ -216,19 +219,35 @@ _CREATE_SCHEMA_STATEMENTS = (
 ) + _GPU_TABLE_STATEMENTS
 
 
-def _reclaim_free_pages(connection: sqlite3.Connection, limit: int | None) -> int:
-    """Return freed pages to the filesystem; ``None`` reclaims every one.
+def _free_pages(connection: sqlite3.Connection) -> int:
+    return int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+
+
+def _reclaim_free_pages(connection: sqlite3.Connection, page_budget: int) -> int:
+    """Return up to ``page_budget`` freed pages to the filesystem online.
 
     ``PRAGMA incremental_vacuum`` releases pages as its statement is stepped,
     one per step, so a bare ``execute()`` reclaims a single page and the file
-    keeps its high-water mark forever. The cursor has to be exhausted.
+    keeps its high-water mark forever. Exhausting the cursor frees the rest on
+    most interpreters, but CPython 3.11's ``sqlite3`` yields no rows for the
+    pragma and still frees one page per call, so progress is measured on
+    ``freelist_count`` and the call count is bounded: a large backlog is not
+    this path's job (startup rebuilds the file instead), keeping up with the
+    few dozen pages a minute that retention frees is.
     """
-    pragma = (
-        "PRAGMA incremental_vacuum"
-        if limit is None
-        else f"PRAGMA incremental_vacuum({int(limit)})"
-    )
-    return sum(1 for _row in connection.execute(pragma))
+    reclaimed = 0
+    for _call in range(_VACUUM_CALLS_PER_PRUNE):
+        before = _free_pages(connection)
+        chunk = min(before, page_budget - reclaimed, _VACUUM_CHUNK_PAGES)
+        if chunk <= 0:
+            break
+        for _row in connection.execute(f"PRAGMA incremental_vacuum({chunk})"):
+            pass
+        freed = before - _free_pages(connection)
+        if freed <= 0:
+            break
+        reclaimed += freed
+    return reclaimed
 
 
 def _partition_keys(
@@ -734,37 +753,48 @@ class SqliteTelemetryPersistence:
                 raise PersistenceError("history database must not be a symbolic link")
             if self._path.exists() and not self._path.is_file():
                 raise PersistenceError("history database path is not a regular file")
-            with (
-                closing(sqlite3.connect(self._path, timeout=5)) as connection,
-                connection,
-            ):
-                connection.execute("PRAGMA journal_mode = DELETE")
-                connection.execute("PRAGMA synchronous = NORMAL")
-                connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
-                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-                if version not in {0, 1, 2, _SCHEMA_VERSION}:
-                    raise PersistenceError(
-                        f"unsupported history schema version: {version}"
+            with closing(sqlite3.connect(self._path, timeout=5)) as connection:
+                with connection:
+                    connection.execute("PRAGMA journal_mode = DELETE")
+                    connection.execute("PRAGMA synchronous = NORMAL")
+                    connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
+                    version = int(
+                        connection.execute("PRAGMA user_version").fetchone()[0]
                     )
-                if version == 0:
-                    self._create_schema(connection)
-                elif version == 1:
-                    self._migrate_v1(connection)
-                elif version == 2:
-                    self._migrate_v2(connection)
-                elif version == 3:
-                    self._migrate_v3(connection)
-                # Every free page goes back before the cap is compared, so a
-                # lowered max_bytes judges the live data, not the old high-water
-                # mark of the file.
-                self._prune(connection, reclaim_pages=None)
-                page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
-                page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
-                if page_count > max(1, self._config.max_bytes // page_size):
-                    raise PersistenceError(
-                        "history database exceeds the configured size limit"
+                    if version not in {0, 1, 2, _SCHEMA_VERSION}:
+                        raise PersistenceError(
+                            f"unsupported history schema version: {version}"
+                        )
+                    if version == 0:
+                        self._create_schema(connection)
+                    elif version == 1:
+                        self._migrate_v1(connection)
+                    elif version == 2:
+                        self._migrate_v2(connection)
+                    elif version == 3:
+                        self._migrate_v3(connection)
+                    self._prune(connection, reclaim_pages=0)
+                # Pages the prune (or a long downtime's worth of expiry) left on
+                # the freelist go back before the cap is compared, so a lowered
+                # max_bytes judges the live data rather than the file's old
+                # high-water mark. VACUUM rebuilds the file in one statement,
+                # proportional to the live data and independent of how the
+                # interpreter steps the incremental pragma; it runs outside a
+                # transaction and only when there is something to reclaim.
+                if _free_pages(connection) > 0:
+                    connection.execute("VACUUM")
+                with connection:
+                    page_size = int(
+                        connection.execute("PRAGMA page_size").fetchone()[0]
                     )
-                self._apply_size_limit(connection)
+                    page_count = int(
+                        connection.execute("PRAGMA page_count").fetchone()[0]
+                    )
+                    if page_count > max(1, self._config.max_bytes // page_size):
+                        raise PersistenceError(
+                            "history database exceeds the configured size limit"
+                        )
+                    self._apply_size_limit(connection)
             self._path.chmod(0o600)
         except PersistenceError:
             raise
@@ -1149,7 +1179,7 @@ class SqliteTelemetryPersistence:
         self,
         connection: sqlite3.Connection,
         *,
-        reclaim_pages: int | None = _VACUUM_PAGES_PER_PRUNE,
+        reclaim_pages: int = _VACUUM_PAGES_PER_PRUNE,
     ) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(
             hours=self._config.retention_hours
@@ -1165,7 +1195,8 @@ class SqliteTelemetryPersistence:
         connection.execute(
             "DELETE FROM process_events WHERE observed_at < ?", (cutoff_text,)
         )
-        _reclaim_free_pages(connection, reclaim_pages)
+        if reclaim_pages > 0:
+            _reclaim_free_pages(connection, reclaim_pages)
 
     @staticmethod
     def _event_from_row(row: tuple[object, ...]) -> IncidentEvent | None:
