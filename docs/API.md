@@ -198,7 +198,7 @@ never included.
 | `INVALID_REQUEST_FRAMING` | 400 | Ambiguous `Transfer-Encoding`/`Content-Length`, duplicate length, or non-decimal length. |
 | `INVALID_REQUEST_TARGET` | 400 | The request URL could not be parsed. |
 | `REQUEST_BODY_NOT_ALLOWED` | 400 | A `GET`/`HEAD` request declared a body. |
-| `QUERY_NOT_ALLOWED` | 400 | This route accepts no query parameters. |
+| `QUERY_NOT_ALLOWED` | 400 | This route accepts no query parameters (every GET whose manifest `query` is empty, and every POST). |
 | `UNKNOWN_QUERY_PARAMETER` | 400 | A query parameter outside the route's allowlist. |
 | `INVALID_QUERY` | 400 | A malformed `host`, `gpu`, or `limit` query value. |
 | `INVALID_LIMIT` | 400 | `limit` is not an integer within the route's bounds. |

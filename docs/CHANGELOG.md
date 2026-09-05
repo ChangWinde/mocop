@@ -67,6 +67,11 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `GET /api/update` now enforces the reader tier its manifest entry always
   advertised (a marker-less request answers `403 UNTRUSTED_ORIGIN`), and a
   test proves every manifested tier against its handler.
+- Every GET route whose manifest `query` is empty now answers a query string
+  with `400 QUERY_NOT_ALLOWED`; `/api/snapshot`, `/api/events`, `/healthz`,
+  and `/readyz` used to ignore one silently while five other routes rejected
+  it. The rule is enforced once in the dispatcher from the manifest, and a
+  test checks it for every route.
 - `POST /api/settings/collector` distinguishes `INVALID_SCHEMA` (shape or
   type) from `INVALID_SETTINGS` (documented bounds) as the API reference
   always described.

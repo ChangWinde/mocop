@@ -448,6 +448,15 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         path = request_url.path
         if not self._require_authentication(path):
             return
+        if request_url.query and path in ROUTE_METHODS and path not in QUERY_SCHEMAS:
+            # The manifest publishes an empty `query` for these routes, so a
+            # query string is a contract violation rather than noise to ignore.
+            self._send_error(
+                "query parameters are not allowed",
+                HTTPStatus.BAD_REQUEST,
+                code="QUERY_NOT_ALLOWED",
+            )
+            return
         # Any authenticated dashboard-marked read (snapshot polling included)
         # is a live viewer; the event stream marks presence separately because
         # EventSource cannot attach the marker header.
@@ -484,28 +493,21 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             self._send_incidents(request_url.query)
             return
         if path == "/api/inventory":
-            self._send_inventory(request_url.query)
+            self._send_inventory()
             return
         if path == "/api/topology":
-            self._send_topology(request_url.query)
+            self._send_topology()
             return
         if path == "/api/update":
-            self._send_update_status(request_url.query)
+            self._send_update_status()
             return
         if path == "/api/diagnostics":
             self._send_diagnostics(request_url.query)
             return
         if path == "/api/meta":
-            self._send_meta(request_url.query)
+            self._send_meta()
             return
         if path == "/metrics":
-            if request_url.query:
-                self._send_error(
-                    "query parameters are not allowed",
-                    HTTPStatus.BAD_REQUEST,
-                    code="QUERY_NOT_ALLOWED",
-                )
-                return
             self._send_openmetrics()
             return
         if path == "/healthz":
@@ -551,14 +553,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self._write_body(payload)
 
-    def _send_meta(self, query: str) -> None:
-        if query:
-            self._send_error(
-                "query parameters are not allowed",
-                HTTPStatus.BAD_REQUEST,
-                code="QUERY_NOT_ALLOWED",
-            )
-            return
+    def _send_meta(self) -> None:
         server = self.monitor_server
         self._send_json(
             {
@@ -891,14 +886,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(snapshot)
 
-    def _send_update_status(self, query: str) -> None:
-        if query:
-            self._send_error(
-                "query parameters are not allowed",
-                HTTPStatus.BAD_REQUEST,
-                code="QUERY_NOT_ALLOWED",
-            )
-            return
+    def _send_update_status(self) -> None:
         if not self._require_dashboard_read():
             return
         updates = self.monitor_server.updates
@@ -1396,14 +1384,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(self.monitor_server.state.incidents(values["limit"]))
 
-    def _send_inventory(self, query: str) -> None:
-        if query:
-            self._send_error(
-                "query parameters are not allowed",
-                HTTPStatus.BAD_REQUEST,
-                code="QUERY_NOT_ALLOWED",
-            )
-            return
+    def _send_inventory(self) -> None:
         if not self._require_dashboard_read():
             return
         inventory = self.monitor_server.inventory
@@ -1425,14 +1406,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(snapshot)
 
-    def _send_topology(self, query: str) -> None:
-        if query:
-            self._send_error(
-                "query parameters are not allowed",
-                HTTPStatus.BAD_REQUEST,
-                code="QUERY_NOT_ALLOWED",
-            )
-            return
+    def _send_topology(self) -> None:
         if not self._require_dashboard_read():
             return
         inventory = self.monitor_server.inventory

@@ -13,7 +13,7 @@ from urllib.error import HTTPError
 from urllib.request import BaseHandler, Request, build_opener, install_opener, urlopen
 
 from mocop import __version__
-from mocop.api_manifest import API_ROUTES
+from mocop.api_manifest import API_ROUTES, QUERY_SCHEMAS
 from mocop.inventory import InventoryRequestError
 from mocop.models import GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
 from mocop.service import StateStore
@@ -958,6 +958,33 @@ class WebTests(unittest.TestCase):
                     )
                     # The same-origin gate proves the POST route exists.
                     self.assertEqual(status, 403)
+
+    def test_manifest_query_contract_is_enforced_by_the_handlers(self) -> None:
+        # /api/meta publishes an empty `query` for these routes; a query string
+        # is therefore a contract violation for every one of them, including
+        # the health probes and the event stream.
+        for method, path, _access in API_ROUTES:
+            if method != "GET" or path in QUERY_SCHEMAS:
+                continue
+            with self.subTest(path=path):
+                self.assert_json_error(
+                    Request(
+                        f"{self.base}{path}?cache=1",
+                        headers={"X-Monitor-Request": "dashboard"},
+                    ),
+                    400,
+                    "QUERY_NOT_ALLOWED",
+                )
+        for path in QUERY_SCHEMAS:
+            with self.subTest(path=path):
+                self.assert_json_error(
+                    Request(
+                        f"{self.base}{path}?nonsense=1",
+                        headers={"X-Monitor-Request": "dashboard"},
+                    ),
+                    400,
+                    "UNKNOWN_QUERY_PARAMETER",
+                )
 
     def test_manifest_access_tiers_are_enforced_by_the_handlers(self) -> None:
         # The manifest is what /api/meta advertises to agents, so a tier it
