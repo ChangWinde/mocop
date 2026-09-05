@@ -1874,14 +1874,21 @@ try {
       restartDisabled: document.querySelector("#restart-service").disabled,
       restartStatus: document.querySelector("#service-restart-status").textContent,
     };
+    // Swap in a copy rather than mutating the live GPU record: summaries are
+    // cached per object, so an in-place edit that a background render picked
+    // up would keep showing 101 processes after the restore.
     const selectedRecord = selectedGpuRecord();
-    const originalProcesses = selectedRecord.gpu.processes;
-    selectedRecord.gpu.processes = Array.from({ length: 101 }, (_, index) => ({
-      pid: 30000 + index,
-      name: "/workspace/process-" + index + ".py",
-      used_memory_mib: 101 - index,
-      workload: null,
-    }));
+    const originalGpu = selectedRecord.gpu;
+    const gpuSlot = selectedRecord.server.gpus.indexOf(originalGpu);
+    selectedRecord.server.gpus[gpuSlot] = {
+      ...originalGpu,
+      processes: Array.from({ length: 101 }, (_, index) => ({
+        pid: 30000 + index,
+        name: "/workspace/process-" + index + ".py",
+        used_memory_mib: 101 - index,
+        workload: null,
+      })),
+    };
     renderGpuDetail();
     result.boundedTaskCount = document.querySelector("#gpu-task-count").textContent;
     result.boundedTaskRows = document.querySelectorAll("#gpu-task-list .gpu-task").length;
@@ -1897,8 +1904,8 @@ try {
     )?.dataset.processKey || "";
     taskSearch.value = "";
     taskSearch.dispatchEvent(new Event("input", { bubbles: true }));
-    selectedRecord.gpu.processes = originalProcesses;
-    renderGpuDetail();
+    selectedRecord.server.gpus[gpuSlot] = originalGpu;
+    render();
     taskDialog.close();
     return result;
   })()`, true);
