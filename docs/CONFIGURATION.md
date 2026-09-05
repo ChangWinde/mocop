@@ -198,6 +198,10 @@ Each webhook accepts only these fields:
 | `min_interval_seconds` | 1 | number 0–300 |
 | `allow_private_networks` | `false` | boolean; explicit SSRF-sensitive opt-in |
 
+What the receiver gets — request headers, the signed JSON body, and the retry,
+throttle, and suppression rules — is specified under
+[Webhook deliveries](API.md#webhook-deliveries) in the API reference.
+
 JSON stores environment-variable names, never destinations or signing secrets.
 For the managed service, put `NAME=value` lines in the private `environment`
 file beside `config.json`, rerun `mocop service install`, and verify status.

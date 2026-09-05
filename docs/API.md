@@ -1084,6 +1084,88 @@ enabled, the service is not supervised, no newer release exists, or an
 update is already running. A failed attempt reports `state: "failed"`
 without restarting, and the running version keeps serving.
 
+## Webhook deliveries
+
+Mocop is also an HTTP client: every configured webhook (see the
+[configuration reference](CONFIGURATION.md#webhooks-and-secrets)) receives one
+`POST` per actionable incident transition whose `state` is in the endpoint's
+`events`. This is the contract a receiver implements.
+
+**Request.** `POST <url>` over HTTPS to the URL named by `url_env`, with
+`Content-Type: application/json; charset=utf-8`, `User-Agent: mocop/<release>`,
+`X-Mocop-Event-ID: <eventId>`, and — when `secret_env` is configured —
+`X-Mocop-Signature: sha256=<hex>`, the HMAC-SHA256 of the exact request body
+bytes keyed with the secret. Verify the signature over the raw bytes before
+parsing; the body is compact JSON with sorted keys, so re-serializing a parsed
+object does not reproduce it.
+
+**Body.**
+
+```json
+{
+  "schemaVersion": 1,
+  "source": "mocop",
+  "sourceVersion": "<release>",
+  "event": {
+    "eventId": 4821,
+    "host": "gpu-node-01",
+    "conditionKey": "connectivity",
+    "category": "connectivity",
+    "resource": "SSH",
+    "severity": "critical",
+    "value": null,
+    "threshold": null,
+    "observedAt": "2026-09-05T10:00:05Z",
+    "detail": "SSH connection timed out",
+    "groupKey": null,
+    "state": "opened"
+  },
+  "correlation": {
+    "correlationKey": "configured-path:bastion",
+    "kind": "configured_shared_path",
+    "anchor": "bastion",
+    "hosts": ["gpu-node-01", "gpu-node-02"],
+    "severity": "critical",
+    "confidence": "possible",
+    "detail": "2 unreachable nodes share the configured path through bastion"
+  }
+}
+```
+
+`event` is the same object `GET /api/incidents` lists under `events[]`:
+`state` is `opened`, `resolved`, `escalated`, or `deescalated`; `observedAt` is
+the transition time; `detail` for connectivity and GPU-availability conditions
+is one of the *Failure messages* strings; `value`/`threshold` are numbers or
+`null`; `groupKey` names a shared device group when the condition has one.
+`correlation` is present only when the transition belongs to a possible
+shared-path group (`GET /api/incidents` `correlations[]`). `POST
+/api/notifications/test` sends the same body with `"test": true` and
+`eventId` `0`, which receivers should acknowledge and discard.
+
+**Delivery rules.**
+
+- Success is any `2xx`. `408`, `425`, `429`, and every `5xx`, plus DNS, TLS,
+  and connection failures, are retried up to `max_attempts` with exponential
+  backoff from `retry_base_seconds` (about ±15 % jitter); any other status
+  ends the attempt as a permanent failure. Consecutive deliveries to one
+  endpoint are at least `min_interval_seconds` apart.
+- `eventId` is the idempotency key: a retry resends the identical body and
+  signature, so a receiver that recorded the id can drop the duplicate.
+- Only actionable transitions are sent (`actionable` under
+  `GET /api/incidents`); an event that is silenced or acknowledged while it
+  waits is withdrawn, counted as suppressed, not as dropped. When an endpoint
+  subscribes to both `opened` and `resolved`, a `resolved` for a condition
+  whose `opened` it never received (for example one that began inside a
+  maintenance window) is suppressed for the same reason.
+- Redirects are never followed (a `3xx` is a permanent failure), the resolved
+  address must be globally routable unless `allow_private_networks` is set
+  (loopback, link-local, private, and reserved ranges are refused), and the
+  secret appears nowhere but in the signature.
+
+`GET /api/snapshot` reports each endpoint's `healthy`, `queuedDeliveries`,
+`deliveredEvents`, `droppedDeliveries`, `suppressedDeliveries`, `lastError`,
+`lastAttemptAt`, and `lastSuccessAt` under `notifications.endpoints[]`.
+
 ## Agent playbooks
 
 Recommended request sequences for common automation tasks. All of them

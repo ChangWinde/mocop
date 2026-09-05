@@ -30,6 +30,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   table to the same set. The SSH failure classification and the stale-multiplex
   retry rules moved from `probe.py` into `ssh_failures.py`, the module that
   owns that vocabulary's emit sites.
+- The API reference specifies the webhook receiver contract — request headers,
+  the HMAC-SHA256 signature over the raw body, the JSON body with its `event`
+  and `correlation` shapes, the test delivery marker, and the retry, throttle,
+  and suppression rules — and a repository test keeps the documented example
+  body's keys equal to what the delivery code sends.
 
 ## [0.12.0] - 2026-09-06
 
