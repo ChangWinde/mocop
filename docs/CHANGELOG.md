@@ -49,6 +49,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   their marker header and same-origin checks belong to the dashboard.
 - `GET /api/meta` capabilities now include `updateSupported`. Excess
   connections answer `503 CONNECTION_LIMIT` as JSON instead of an empty body.
+- Error envelopes carry `field` whenever exactly one query parameter or body
+  field is at fault — an unknown parameter's name, a malformed or out-of-bounds
+  parameter, a wrongly typed or unaccepted body field, and the single-field
+  cross checks on maintenance, host-group, and incident-action writes — so an
+  agent maps a rejection back to its input without parsing the message.
 - `403 AUTHENTICATION_REQUIRED` responses carry a `hint` naming the header to
   send and where the capability file lives, plus the `documentation` URL, so
   an agent can recover from a cold start without out-of-band knowledge.
@@ -93,7 +98,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   one function per configuration section, run in the same order so every
   error message and its precedence are unchanged; `config.py` keeps the
   schema — limits, typed sections, validators — and ratchets from 1,550 to
-  375 lines.
+  375 lines. The same split applies to the HTTP contract: `api_schema.py`
+  owns the query and body field types and the two validators, `api_manifest.py`
+  the route tables built from them. The Host, marker, Origin, and Fetch
+  Metadata guards for dashboard reads and writes moved from the request
+  handler into `hostnames.py` beside the trust policy they enforce.
 - The dashboard's payload normalizers (snapshot and incidents envelopes,
   inventory, collector settings, maintenance windows, host groups, topology)
   moved from `app.js` into the `api-contracts.js` leaf, which now has its own
@@ -161,6 +170,17 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- The history database now actually shrinks after retention deletes. Python's
+  `sqlite3` steps `PRAGMA incremental_vacuum` once per `execute()`, so every
+  prune since persistence was introduced had returned exactly one page to the
+  filesystem: a live 476 MB file held 130 MB of data, and because the startup
+  cap check counts free pages, lowering `persistence.max_bytes` below the
+  file's high-water mark refused to start even though the live data fitted.
+  Startup now rebuilds a file that has free pages with `VACUUM` before the
+  cap is compared (0.5 s for that 476 MB file, which came back at 115 MB), and
+  each 60-second prune reclaims up to 8 MiB online in a bounded number of
+  pragma calls, because CPython 3.11's `sqlite3` frees one page per call
+  regardless of how the cursor is consumed.
 - Restoring history at startup no longer scans the whole SQLite database: the
   newest points of each host and GPU are read through the tables' primary
   keys instead of a window function that SQLite executed as a full scan plus

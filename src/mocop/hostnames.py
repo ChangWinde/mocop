@@ -13,7 +13,8 @@ import ipaddress
 import re
 import unicodedata
 from collections.abc import Iterable
-from urllib.parse import urlsplit
+from typing import Protocol
+from urllib.parse import SplitResult, urlsplit
 
 _LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?")
 # Hostnames a browser can present when it genuinely reached this server over
@@ -55,6 +56,89 @@ def trusted_web_policy(
             raise ValueError(f"invalid trusted web host: {candidate!r}")
         trusted.add(hostname)
     return frozenset(trusted), frozenset(origin_suffixes)
+
+
+class _Headers(Protocol):
+    """The two reads the guards need from ``http.server`` request headers."""
+
+    def get(self, name: str, default: str | None = None) -> str | None: ...
+
+    def get_all(self, name: str) -> list[str] | None: ...
+
+
+_SAME_ORIGIN_FETCH_SITES = frozenset({"", "same-origin", "none"})
+
+
+def has_trusted_host(headers: _Headers, trusted_hostnames: frozenset[str]) -> bool:
+    """Require exactly one Host header naming one of the server's own names.
+
+    A loopback bind alone does not stop DNS rebinding: an attacker domain
+    re-resolved to 127.0.0.1 makes the victim's browser send same-origin
+    requests here, but with the attacker's hostname in Host. Pinning Host to
+    the loopback/configured allowlist closes that path.
+    """
+    host_values = headers.get_all("Host") or []
+    if len(host_values) != 1:
+        return False
+    hostname = normalize_web_hostname(host_values[0], allow_port=True)
+    return hostname is not None and hostname in trusted_hostnames
+
+
+def is_dashboard_read(headers: _Headers, trusted_hostnames: frozenset[str]) -> bool:
+    """A marked read from a trusted Host that Fetch Metadata does not call cross-site."""
+    fetch_site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    return (
+        has_trusted_host(headers, trusted_hostnames)
+        and headers.get("X-Monitor-Request") == "dashboard"
+        and fetch_site in _SAME_ORIGIN_FETCH_SITES
+    )
+
+
+def is_dashboard_write(
+    headers: _Headers,
+    trusted_hostnames: frozenset[str],
+    trusted_origin_suffixes: frozenset[str],
+) -> bool:
+    """A marked write whose Origin is one trusted authority or HTTPS suffix.
+
+    The Origin must be a bare scheme and authority: credentials, a path other
+    than ``/``, a query, or a fragment mark a forged or proxied value.
+    """
+    if not is_dashboard_read(headers, trusted_hostnames):
+        return False
+    origin = headers.get("Origin")
+    if not origin:
+        return False
+    try:
+        parsed = urlsplit(origin)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and _has_trusted_origin(parsed, trusted_hostnames, trusted_origin_suffixes)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def _has_trusted_origin(
+    origin: SplitResult,
+    trusted_hostnames: frozenset[str],
+    trusted_origin_suffixes: frozenset[str],
+) -> bool:
+    """Match an exact authority or one configured HTTPS subdomain suffix."""
+    hostname = normalize_web_hostname(origin.hostname)
+    if hostname is None:
+        return False
+    if hostname in trusted_hostnames:
+        return True
+    if origin.scheme != "https":
+        return False
+    return any(hostname.endswith(f".{suffix}") for suffix in trusted_origin_suffixes)
 
 
 def normalize_web_hostname(value: object, *, allow_port: bool = False) -> str | None:

@@ -465,6 +465,79 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         reopened.close()
         self.assertLessEqual(self.path.stat().st_size, config.max_bytes)
 
+    def test_expired_pages_return_to_the_filesystem_and_free_a_lowered_cap(
+        self,
+    ) -> None:
+        # ``PRAGMA incremental_vacuum`` frees one page per statement step, so
+        # the old bare execute() left every page from a retention delete in the
+        # file: the database never shrank, and because the startup cap check
+        # counts free pages, lowering max_bytes below the file's high-water
+        # mark refused a database whose live data fitted comfortably.
+        config = PersistenceConfig(enabled=True, retention_hours=1, max_bytes=8_388_608)
+        store = SqliteTelemetryPersistence(config, self.path)
+        stale_at = utc_text(datetime.now(timezone.utc) - timedelta(hours=2))
+        for index in range(400):
+            store.record_gpu_telemetry(
+                "gpu-01",
+                (),
+                (
+                    {
+                        **process_event(stale_at, "GPU-1", index),
+                        "workload": {"padding": "x" * 2048, "index": index},
+                    },
+                ),
+            )
+        self.assertTrue(store.flush())
+        store.close()
+        grown = self.path.stat().st_size
+        self.assertGreater(grown, 512 * 1024)
+
+        # Startup prune: the expired rows go, and so do their pages.
+        reopened = SqliteTelemetryPersistence(config, self.path)
+        reopened.close()
+        with closing(sqlite3.connect(self.path)) as connection:
+            freelist = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+            rows = int(
+                connection.execute("SELECT count(*) FROM process_events").fetchone()[0]
+            )
+        self.assertEqual((rows, freelist), (0, 0))
+        self.assertLess(self.path.stat().st_size, 128 * 1024)
+
+        # The lowered cap is judged against live data, not the old file size.
+        lowered = PersistenceConfig(enabled=True, retention_hours=1, max_bytes=262_144)
+        SqliteTelemetryPersistence(lowered, self.path).close()
+
+    def test_runtime_prune_reclaims_pages_in_bounded_steps(self) -> None:
+        config = PersistenceConfig(enabled=True, retention_hours=1, max_bytes=8_388_608)
+        store = SqliteTelemetryPersistence(config, self.path)
+        self.addCleanup(store.close)
+        stale_at = utc_text(datetime.now(timezone.utc) - timedelta(hours=2))
+        for index in range(400):
+            store.record_gpu_telemetry(
+                "gpu-01",
+                (),
+                (
+                    {
+                        **process_event(stale_at, "GPU-1", index),
+                        "workload": {"padding": "x" * 2048, "index": index},
+                    },
+                ),
+            )
+        self.assertTrue(store.flush())
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            before = int(connection.execute("PRAGMA page_count").fetchone()[0])
+            store._prune(connection, reclaim_pages=16)
+            after_bounded = int(connection.execute("PRAGMA page_count").fetchone()[0])
+            free_after_bounded = int(
+                connection.execute("PRAGMA freelist_count").fetchone()[0]
+            )
+            # A second bounded pass keeps draining the backlog by the same step.
+            store._prune(connection, reclaim_pages=16)
+            after_second = int(connection.execute("PRAGMA page_count").fetchone()[0])
+        self.assertEqual(before - after_bounded, 16)
+        self.assertEqual(after_bounded - after_second, 16)
+        self.assertGreater(free_after_bounded, 32)
+
     def test_removes_transient_companion_triggers_before_retention_pruning(
         self,
     ) -> None:

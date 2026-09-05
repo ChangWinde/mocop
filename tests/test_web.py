@@ -1683,6 +1683,70 @@ class WebTests(unittest.TestCase):
                     request = self.write_request(payload, origin=self.base, path=path)
                     self.assert_json_error(request, 400, code)
 
+    def test_errors_name_the_rejected_field_when_exactly_one_is_at_fault(self) -> None:
+        # Agents map a rejection back to the parameter or body field without
+        # parsing the English message; shape problems have no single field.
+        write_cases = (
+            (b'{"action":1,"host":"gpu-02"}', "INVALID_SCHEMA", "action"),
+            (b'{"action":"replace","host":"gpu-01"}', "INVALID_SETTINGS", "action"),
+            (b'{"action":"add","host":"--proxy"}', "INVALID_SETTINGS", "host"),
+            (b'{"action":"add"}', "INVALID_SCHEMA", None),
+        )
+        for payload, code, field in write_cases:
+            with self.subTest(payload=payload):
+                request = self.write_request(
+                    payload, origin=self.base, path="/api/settings/hosts"
+                )
+                _headers, body = self.assert_json_error(request, 400, code)
+                self.assertEqual(body.get("field"), field)
+        cross_field = (
+            (
+                "/api/settings/maintenance",
+                b'{"host":"gpu-01","durationSeconds":3600,"reason":" "}',
+                "reason",
+            ),
+            (
+                "/api/settings/host-group",
+                json.dumps({"host": "gpu-01", "group": "x\u007f"}).encode(),
+                "group",
+            ),
+            (
+                "/api/settings/incident-action",
+                b'{"host":"gpu-01","conditionKey":"connectivity","incidentStartedAt":null,'
+                b'"action":"acknowledged","durationSeconds":3600,"reason":""}',
+                "incidentStartedAt",
+            ),
+            (
+                "/api/settings/incident-action",
+                b'{"host":"gpu-01","conditionKey":"connectivity","incidentStartedAt":null,'
+                b'"action":"clear","durationSeconds":3600,"reason":""}',
+                "durationSeconds",
+            ),
+        )
+        for path, payload, field in cross_field:
+            with self.subTest(path=path, field=field):
+                request = self.write_request(payload, origin=self.base, path=path)
+                _headers, body = self.assert_json_error(
+                    request, 400, "INVALID_SETTINGS"
+                )
+                self.assertEqual(body["field"], field)
+        query_cases = (
+            ("/api/history?host=gpu-1&limit=1", "INVALID_LIMIT", "limit"),
+            ("/api/history?limit=5", "INVALID_QUERY", "host"),
+            ("/api/history?host=gpu-1&debug=1", "UNKNOWN_QUERY_PARAMETER", "debug"),
+            ("/api/capacity?gpus=0", "INVALID_CAPACITY_REQUEST", "gpus"),
+        )
+        for target, code, field in query_cases:
+            with self.subTest(target=target):
+                _headers, body = self.assert_json_error(
+                    f"{self.base}{target}", 400, code
+                )
+                self.assertEqual(body["field"], field)
+        _headers, body = self.assert_json_error(
+            f"{self.base}/api/meta?x=1", 400, "QUERY_NOT_ALLOWED"
+        )
+        self.assertNotIn("field", body)
+
     def test_rejects_unmarked_or_cross_site_inventory_scans(self) -> None:
         self.assert_http_error(f"{self.base}/api/inventory", 403)
 

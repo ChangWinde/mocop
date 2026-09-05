@@ -102,7 +102,7 @@ The verification surface intentionally includes more than happy-path unit tests:
   layout, keyboard focus, bounded process views, filters, drill-down, copy
   actions, and global search transitions.
 
-The 2026-09-05 Python 3.14 run executed 559 tests and measured 89% combined
+The 2026-09-05 Python 3.14 run executed 563 tests and measured 89% combined
 statement/branch coverage with Coverage.py 7.15.4 (the 2026-08-16 0.9.0 baseline
 was 467 tests at 88%). CI enforces a conservative 85% floor as a
 regression signal; the focused contracts and failure-injection oracles remain
