@@ -2,7 +2,7 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [Unreleased]
+## [0.12.0] - 2026-09-06
 
 ### Added
 
@@ -21,7 +21,6 @@ All notable changes are documented here. This project follows Semantic Versionin
   `cpu_seconds` and `rss_mib` (both nullable).
 - The truncated command line in a task row expands in place on click
   instead of requiring copy-and-paste to read the training config.
-
 - `mocop deploy --help`, `mocop migrate --help`, and `mocop service --help`
   now describe every flag and action, and help output names the program
   `mocop` instead of `__main__.py`. The operations runbook gained a command,
@@ -81,7 +80,6 @@ All notable changes are documented here. This project follows Semantic Versionin
   `--once` / `--strict` with a subcommand are rejected as usage errors.
   Inventory payloads must publish `infrastructureHosts` and
   `sshDiscoveryMode`; the dashboard no longer defaults those fields.
-
 - Workload record parsing moved from `probe.py` into a new `workloads.py`
   module, and the GPU task projections moved from `app.js` into the
   `gpu-tasks.js` leaf ([ADR-0021](adr/0021-incremental-module-boundaries.md));
@@ -121,8 +119,12 @@ All notable changes are documented here. This project follows Semantic Versionin
   contributes, the shared-path and shared-storage grouping that consumes the
   conditions it explains, per-host issues, and ranking — moved into the
   `attention.js` leaf with a contract test that pins every grouping rule
-  previously exercised only through the browser journey. The `app.js` ceiling
-  ratcheted down to 6,000 lines.
+  previously exercised only through the browser journey. The operator-facing
+  wording for collector failures, incident conditions, state labels, evidence
+  rows, and diagnosis guidance moved into the `incident-text.js` leaf, and a
+  repository test now requires one translation for every failure message the
+  probe or collector can emit and no dead translation. The `app.js` ceiling
+  ratcheted down to 5,850 lines.
 - Every HTTP server instance now requires the Bearer capability: the
   unauthenticated server mode that only tests used is gone, `GET /api/meta`
   no longer reports the constant `authenticationRequired` flag, and the
@@ -193,9 +195,9 @@ All notable changes are documented here. This project follows Semantic Versionin
   lock; no schema change is involved.
 - `mocop service install` could not verify a service publishing the complete
   `/api/meta` manifest: the installer's liveness probe rejected any manifest
-  longer than 4 KiB, so every install of this release rolled back with
-  `SERVICE_UNHEALTHY`. The cap is now 64 KiB and a test pins the real manifest
-  under it with headroom. The verification window also grew from 8 to 60
+  longer than 4 KiB, so installing a build with the complete manifest rolled
+  back with `SERVICE_UNHEALTHY`. The cap is now 64 KiB and a test pins the
+  real manifest under it with headroom. The verification window also grew from 8 to 60
   seconds, because the service restores its retained history before binding
   and a 476 MB history measured 9–18 s on a loaded host.
 - The capacity-watch notification and title marker now fire while the tab is
@@ -212,6 +214,10 @@ All notable changes are documented here. This project follows Semantic Versionin
   of closing the dialog under the cursor.
 - Fleet rail items are valid HTML: the rows inside each `<button>` are now
   phrasing content, so assistive technology no longer has to flatten them.
+- Two collector failure messages reached operators in English because the
+  dashboard had no translation for them: `Local SSH client could not be
+  started` and `nvidia-smi output was malformed`. A stale translation for a
+  message the collector no longer emits was removed at the same time.
 
 ### Removed
 
