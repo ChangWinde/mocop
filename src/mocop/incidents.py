@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, replace
-from typing import Literal, Protocol
+from dataclasses import replace
 
 from .config import IncidentConfig, IncidentScopeOverrideConfig, ThresholdConfig
 from .incident_domains import condition_domains, telemetry_unknown
-from .models import ProbeResult
-
-IncidentSeverity = Literal["warning", "critical"]
-IncidentState = Literal["opened", "resolved", "escalated", "deescalated"]
+from .incident_types import (
+    IncidentCondition,
+    IncidentEvent,
+    IncidentPolicy,
+    IncidentSeverity,
+    IncidentState,
+    OpenIncident,
+)
+from .models import ProbeResult, epoch_seconds
 
 # Every probe message that means "this sample cannot speak for the GPUs" must
 # be listed here. A malformed nvidia-smi payload degrades to zero GPUs with
@@ -23,96 +27,6 @@ _GPU_QUERY_FAILURE_MESSAGES = frozenset(
         "nvidia-smi output was malformed",
     }
 )
-
-
-@dataclass(frozen=True, slots=True)
-class IncidentCondition:
-    key: str
-    category: str
-    resource: str
-    severity: IncidentSeverity
-    value: float | None
-    threshold: float | None
-    observed_at: str
-    detail: str | None = None
-    open_after_cycles: int = 2
-    recovery_cycles: int = 2
-    group_key: str | None = None
-
-    def active_dict(self, host: str) -> dict[str, object]:
-        return {
-            "host": host,
-            "conditionKey": self.key,
-            "category": self.category,
-            "resource": self.resource,
-            "severity": self.severity,
-            "value": self.value,
-            "threshold": self.threshold,
-            "observedAt": self.observed_at,
-            "detail": self.detail,
-            "groupKey": self.group_key,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class IncidentEvent:
-    event_id: int
-    host: str
-    condition: IncidentCondition
-    state: IncidentState
-    observed_at: str
-
-    def to_dict(self) -> dict[str, object]:
-        value = self.condition.active_dict(self.host)
-        value.update(
-            {
-                "eventId": self.event_id,
-                "state": self.state,
-                "observedAt": self.observed_at,
-            }
-        )
-        return value
-
-
-@dataclass(frozen=True, slots=True)
-class OpenIncident:
-    """A condition that was still active when the previous process stopped.
-
-    ``condition`` carries the severity and values of its latest transition;
-    ``opened_at`` is the generation's first observation, which the incident
-    reports as ``firstObservedAt`` and incident actions are bound to.
-    """
-
-    host: str
-    condition: IncidentCondition
-    opened_at: str
-
-
-class IncidentPolicy(Protocol):
-    """Everything ``IncidentTracker`` and ``StateStore`` require of a policy."""
-
-    def conditions(self, result: ProbeResult) -> dict[str, IncidentCondition]: ...
-
-    def observed_domains(self, result: ProbeResult) -> frozenset[str]: ...
-
-    def condition_observed(self, result: ProbeResult, key: str) -> bool: ...
-
-    def update_expected_gpu_counts(
-        self, expected_gpu_counts: tuple[tuple[str, int], ...]
-    ) -> None: ...
-
-    def update_overrides(
-        self,
-        host_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...],
-        group_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...],
-        host_groups: tuple[tuple[str, str], ...],
-    ) -> None: ...
-
-    def retain_hosts(self, hosts: set[str]) -> None: ...
-
-    def recovery_cycles(self) -> int:
-        """Healthy samples a restored condition needs before it resolves."""
-        ...
 
 
 class ThresholdIncidentPolicy:
@@ -367,6 +281,7 @@ class ThresholdIncidentPolicy:
                 observed_at=result.observed_at,
                 detail="GPU process telemetry is unavailable",
                 open_after_cycles=self._incidents.resource_open_cycles,
+                open_after_seconds=self._incidents.resource_open_seconds,
                 recovery_cycles=self._incidents.recovery_cycles,
             )
 
@@ -384,6 +299,7 @@ class ThresholdIncidentPolicy:
                     threshold=temperature_threshold,
                     observed_at=result.observed_at,
                     open_after_cycles=self._incidents.resource_open_cycles,
+                    open_after_seconds=self._incidents.resource_open_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
 
@@ -406,6 +322,7 @@ class ThresholdIncidentPolicy:
                     threshold=memory_threshold,
                     observed_at=result.observed_at,
                     open_after_cycles=self._incidents.resource_open_cycles,
+                    open_after_seconds=self._incidents.resource_open_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
             utilization = gpu.utilization_gpu_pct
@@ -427,6 +344,7 @@ class ThresholdIncidentPolicy:
                     observed_at=result.observed_at,
                     detail=f"GPU utilization is {round(utilization, 2)}%",
                     open_after_cycles=self._incidents.gpu_idle_memory_cycles,
+                    open_after_seconds=self._incidents.resource_open_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
             health = gpu.health
@@ -444,6 +362,7 @@ class ThresholdIncidentPolicy:
                     observed_at=result.observed_at,
                     detail="Volatile uncorrected ECC errors detected",
                     open_after_cycles=self._incidents.resource_open_cycles,
+                    open_after_seconds=self._incidents.resource_open_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
             if health.retired_pages_pending or health.remapped_rows_pending:
@@ -458,6 +377,7 @@ class ThresholdIncidentPolicy:
                     observed_at=result.observed_at,
                     detail="GPU memory repair is pending",
                     open_after_cycles=self._incidents.resource_open_cycles,
+                    open_after_seconds=self._incidents.resource_open_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
             if health.thermal_slowdown or health.power_brake_slowdown:
@@ -477,6 +397,7 @@ class ThresholdIncidentPolicy:
                     observed_at=result.observed_at,
                     detail=f"Hardware slowdown active: {', '.join(causes)}",
                     open_after_cycles=self._incidents.resource_open_cycles,
+                    open_after_seconds=self._incidents.resource_open_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
         return conditions
@@ -561,9 +482,24 @@ class ThresholdIncidentPolicy:
             observed_at=observed_at,
             detail=detail,
             open_after_cycles=self._incidents.resource_open_cycles,
+            open_after_seconds=self._incidents.resource_open_seconds,
             recovery_cycles=self._incidents.recovery_cycles,
             group_key=group_key,
         )
+
+
+def _sustained(since: str, condition: IncidentCondition) -> bool:
+    """Whether the condition has been observed for its required duration.
+
+    Unparsable timestamps fall back to confirmation by cycles alone.
+    """
+    if condition.open_after_seconds <= 0:
+        return True
+    started = epoch_seconds(since)
+    now = epoch_seconds(condition.observed_at)
+    if started is None or now is None:
+        return True
+    return now - started >= condition.open_after_seconds
 
 
 class IncidentTracker:
@@ -583,9 +519,11 @@ class IncidentTracker:
     ) -> None:
         self._policy = policy
         self._active: dict[str, dict[str, IncidentCondition]] = {}
-        self._candidates: dict[str, dict[str, tuple[IncidentCondition, int]]] = {}
+        self._candidates: dict[str, dict[str, tuple[IncidentCondition, int, str]]] = {}
         self._recoveries: dict[str, dict[str, int]] = {}
-        self._severity_changes: dict[str, dict[str, tuple[IncidentSeverity, int]]] = {}
+        self._severity_changes: dict[
+            str, dict[str, tuple[IncidentSeverity, int, str]]
+        ] = {}
         self._opened_at: dict[str, dict[str, str]] = {}
         self._last_observed_at: dict[str, dict[str, str]] = {}
         self._initialized: set[str] = set()
@@ -650,7 +588,7 @@ class IncidentTracker:
             }
             self._active[result.host] = immediate
             self._candidates[result.host] = {
-                key: (condition, 1)
+                key: (condition, 1, condition.observed_at)
                 for key, condition in observed.items()
                 if condition.open_after_cycles > 1
             }
@@ -704,14 +642,16 @@ class IncidentTracker:
                     severity_changes.pop(key, None)
                     current[key] = new
                     continue
-                pending_severity, count = severity_changes.get(key, (new.severity, 0))
+                pending_severity, count, since = severity_changes.get(
+                    key, (new.severity, 0, new.observed_at)
+                )
                 if pending_severity != new.severity:
-                    count = 0
+                    count, since = 0, new.observed_at
                 count += 1
-                if count < new.open_after_cycles:
+                if count < new.open_after_cycles or not _sustained(since, new):
                     # Debounce severity flapping: keep the confirmed severity
                     # until the change is sustained, mirroring open cycles.
-                    severity_changes[key] = (new.severity, count)
+                    severity_changes[key] = (new.severity, count, since)
                     current[key] = replace(new, severity=old.severity)
                     continue
                 severity_changes.pop(key, None)
@@ -724,11 +664,11 @@ class IncidentTracker:
                 )
                 continue
 
-            candidate, count = candidates.get(key, (new, 0))
+            candidate, count, since = candidates.get(key, (new, 0, new.observed_at))
             if candidate.severity != new.severity:
-                count = 0
+                count, since = 0, new.observed_at
             count += 1
-            if count >= new.open_after_cycles:
+            if count >= new.open_after_cycles and _sustained(since, new):
                 candidates.pop(key, None)
                 current[key] = new
                 opened_at[key] = new.observed_at
@@ -737,7 +677,7 @@ class IncidentTracker:
                     self._append(result.host, new, "opened", result.observed_at)
                 )
             else:
-                candidates[key] = (new, count)
+                candidates[key] = (new, count, since)
 
         if result.status == "online":
             for key in set(previous) - set(observed):

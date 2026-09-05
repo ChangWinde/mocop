@@ -154,7 +154,7 @@ class WebhookContractDriftTests(unittest.TestCase):
         self.literals = set(re.findall(r"`([^`\n]+)`", self.section))
 
     def test_payload_keys_headers_and_status_fields_are_documented(self) -> None:
-        from mocop.incidents import IncidentCondition, IncidentEvent
+        from mocop.incident_types import IncidentCondition, IncidentEvent
         from mocop.notifications import NotificationEnvelope, _WebhookWorker
 
         event = IncidentEvent(

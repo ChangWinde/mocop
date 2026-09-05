@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 from . import __version__
 from .config import WebhookConfig
-from .incidents import IncidentCondition, IncidentEvent
+from .incident_types import IncidentCondition, IncidentEvent
 from .models import utc_now
 from .webhook_transport import (
     AddressResolver,

@@ -4,13 +4,8 @@ import unittest
 from dataclasses import replace
 
 from mocop.config import IncidentConfig, IncidentScopeOverrideConfig, ThresholdConfig
-from mocop.incidents import (
-    IncidentCondition,
-    IncidentEvent,
-    IncidentTracker,
-    OpenIncident,
-    ThresholdIncidentPolicy,
-)
+from mocop.incident_types import IncidentCondition, IncidentEvent, OpenIncident
+from mocop.incidents import IncidentTracker, ThresholdIncidentPolicy
 from mocop.models import (
     DiskMetrics,
     GpuHealthMetrics,
@@ -21,6 +16,12 @@ from mocop.models import (
     ProbeResult,
     SystemMetrics,
 )
+
+
+def cycles_only(**overrides: object) -> IncidentConfig:
+    """Cycle-confirmation semantics without the duration floor; these tests
+    replay unspaced samples and reason about sample counts alone."""
+    return IncidentConfig(resource_open_seconds=0, **overrides)  # type: ignore[arg-type]
 
 
 def system(cpu: float, disk: float) -> SystemMetrics:
@@ -80,13 +81,13 @@ class IncidentTrackerTests(unittest.TestCase):
         self.tracker = IncidentTracker(
             ThresholdIncidentPolicy(
                 ThresholdConfig(),
-                incidents=IncidentConfig(gpu_idle_memory_cycles=3),
+                incidents=cycles_only(gpu_idle_memory_cycles=3),
             ),
             history_points=20,
         )
 
     def test_disk_severity_accounts_for_absolute_headroom(self) -> None:
-        policy = ThresholdIncidentPolicy(ThresholdConfig(), incidents=IncidentConfig())
+        policy = ThresholdIncidentPolicy(ThresholdConfig(), incidents=cycles_only())
 
         def disk_condition(
             total_gib: float, used_pct: float, mount: str = "/"
@@ -130,7 +131,7 @@ class IncidentTrackerTests(unittest.TestCase):
         self.assertIsNone(disk_condition(0.5, 2, mount="/boot/efi"))
 
     def test_pressure_stall_conditions_follow_the_some_avg60_window(self) -> None:
-        policy = ThresholdIncidentPolicy(ThresholdConfig(), incidents=IncidentConfig())
+        policy = ThresholdIncidentPolicy(ThresholdConfig(), incidents=cycles_only())
 
         def conditions_for(pressure: PressureStallMetrics | None) -> dict:
             return policy.conditions(
@@ -196,7 +197,7 @@ class IncidentTrackerTests(unittest.TestCase):
         )
 
     def test_skipped_process_sample_is_not_an_availability_incident(self) -> None:
-        policy = ThresholdIncidentPolicy(ThresholdConfig())
+        policy = ThresholdIncidentPolicy(ThresholdConfig(), incidents=cycles_only())
         skipped = replace(
             gpu(60),
             processes=(),
@@ -257,7 +258,7 @@ class IncidentTrackerTests(unittest.TestCase):
             observed_at="2026-08-09T00:00:00Z",
         )
         tracker = IncidentTracker(
-            ThresholdIncidentPolicy(ThresholdConfig()),
+            ThresholdIncidentPolicy(ThresholdConfig(), incidents=cycles_only()),
             history_points=20,
             historical_events=(historical,),
         )
@@ -270,10 +271,100 @@ class IncidentTrackerTests(unittest.TestCase):
             [8, 7],
         )
 
+    def test_resource_conditions_must_be_sustained_by_the_clock(self) -> None:
+        # Live evidence: at a five-second cadence, VRAM spiking above 90% for
+        # ten to fifteen seconds satisfied two confirming samples and opened
+        # incidents that resolved twenty seconds later (42 of 43 cycles under
+        # ten minutes). The duration floor is independent of the cadence.
+        tracker = IncidentTracker(
+            ThresholdIncidentPolicy(
+                ThresholdConfig(), incidents=IncidentConfig(resource_open_seconds=60)
+            ),
+            20,
+        )
+
+        def sample(second: int, memory_used: float) -> ProbeResult:
+            return ProbeResult(
+                "node-a",
+                "online",
+                1,
+                (gpu(60, memory_used=memory_used),),
+                system=system(10, 10),
+                observed_at=f"2026-08-09T00:{second // 60:02d}:{second % 60:02d}Z",
+            )
+
+        # A 15-second spike: three samples at 96%, then back to 40%.
+        for second in (0, 5, 10):
+            self.assertEqual(tracker.update(sample(second, 96)), ())
+        self.assertEqual(tracker.update(sample(15, 40)), ())
+        self.assertEqual(tracker.snapshot(20)["active"], [])
+
+        # A second spike after the gap starts a new streak; it opens only once
+        # the samples span the floor.
+        for second in range(20, 80, 5):
+            self.assertEqual(tracker.update(sample(second, 96)), (), second)
+        opened = tracker.update(sample(80, 96))
+        self.assertEqual([event.state for event in opened], ["opened"])
+        self.assertEqual(opened[0].observed_at, "2026-08-09T00:01:20Z")
+        # Recovery is unchanged: two healthy samples.
+        tracker.update(sample(85, 40))
+        resolved = tracker.update(sample(90, 40))
+        self.assertEqual([event.state for event in resolved], ["resolved"])
+
+    def test_severity_changes_follow_the_same_duration_floor(self) -> None:
+        tracker = IncidentTracker(
+            ThresholdIncidentPolicy(
+                ThresholdConfig(), incidents=IncidentConfig(resource_open_seconds=30)
+            ),
+            20,
+        )
+
+        def sample(second: int, cpu: float) -> ProbeResult:
+            return ProbeResult(
+                "node-a",
+                "online",
+                1,
+                system=system(cpu, 10),
+                observed_at=f"2026-08-09T00:{second // 60:02d}:{second % 60:02d}Z",
+            )
+
+        for second in range(0, 35, 5):
+            tracker.update(sample(second, 90))
+        (active,) = tracker.snapshot(20)["active"]
+        self.assertEqual(
+            (active["conditionKey"], active["severity"]), ("cpu", "warning")
+        )
+        # Critical readings for 20 seconds keep the confirmed severity.
+        for second in range(35, 55, 5):
+            self.assertEqual(tracker.update(sample(second, 97)), ())
+        self.assertEqual(tracker.snapshot(20)["active"][0]["severity"], "warning")
+        # Once sustained for the floor they escalate exactly once.
+        escalated = tracker.update(sample(65, 97))
+        self.assertEqual([event.state for event in escalated], ["escalated"])
+        self.assertEqual(tracker.snapshot(20)["active"][0]["severity"], "critical")
+
+    def test_connectivity_and_availability_open_immediately_despite_the_floor(
+        self,
+    ) -> None:
+        tracker = IncidentTracker(
+            ThresholdIncidentPolicy(
+                ThresholdConfig(), incidents=IncidentConfig(resource_open_seconds=600)
+            ),
+            20,
+        )
+        events = tracker.update(
+            ProbeResult("node-a", "unreachable", 1, observed_at="2026-08-09T00:00:00Z")
+        )
+        self.assertEqual(
+            [(e.condition.key, e.state) for e in events], [("connectivity", "opened")]
+        )
+
     def test_restored_open_conditions_resume_their_generation(self) -> None:
         # Before the restart: a disk warning and a critical connectivity
         # condition are open on node-a (disk needs its two confirming samples).
-        before = IncidentTracker(ThresholdIncidentPolicy(ThresholdConfig()), 20)
+        before = IncidentTracker(
+            ThresholdIncidentPolicy(ThresholdConfig(), incidents=cycles_only()), 20
+        )
         degraded = ProbeResult(
             "node-a",
             "online",
@@ -317,7 +408,7 @@ class IncidentTrackerTests(unittest.TestCase):
         # no transition is created and firstObservedAt is unchanged, so an
         # action bound to that timestamp keeps applying.
         after = IncidentTracker(
-            ThresholdIncidentPolicy(ThresholdConfig()),
+            ThresholdIncidentPolicy(ThresholdConfig(), incidents=cycles_only()),
             20,
             historical_events=history,
             open_incidents=restored,
@@ -377,7 +468,9 @@ class IncidentTrackerTests(unittest.TestCase):
             "2026-08-09T00:00:10Z",
         )
         tracker = IncidentTracker(
-            ThresholdIncidentPolicy(ThresholdConfig()), 20, open_incidents=(restored,)
+            ThresholdIncidentPolicy(ThresholdConfig(), incidents=cycles_only()),
+            20,
+            open_incidents=(restored,),
         )
         # A healthy first sample recovers with the usual confirmation, while a
         # newly observed condition opens with its own confirmation count.
@@ -403,7 +496,7 @@ class IncidentTrackerTests(unittest.TestCase):
         # restored condition follows the configured policy, not a default.
         patient = IncidentTracker(
             ThresholdIncidentPolicy(
-                ThresholdConfig(), incidents=IncidentConfig(recovery_cycles=4)
+                ThresholdConfig(), incidents=cycles_only(recovery_cycles=4)
             ),
             20,
             open_incidents=(restored,),
@@ -501,7 +594,7 @@ class IncidentTrackerTests(unittest.TestCase):
     def test_event_log_is_bounded_and_newest_first(self) -> None:
         tracker = IncidentTracker(
             ThresholdIncidentPolicy(
-                ThresholdConfig(), incidents=IncidentConfig(recovery_cycles=1)
+                ThresholdConfig(), incidents=cycles_only(recovery_cycles=1)
             ),
             history_points=2,
         )
@@ -693,7 +786,7 @@ class IncidentTrackerTests(unittest.TestCase):
         policy = ThresholdIncidentPolicy(
             ThresholdConfig(),
             expected_gpu_counts=(("node-a", 2),),
-            incidents=IncidentConfig(gpu_idle_memory_cycles=3),
+            incidents=cycles_only(gpu_idle_memory_cycles=3),
         )
         unhealthy = gpu(
             70,

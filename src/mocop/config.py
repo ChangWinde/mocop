@@ -66,6 +66,11 @@ class IncidentConfig:
     resource_open_cycles: int = 2
     recovery_cycles: int = 2
     gpu_idle_memory_cycles: int = 12
+    # Confirmation in samples alone scales with the poll interval: two samples
+    # are ten seconds at a five-second cadence, so a VRAM spike of that length
+    # opens an incident that resolves twenty seconds later. The floor makes a
+    # resource condition sustained by the clock as well.
+    resource_open_seconds: float = 60
 
 
 @dataclass(frozen=True, slots=True)

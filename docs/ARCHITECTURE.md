@@ -53,6 +53,7 @@ interfaces without a runtime plugin registry.
 |---|---|
 | `config.py` | the configuration schema: limits, typed sections, and the alias/text validators the HTTP layer and configuration controller reuse |
 | `config_loader.py` | path resolution, bounded and private file reads, strict JSON decoding, and one parser per configuration section, run in a fixed order |
+| `config_integrations.py` | section parsers for topology links, SQLite history, workload identity, and webhook endpoints |
 | `privatefiles.py` | private lock and `0600` file primitives shared by the lifecycle and configuration controller |
 | `hostnames.py` | canonical Host/Origin hostname normalization, the trusted web policy, and the Host/marker/Origin/Fetch-Metadata guards for dashboard reads and writes |
 | `discovery_policy.py` | dependency-free SSH discovery policy parsing and bounds |
@@ -70,6 +71,7 @@ interfaces without a runtime plugin registry.
 | `telemetry_points.py` | compact in-memory history records: struct-packed host and GPU samples, process transitions |
 | `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage` |
 | `models.py` | immutable resource result types |
+| `incident_types.py` | the incident vocabulary: conditions, transition events, restored open incidents, the policy protocol |
 | `incidents.py` | condition evaluation, bounded transition history, restored generations, and raw/actionable counts |
 | `incident_domains.py` | which telemetry domains a condition's recovery needs and when a sample is blind to them |
 | `correlation.py` | possible shared-path grouping without changing incident truth |
@@ -187,7 +189,7 @@ trusted Origin. Deployments with ephemeral Host-rewriting preview names may auth
 a bounded `*.example` HTTPS Origin suffix; suffix entries never authorize Host and no
 `X-Forwarded-*` header participates in the trust decision.
 
-`IncidentPolicy` is the sole authority for connectivity, CPU, memory, swap, filesystem, GPU availability, pressure, temperature, and hardware-health conditions. `IncidentTracker` applies bounded activation and recovery cycles while preserving previous resource conditions across failed probes, so transient samples and missing telemetry are not mistaken for stable failure or recovery.
+`IncidentPolicy` is the sole authority for connectivity, CPU, memory, swap, filesystem, GPU availability, pressure, temperature, and hardware-health conditions. `IncidentTracker` applies bounded activation and recovery cycles plus a wall-clock duration floor for resource conditions (`incidents.resource_open_seconds`) while preserving previous resource conditions across failed probes, so transient samples, cadence-dependent spikes, and missing telemetry are not mistaken for stable failure or recovery.
 
 Time-bounded maintenance and condition-level actions are overlays on that authority,
 never inputs to collection or condition state. Acknowledgement records ownership while

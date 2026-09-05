@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .config import PersistenceConfig
-from .incidents import IncidentCondition, IncidentEvent, OpenIncident
+from .incident_types import IncidentCondition, IncidentEvent, OpenIncident
 from .persistence_schema import (
     CREATE_SCHEMA_STATEMENTS,
     GPU_ROW_FILTER,

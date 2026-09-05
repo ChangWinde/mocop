@@ -34,7 +34,8 @@ from .discovery import (
     HostSource,
     resolve_host_discovery,
 )
-from .incidents import IncidentPolicy, IncidentTracker, ThresholdIncidentPolicy
+from .incident_types import IncidentPolicy
+from .incidents import IncidentTracker, ThresholdIncidentPolicy
 from .models import GpuProcess, ProbeResult, ServerState, utc_after, utc_now
 from .notifications import DisabledNotificationSink, IncidentNotificationSink
 from .persistence import (

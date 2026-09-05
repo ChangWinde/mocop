@@ -93,6 +93,13 @@ All threshold fields are numbers. Defaults and inclusive ranges are:
 
 `incidents.resource_open_cycles` (2), `recovery_cycles` (2), and
 `gpu_idle_memory_cycles` (12) are integers from 1 through 60.
+`incidents.resource_open_seconds` (60) is a number from 0 through 3600: a
+resource condition (CPU, memory, swap, filesystem, pressure, GPU memory,
+temperature, idle-memory, hardware health) opens or changes severity only once
+its confirming samples also span this many seconds, so sensitivity does not
+depend on the poll interval — at a five-second cadence, two samples alone would
+open an incident for a ten-second VRAM spike. Connectivity and GPU-availability
+conditions open immediately regardless. `0` confirms by sample count alone.
 
 `incident_overrides` may contain only `hosts` and `groups`, each with at most
 256 entries. A scope object is non-empty and may contain `thresholds` and/or

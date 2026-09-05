@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from mocop.config import PersistenceConfig
-from mocop.incidents import IncidentCondition, IncidentEvent
+from mocop.incident_types import IncidentCondition, IncidentEvent
 from mocop.models import GpuMetrics, ProbeResult, SystemMetrics
 from mocop.persistence import (
     LoadedTelemetry,

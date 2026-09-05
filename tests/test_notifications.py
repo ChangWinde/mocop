@@ -12,7 +12,7 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from mocop.config import WebhookConfig
-from mocop.incidents import IncidentCondition, IncidentEvent
+from mocop.incident_types import IncidentCondition, IncidentEvent
 from mocop.notifications import (
     NotificationEnvelope,
     WebhookNotificationSink,

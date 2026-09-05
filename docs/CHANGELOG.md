@@ -32,13 +32,28 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Resource conditions must now be sustained by the clock as well as by
+  sample count: `incidents.resource_open_seconds` (default 60, range 0–3600)
+  is the minimum span the confirming samples must cover before a CPU, memory,
+  swap, filesystem, pressure, GPU-memory, temperature, idle-memory, or
+  hardware-health condition opens or changes severity. On a live deployment
+  polling every five seconds, VRAM spikes of ten to fifteen seconds satisfied
+  `resource_open_cycles: 2` and produced 43 `gpu_memory` incidents in five
+  hours, 42 of them shorter than ten minutes and most resolved within twenty
+  seconds. Connectivity and GPU-availability conditions still open
+  immediately; set `resource_open_seconds: 0` to confirm by cycles alone as
+  before.
 - Four modules crossed their line ceilings with the incident-restore fix and were split along
   existing seams instead: the struct-packed history records moved from
   `service.py` into `telemetry_points.py`, the bounded HTTPS delivery
   transport (pinned DNS, SSRF guards) from `notifications.py` into
   `webhook_transport.py`, the telemetry-domain rules from `incidents.py` into
   `incident_domains.py`, and the SQLite DDL and row contracts from
-  `persistence.py` into `persistence_schema.py`. Every ceiling ratchets down.
+  `persistence.py` into `persistence_schema.py`; the duration floor then
+  pushed two more over, so the incident vocabulary (`incident_types.py`) left
+  `incidents.py` and the integration section parsers
+  (`config_integrations.py`) left `config_loader.py`. Every ceiling ratchets
+  down.
 - A connectivity incident's `diagnosis.nextSteps` (and the dashboard's
   incident dialog) now open with the step that follows from the failure
   classification — check the jump host's forwarding, the node's `sshd`
