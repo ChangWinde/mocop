@@ -55,6 +55,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   module, and the GPU task projections moved from `app.js` into the
   `gpu-tasks.js` leaf ([ADR-0021](adr/0021-incremental-module-boundaries.md));
   both budgets ratcheted down.
+- The dashboard's payload normalizers (snapshot and incidents envelopes,
+  inventory, collector settings, maintenance windows, host groups, topology)
+  moved from `app.js` into the `api-contracts.js` leaf, which now has its own
+  Node contract test covering every accepted shape and rejection; the
+  `app.js` ceiling ratcheted down to 6,525 lines.
 - Every HTTP server instance now requires the Bearer capability: the
   unauthenticated server mode that only tests used is gone, `GET /api/meta`
   no longer reports the constant `authenticationRequired` flag, and the
