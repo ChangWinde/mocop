@@ -179,7 +179,7 @@ const attention = globalThis.MocopAttention.create({
   safeStoredHosts,
   conditionMessage: (condition) => incidentConditionMessage(condition),
 });
-const gpuTasks = globalThis.MocopGpuTasks.create();
+const gpuTasks = globalThis.MocopGpuTasks.create({ durationSince });
 const capacityWatch = globalThis.MocopCapacityWatch.create({ storage: localStorage });
 
 const view = {
@@ -4403,8 +4403,7 @@ function renderGpuHistory() {
   }
   elements.gpuProcessTimeline.replaceChildren(...events.slice(0, 24).map((event) => {
     const item = create("article", `gpu-timeline-item ${event.event}`);
-    const process = gpuProcessName(event);
-    const summary = `${event.event === "started" ? "进入" : "退出"} · ${process} · PID ${event.pid}`;
+    const summary = gpuTasks.timelineSummary(event);
     item.append(
       create("i"),
       create("span", "", summary),

@@ -28,11 +28,8 @@ from mocop.models import (
     SystemMetrics,
     WorkloadMetadata,
 )
-from mocop.persistence import (
-    DisabledPersistence,
-    LoadedTelemetry,
-    SqliteTelemetryPersistence,
-)
+from mocop.persistence import DisabledPersistence, SqliteTelemetryPersistence
+from mocop.persistence_restore import LoadedTelemetry
 from mocop.service import _MAX_GPU_IDENTITIES_PER_HOST, MonitorService, StateStore
 
 
@@ -479,6 +476,11 @@ class StateStoreTests(unittest.TestCase):
             {(event["event"], event["pid"]) for event in history["processEvents"]},
             {("started", 11), ("stopped", 10)},
         )
+        # Every transition names when this monitor first saw the process on
+        # the device, so a stop describes its whole run on its own.
+        by_pid = {event["pid"]: event for event in history["processEvents"]}
+        self.assertEqual(by_pid[10]["firstSeenAt"], "2026-08-10T00:00:00Z")
+        self.assertEqual(by_pid[11]["firstSeenAt"], "2026-08-10T00:00:05Z")
 
     def test_empty_gpu_process_samples_preserve_transition_semantics(self) -> None:
         idle = GpuMetrics(

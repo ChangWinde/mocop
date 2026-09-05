@@ -45,6 +45,9 @@ class ProcessTransition(Protocol):
     @property
     def workload(self) -> dict[str, object] | None: ...
 
+    @property
+    def first_seen_at(self) -> str | None: ...
+
 
 @dataclass(slots=True)
 class _Interval:
@@ -126,8 +129,16 @@ def _intervals(
         if opened is not None:
             close(opened[0], observed, opened[1] or event.workload)
             continue
-        # Process start time is not a GPU-occupancy observation.  An
-        # unmatched stop therefore has no safe accounting anchor.
+        # The matching start has left the retained window. The stop carries
+        # the monitor's own first observation of the process on this device,
+        # which is a GPU-occupancy observation and anchors the run; a process
+        # start time would not be, so a stop without it has no safe anchor.
+        anchored_start = epoch_seconds(event.first_seen_at)
+        if anchored_start is not None and anchored_start <= observed:
+            if earliest is None or anchored_start < earliest:
+                earliest = anchored_start
+            close(anchored_start, observed, event.workload)
+            continue
         dropped += 1
 
     for process_key, (started, workload) in open_processes.items():

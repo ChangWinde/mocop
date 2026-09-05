@@ -18,18 +18,48 @@ def _at(minutes_before_now: int) -> str:
 
 @dataclass(frozen=True)
 class Transition:
-    """Any record with the five fields the aggregator reads is accepted."""
+    """Any record with the six fields the aggregator reads is accepted."""
 
     observed_at: str
     event: str
     pid: int
     name: str
     workload: dict[str, object] | None = None
+    first_seen_at: str | None = None
 
 
 class AggregateUsageTests(unittest.TestCase):
     """The pure rollup behind StateStore.usage(); the store tests cover the
     live timeline, this pins the module boundary and the accounting rules."""
+
+    def test_unmatched_stops_anchor_on_the_monitors_first_observation(self) -> None:
+        # Live evidence: a busy GPU churns hundreds of processes a day, so the
+        # started edge of many runs leaves the retained event window before
+        # the stopped edge does; 592 of 644 dropped records in a 24-hour
+        # report were such orphan stops. A stop that carries when this monitor
+        # first saw the process on the device is a complete run on its own.
+        carol = {"owner": "carol", "kind": "process"}
+        events = [
+            Transition(_at(20), "stopped", 5, "train", carol, first_seen_at=_at(50)),
+            # A first observation after the stop is corrupt and stays dropped,
+            # as does a stop without one.
+            Transition(_at(15), "stopped", 6, "eval", carol, first_seen_at=_at(10)),
+            Transition(_at(12), "stopped", 7, "ghost", carol),
+        ]
+        usage = aggregate_usage(
+            now=NOW,
+            window_hours=1,
+            owner_limit=10,
+            busy_pct=20.0,
+            events_by_gpu={GPU: events},
+            active_by_gpu={GPU: {}},
+            utilization_by_gpu={GPU: []},
+        )
+        self.assertEqual(usage["droppedRecords"], 2)
+        (owner,) = usage["owners"]
+        self.assertEqual(owner["owner"], "carol")
+        self.assertEqual(owner["gpuSeconds"], 30 * 60.0)
+        self.assertEqual(usage["earliestDataAt"], _at(50))
 
     def test_pairs_transitions_merges_owners_and_classifies_idle_time(self) -> None:
         alice = {"owner": "alice", "kind": "slurm"}
@@ -40,7 +70,8 @@ class AggregateUsageTests(unittest.TestCase):
             Transition(_at(40), "started", 2, "eval", alice),
             Transition(_at(30), "stopped", 2, "eval", alice),
             Transition(_at(20), "stopped", 1, "train", alice),
-            # An unmatched stop has no safe anchor and is reported dropped.
+            # An unmatched stop without the monitor's first observation has
+            # no safe anchor and is reported dropped.
             Transition(_at(10), "stopped", 9, "ghost"),
         ]
         # One sample per minute; each segment takes the classification of the

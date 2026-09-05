@@ -17,10 +17,23 @@
     /\/([^/]+)\/\.?venv[^/]*\/bin\//, // project-local venv: name the project
   ]);
 
-  function create() {
+  function create({ durationSince } = {}) {
     function processName(process) {
       const fullName = String(process.name || "unknown process");
       return fullName.replaceAll("\\", "/").split("/").at(-1) || fullName;
+    }
+
+    // One timeline line for a started/stopped transition. A stop carries when
+    // this monitor first saw the process, so it also says how long the run
+    // held the device; a start, or a stop without that anchor, does not.
+    function timelineSummary(event) {
+      const verb = event.event === "started" ? "进入" : "退出";
+      const stoppedAt = Date.parse(event.observedAt);
+      const startedAt = event.firstSeenAt ? Date.parse(event.firstSeenAt) : NaN;
+      const ran = event.event === "stopped" && durationSince
+        && Number.isFinite(stoppedAt) && Number.isFinite(startedAt) && startedAt <= stoppedAt
+        ? ` · 运行 ${durationSince(event.firstSeenAt, stoppedAt)}` : "";
+      return `${verb} · ${processName(event)} · PID ${event.pid}${ran}`;
     }
 
     function processStartMs(process) {
@@ -130,6 +143,7 @@
     return Object.freeze({
       processName,
       processStartMs,
+      timelineSummary,
       taskEntry,
       environmentName,
       footprint,

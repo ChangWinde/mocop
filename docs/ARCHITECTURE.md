@@ -77,7 +77,8 @@ interfaces without a runtime plugin registry.
 | `incident_domains.py` | which telemetry domains a condition's recovery needs and when a sample is blind to them |
 | `correlation.py` | possible shared-path grouping without changing incident truth |
 | `diagnostics.py` | deterministic incident guidance and redacted support bundles |
-| `persistence.py` | optional bounded asynchronous SQLite history, restore of open incidents |
+| `persistence.py` | optional bounded asynchronous SQLite history: the writer thread, retention, and the size cap |
+| `persistence_restore.py` | restore of the retained window per host and device, and of the incidents open at shutdown |
 | `persistence_schema.py` | the history database's DDL, column contracts, and row validity filters |
 | `notifications.py` | webhook endpoint validation, deduplication, throttling, pairing, and retry policy |
 | `webhook_transport.py` | one bounded HTTPS delivery attempt: pinned DNS, SSRF guards, response bound |

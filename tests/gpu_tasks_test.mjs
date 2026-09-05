@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 
+await import("../src/mocop/static/format.js");
 await import("../src/mocop/static/gpu-tasks.js");
 
-const tasks = globalThis.MocopGpuTasks.create();
+const { durationSince } = globalThis.MocopFormat.create();
+const tasks = globalThis.MocopGpuTasks.create({ durationSince });
 
 function process(name, command, overrides = {}) {
   const { workload, ...rest } = overrides;
@@ -158,3 +160,30 @@ assert.equal(
 );
 
 console.log("gpu-tasks contract: all assertions passed");
+
+// --- timelineSummary: a stop with its first observation states the run ---
+
+{
+  const stop = {
+    event: "stopped",
+    observedAt: "2026-08-14T03:00:00Z",
+    firstSeenAt: "2026-08-14T00:48:00Z",
+    pid: 77,
+    name: "/opt/conda/envs/llm/bin/python3.11",
+  };
+  assert.equal(tasks.timelineSummary(stop), "退出 · python3.11 · PID 77 · 运行 2 小时 12 分");
+  assert.equal(
+    tasks.timelineSummary({ ...stop, event: "started", firstSeenAt: stop.observedAt }),
+    "进入 · python3.11 · PID 77",
+  );
+  // No anchor, an unparsable anchor, or an anchor after the stop: no run length.
+  assert.equal(tasks.timelineSummary({ ...stop, firstSeenAt: null }), "退出 · python3.11 · PID 77");
+  assert.equal(tasks.timelineSummary({ ...stop, firstSeenAt: "later" }), "退出 · python3.11 · PID 77");
+  assert.equal(
+    tasks.timelineSummary({ ...stop, firstSeenAt: "2026-08-14T04:00:00Z" }),
+    "退出 · python3.11 · PID 77",
+  );
+  // Without the formatter injected the leaf still yields the bare line.
+  assert.equal(globalThis.MocopGpuTasks.create().timelineSummary(stop), "退出 · python3.11 · PID 77");
+}
+

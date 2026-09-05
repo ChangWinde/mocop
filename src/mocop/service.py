@@ -38,11 +38,8 @@ from .incidents import IncidentTracker, ThresholdIncidentPolicy
 from .maintenance import MaintenanceWindowConfig
 from .models import GpuProcess, ProbeResult, ServerState, utc_after, utc_now
 from .notifications import DisabledNotificationSink, IncidentNotificationSink
-from .persistence import (
-    DisabledPersistence,
-    LoadedTelemetry,
-    TelemetryPersistence,
-)
+from .persistence import DisabledPersistence, TelemetryPersistence
+from .persistence_restore import LoadedTelemetry
 from .probe import (
     AttendedAwareResourceProbe,
     CancellableResourceProbe,
@@ -1457,6 +1454,7 @@ class StateStore:
             used_memory_mib=process.used_memory_mib,
             workload=process.workload.to_dict() if process.workload else None,
             visible=visible,
+            first_seen_at=process.first_seen_at,
         )
 
     @staticmethod

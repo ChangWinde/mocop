@@ -6,6 +6,18 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- `/api/usage` no longer loses the occupancy of runs whose `started` edge has
+  left the retained event window. On a live deployment a 24-hour report
+  dropped 644 records, 592 of them orphan `stopped` events from GPUs that
+  churn hundreds of processes a day (the restore keeps the last 500
+  transitions per device). Every transition now carries `firstSeenAt`, this
+  monitor's first observation of the process on the device — a genuine
+  GPU-occupancy observation, unlike the process start time — so an orphan
+  stop is a complete run on its own; the value rides inside the existing
+  `workload_json` column, keeping the process table's nine-column contract,
+  and the dashboard's GPU timeline states how long each finished run held
+  the device.
+
 - Incidents that were open when the service stopped resume their generation
   at startup instead of opening again. A live deployment had re-emitted
   `opened` for every persisting condition after each restart — 17 per restart
@@ -54,8 +66,9 @@ All notable changes are documented here. This project follows Semantic Versionin
   `persistence.py` into `persistence_schema.py`; the duration floor then
   pushed two more over, so the incident vocabulary (`incident_types.py`) left
   `incidents.py` and the integration section parsers
-  (`config_integrations.py`) left `config_loader.py`, and the maintenance
-  window type (`maintenance.py`) left `config.py`. Every ceiling ratchets
+  (`config_integrations.py`) left `config_loader.py`, the maintenance window
+  type (`maintenance.py`) left `config.py`, and the restore path
+  (`persistence_restore.py`) left `persistence.py`. Every ceiling ratchets
   down.
 - A connectivity incident's `diagnosis.nextSteps` (and the dashboard's
   incident dialog) now open with the step that follows from the failure

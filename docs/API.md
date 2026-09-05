@@ -880,7 +880,11 @@ processEvents[]}`. Points: `observedAt`, `gpuId`, `index`,
 `utilizationGpuPct`, `memoryUsedMiB`, `memoryTotalMiB`, `temperatureC`,
 `powerDrawW` (all nullable). Process events: `observedAt`, `gpuId`,
 `index`, `event` (`started`/`stopped`), `pid`, `name`, `usedMemoryMiB`
-(nullable), `workload` (nullable object as in the snapshot).
+(nullable), `workload` (nullable object as in the snapshot), and
+`firstSeenAt` (nullable): when this monitor first observed the process on the
+device, so a `stopped` event describes the whole run on its own — the
+`/api/usage` rollup anchors a stop whose start has left the retained window
+on it.
 
 Errors: `403 UNTRUSTED_ORIGIN`, `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`,
 `INVALID_LIMIT`, `404 UNKNOWN_GPU`.
