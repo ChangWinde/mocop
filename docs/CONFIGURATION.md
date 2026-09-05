@@ -170,7 +170,11 @@ cycles, and nodes unreachable from root are rejected.
 | `workloads.mode` | `disabled` | `disabled`, `identity`, or `auto` |
 
 The byte limit caps the SQLite database file, not its temporary rollback
-journal. `identity` reads bounded UID/start/command metadata; `auto` additionally
+journal. Rows older than `retention_hours` are deleted every 60 seconds and
+the pages they occupied are returned to the filesystem — up to 8 MiB per cycle
+while the service runs, and completely at startup before the cap is checked,
+so lowering `max_bytes` takes effect at the next start as long as the live
+data fits. `identity` reads bounded UID/start/command metadata; `auto` additionally
 classifies supported scheduler/container contexts. Neither mode executes a
 scheduler client.
 

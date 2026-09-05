@@ -26,6 +26,10 @@ _SCHEMA_VERSION = 3
 _QUEUE_CAPACITY = 4096
 _WRITE_BATCH_SIZE = 128
 _PRUNE_INTERVAL_SECONDS = 60.0
+# Steady-state retention frees a few dozen pages a minute; this bound (8 MiB at
+# the 4 KiB page size) keeps the writer's prune transaction short while still
+# draining a large backlog within the hour. Startup reclaims everything.
+_VACUUM_PAGES_PER_PRUNE = 2048
 _SQLITE_FULL_ERRORCODE = 13  # sqlite3.SQLITE_FULL is unavailable on Python 3.10
 _HISTORY_FIELDS = (
     "cpuUsagePct",
@@ -210,6 +214,21 @@ _CREATE_SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS incident_events_observed_at"
     " ON incident_events(observed_at)",
 ) + _GPU_TABLE_STATEMENTS
+
+
+def _reclaim_free_pages(connection: sqlite3.Connection, limit: int | None) -> int:
+    """Return freed pages to the filesystem; ``None`` reclaims every one.
+
+    ``PRAGMA incremental_vacuum`` releases pages as its statement is stepped,
+    one per step, so a bare ``execute()`` reclaims a single page and the file
+    keeps its high-water mark forever. The cursor has to be exhausted.
+    """
+    pragma = (
+        "PRAGMA incremental_vacuum"
+        if limit is None
+        else f"PRAGMA incremental_vacuum({int(limit)})"
+    )
+    return sum(1 for _row in connection.execute(pragma))
 
 
 def _partition_keys(
@@ -735,7 +754,10 @@ class SqliteTelemetryPersistence:
                     self._migrate_v2(connection)
                 elif version == 3:
                     self._migrate_v3(connection)
-                self._prune(connection)
+                # Every free page goes back before the cap is compared, so a
+                # lowered max_bytes judges the live data, not the old high-water
+                # mark of the file.
+                self._prune(connection, reclaim_pages=None)
                 page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
                 page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
                 if page_count > max(1, self._config.max_bytes // page_size):
@@ -1123,7 +1145,12 @@ class SqliteTelemetryPersistence:
             separators=(",", ":"),
         )
 
-    def _prune(self, connection: sqlite3.Connection) -> None:
+    def _prune(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        reclaim_pages: int | None = _VACUUM_PAGES_PER_PRUNE,
+    ) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(
             hours=self._config.retention_hours
         )
@@ -1138,7 +1165,7 @@ class SqliteTelemetryPersistence:
         connection.execute(
             "DELETE FROM process_events WHERE observed_at < ?", (cutoff_text,)
         )
-        connection.execute("PRAGMA incremental_vacuum")
+        _reclaim_free_pages(connection, reclaim_pages)
 
     @staticmethod
     def _event_from_row(row: tuple[object, ...]) -> IncidentEvent | None:
