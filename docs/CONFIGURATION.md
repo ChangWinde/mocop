@@ -176,8 +176,9 @@ while the service runs, and completely at startup, where a file with free pages
 left over (after a long downtime, or when `max_bytes` was lowered) is rebuilt
 with `VACUUM` before the cap is checked. That rebuild takes well under a second
 per hundred megabytes of live data and needs temporary disk space up to the
-file's size; lowering `max_bytes` therefore takes effect at the next start as
-long as the live data fits. `identity` reads bounded UID/start/command metadata; `auto` additionally
+file's size; when it cannot run (a full disk), the service still starts and
+reclaims what the online path can. Lowering `max_bytes` therefore takes effect
+at the next start as long as the live data fits. `identity` reads bounded UID/start/command metadata; `auto` additionally
 classifies supported scheduler/container contexts. Neither mode executes a
 scheduler client.
 

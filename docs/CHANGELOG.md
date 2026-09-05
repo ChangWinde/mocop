@@ -4,6 +4,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Fixed
+
+- The startup `VACUUM` that returns expired pages is best-effort: when it
+  cannot run (typically a full disk, since it needs temporary space up to the
+  file's size) the service starts anyway, reclaims what the bounded online
+  path can, and leaves the condition to the persistence status it already
+  reports, instead of refusing to start over it.
+
 ### Added
 
 - Two SSH failures that a fleet behind a bastion sees often now have their own
