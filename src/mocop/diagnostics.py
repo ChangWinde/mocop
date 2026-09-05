@@ -17,6 +17,51 @@ _CATEGORY_UNITS = {
 }
 _GPU_INDEX_IN_RESOURCE = re.compile(r"\bGPU (\d+)\b")
 
+# The first next step for a connectivity condition follows from the sanitized
+# failure classification in its detail (see models.SERVER_MESSAGES); anything
+# unclassified keeps the generic batch-mode check.
+_CONNECTIVITY_STEPS = {
+    "SSH host key changed": (
+        "Confirm the node was reinstalled or re-keyed on purpose, then update "
+        "the monitor's known_hosts entry; the probe never accepts a changed key."
+    ),
+    "SSH host key is not trusted": (
+        "Connect once interactively from the monitor to record the host key; "
+        "the probe never accepts new keys on its own."
+    ),
+    "SSH authentication failed": (
+        "Check that the monitor's key is still in the node's authorized_keys "
+        "and that the alias's IdentityFile or agent still offers it."
+    ),
+    "SSH name resolution failed": (
+        "Check the alias's HostName and the monitor's DNS resolution."
+    ),
+    "SSH jump host could not reach the target": (
+        "From the jump host, test the target's SSH port directly and confirm "
+        "its sshd permits TCP forwarding (AllowTcpForwarding, PermitOpen)."
+    ),
+    "SSH connection was refused": (
+        "Confirm sshd is running on the node and listening on the configured port."
+    ),
+    "SSH connection timed out": (
+        "Check routing and firewall rules between the monitor and the node's SSH port."
+    ),
+    "SSH network is unreachable": (
+        "Check the monitor's routes and any VPN or tunnel the alias depends on."
+    ),
+    "SSH connection closed during key exchange": (
+        "Check the node's sshd load and MaxStartups, and whether fail2ban or a "
+        "proxy in front of it has banned the monitor."
+    ),
+    "SSH transport stopped responding": (
+        "The node may have hung or lost its link; check its power, console, and uplink."
+    ),
+    "SSH produced no output before the collection timeout": (
+        "Log in to the node and check whether it is stalled on I/O or a hung "
+        "filesystem such as an unresponsive network mount."
+    ),
+}
+
 
 def _number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -82,6 +127,9 @@ def diagnose_condition(
             "Verify the same OpenSSH alias in non-interactive batch mode.",
             "If several nodes failed together, inspect their shared jump host or tunnel.",
         ]
+        specific = _CONNECTIVITY_STEPS.get(str(condition.get("detail") or ""))
+        if specific is not None:
+            next_steps.insert(0, specific)
         if server is not None:
             evidence.extend(
                 (

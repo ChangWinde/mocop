@@ -11,8 +11,8 @@ const {
   incidentDescription,
   diagnosticEvidenceLabel,
   diagnosticEvidenceValue,
-  localizedDiagnosis,
 } = globalThis.MocopIncidentText.create({ format, numeric, age });
+const { localizedDiagnosis } = globalThis.MocopDiagnosisText.create({ incidentConditionMessage });
 // Payload contracts: every normalizer returns a bounded projection or throws,
 // so renderers can dereference server data unguarded.
 const {

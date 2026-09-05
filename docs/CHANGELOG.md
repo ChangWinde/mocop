@@ -17,6 +17,16 @@ All notable changes are documented here. This project follows Semantic Versionin
   The rollup previously had to drop that occupancy as an unanchorable start,
   undercounting the owner and raising `droppedRecords`.
 
+### Changed
+
+- A connectivity incident's `diagnosis.nextSteps` (and the dashboard's
+  incident dialog) now open with the step that follows from the failure
+  classification — check the jump host's forwarding, the node's `sshd`
+  load or a ban, `known_hosts`, `authorized_keys`, DNS, routing — ahead of the
+  generic batch-mode check; unclassified failures keep the generic guidance.
+  The dashboard's dialog guidance moved from `incident-text.js` into its own
+  leaf, `diagnosis-text.js`.
+
 ### Added
 
 - Two SSH failures that a fleet behind a bastion sees often now have their own

@@ -72,30 +72,4 @@ const NOW = Date.parse("2026-08-14T03:00:00Z");
   assert.match(text.diagnosticEvidenceValue({ label: "lastSuccessAt", value: new Date(NOW).toISOString() }), /前|刚刚/);
 }
 
-{
-  // Diagnosis guidance: fixed copy per known category with the resource
-  // interpolated where it matters, and the server's own diagnosis for others.
-  const [title, summary, steps] = text.localizedDiagnosis({ category: "disk", resource: "/scratch" });
-  assert.equal(title, "文件系统空间不足");
-  assert.equal(summary, "/scratch 已超过配置的使用率阈值。");
-  assert.equal(steps.length, 2);
-  for (const category of ["connectivity", "swap", "memory", "cpu", "gpu_idle_memory", "gpu_temperature", "gpu_count", "gpu_ecc", "gpu_memory_repair", "gpu_slowdown"]) {
-    const [heading, body, next] = text.localizedDiagnosis({ category, resource: "x" });
-    assert.ok(heading && body && next.length >= 1, category);
-  }
-  assert.deepEqual(
-    text.localizedDiagnosis({
-      category: "pressure",
-      resource: "内存压力",
-      value: 42,
-      diagnosis: { title: "服务端标题", summary: "服务端摘要", nextSteps: ["第一步"] },
-    }),
-    ["服务端标题", "服务端摘要", ["第一步"]],
-  );
-  assert.deepEqual(
-    text.localizedDiagnosis({ category: "pressure", resource: "内存压力", value: 42 }),
-    ["资源状态需要处理", "内存压力 42%", ["确认当前状态是否符合任务预期。"]],
-  );
-}
-
 console.log("incident-text contract ok");

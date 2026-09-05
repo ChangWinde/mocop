@@ -30,7 +30,8 @@ TRACKED_ROOT_ENTRIES = {
 # rule. Extract a coherent leaf and lower the budget instead of raising it.
 CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/static/app.js": 5_850,
-    "src/mocop/static/incident-text.js": 200,
+    "src/mocop/static/incident-text.js": 150,
+    "src/mocop/static/diagnosis-text.js": 110,
     "src/mocop/static/attention.js": 175,
     "src/mocop/static/background-asset.js": 350,
     "src/mocop/static/api-contracts.js": 300,

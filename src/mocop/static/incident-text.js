@@ -2,8 +2,9 @@
 // extracted from app.js under the ADR-0021 leaf pattern. The failure table is
 // the Chinese counterpart of the exact messages the probe attaches to a host
 // or GPU result; a repository test keeps the two vocabularies aligned so a new
-// backend message cannot reach the operator untranslated. Pure: the caller
-// injects the formatter, and app.js owns every DOM node the text lands in.
+// backend message cannot reach the operator untranslated. Dialog guidance
+// lives in diagnosis-text.js. Pure: the caller injects the formatter, and
+// app.js owns every DOM node the text lands in.
 (() => {
   "use strict";
 
@@ -113,62 +114,6 @@
       return String(item.value);
     }
 
-    // [title, summary, nextSteps] for the incident detail dialog; categories
-    // without fixed guidance fall back to what the server diagnosed.
-    function localizedDiagnosis(condition) {
-      const resource = condition.resource || "资源";
-      const descriptions = {
-        connectivity: [
-          "采集链路不可用",
-          "固定 SSH 探针未能完成，当前资源数据不可用。",
-          ["使用同一 OpenSSH 别名验证非交互连接。", "若多台节点同时失败，优先检查共享跳板机或隧道。"],
-        ],
-        disk: [
-          "文件系统空间不足",
-          `${resource} 已超过配置的使用率阈值。`,
-          ["确认该文件系统是否仍在按预期增长。", "检查大目录以及日志、缓存和检查点保留策略。"],
-        ],
-        swap: [
-          "Swap 压力偏高",
-          "Swap 使用率超过阈值，可能存在持续内存压力。",
-          ["对照可用内存和当前任务规模。", "观察 Swap 是否持续增长或已趋于稳定。"],
-        ],
-        memory: [
-          "内存压力偏高",
-          "内存使用率超过配置阈值。",
-          ["检查当前节点上的主要任务。", "观察采样之间的可用内存是否恢复。"],
-        ],
-        cpu: [
-          "CPU 负载偏高",
-          "CPU 使用率超过配置阈值。",
-          ["确认数据加载或预处理是否限制 GPU。", "对照同一时段的 CPU 与 GPU 利用率。"],
-        ],
-        gpu_idle_memory: [
-          "显存占用但计算空闲",
-          "显存仍被进程占用，但 GPU 计算负载持续低于忙碌阈值。",
-          ["查看该 GPU 的进程与任务归属。", "确认进程是在正常等待，还是已经停滞。"],
-        ],
-        gpu_temperature: [
-          "GPU 温度偏高",
-          "GPU 温度超过配置的警告阈值。",
-          ["检查散热、风扇和相邻设备温度。", "继续长任务前确认硬件降频状态。"],
-        ],
-        gpu_count: [
-          "GPU 数量与配置不一致",
-          "当前可见 GPU 数量与 expected_gpu_counts 不一致。",
-          ["检查设备可见性和驱动初始化。", "仅在硬件确实调整后修改预期数量。"],
-        ],
-        gpu_ecc: ["GPU 硬件健康异常", "检测到未纠正 ECC 错误。", ["保留任务上下文并按集群硬件维护流程处理。"]],
-        gpu_memory_repair: ["GPU 显存需要修复", "硬件遥测报告待处理的显存修复状态。", ["保留任务上下文并按集群硬件维护流程处理。"]],
-        gpu_slowdown: ["GPU 已触发硬件降频", "温度或功率相关硬件状态触发了降频。", ["检查温度、功耗上限和散热条件。"]],
-      };
-      return descriptions[condition.category] || [
-        condition.diagnosis?.title || "资源状态需要处理",
-        condition.diagnosis?.summary || incidentConditionMessage(condition),
-        condition.diagnosis?.nextSteps || ["确认当前状态是否符合任务预期。"],
-      ];
-    }
-
     return Object.freeze({
       failureText,
       incidentConditionMessage,
@@ -176,7 +121,6 @@
       incidentDescription,
       diagnosticEvidenceLabel,
       diagnosticEvidenceValue,
-      localizedDiagnosis,
     });
   }
 

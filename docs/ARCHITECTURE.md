@@ -350,7 +350,8 @@ by `tests/<leaf>_test.mjs`:
 |---|---|
 | `dashboard-auth.js` | capability ingestion, fragment scrubbing, tab-scoped retention, the token prompt |
 | `format.js` | pure numeric, memory, rate, and relative-time formatting; SSE chunk normalization |
-| `incident-text.js` | the operator-facing wording for collector failures (the exact probe vocabulary, kept aligned by a repository test), incident conditions, state labels, evidence, and diagnosis guidance |
+| `incident-text.js` | the operator-facing wording for collector failures (the exact probe vocabulary, kept aligned by a repository test), incident conditions, state labels, and evidence |
+| `diagnosis-text.js` | the incident dialog's guidance: fixed title, summary, and next steps per condition category, with the first connectivity step chosen by the failure classification |
 | `keyed-loader.js` | bounded-backoff loading of one keyed resource: single flight, success-confirmed keys, one 4–30 s retry timer, stale-response rejection |
 | `api-contracts.js` | payload contracts: bounded normalizers for snapshot, incidents, inventory, collector, maintenance, group, and topology responses that throw on anything malformed |
 | `process-search.js` | NFKC term normalization, bounded process/GPU matching, ranking and memory ordering |

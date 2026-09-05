@@ -19,6 +19,7 @@ STATIC_ROUTES: dict[str, tuple[str, str]] = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/format.js": ("format.js", _JAVASCRIPT),
     "/incident-text.js": ("incident-text.js", _JAVASCRIPT),
+    "/diagnosis-text.js": ("diagnosis-text.js", _JAVASCRIPT),
     "/api-contracts.js": ("api-contracts.js", _JAVASCRIPT),
     "/keyed-loader.js": ("keyed-loader.js", _JAVASCRIPT),
     "/csv-export.js": ("csv-export.js", _JAVASCRIPT),
