@@ -1,20 +1,28 @@
 """Machine-readable HTTP API contract: routes, tiers, query/body schemas.
 
 ``GET /api/meta`` serializes this manifest, every GET handler parses its query
-through it, and the JSON 404/405 fallbacks consult it, so a route or parameter
-change must land here to stay visible to agents. Write-body field lists and
-the error-code catalog live here too, so an agent can POST without opening
-``docs/API.md``. Repository tests compare the manifest with that reference
-and with live routing behaviour.
+through it, every POST handler validates its body through it, and the JSON
+404/405 fallbacks consult it, so a route or parameter change must land here to
+stay visible to agents. The error-code catalog lives here too, so an agent can
+call any route without opening ``docs/API.md``. Repository tests compare the
+manifest with that reference and with live routing behaviour.
 """
 
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from urllib.parse import parse_qs
 
 from . import __version__
-from .config import is_safe_alias
+from .config import (
+    HOST_GROUP_MAX_LENGTH,
+    INCIDENT_ACTION_KEY_MAX_LENGTH,
+    INCIDENT_ACTION_REASON_MAX_LENGTH,
+    MAINTENANCE_REASON_MAX_LENGTH,
+    is_safe_alias,
+)
 from .metrics import OPENMETRICS_CONTENT_TYPE
 
 API_VERSION = "2"
@@ -243,15 +251,33 @@ def parse_query(schema: QuerySchema, query: str) -> dict[str, object]:
 
 
 # Dashboard writes accept these exact duration values (seconds); 0 clears.
-_DASHBOARD_DURATIONS = (0, 3_600, 14_400, 86_400, 604_800)
+DASHBOARD_DURATIONS: frozenset[int] = frozenset({0, 3_600, 14_400, 86_400, 604_800})
+_DURATION_VALUES = tuple(sorted(DASHBOARD_DURATIONS))
+_ENUM_ACTIONS = ("acknowledged", "silenced", "clear")
+
+
+class BodyError(ValueError):
+    """A rejected write body carrying the stable machine-readable code."""
+
+    def __init__(self, message: str, code: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
 class BodyField:
-    """One accepted JSON field on a write route."""
+    """One accepted JSON field on a write route.
+
+    ``alias`` and ``enum`` are strings restricted to the safe alias grammar or
+    ``values``; ``integer`` and ``number`` are non-boolean JSON numbers inside
+    ``values`` or ``[minimum, maximum]``; ``text`` is a string whose stripped
+    length may not exceed ``maximum`` (the route enforces its own character
+    grammar); ``timestamp`` is a string, or ``null`` when ``nullable``.
+    """
 
     kind: str
     required: bool = True
+    nullable: bool = False
     values: tuple[object, ...] | None = None
     minimum: int | None = None
     maximum: int | None = None
@@ -259,6 +285,8 @@ class BodyField:
 
     def describe(self) -> dict[str, object]:
         described: dict[str, object] = {"type": self.kind, "required": self.required}
+        if self.nullable:
+            described["nullable"] = True
         if self.values is not None:
             described["values"] = list(self.values)
         if self.minimum is not None:
@@ -268,6 +296,37 @@ class BodyField:
         if self.notes is not None:
             described["notes"] = self.notes
         return described
+
+    def well_typed(self, value: object) -> bool:
+        if value is None:
+            return self.nullable
+        if self.kind in {"alias", "enum", "text", "timestamp"}:
+            return isinstance(value, str)
+        if isinstance(value, bool):
+            return False
+        if self.kind == "integer":
+            return isinstance(value, int)
+        return isinstance(value, int | float)
+
+    def accepts(self, value: object) -> bool:
+        """Value-level check for a well-typed value."""
+        if value is None:
+            return True
+        if self.kind == "alias":
+            return is_safe_alias(value)
+        if self.kind == "text":
+            return self.maximum is None or len(value.strip()) <= self.maximum
+        if self.values is not None:
+            return value in self.values
+        if self.minimum is None:
+            return True
+        try:
+            numeric = float(value)
+        except OverflowError:
+            # JSON integers have unbounded precision; huge ones are invalid.
+            return False
+        assert self.maximum is not None
+        return math.isfinite(numeric) and self.minimum <= value <= self.maximum
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +351,35 @@ class BodySchema:
             "fields": {name: field.describe() for name, field in self.fields.items()},
         }
 
+    def accepts_keys(self, keys: Iterable[str]) -> bool:
+        supplied = set(keys)
+        if self.empty:
+            return not supplied
+        if self.exact_keys:
+            return supplied == set(self.fields)
+        return bool(supplied) and supplied <= set(self.fields)
+
+
+def validate_body(schema: BodySchema, payload: object) -> dict[str, object]:
+    """Check a parsed JSON body against ``schema`` and return it as a dict.
+
+    Anything but an object, a key set the schema does not accept, or a field
+    of the wrong JSON type is ``INVALID_SCHEMA``; a well-typed value outside
+    the published alias grammar, ``values``, bounds, or text length is
+    ``INVALID_SETTINGS``. Cross-field rules stay with the route handler.
+    """
+    if not isinstance(payload, dict) or not schema.accepts_keys(payload):
+        raise BodyError(
+            "request body does not match the route schema", "INVALID_SCHEMA"
+        )
+    for name, value in payload.items():
+        field = schema.fields[name]
+        if not field.well_typed(value):
+            raise BodyError(f"{name} has the wrong type", "INVALID_SCHEMA")
+        if not field.accepts(value):
+            raise BodyError(f"{name} is not an accepted value", "INVALID_SETTINGS")
+    return payload
+
 
 WRITE_SCHEMAS: dict[str, BodySchema] = {
     "/api/settings/collector": BodySchema(
@@ -300,7 +388,11 @@ WRITE_SCHEMAS: dict[str, BodySchema] = {
                 "number", required=False, minimum=2, maximum=60
             ),
             "probeTimeoutSeconds": BodyField(
-                "number", required=False, minimum=2, maximum=300
+                "number",
+                required=False,
+                minimum=2,
+                maximum=300,
+                notes="must exceed the configured SSH connect timeout",
             ),
             "maxWorkers": BodyField("integer", required=False, minimum=1, maximum=64),
         },
@@ -315,27 +407,41 @@ WRITE_SCHEMAS: dict[str, BodySchema] = {
     "/api/settings/maintenance": BodySchema(
         {
             "host": BodyField("alias"),
-            "durationSeconds": BodyField("integer", values=_DASHBOARD_DURATIONS),
-            "reason": BodyField("text", notes="required unless durationSeconds is 0"),
+            "durationSeconds": BodyField("integer", values=_DURATION_VALUES),
+            "reason": BodyField(
+                "text",
+                maximum=MAINTENANCE_REASON_MAX_LENGTH,
+                notes="required unless durationSeconds is 0",
+            ),
         }
     ),
     "/api/settings/host-group": BodySchema(
         {
             "host": BodyField("alias"),
-            "group": BodyField("text", notes="empty string clears the group"),
+            "group": BodyField(
+                "text",
+                maximum=HOST_GROUP_MAX_LENGTH,
+                notes="empty string clears the group",
+            ),
         }
     ),
     "/api/settings/incident-action": BodySchema(
         {
             "host": BodyField("alias"),
-            "conditionKey": BodyField("text"),
+            "conditionKey": BodyField("text", maximum=INCIDENT_ACTION_KEY_MAX_LENGTH),
             "incidentStartedAt": BodyField(
                 "timestamp",
-                notes="required unless action is clear; must be null when clearing",
+                nullable=True,
+                notes="the condition's firstObservedAt; null if and only if "
+                "action is clear",
             ),
-            "action": BodyField("enum", values=("acknowledged", "silenced", "clear")),
-            "durationSeconds": BodyField("integer", values=_DASHBOARD_DURATIONS),
-            "reason": BodyField("text"),
+            "action": BodyField("enum", values=_ENUM_ACTIONS),
+            "durationSeconds": BodyField(
+                "integer",
+                values=_DURATION_VALUES,
+                notes="0 if and only if action is clear",
+            ),
+            "reason": BodyField("text", maximum=INCIDENT_ACTION_REASON_MAX_LENGTH),
         }
     ),
     "/api/probe": BodySchema({"host": BodyField("alias")}),
@@ -347,6 +453,9 @@ WRITE_SCHEMAS: dict[str, BodySchema] = {
 # Stable HTTP error codes and their status. /api/meta publishes this list;
 # docs/API.md and the handler string literals must stay in lockstep.
 ERROR_CODES: tuple[tuple[str, int], ...] = (
+    ("INVALID_REQUEST_AUTHORITY", 400),
+    ("INVALID_REQUEST_FRAMING", 400),
+    ("INVALID_REQUEST_TARGET", 400),
     ("REQUEST_BODY_NOT_ALLOWED", 400),
     ("QUERY_NOT_ALLOWED", 400),
     ("UNKNOWN_QUERY_PARAMETER", 400),
@@ -371,7 +480,6 @@ ERROR_CODES: tuple[tuple[str, int], ...] = (
     ("PAYLOAD_TOO_LARGE", 413),
     ("UNSUPPORTED_MEDIA_TYPE", 415),
     ("RATE_LIMITED", 429),
-    ("INTERNAL_ERROR", 500),
     ("SERVICE_UNAVAILABLE", 503),
     ("METRICS_LIMIT_EXCEEDED", 503),
     ("NOTIFICATIONS_DISABLED", 503),

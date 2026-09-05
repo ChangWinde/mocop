@@ -89,9 +89,22 @@ All notable changes are documented here. This project follows Semantic Versionin
   and `/readyz` used to ignore one silently while five other routes rejected
   it. The rule is enforced once in the dispatcher from the manifest, and a
   test checks it for every route.
-- `POST /api/settings/collector` distinguishes `INVALID_SCHEMA` (shape or
-  type) from `INVALID_SETTINGS` (documented bounds) as the API reference
-  always described.
+- Every write route now validates its body through the same manifest the
+  `/api/meta` `body` schemas are generated from, in one documented order:
+  shape and JSON-type problems are `INVALID_SCHEMA`, well-typed values
+  outside the published alias grammar, `values`, bounds, or text length are
+  `INVALID_SETTINGS`, and only cross-field rules stay in the handlers.
+  `POST /api/settings/hosts` and `POST /api/probe` therefore answer an unsafe
+  alias or unknown action with `INVALID_SETTINGS` (previously
+  `INVALID_SCHEMA`), and a non-integer `durationSeconds` is `INVALID_SCHEMA`
+  (previously `INVALID_SETTINGS`). The manifest also publishes the text
+  `maximum` of every reason, group, and condition-key field, `nullable` on
+  `incidentStartedAt`, the three request-framing codes it had omitted, and
+  drops the one-route `500 INTERNAL_ERROR`: a host-group persist failure is
+  `503 SERVICE_UNAVAILABLE` like every other configuration write. The
+  collector bounds and the dashboard duration set now have one owner
+  (`api_manifest.py`) instead of copies in `web.py` and `inventory.py`, and
+  `web.py` shrank by 230 lines.
 - A managed unit that omits `--access-token-file` now exits `2` with a
   message pointing at `mocop service install` instead of minting a token
   nobody was shown; units generated since 0.9.0 always pass the flag.

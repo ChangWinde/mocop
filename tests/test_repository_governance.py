@@ -39,8 +39,8 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/static/process-search.js": 225,
     "src/mocop/static/update-pill.js": 175,
     "src/mocop/service.py": 2_725,
-    "src/mocop/web.py": 1_550,
-    "src/mocop/api_manifest.py": 425,
+    "src/mocop/web.py": 1_325,
+    "src/mocop/api_manifest.py": 525,
     "src/mocop/probe.py": 1_540,
     "src/mocop/config.py": 1_550,
 }

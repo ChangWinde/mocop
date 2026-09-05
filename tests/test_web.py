@@ -1597,6 +1597,92 @@ class WebTests(unittest.TestCase):
                 )
                 self.assert_http_error(request, status)
 
+    def test_every_write_route_validates_bodies_in_the_manifest_order(self) -> None:
+        # One rule set for all nine routes: shape and JSON type problems are
+        # INVALID_SCHEMA, well-typed values outside the published grammar,
+        # values, bounds, or text length are INVALID_SETTINGS. Agents can
+        # therefore implement a single client-side check from /api/meta.
+        shape_cases = (
+            ("/api/settings/hosts", b"[]"),
+            ("/api/settings/hosts", b'{"action":"add"}'),
+            ("/api/settings/hosts", b'{"action":"add","host":"gpu-02","x":1}'),
+            ("/api/settings/collector", b"{}"),
+            ("/api/settings/collector", b'{"connectTimeoutSeconds":9}'),
+            ("/api/service/restart", b'{"force":true}'),
+            ("/api/update/apply", b'{"version":"1.0.0"}'),
+            ("/api/notifications/test", b'{"endpoint":"ops"}'),
+        )
+        type_cases = (
+            ("/api/settings/hosts", b'{"action":1,"host":"gpu-02"}'),
+            ("/api/settings/hosts", b'{"action":"add","host":null}'),
+            ("/api/probe", b'{"host":["gpu-01"]}'),
+            (
+                "/api/settings/maintenance",
+                b'{"host":"gpu-01","durationSeconds":"3600","reason":"Work"}',
+            ),
+            (
+                "/api/settings/maintenance",
+                b'{"host":"gpu-01","durationSeconds":3600.0,"reason":"Work"}',
+            ),
+            (
+                "/api/settings/maintenance",
+                b'{"host":"gpu-01","durationSeconds":true,"reason":"Work"}',
+            ),
+            ("/api/settings/host-group", b'{"host":"gpu-01","group":null}'),
+            ("/api/settings/collector", b'{"maxWorkers":2.5}'),
+            ("/api/settings/collector", b'{"pollIntervalSeconds":true}'),
+            (
+                "/api/settings/incident-action",
+                b'{"host":"gpu-01","conditionKey":"connectivity","incidentStartedAt":5,'
+                b'"action":"acknowledged","durationSeconds":3600,"reason":""}',
+            ),
+        )
+        value_cases = (
+            ("/api/settings/hosts", b'{"action":"replace","host":"gpu-01"}'),
+            ("/api/settings/hosts", b'{"action":"add","host":"--proxy"}'),
+            ("/api/probe", b'{"host":"bad alias"}'),
+            (
+                "/api/settings/maintenance",
+                b'{"host":"gpu-01","durationSeconds":60,"reason":"Work"}',
+            ),
+            (
+                "/api/settings/maintenance",
+                json.dumps(
+                    {"host": "gpu-01", "durationSeconds": 3600, "reason": "x" * 121}
+                ).encode(),
+            ),
+            (
+                "/api/settings/host-group",
+                json.dumps({"host": "gpu-01", "group": "x" * 49}).encode(),
+            ),
+            ("/api/settings/collector", b'{"pollIntervalSeconds":61}'),
+            ("/api/settings/collector", b'{"maxWorkers":0}'),
+            ("/api/settings/collector", b'{"probeTimeoutSeconds":1e999}'),
+            # Cross-field rules keep the same code as value problems.
+            (
+                "/api/settings/maintenance",
+                b'{"host":"gpu-01","durationSeconds":3600,"reason":" "}',
+            ),
+            (
+                "/api/settings/incident-action",
+                b'{"host":"gpu-01","conditionKey":"connectivity","incidentStartedAt":null,'
+                b'"action":"acknowledged","durationSeconds":3600,"reason":""}',
+            ),
+            (
+                "/api/settings/incident-action",
+                b'{"host":"gpu-01","conditionKey":"connectivity","incidentStartedAt":null,'
+                b'"action":"clear","durationSeconds":3600,"reason":""}',
+            ),
+        )
+        for code, cases in (
+            ("INVALID_SCHEMA", shape_cases + type_cases),
+            ("INVALID_SETTINGS", value_cases),
+        ):
+            for path, payload in cases:
+                with self.subTest(path=path, payload=payload):
+                    request = self.write_request(payload, origin=self.base, path=path)
+                    self.assert_json_error(request, 400, code)
+
     def test_rejects_unmarked_or_cross_site_inventory_scans(self) -> None:
         self.assert_http_error(f"{self.base}/api/inventory", 403)
 

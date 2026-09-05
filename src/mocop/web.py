@@ -23,14 +23,16 @@ from .api_manifest import (
     ROUTE_METHODS,
     WRITE_BODY_LIMITS,
     WRITE_REQUIREMENTS,
+    WRITE_SCHEMAS,
+    BodyError,
     QueryError,
     describe_endpoints,
     describe_error_codes,
     parse_query,
+    validate_body,
 )
 from .capacity import CapacityRequest, match_capacity
 from .config import (
-    is_safe_alias,
     is_valid_host_group,
     is_valid_incident_action_reason,
     is_valid_incident_condition_key,
@@ -39,8 +41,6 @@ from .config import (
 )
 from .hostnames import trusted_web_policy
 from .inventory import (
-    DASHBOARD_INCIDENT_ACTION_DURATIONS,
-    DASHBOARD_MAINTENANCE_DURATIONS,
     DashboardConfigController,
     InventoryError,
     InventoryRequestError,
@@ -61,16 +61,6 @@ from .static_assets import (
 )
 from .updates import UpdateStatusSource
 
-_COLLECTOR_SETTINGS_KEYS = {
-    "pollIntervalSeconds",
-    "probeTimeoutSeconds",
-    "maxWorkers",
-}
-_COLLECTOR_NUMBER_BOUNDS = (
-    ("pollIntervalSeconds", 2, 60),
-    ("probeTimeoutSeconds", 2, 300),
-)
-_MAX_COLLECTOR_WORKERS = 64
 _SSE_HEARTBEAT_SECONDS = 15.0
 # SSE loops wake at this cadence to notice the server shutdown event.
 _SSE_STOP_POLL_SECONDS = 1.0
@@ -694,7 +684,14 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "invalid JSON body", HTTPStatus.BAD_REQUEST, code="INVALID_JSON"
             )
             return
-        handlers: dict[str, Callable[[object], None]] = {
+        # Shape, field types, and published values/bounds are checked once
+        # against the manifest; handlers only add cross-field rules.
+        try:
+            body = validate_body(WRITE_SCHEMAS[request_url.path], payload)
+        except BodyError as error:
+            self._send_error(str(error), HTTPStatus.BAD_REQUEST, code=error.code)
+            return
+        handlers: dict[str, Callable[[dict[str, object]], None]] = {
             "/api/settings/hosts": self._change_inventory,
             "/api/settings/collector": self._change_collector_settings,
             "/api/settings/maintenance": self._change_maintenance,
@@ -705,7 +702,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             "/api/service/restart": self._restart_service,
             "/api/update/apply": self._apply_update,
         }
-        handlers[request_url.path](payload)
+        handlers[request_url.path](body)
 
     def _unsupported_method(self, method: str) -> None:
         self.close_connection = True
@@ -725,19 +722,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def do_TRACE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         self._unsupported_method("TRACE")
 
-    def _request_probe(self, payload: object) -> None:
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != {"host"}
-            or not isinstance(payload["host"], str)
-            or not is_safe_alias(payload["host"])
-        ):
-            self._send_error(
-                "invalid probe request schema",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SCHEMA",
-            )
-            return
+    def _request_probe(self, body: dict[str, object]) -> None:
         control = self.monitor_server.probe_control
         if control is None:
             self._send_error(
@@ -746,7 +731,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 code="SERVICE_UNAVAILABLE",
             )
             return
-        result = control.request_probe(payload["host"])
+        result = control.request_probe(body["host"])
         status = str(result.get("status"))
         response_status, code = {
             "unknown_host": (HTTPStatus.NOT_FOUND, "UNKNOWN_HOST"),
@@ -766,14 +751,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 extra_headers = (("Retry-After", str(max(0, math.ceil(retry_after)))),)
         self._send_json(result, response_status, extra_headers)
 
-    def _test_notifications(self, payload: object) -> None:
-        if not isinstance(payload, dict) or payload:
-            self._send_error(
-                "invalid notification test schema",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SCHEMA",
-            )
-            return
+    def _test_notifications(self, _body: dict[str, object]) -> None:
         notifications = self._read_only_snapshot().get("notifications")
         if not (isinstance(notifications, dict) and notifications.get("enabled")):
             self._send_error(
@@ -791,46 +769,20 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"status": "queued"}, HTTPStatus.ACCEPTED)
 
-    def _change_incident_action(self, payload: object) -> None:
-        expected = {
-            "host",
-            "conditionKey",
-            "incidentStartedAt",
-            "action",
-            "durationSeconds",
-            "reason",
-        }
-        if not isinstance(payload, dict) or set(payload) != expected:
-            self._send_error(
-                "invalid incident action schema",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SCHEMA",
-            )
-            return
-        host = payload["host"]
-        condition_key = payload["conditionKey"]
-        action = payload["action"]
-        incident_started_at = payload["incidentStartedAt"]
-        duration = payload["durationSeconds"]
-        reason = payload["reason"]
+    def _change_incident_action(self, body: dict[str, object]) -> None:
+        host = body["host"]
+        condition_key = body["conditionKey"]
+        action = body["action"]
+        incident_started_at = body["incidentStartedAt"]
+        duration = body["durationSeconds"]
+        reason = body["reason"]
+        clearing = action == "clear"
         if (
-            not isinstance(host, str)
-            or not is_safe_alias(host)
-            or not is_valid_incident_condition_key(condition_key)
-            or not isinstance(action, str)
-            or action not in {"acknowledged", "silenced", "clear"}
-            or isinstance(duration, bool)
-            or not isinstance(duration, int)
-            or duration not in DASHBOARD_INCIDENT_ACTION_DURATIONS
-            or (action == "clear") != (duration == 0)
+            not is_valid_incident_condition_key(condition_key)
             or not is_valid_incident_action_reason(reason)
-            or (
-                action != "clear"
-                and (
-                    not isinstance(incident_started_at, str) or not incident_started_at
-                )
-            )
-            or (action == "clear" and incident_started_at is not None)
+            or clearing != (duration == 0)
+            or clearing != (incident_started_at is None)
+            or incident_started_at == ""
         ):
             self._send_error(
                 "invalid incident action settings",
@@ -838,29 +790,15 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 code="INVALID_SETTINGS",
             )
             return
-        inventory = self.monitor_server.inventory
-        if inventory is None:
-            self._send_error(
-                "incident action management is unavailable",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
-            )
-            return
-        if (
-            action != "clear"
-            and self.monitor_server.state.active_incident_started_at(
-                host, condition_key
-            )
-            != incident_started_at
+        if not self._incident_generation_matches(
+            host,
+            condition_key,
+            incident_started_at,
+            "incident condition is no longer active",
         ):
-            self._send_error(
-                "incident condition is no longer active",
-                HTTPStatus.CONFLICT,
-                code="INCIDENT_NOT_ACTIVE",
-            )
             return
-        try:
-            snapshot = inventory.update_incident_action(
+        snapshot = self._write_configuration(
+            lambda inventory: inventory.update_incident_action(
                 host,
                 condition_key,
                 action,
@@ -868,34 +806,69 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 reason,
                 incident_started_at,
             )
-        except InventoryRequestError:
-            self._send_error(
-                "incident action is no longer valid",
-                HTTPStatus.CONFLICT,
-                code="INVENTORY_CHANGED",
-            )
+        )
+        if snapshot is None:
             return
-        except InventoryError:
+        if not self._incident_generation_matches(
+            host,
+            condition_key,
+            incident_started_at,
+            "incident condition changed while the action was saved",
+        ):
+            return
+        self._send_json(snapshot)
+
+    def _incident_generation_matches(
+        self, host: str, condition_key: str, started_at: object, message: str
+    ) -> bool:
+        """Clearing never races; acknowledging binds to one incident generation."""
+        if started_at is None:
+            return True
+        if (
+            self.monitor_server.state.active_incident_started_at(host, condition_key)
+            == started_at
+        ):
+            return True
+        self._send_error(message, HTTPStatus.CONFLICT, code="INCIDENT_NOT_ACTIVE")
+        return False
+
+    def _write_configuration(
+        self,
+        operation: Callable[[DashboardConfigController], dict[str, object]],
+        *,
+        rejected: tuple[HTTPStatus, str, str] = (
+            HTTPStatus.CONFLICT,
+            "INVENTORY_CHANGED",
+            "configuration changed underneath the request; re-read and retry",
+        ),
+    ) -> dict[str, object] | None:
+        """Run one configuration write; ``None`` means the error was already sent.
+
+        A missing controller and a failed scan or persist are 503s; a request
+        the controller refuses maps to ``rejected``, which is the 409 conflict
+        for every route except collector settings, whose only controller-level
+        refusal is the cross-field timeout rule (400).
+        """
+        inventory = self.monitor_server.inventory
+        if inventory is None:
             self._send_error(
-                "incident action could not be saved",
+                "configuration management is unavailable",
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 code="SERVICE_UNAVAILABLE",
             )
-            return
-        if (
-            action != "clear"
-            and self.monitor_server.state.active_incident_started_at(
-                host, condition_key
-            )
-            != incident_started_at
-        ):
+            return None
+        try:
+            return operation(inventory)
+        except InventoryRequestError:
+            status, code, message = rejected
+            self._send_error(message, status, code=code)
+        except InventoryError:
             self._send_error(
-                "incident condition changed while the action was saved",
-                HTTPStatus.CONFLICT,
-                code="INCIDENT_NOT_ACTIVE",
+                "configuration could not be updated",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
             )
-            return
-        self._send_json(snapshot)
+        return None
 
     def _send_update_status(self) -> None:
         if not self._require_dashboard_read():
@@ -907,14 +880,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             else {"mode": "off", "currentVersion": __version__}
         )
 
-    def _apply_update(self, payload: object) -> None:
-        if not isinstance(payload, dict) or payload:
-            self._send_error(
-                "invalid update request schema",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SCHEMA",
-            )
-            return
+    def _apply_update(self, _body: dict[str, object]) -> None:
         updates = self.monitor_server.updates
         accepted, message = (
             updates.apply() if updates is not None else (False, "self-update is off")
@@ -924,14 +890,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"status": "updating"}, HTTPStatus.ACCEPTED)
 
-    def _restart_service(self, payload: object) -> None:
-        if not isinstance(payload, dict) or payload:
-            self._send_error(
-                "invalid restart request schema",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SCHEMA",
-            )
-            return
+    def _restart_service(self, _body: dict[str, object]) -> None:
         restart = self.monitor_server.restart
         if restart is None:
             self._send_error(
@@ -963,118 +922,55 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self._write_body(payload)
 
-    def _change_host_group(self, payload: object) -> None:
-        if not isinstance(payload, dict) or set(payload) != {"host", "group"}:
-            self._send_error(
-                "invalid host group schema",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SCHEMA",
-            )
-            return
-        host = payload["host"]
-        group = payload["group"]
-        if (
-            not isinstance(host, str)
-            or not is_safe_alias(host)
-            or not is_valid_host_group(group, required=False)
-        ):
+    def _change_host_group(self, body: dict[str, object]) -> None:
+        host, group = body["host"], body["group"]
+        if not is_valid_host_group(group, required=False):
             self._send_error(
                 "invalid host group settings",
                 HTTPStatus.BAD_REQUEST,
                 code="INVALID_SETTINGS",
             )
             return
-        inventory = self.monitor_server.inventory
-        if inventory is None:
-            self._send_error(
-                "host group management is unavailable",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
-            )
-            return
-        try:
-            snapshot = inventory.update_host_group(host, group)
-        except InventoryRequestError:
-            self._send_error(
-                "monitored inventory changed; scan again",
-                HTTPStatus.CONFLICT,
-                code="INVENTORY_CHANGED",
-            )
-            return
-        except InventoryError:
-            self._send_error(
-                "host group could not be updated",
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                code="INTERNAL_ERROR",
-            )
-            return
-        self._send_json(snapshot)
+        snapshot = self._write_configuration(
+            lambda inventory: inventory.update_host_group(host, group)
+        )
+        if snapshot is not None:
+            self._send_json(snapshot)
 
-    def _change_maintenance(self, payload: object) -> None:
-        if not isinstance(payload, dict) or set(payload) != {
-            "host",
-            "durationSeconds",
-            "reason",
-        }:
-            self._send_error(
-                "invalid maintenance settings schema",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SCHEMA",
-            )
-            return
-        host = payload["host"]
-        duration = payload["durationSeconds"]
-        reason = payload["reason"]
-        if (
-            not isinstance(host, str)
-            or not is_safe_alias(host)
-            or isinstance(duration, bool)
-            or not isinstance(duration, int)
-            or duration not in DASHBOARD_MAINTENANCE_DURATIONS
-            or not is_valid_maintenance_reason(reason, required=duration != 0)
-        ):
+    def _change_maintenance(self, body: dict[str, object]) -> None:
+        host, duration, reason = body["host"], body["durationSeconds"], body["reason"]
+        if not is_valid_maintenance_reason(reason, required=duration != 0):
             self._send_error(
                 "invalid maintenance settings",
                 HTTPStatus.BAD_REQUEST,
                 code="INVALID_SETTINGS",
             )
             return
-        inventory = self.monitor_server.inventory
-        if inventory is None:
-            self._send_error(
-                "maintenance management is unavailable",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
-            )
-            return
-        try:
-            snapshot = inventory.update_maintenance(host, duration, reason)
-        except InventoryRequestError:
-            self._send_error(
-                "monitored inventory changed; scan again",
-                HTTPStatus.CONFLICT,
-                code="INVENTORY_CHANGED",
-            )
-            return
-        except InventoryError:
-            self._send_error(
-                "maintenance settings could not be updated",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
-            )
-            return
-        self._send_json(snapshot)
+        snapshot = self._write_configuration(
+            lambda inventory: inventory.update_maintenance(host, duration, reason)
+        )
+        if snapshot is not None:
+            self._send_json(snapshot)
 
-    def _change_collector_settings(self, payload: object) -> None:
-        rejection = self._collector_settings_rejection(payload)
-        if rejection is not None:
-            code, message = rejection
-            self._send_error(message, HTTPStatus.BAD_REQUEST, code=code)
-            return
-        assert isinstance(payload, dict)
-        settings = self._apply_collector_settings(payload)
+    def _change_collector_settings(self, body: dict[str, object]) -> None:
+        # The manifest checked types and per-field bounds; the controller
+        # applies the probe-timeout-vs-connect-timeout rule to the merged
+        # effective configuration, which is the one refusal left to map.
+        settings = self._write_configuration(
+            lambda inventory: inventory.update_collector_settings(body),
+            rejected=(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_SETTINGS",
+                "invalid collector settings",
+            ),
+        )
         if settings is None:
             return
+        # The persisted interval is inside the configuration bounds, which the
+        # runtime scheduler accepts by construction.
+        self.monitor_server.state.set_poll_interval_seconds(
+            settings["pollIntervalSeconds"]
+        )
         # Three scalar fields do not justify deep-copying the whole projection.
         snapshot = self.monitor_server.state.snapshot_view()
         self._send_json(
@@ -1086,140 +982,13 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             }
         )
 
-    def _collector_settings_rejection(self, payload: object) -> tuple[str, str] | None:
-        """Validate a non-empty subset of the dashboard collector settings.
-
-        Returns ``(code, message)`` for a rejected payload: shape and type
-        problems are ``INVALID_SCHEMA``; documented per-field bounds are
-        ``INVALID_SETTINGS``. The cross-field probe-timeout-vs-connect-timeout
-        constraint is enforced by the inventory against the merged effective
-        configuration.
-        """
-        schema = ("INVALID_SCHEMA", "invalid collector settings schema")
-        if (
-            not isinstance(payload, dict)
-            or not payload
-            or set(payload) - _COLLECTOR_SETTINGS_KEYS
-        ):
-            return schema
-        for key, minimum, maximum in _COLLECTOR_NUMBER_BOUNDS:
-            if key not in payload:
-                continue
-            value = payload[key]
-            if isinstance(value, bool) or not isinstance(value, int | float):
-                return schema
-            if not self._within_bounds(value, minimum, maximum):
-                return (
-                    "INVALID_SETTINGS",
-                    f"{key} must be between {minimum} and {maximum}",
-                )
-        if "maxWorkers" in payload:
-            workers = payload["maxWorkers"]
-            if isinstance(workers, bool) or not isinstance(workers, int):
-                return schema
-            if not 1 <= workers <= _MAX_COLLECTOR_WORKERS:
-                return (
-                    "INVALID_SETTINGS",
-                    f"maxWorkers must be between 1 and {_MAX_COLLECTOR_WORKERS}",
-                )
-        return None
-
-    def _apply_collector_settings(
-        self, payload: dict[str, object]
-    ) -> dict[str, object] | None:
-        """Persist settings and sync the runtime cadence; None means responded."""
-        settings = self._persist_collector_settings(payload)
-        if settings is None:
-            return None
-        try:
-            self.monitor_server.state.set_poll_interval_seconds(
-                settings["pollIntervalSeconds"]
-            )
-        except (KeyError, ValueError):
-            self._send_error(
-                "collector settings synchronization failed",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
-            )
-            return None
-        return settings
-
-    @staticmethod
-    def _within_bounds(value: int | float, minimum: float, maximum: float) -> bool:
-        try:
-            numeric = float(value)
-        except OverflowError:
-            # JSON integers have unbounded precision; huge ones are invalid.
-            return False
-        return math.isfinite(numeric) and minimum <= value <= maximum
-
-    def _persist_collector_settings(
-        self, settings: dict[str, object]
-    ) -> dict[str, object] | None:
-        inventory = self.monitor_server.inventory
-        if inventory is None:
-            self._send_error(
-                "configuration management is unavailable",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
-            )
-            return None
-        try:
-            return inventory.update_collector_settings(settings)
-        except InventoryRequestError:
-            self._send_error(
-                "invalid collector settings",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SETTINGS",
-            )
-        except InventoryError:
-            self._send_error(
-                "collector settings could not be updated",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
-            )
-        return None
-
-    def _change_inventory(self, payload: object) -> None:
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != {"action", "host"}
-            or not isinstance(payload["action"], str)
-            or payload["action"] not in {"add", "remove"}
-            or not isinstance(payload["host"], str)
-            or not is_safe_alias(payload["host"])
-        ):
-            self._send_error(
-                "invalid inventory settings schema",
-                HTTPStatus.BAD_REQUEST,
-                code="INVALID_SCHEMA",
-            )
-            return
-        inventory = self.monitor_server.inventory
-        if inventory is None:
-            self._send_error(
-                "inventory management is unavailable",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
-            )
-            return
-        try:
-            snapshot = inventory.change(payload["action"], payload["host"])
-        except InventoryRequestError:
-            self._send_error(
-                "inventory changed; scan again and retry",
-                HTTPStatus.CONFLICT,
-                code="INVENTORY_CHANGED",
-            )
-            return
-        except InventoryError:
-            self._send_error(
-                "inventory could not be updated",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
-            )
-            return
-        self._send_json(snapshot)
+    def _change_inventory(self, body: dict[str, object]) -> None:
+        action, host = body["action"], body["host"]
+        snapshot = self._write_configuration(
+            lambda inventory: inventory.change(action, host)
+        )
+        if snapshot is not None:
+            self._send_json(snapshot)
 
     def do_OPTIONS(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         # The settings write intentionally has no cross-origin API contract. A

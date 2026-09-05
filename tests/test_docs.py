@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from mocop.api_manifest import API_ROUTES, API_VERSION
+from mocop.api_manifest import API_ROUTES, API_VERSION, ERROR_CODES
 from mocop.config import _OPTIONAL_KEYS, _REQUIRED_KEYS
 from mocop.remote_script import _PROTOCOL_VERSION
 
@@ -19,7 +19,7 @@ HTML_TARGET = re.compile(r'(?:href|src)="([^"]+)"')
 HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 API_PATH = re.compile(r"/api/[a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)*")
 ROUTE_ROW = re.compile(r"^\| (GET|POST) \| `([^`]+)` \| ([PARW]) \|", re.MULTILINE)
-ERROR_ROW = re.compile(r"^\| `([A-Z][A-Z0-9_]+)` \| \d{3} \|", re.MULTILINE)
+ERROR_TABLE_ROW = re.compile(r"^\| `([A-Z][A-Z0-9_]+)` \| (\d{3}) \|", re.MULTILINE)
 CONFIG_ROW = re.compile(r"^\| `([^`]+)` \| (?:yes|no) \|", re.MULTILINE)
 ERROR_LITERAL = re.compile(r"^[A-Z][A-Z0-9_]+$")
 ACCESS_ABBREVIATIONS = {
@@ -80,11 +80,19 @@ class ApiReferenceDriftTests(unittest.TestCase):
     def test_stable_error_code_table_matches_web_implementation(self) -> None:
         import ast
 
-        # The handler and the declarative manifest together own every code.
-        implemented: set[str] = set()
+        # The manifest catalog is what /api/meta publishes; the reference table
+        # must list exactly that, and every code the handler or the manifest
+        # validators can emit must be in the catalog.
+        catalog = {code for code, _status in ERROR_CODES}
+        documented = {
+            code: int(status)
+            for code, status in ERROR_TABLE_ROW.findall(self.reference)
+        }
+        self.assertEqual(documented, dict(ERROR_CODES))
+        emitted: set[str] = set()
         for module in ("web.py", "api_manifest.py"):
             source = (ROOT / "src" / "mocop" / module).read_text(encoding="utf-8")
-            implemented.update(
+            emitted.update(
                 node.value
                 for node in ast.walk(ast.parse(source))
                 if isinstance(node, ast.Constant)
@@ -92,7 +100,7 @@ class ApiReferenceDriftTests(unittest.TestCase):
                 and ERROR_LITERAL.fullmatch(node.value)
                 and node.value not in NON_ERROR_LITERALS
             )
-        self.assertEqual(implemented, set(ERROR_ROW.findall(self.reference)))
+        self.assertEqual(emitted - catalog, set())
 
     def test_authentication_and_protocol_contracts_are_current(self) -> None:
         self.assertIn(f"**API version:** `{API_VERSION}`", self.reference)

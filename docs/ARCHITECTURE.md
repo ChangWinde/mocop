@@ -72,7 +72,7 @@ interfaces without a runtime plugin registry.
 | `persistence.py` | optional bounded asynchronous SQLite history |
 | `notifications.py` | HTTPS webhook validation, deduplication, throttling, and delivery |
 | `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
-| `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query schemas, body caps; `/api/meta` and the handlers share it |
+| `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query and body schemas, body caps, error catalog; `/api/meta` publishes it and every GET query and POST body is validated through it |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
 | `static_assets.py` | static asset route table, strong ETags, and conditional-delivery validators |
 | `lifecycle.py` | private config creation and user-level systemd management |

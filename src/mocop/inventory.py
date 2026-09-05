@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
+from .api_manifest import DASHBOARD_DURATIONS
 from .config import (
     BUNDLED_CONFIG_PATH,
     ConfigError,
@@ -37,8 +38,6 @@ from .privatefiles import (
 )
 
 _MAX_CONFIG_BYTES = 1_048_576
-DASHBOARD_MAINTENANCE_DURATIONS = frozenset({0, 3_600, 14_400, 86_400, 604_800})
-DASHBOARD_INCIDENT_ACTION_DURATIONS = frozenset({0, 3_600, 14_400, 86_400, 604_800})
 
 
 class InventoryError(RuntimeError):
@@ -307,7 +306,7 @@ class ConfigInventory:
         if (
             isinstance(duration_seconds, bool)
             or not isinstance(duration_seconds, int)
-            or duration_seconds not in DASHBOARD_MAINTENANCE_DURATIONS
+            or duration_seconds not in DASHBOARD_DURATIONS
         ):
             raise InventoryRequestError("maintenance duration is not allowed")
         if not is_valid_maintenance_reason(reason, required=duration_seconds != 0):
@@ -360,7 +359,7 @@ class ConfigInventory:
         if (
             isinstance(duration_seconds, bool)
             or not isinstance(duration_seconds, int)
-            or duration_seconds not in DASHBOARD_INCIDENT_ACTION_DURATIONS
+            or duration_seconds not in DASHBOARD_DURATIONS
             or (action == "clear") != (duration_seconds == 0)
         ):
             raise InventoryRequestError("incident action duration is invalid")

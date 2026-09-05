@@ -164,8 +164,22 @@ returns `N/A`; `latencyMs`, `lastSuccessAt`, `nextRetryAt`, `message` are
 
 Write bodies are parsed strictly: duplicate keys, unknown keys, missing
 keys, non-finite numbers (`NaN`/`Infinity`), and boolean values where
-numbers are expected are all rejected. Each write route has a hard body
-cap:
+numbers are expected are all rejected. Every route validates its body in
+the same order, against the `body` schema `GET /api/meta` publishes for it:
+
+1. not a JSON object, or a key set the route does not accept
+   (`exactKeys`, the non-empty subset for collector settings, or the exact
+   `{}` for `empty` bodies) → `INVALID_SCHEMA`;
+2. a field of the wrong JSON type (`alias`, `enum`, `text`, and
+   `timestamp` are strings — `timestamp` may be `null` where `nullable` is
+   set; `integer` and `number` are non-boolean numbers) → `INVALID_SCHEMA`;
+3. a well-typed value outside the published safe alias grammar, `values`,
+   `minimum`/`maximum`, or the `text` visible-length `maximum` →
+   `INVALID_SETTINGS`;
+4. route-specific cross-field rules (listed per endpoint) →
+   `INVALID_SETTINGS`.
+
+Each write route has a hard body cap:
 
 | Route | Body cap (bytes) |
 |---|---|
@@ -210,8 +224,8 @@ never included.
 | `INVALID_CAPACITY_REQUEST` | 400 | `gpus`, `min_vram_gib`, or `model` on `/api/capacity` is malformed or out of bounds. |
 | `INVALID_HOST` | 400 | The `host` query value is not a safe alias. |
 | `INVALID_JSON` | 400 | The body is not valid strict JSON (duplicate keys and non-finite numbers included). |
-| `INVALID_SCHEMA` | 400 | The JSON body does not match the route's exact schema. |
-| `INVALID_SETTINGS` | 400 | Schema-valid values outside documented bounds or invalid for the current configuration. |
+| `INVALID_SCHEMA` | 400 | The body is not an object, its key set does not match the route (see `body` in `/api/meta`), or a field has the wrong JSON type. |
+| `INVALID_SETTINGS` | 400 | Well-typed values outside the published grammar, `values`, bounds, or text length; cross-field rules; or values invalid for the current configuration. |
 | `UNTRUSTED_ORIGIN` | 403 | Missing/untrusted `Host`, marker header, `Origin`, or cross-site Fetch Metadata; also every `OPTIONS`. |
 | `AUTHENTICATION_REQUIRED` | 403 | Bearer capability is missing, duplicated, or incorrect. |
 | `NOT_FOUND` | 404 | Unknown API-family path. |
@@ -225,7 +239,6 @@ never included.
 | `PAYLOAD_TOO_LARGE` | 413 | Body missing, empty, or beyond the route's byte cap. |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type` is not `application/json`. |
 | `RATE_LIMITED` | 429 | Manual probe cooldown (with `Retry-After` header) or notification-test cooldown. |
-| `INTERNAL_ERROR` | 500 | The host-group change failed unexpectedly. |
 | `SERVICE_UNAVAILABLE` | 503 | The capability is not available (no config controller, restart not supervised, manual probing disabled, SSE slots exhausted, scan/persist failure). |
 | `METRICS_LIMIT_EXCEEDED` | 503 | Rendering would exceed the fixed 100,000-series OpenMetrics budget. |
 | `NOTIFICATIONS_DISABLED` | 503 | Notification test requested but no webhook is configured. |
@@ -742,8 +755,14 @@ query string), each with a `type` of `alias` (a safe SSH alias), `identity`
 (with `minimum`, `maximum`, and the `default` used when omitted), plus
 `required`. POST routes carry `bodyLimitBytes` and `body`: the exact JSON
 object (`exactKeys: true`), a non-empty field subset (`exactKeys: false`), or
-an empty object (`empty: true`). `responseType` is `application/json` except
-for the `/api/events` stream and `/metrics`. `restartSupported` is true only
+an empty object (`empty: true`). Each body field has a `type` of `alias`,
+`enum` (with `values`), `integer` or `number` (with `values` or
+`minimum`/`maximum`), `text` (with the visible-length `maximum`), or
+`timestamp` (`nullable` where `null` is meaningful), plus `required` and a
+`notes` sentence for any cross-field rule; the server validates bodies in the
+order described under *Strict JSON on writes*. `responseType` is
+`application/json` except for the `/api/events` stream and `/metrics`.
+`restartSupported` is true only
 under the supervised user service; `manualProbeSupported` requires the live
 scheduler; `configurationWriteSupported` reports whether the active
 configuration file is dashboard-writable (file metadata only, no SSH);
@@ -879,8 +898,8 @@ Omitted fields keep their current values. Response `200`:
 
 Errors: `INVALID_SCHEMA` (unknown key, empty object, `connectTimeoutSeconds`
 included, wrong value type), `INVALID_SETTINGS` (documented bounds or the
-`probeTimeoutSeconds > connectTimeoutSeconds` cross-field rule),
-`503 SERVICE_UNAVAILABLE`.
+`probeTimeoutSeconds > connectTimeoutSeconds` cross-field rule against the
+merged effective configuration), `503 SERVICE_UNAVAILABLE`.
 
 ### POST /api/settings/hosts
 
@@ -895,8 +914,9 @@ Add or remove one monitored host. Tier W. Body cap 512 bytes. Body: exactly
   is on.
 
 Response `200`: the full inventory snapshot (same shape as
-`GET /api/inventory`). Errors: `INVALID_SCHEMA`, `409 INVENTORY_CHANGED`
-(not eligible / not active / configuration changed underneath — re-read
+`GET /api/inventory`). Errors: `INVALID_SCHEMA`, `INVALID_SETTINGS`
+(unknown `action` or an unsafe alias), `409 INVENTORY_CHANGED` (not
+eligible / not active / configuration changed underneath — re-read
 inventory first), `503 SERVICE_UNAVAILABLE`.
 
 ### POST /api/settings/maintenance
@@ -921,7 +941,7 @@ Assign or clear one explicitly configured host's group. Tier W. Body cap
 512 bytes. Body: exactly `{"host", "group"}`; empty/whitespace `group`
 clears; at most 48 visible characters. Response `200`: the full inventory
 snapshot. Errors: `INVALID_SCHEMA`, `INVALID_SETTINGS`,
-`409 INVENTORY_CHANGED`, `500 INTERNAL_ERROR`, `503 SERVICE_UNAVAILABLE`.
+`409 INVENTORY_CHANGED`, `503 SERVICE_UNAVAILABLE`.
 
 ### POST /api/settings/incident-action
 
@@ -966,7 +986,8 @@ Non-success responses carry the same status body **plus `code`** (no
 
 A duplicate request while one is already queued answers `202` with
 `status: "queued"` again (coalesced). Schema and availability failures use
-the normal envelope (`INVALID_SCHEMA`, `503 SERVICE_UNAVAILABLE`).
+the normal envelope (`INVALID_SCHEMA`, `INVALID_SETTINGS` for an unsafe
+alias, `503 SERVICE_UNAVAILABLE`).
 
 ### POST /api/notifications/test
 
@@ -1166,5 +1187,5 @@ Every `host` value in queries and write bodies must match:
 One leading letter or digit, then up to 252 further letters, digits, dots,
 underscores, or hyphens — the same grammar the configuration enforces for
 OpenSSH aliases. Values that fail it are rejected before any lookup
-(`INVALID_HOST`, `INVALID_QUERY`, or `INVALID_SCHEMA` depending on the
-route).
+(`INVALID_HOST` or `INVALID_QUERY` in a query string, `INVALID_SETTINGS` in
+a write body).
