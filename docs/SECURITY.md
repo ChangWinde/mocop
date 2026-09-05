@@ -96,8 +96,13 @@ usernames, addresses, and raw proxy commands are discarded. Only the resulting
 display metadata and never adds an alias to that set. All write routes require
 Bearer authentication, an exact queryless path, valid trusted HTTP(S) `Origin`, the
 dashboard marker, non-cross-site Fetch Metadata when present, exact JSON media type,
-unique keys, exact schema, and a route-specific body cap. The detailed route bounds
-and stable errors are the tested contract in [API.md](API.md).
+unique keys, and a route-specific body cap, and every body is checked once in the
+dispatcher against the same manifest `GET /api/meta` publishes (key set, JSON
+types, alias grammar, enumerations, bounds, text length) before a handler runs.
+The detailed route bounds and stable errors are the tested contract in
+[API.md](API.md). The local `mocop api` client never sends the dashboard marker
+and refuses reader and writer routes, so it cannot become a scripted path around
+these guards.
 
 The write guard intentionally does not compare external Origin with a proxy-rewritten
 backend Host. Exact `trusted_web_hosts` entries authorize Host and Origin; a leading

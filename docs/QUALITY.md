@@ -18,7 +18,7 @@ that follows 0.11.0, while the live-deployment collection figures date from the
 | Browser responsiveness | Strong for current bounded views | The 65,536-process browser fixture retained only 200 search rows. Two consecutive runs measured 90.4–96.0 ms cold search, 26.9–30.6 ms bounded warm medians, 1.6–1.7 ms cold GPU-summary derivation, and at most 0.1 ms cached summary medians. | Browser timings are diagnostic, not CI thresholds; low-power clients need separate profiling. |
 | Memory and retention | Bounded by design and acceptable in measured deployments | Production observation measured 31.7 MiB main-process RSS. The synthetic large fixture attributed 10.30 MiB to `StateStore`; a bounded 20-host/160-GPU retention soak changed traced allocation by 12.9 KiB (0.37%) after stabilization. | The synthetic process RSS of 73.02 MiB includes the fixture, payloads, tracing, and interpreter, so it is not an idle-service claim. Multi-day live soak remains environment-specific release evidence. |
 | Robustness | Strong defense-in-depth | Probe deadlines, output caps, process-group cancellation, per-host isolation, bounded queues, authenticated HTTP, framing/authority checks, and persistence failure isolation have focused unit and integration coverage. | Correct configuration, private capability storage, OpenSSH host verification, and protected transport remain operator responsibilities. |
-| Stability | Strong deterministic coverage; long-running evidence is scoped | Unit, contract, browser, cancellation, bounded-retention, restart, migration, and fault-injection suites exercise the major state transitions. Python branch coverage measured 88% and CI rejects a regression below 85%; HTTP thread and file-descriptor counts returned to baseline after the synthetic lifecycle check. | Coverage locates unexecuted paths but does not prove assertion quality, and one local test run does not replace a multi-day soak on the operator's drivers, network, and SSH topology. |
+| Stability | Strong deterministic coverage; long-running evidence is scoped | Unit, contract, browser, cancellation, bounded-retention, restart, migration, and fault-injection suites exercise the major state transitions. Python branch coverage measured 89% and CI rejects a regression below 85%; HTTP thread and file-descriptor counts returned to baseline after the synthetic lifecycle check. | Coverage locates unexecuted paths but does not prove assertion quality, and one local test run does not replace a multi-day soak on the operator's drivers, network, and SSH topology. |
 
 ## Resource model
 
@@ -47,10 +47,11 @@ Run the opt-in backend profile with:
 python3 -m tests.benchmarks.runtime_profile
 ```
 
-Two consecutive reference runs used Python 3.14.6 on Linux x86-64 with 200
-hosts, eight GPUs per host, and four processes per GPU. Three warm-ups preceded
-measured latency samples. Stable sizes are shown exactly; timing ranges show the
-two observed runs rather than selecting the faster one. The snapshot grew from
+Three reference runs used Python 3.14.6 on Linux x86-64 with 200 hosts, eight
+GPUs per host, and four processes per GPU; the third ran on a host with two GPU
+training jobs active and marks the upper end of every range. Three warm-ups
+preceded measured latency samples. Stable sizes are shown exactly; timing ranges
+show the observed runs rather than selecting the fastest one. The snapshot grew from
 2,777,329 bytes at 0.9.0 because 0.11.0 added per-process CPU and memory
 footprint fields; every other figure is within run-to-run noise of the 0.9.0
 baseline.
@@ -61,7 +62,7 @@ baseline.
 | Snapshot JSON size | 2,994,955 bytes |
 | OpenMetrics size | 1,843,129 bytes |
 | Snapshot view median | 0.0013 ms |
-| Isolated deep-copy median | 16.7329–18.5370 ms |
+| Isolated deep-copy median | 16.7329–20.5903 ms |
 | Cold JSON serialization median | 7.3456–7.6400 ms |
 | Cached JSON / metrics median | 0.0021–0.0022 / 0.0021–0.0023 ms |
 | Diagnostic gzip level 5 | 53,100 bytes (1.77%), 4.1452–4.1792 ms median |
@@ -101,9 +102,9 @@ The verification surface intentionally includes more than happy-path unit tests:
   layout, keyboard focus, bounded process views, filters, drill-down, copy
   actions, and global search transitions.
 
-The 2026-09-05 Python 3.10 run executed 545 tests and measured 88% combined
+The 2026-09-05 Python 3.14 run executed 555 tests and measured 89% combined
 statement/branch coverage with Coverage.py 7.15.4 (the 2026-08-16 0.9.0 baseline
-was 467 tests at the same 88%). CI enforces a conservative 85% floor as a
+was 467 tests at 88%). CI enforces a conservative 85% floor as a
 regression signal; the focused contracts and failure-injection oracles remain
 the acceptance evidence.
 
