@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from mocop.api_manifest import API_VERSION, describe_endpoints, describe_error_codes
 from mocop.lifecycle import (
+    META_MAX_BYTES,
     LifecycleError,
     UserServiceManager,
     ensure_access_token,
@@ -497,6 +499,42 @@ class LifecycleTests(unittest.TestCase):
         self.assertNotIn("headers", second_call.kwargs)
         for call in connection.request.call_args_list:
             self.assertNotIn("Authorization", str(call))
+
+    def test_wait_until_healthy_accepts_the_complete_manifest(self) -> None:
+        # The manifest grew past the old 4 KiB probe cap when it started to
+        # publish query and body schemas; the cap must fit the real document
+        # with headroom and still refuse a listener that streams garbage.
+        manifest = json.dumps(
+            {
+                "apiVersion": API_VERSION,
+                "endpoints": describe_endpoints(),
+                "errorCodes": describe_error_codes(),
+            }
+        ).encode()
+        self.assertGreater(len(manifest), 4096)
+        self.assertLess(len(manifest) * 4, META_MAX_BYTES)
+        manager = self.build_manager(lambda _arguments: 0)
+        for payload, expected in (
+            (manifest, True),
+            (b"{" + b" " * META_MAX_BYTES + b"}", False),
+        ):
+            with self.subTest(size=len(payload)):
+                connection = Mock()
+                meta = Mock(status=200)
+                meta.read.side_effect = lambda limit, body=payload: body[:limit]
+                protected = Mock(status=403)
+                protected.read.return_value = b""
+                connection.getresponse.side_effect = (meta, protected)
+                with patch(
+                    "mocop.lifecycle.http.client.HTTPConnection",
+                    return_value=connection,
+                ):
+                    self.assertEqual(
+                        manager.wait_until_healthy(
+                            "127.0.0.1", 8787, timeout_seconds=0
+                        ),
+                        expected,
+                    )
 
     def test_wait_until_healthy_rejects_a_service_without_auth(self) -> None:
         # A service that started without a readable token serves
