@@ -203,6 +203,7 @@ never included.
 | `INVALID_QUERY` | 400 | A malformed `host`, `gpu`, or `limit` query value. |
 | `INVALID_LIMIT` | 400 | `limit` is not an integer within the route's bounds. |
 | `INVALID_HOURS` | 400 | `hours` is not an integer within the route's bounds. |
+| `INVALID_CAPACITY_REQUEST` | 400 | `gpus`, `min_vram_gib`, or `model` on `/api/capacity` is malformed or out of bounds. |
 | `INVALID_HOST` | 400 | The `host` query value is not a safe alias. |
 | `INVALID_JSON` | 400 | The body is not valid strict JSON (duplicate keys and non-finite numbers included). |
 | `INVALID_SCHEMA` | 400 | The JSON body does not match the route's exact schema. |
@@ -327,6 +328,7 @@ This table matches the server's route manifest exactly.
 | GET | `/api/events` | A | SSE stream of snapshots with named heartbeats. |
 | GET | `/api/history` | A | Per-host resource trend points. |
 | GET | `/api/usage` | A | Per-owner GPU occupancy and idle-occupancy rollup. |
+| GET | `/api/capacity` | A | Ranked same-host, same-model GPU groups that can take a job. |
 | GET | `/api/incidents` | A | Active conditions, transition events, correlations. |
 | GET | `/api/meta` | P | API self-description: versions, capabilities, endpoints. |
 | GET | `/healthz` | P | Liveness plus cumulative transport retries. |
@@ -572,6 +574,47 @@ and offline stretches are never counted as measured activity.
 
 Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_HOURS`,
 `INVALID_LIMIT`.
+
+### GET /api/capacity
+
+Answer the placement question directly: which hosts can take a job that needs
+`gpus` devices on one host, each with at least `min_vram_gib` GiB free, optionally
+of one exact `model` name. Tier A. Query: `gpus` (integer 1–256, default 1),
+`min_vram_gib` (integer 0–512, default 0), `model` (exact GPU name as reported in
+the snapshot, or `any`, the default). The server ranks the current in-memory
+snapshot; it never opens an SSH connection or reserves anything, so treat the
+answer as an observation to act on quickly.
+
+```json
+{
+  "generatedAt": "…", "lastPollCompletedAt": "…",
+  "request": {"gpuCount": 2, "minVramGiB": 40, "model": "any"},
+  "satisfying": 1, "excludedMaintenance": 0, "excludedHealth": 1,
+  "candidates": [
+    {"host": "gpu-02", "model": "NVIDIA H100 80GB HBM3", "total": 8,
+     "satisfies": true, "deficit": 0, "minimumFreeMiB": 79000,
+     "averageUtilization": 2.0, "cpuUsagePct": 12.5,
+     "available": [{"index": 0, "uuid": "GPU-…", "freeVramMiB": 80000,
+                    "utilizationPct": 1, "temperatureC": 45}]}
+  ]
+}
+```
+
+A candidate is one host/model group. A GPU is *available* when its utilization
+is below `thresholds.gpu_busy_pct`, its free VRAM meets the request, its
+temperature is below `thresholds.gpu_temperature_warning_c` (an unknown
+temperature does not disqualify), and no hardware condition (`gpu_ecc`,
+`gpu_memory_repair`, `gpu_slowdown`, `gpu_temperature`) names it. Hosts in a
+maintenance window are counted in `excludedMaintenance`; hosts with an active
+`connectivity`, `gpu_availability`, or `gpu_count` condition — including
+acknowledged or silenced ones — in `excludedHealth`; stale and offline hosts are
+skipped silently. Candidates are ordered by: satisfies the request, smallest
+deficit, most available GPUs, largest minimum free VRAM, lowest average
+utilization, then host name. The dashboard's capacity matcher and watch use the
+identical ranking in the browser; `tests/fixtures/capacity_match.json` pins the
+two implementations to one result.
+
+Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_CAPACITY_REQUEST`.
 
 ### GET /api/incidents
 

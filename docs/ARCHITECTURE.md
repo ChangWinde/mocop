@@ -59,6 +59,7 @@ interfaces without a runtime plugin registry.
 | `ssh_topology.py` | bounded effective-route resolution, infrastructure classification, topology and grouping projection |
 | `inventory.py` | typed dashboard configuration projection and private atomic mutation |
 | `metrics.py` | deterministic OpenMetrics 1.0 snapshot exposition |
+| `capacity.py` | server-side twin of the browser capacity matcher behind `GET /api/capacity` |
 | `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
 | `remote_script.py` | the fixed `MONITOR_V8` collection script: protocol constants, template, rendering |
 | `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |
@@ -200,7 +201,7 @@ after this overlay and may include the current correlation context.
 
 ## Dashboard rendering
 
-GPU count, busy devices, and cluster VRAM form the first summary layer. The capacity matcher ranks same-node, same-model groups from the current snapshot by requested device count, per-device free VRAM, health, utilization, and CPU context; it excludes stale and maintained nodes and never triggers collection. One optional capacity watch persists a saved demand in the browser and re-evaluates it on every accepted snapshot: the satisfaction edge raises an in-page banner, a title marker, and an opt-in browser notification under a bounded cooldown, then re-arms only after demand stops being satisfied. The watch is a browser-only projection and never adds an API call or SSH command. The fleet rail can render config-backed host sections without changing telemetry order or collection. The scheduling heatmap follows, then system resources and native per-host GPU groups. GPU groups are collapsed by default. Search and status filters temporarily expand matching groups without losing the user's explicit expansion state.
+GPU count, busy devices, and cluster VRAM form the first summary layer. The capacity matcher ranks same-node, same-model groups from the current snapshot by requested device count, per-device free VRAM, health, utilization, and CPU context; it excludes stale and maintained nodes and never triggers collection. One optional capacity watch persists a saved demand in the browser and re-evaluates it on every accepted snapshot: the satisfaction edge raises an in-page banner, a title marker, and an opt-in browser notification under a bounded cooldown, then re-arms only after demand stops being satisfied. The watch is a browser-only projection and never adds an API call or SSH command. Agents and scripts get the identical ranking from `GET /api/capacity`, served by `capacity.py` from the same in-memory snapshot and active conditions; `tests/fixtures/capacity_match.json` pins the browser leaf and the Python module to one result so neither can drift. The fleet rail can render config-backed host sections without changing telemetry order or collection. The scheduling heatmap follows, then system resources and native per-host GPU groups. GPU groups are collapsed by default. Search and status filters temporarily expand matching groups without losing the user's explicit expansion state.
 
 The unified inventory query also builds a bounded process result projection from
 the authenticated in-memory snapshot. Its scope follows the selected host, so

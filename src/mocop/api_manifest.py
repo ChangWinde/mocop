@@ -30,6 +30,7 @@ API_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/events", "authenticated"),
     ("GET", "/api/history", "authenticated"),
     ("GET", "/api/usage", "authenticated"),
+    ("GET", "/api/capacity", "authenticated"),
     ("GET", "/api/incidents", "authenticated"),
     ("GET", "/api/meta", "public"),
     ("GET", "/healthz", "public"),
@@ -89,17 +90,18 @@ class QueryError(ValueError):
 class QueryParameter:
     """One accepted query parameter.
 
-    ``alias`` values must be safe SSH aliases and ``identity`` values are
-    bounded printable GPU identities; both raise the route's shape code when
-    malformed. ``integer`` values raise their own ``invalid_code`` when they
-    are not integers inside ``[minimum, maximum]``.
+    ``alias`` values must be safe SSH aliases, ``identity`` values are bounded
+    printable GPU identities, and ``text`` values are bounded printable free
+    text; all three raise the route's shape code when malformed. ``integer``
+    values raise their own ``invalid_code`` when they are not integers inside
+    ``[minimum, maximum]``.
     """
 
     kind: str
     required: bool = False
     minimum: int | None = None
     maximum: int | None = None
-    default: int | None = None
+    default: int | str | None = None
     invalid_code: str | None = None
 
     def describe(self) -> dict[str, object]:
@@ -171,10 +173,19 @@ QUERY_SCHEMAS: dict[str, QuerySchema] = {
         "INVALID_LIMIT",
         "invalid limit",
     ),
+    "/api/capacity": QuerySchema(
+        {
+            "gpus": _integer(1, 256, 1, "INVALID_CAPACITY_REQUEST"),
+            "min_vram_gib": _integer(0, 512, 0, "INVALID_CAPACITY_REQUEST"),
+            "model": QueryParameter("text", default="any"),
+        },
+        "INVALID_CAPACITY_REQUEST",
+        "invalid gpus, min_vram_gib, or model",
+    ),
 }
 
 
-def _valid_identity(value: str) -> bool:
+def _valid_text(value: str) -> bool:
     return 1 <= len(value) <= 128 and not any(
         ord(character) < 32 for character in value
     )
@@ -201,7 +212,7 @@ def parse_query(schema: QuerySchema, query: str) -> dict[str, object]:
             continue
         if parameter.kind == "alias" and not is_safe_alias(given[0]):
             raise shape_error
-        if parameter.kind == "identity" and not _valid_identity(given[0]):
+        if parameter.kind in {"identity", "text"} and not _valid_text(given[0]):
             raise shape_error
         supplied[name] = given[0]
     values: dict[str, object] = {}

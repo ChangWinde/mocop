@@ -39,6 +39,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `mocop config check --json` writes the validation report as one JSON
   document on stdout (also for a rejected configuration), matching
   `doctor --json`.
+- `GET /api/capacity?gpus=N&min_vram_gib=G&model=M` answers the placement
+  question from one bounded authenticated call: ranked same-host, same-model
+  GPU groups with the available devices, deficit, minimum free VRAM, and the
+  maintenance and health exclusions, using exactly the dashboard's matching
+  rules. A shared fixture pins the browser leaf and the new `capacity.py` to
+  one ranking, and the browser leaf now orders hosts by code point instead of
+  the locale so both agree everywhere.
 - `tests/gpu_tasks_test.mjs` now runs in CI: the workflow globs every browser
   leaf and contract test instead of maintaining a list that had drifted.
 

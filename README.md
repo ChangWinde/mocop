@@ -51,17 +51,17 @@ English README, API, operations, and engineering references remain maintained.
 
 - GPU utilization, VRAM, temperature, power, model, driver, hardware health, and
   scan-friendly per-GPU process summaries
-- GPU capacity matching plus a capacity watch: a banner and opt-in
-  notification fire when idle GPUs satisfy it, plus scheduling heatmap,
-  connection map, program search, process filters, attribution filters,
-  `ssh` copy, and CSV export
+- GPU capacity matching in the dashboard and as `GET /api/capacity` for
+  agents, plus a capacity watch whose banner and opt-in notification fire when
+  idle GPUs satisfy it; scheduling heatmap, connection map, program search,
+  process and attribution filters, `ssh` copy, and CSV export
 - CPU, load, memory, swap, disk capacity and I/O, network rate, uptime, and kernel pressure stall (PSI) telemetry
-- Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, and timed maintenance
-- Independent per-host scheduling, possible shared-path grouping, and optional HTTPS webhooks
+- Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, timed maintenance
+- Independent per-host scheduling, shared-path grouping, optional HTTPS webhooks
 - Config-backed host inventory, expected GPU counts, local-host collection, and host groups
-- Per-GPU trends and process timelines, with optional bounded SQLite retention and read-only Slurm/Kubernetes/Docker/Podman context
+- Per-GPU trends and process timelines, optional bounded SQLite retention, read-only Slurm/Kubernetes/Docker/Podman context
 - Per-owner GPU occupancy and idle-share rollups over a selectable window
-- Six visual styles, six independent accents, compact mode, saved ordering, and validated local backgrounds
+- Six visual styles, six accents, compact mode, saved ordering, validated local backgrounds
 - Opt-in release checks and one-click verified self-update
 - OpenMetrics 1.0 endpoint for Prometheus and Grafana
 

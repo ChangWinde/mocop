@@ -25,6 +25,7 @@ from .api_manifest import (
     describe_endpoints,
     parse_query,
 )
+from .capacity import CapacityRequest, match_capacity
 from .config import (
     is_safe_alias,
     is_valid_host_group,
@@ -472,6 +473,9 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/usage":
             self._send_usage(request_url.query)
+            return
+        if path == "/api/capacity":
+            self._send_capacity(request_url.query)
             return
         if path == "/api/gpu-history":
             self._send_gpu_history(request_url.query)
@@ -1331,6 +1335,26 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self._send_json(
             self.monitor_server.state.usage(values["hours"], values["limit"])
         )
+
+    def _send_capacity(self, query: str) -> None:
+        """Rank idle GPU groups against a demand; observations, never reservations."""
+        values = self._parse_query("/api/capacity", query)
+        if values is None:
+            return
+        state = self.monitor_server.state
+        snapshot = state.snapshot_view()
+        thresholds = snapshot["thresholds"]
+        assert isinstance(thresholds, dict)
+        result = match_capacity(
+            snapshot["servers"],  # type: ignore[arg-type]
+            state.incidents(1)["active"],  # type: ignore[arg-type]
+            CapacityRequest(values["gpus"], values["min_vram_gib"], values["model"]),
+            busy_pct=float(thresholds["gpu_busy_pct"]),
+            temperature_c=float(thresholds["gpu_temperature_warning_c"]),
+        )
+        result["generatedAt"] = snapshot["generatedAt"]
+        result["lastPollCompletedAt"] = snapshot["lastPollCompletedAt"]
+        self._send_json(result)
 
     def _send_gpu_history(self, query: str) -> None:
         if not self._require_dashboard_read():

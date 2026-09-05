@@ -1115,6 +1115,77 @@ class WebTests(unittest.TestCase):
             400,
         )
 
+    def test_capacity_endpoint_ranks_idle_gpus_for_automation(self) -> None:
+        def gpu(index: int, utilization: float, free: float) -> GpuMetrics:
+            return GpuMetrics(
+                index=index,
+                uuid=f"GPU-{index}",
+                name="NVIDIA H100 80GB HBM3",
+                driver_version="550",
+                pstate="P0",
+                temperature_c=45,
+                utilization_gpu_pct=utilization,
+                utilization_memory_pct=0,
+                memory_total_mib=81_920,
+                memory_used_mib=81_920 - free,
+                memory_free_mib=free,
+                power_draw_w=70,
+                power_limit_w=700,
+            )
+
+        self.state.set_hosts(("gpu-01", "gpu-02"))
+        self.state.apply(
+            ProbeResult("gpu-01", "online", 1, (gpu(0, 2, 80_000), gpu(1, 95, 4_000)))
+        )
+        self.state.apply(
+            ProbeResult("gpu-02", "online", 1, (gpu(0, 1, 80_000), gpu(1, 3, 79_000)))
+        )
+
+        # An automation read: Bearer only, no dashboard marker.
+        with urlopen(
+            f"{self.base}/api/capacity?gpus=2&min_vram_gib=40", timeout=2
+        ) as response:
+            capacity = json.load(response)
+        self.assertEqual(
+            capacity["request"], {"gpuCount": 2, "minVramGiB": 40, "model": "any"}
+        )
+        self.assertEqual(capacity["satisfying"], 1)
+        self.assertEqual(
+            [c["host"] for c in capacity["candidates"]], ["gpu-02", "gpu-01"]
+        )
+        first = capacity["candidates"][0]
+        self.assertTrue(first["satisfies"])
+        self.assertEqual([g["uuid"] for g in first["available"]], ["GPU-0", "GPU-1"])
+        self.assertEqual(first["minimumFreeMiB"], 79_000)
+        self.assertIn("generatedAt", capacity)
+        self.assertIn("lastPollCompletedAt", capacity)
+
+        # Defaults ask for one GPU with any free VRAM on any model.
+        with urlopen(f"{self.base}/api/capacity", timeout=2) as response:
+            self.assertEqual(json.load(response)["request"]["gpuCount"], 1)
+        with urlopen(
+            f"{self.base}/api/capacity?model=NVIDIA%20GeForce%20RTX%204090", timeout=2
+        ) as response:
+            self.assertEqual(json.load(response)["candidates"], [])
+
+        self.assert_json_error(
+            f"{self.base}/api/capacity?gpus=0", 400, "INVALID_CAPACITY_REQUEST"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/capacity?min_vram_gib=513",
+            400,
+            "INVALID_CAPACITY_REQUEST",
+        )
+        self.assert_json_error(
+            f"{self.base}/api/capacity?model=%01", 400, "INVALID_CAPACITY_REQUEST"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/capacity?gpus=1&gpus=2", 400, "INVALID_CAPACITY_REQUEST"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/capacity?vram=1", 400, "UNKNOWN_QUERY_PARAMETER"
+        )
+
     def test_gpu_history_and_sanitized_diagnostics_require_dashboard_reads(
         self,
     ) -> None:
