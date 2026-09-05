@@ -867,10 +867,10 @@ def _run_lifecycle(args: argparse.Namespace) -> int:
         )
         if not as_json:
             print(f"Fresh deployment configuration: {created}")
-        result = _install_service(created, as_json=as_json)
-        if result != 0 and not as_json:
+        install_code = _install_service(created, as_json=as_json)
+        if install_code != 0 and not as_json:
             print(f"Configuration retained for diagnosis: {created}")
-        return result
+        return install_code
 
     config_path = args.config or user_config_path()
     if args.action == "install":
