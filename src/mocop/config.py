@@ -71,6 +71,10 @@ class IncidentConfig:
     # opens an incident that resolves twenty seconds later. The floor makes a
     # resource condition sustained by the clock as well.
     resource_open_seconds: float = 60
+    # Idle VRAM is a claim about a workload, not a spike: checkpoint and
+    # evaluation pauses idle a GPU for a minute or two, so the idle-memory
+    # condition has its own, longer floor.
+    gpu_idle_memory_seconds: float = 300
 
 
 @dataclass(frozen=True, slots=True)

@@ -344,7 +344,7 @@ class ThresholdIncidentPolicy:
                     observed_at=result.observed_at,
                     detail=f"GPU utilization is {round(utilization, 2)}%",
                     open_after_cycles=self._incidents.gpu_idle_memory_cycles,
-                    open_after_seconds=self._incidents.resource_open_seconds,
+                    open_after_seconds=self._incidents.gpu_idle_memory_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
                 )
             health = gpu.health

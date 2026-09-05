@@ -107,7 +107,8 @@
     "resource_open_cycles": 2,
     "resource_open_seconds": 60,
     "recovery_cycles": 2,
-    "gpu_idle_memory_cycles": 12
+    "gpu_idle_memory_cycles": 12,
+    "gpu_idle_memory_seconds": 300
   },
   "thresholds": {
     "cpu_warning_pct": 85,

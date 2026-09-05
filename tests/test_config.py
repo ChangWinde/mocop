@@ -80,6 +80,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.incidents.recovery_cycles, 2)
         self.assertEqual(config.incidents.gpu_idle_memory_cycles, 12)
         self.assertEqual(config.incidents.resource_open_seconds, 60)
+        self.assertEqual(config.incidents.gpu_idle_memory_seconds, 300)
 
     def test_validates_resolved_ssh_discovery_policy(self) -> None:
         value = valid_config()
@@ -797,6 +798,14 @@ class ConfigTests(unittest.TestCase):
                 ):
                     load_config(self.write(value))
         value["incidents"]["resource_open_seconds"] = 60
+        value["incidents"]["gpu_idle_memory_seconds"] = 0
+        self.assertEqual(
+            load_config(self.write(value)).incidents.gpu_idle_memory_seconds, 0
+        )
+        value["incidents"]["gpu_idle_memory_seconds"] = -5
+        with self.assertRaisesRegex(ConfigError, "incidents.gpu_idle_memory_seconds"):
+            load_config(self.write(value))
+        del value["incidents"]["gpu_idle_memory_seconds"]
 
         for invalid in (0, 61, 2.5, True):
             with self.subTest(invalid=invalid):

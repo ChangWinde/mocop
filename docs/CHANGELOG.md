@@ -40,9 +40,12 @@ All notable changes are documented here. This project follows Semantic Versionin
   polling every five seconds, VRAM spikes of ten to fifteen seconds satisfied
   `resource_open_cycles: 2` and produced 43 `gpu_memory` incidents in five
   hours, 42 of them shorter than ten minutes and most resolved within twenty
-  seconds. Connectivity and GPU-availability conditions still open
-  immediately; set `resource_open_seconds: 0` to confirm by cycles alone as
-  before.
+  seconds. The idle-VRAM condition gets its own floor,
+  `incidents.gpu_idle_memory_seconds` (default 300), because the same
+  deployment logged sixteen two-minute `gpu_idle_memory` incidents from
+  checkpoint and evaluation pauses. Connectivity and GPU-availability
+  conditions still open immediately; set either floor to `0` to confirm by
+  cycles alone as before.
 - Four modules crossed their line ceilings with the incident-restore fix and were split along
   existing seams instead: the struct-packed history records moved from
   `service.py` into `telemetry_points.py`, the bounded HTTPS delivery

@@ -21,7 +21,9 @@ from mocop.models import (
 def cycles_only(**overrides: object) -> IncidentConfig:
     """Cycle-confirmation semantics without the duration floor; these tests
     replay unspaced samples and reason about sample counts alone."""
-    return IncidentConfig(resource_open_seconds=0, **overrides)  # type: ignore[arg-type]
+    return IncidentConfig(
+        resource_open_seconds=0, gpu_idle_memory_seconds=0, **overrides
+    )  # type: ignore[arg-type]
 
 
 def system(cpu: float, disk: float) -> SystemMetrics:
@@ -342,6 +344,46 @@ class IncidentTrackerTests(unittest.TestCase):
         escalated = tracker.update(sample(65, 97))
         self.assertEqual([event.state for event in escalated], ["escalated"])
         self.assertEqual(tracker.snapshot(20)["active"][0]["severity"], "critical")
+
+    def test_idle_vram_needs_its_own_longer_floor(self) -> None:
+        # Live evidence: sixteen two-minute gpu_idle_memory incidents from
+        # checkpoint and evaluation pauses at a five-second cadence, where
+        # twelve cycles are one minute. The idle floor is five minutes.
+        tracker = IncidentTracker(
+            ThresholdIncidentPolicy(
+                ThresholdConfig(),
+                incidents=IncidentConfig(
+                    gpu_idle_memory_cycles=12, gpu_idle_memory_seconds=300
+                ),
+            ),
+            20,
+        )
+
+        def sample(second: int, utilization: float) -> ProbeResult:
+            return ProbeResult(
+                "node-a",
+                "online",
+                1,
+                (gpu(60, utilization=utilization, memory_used=80),),
+                system=system(10, 10),
+                observed_at=f"2026-08-09T00:{second // 60:02d}:{second % 60:02d}Z",
+            )
+
+        # Busy, then a 120-second pause with VRAM held, then busy again.
+        tracker.update(sample(0, 90))
+        for second in range(5, 125, 5):
+            self.assertEqual(tracker.update(sample(second, 0)), (), second)
+        self.assertEqual(tracker.update(sample(125, 90)), ())
+        self.assertEqual(tracker.snapshot(20)["active"], [])
+
+        # A device held idle for five minutes opens once.
+        events: list[str] = []
+        for second in range(130, 440, 5):
+            events.extend(e.state for e in tracker.update(sample(second, 0)))
+        self.assertEqual(events, ["opened"])
+        (active,) = tracker.snapshot(20)["active"]
+        self.assertEqual(active["category"], "gpu_idle_memory")
+        self.assertEqual(active["firstObservedAt"], "2026-08-09T00:07:10Z")
 
     def test_connectivity_and_availability_open_immediately_despite_the_floor(
         self,

@@ -100,6 +100,10 @@ its confirming samples also span this many seconds, so sensitivity does not
 depend on the poll interval — at a five-second cadence, two samples alone would
 open an incident for a ten-second VRAM spike. Connectivity and GPU-availability
 conditions open immediately regardless. `0` confirms by sample count alone.
+`incidents.gpu_idle_memory_seconds` (300, same range) is the corresponding
+floor for the idle-VRAM condition, which also needs `gpu_idle_memory_cycles`
+samples: checkpoint and evaluation pauses idle a GPU for a minute or two and
+should not read as a held-but-unused device.
 
 `incident_overrides` may contain only `hosts` and `groups`, each with at most
 256 entries. A scope object is non-empty and may contain `thresholds` and/or

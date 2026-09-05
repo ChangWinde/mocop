@@ -118,6 +118,7 @@ _INCIDENT_KEYS = {
     "recovery_cycles",
     "gpu_idle_memory_cycles",
     "resource_open_seconds",
+    "gpu_idle_memory_seconds",
 }
 _HOST_OVERRIDE_KEYS = {"poll_interval_seconds", "probe_timeout_seconds", "display_name"}
 _MAINTENANCE_WINDOW_KEYS = {"until", "reason", "recurrence"}
@@ -841,23 +842,24 @@ def _incident_cycles(data: dict[str, Any]) -> IncidentConfig:
             raise ConfigError(f"incidents.{name} must be between 1 and 60")
         return value
 
-    seconds = incident_data.get(
-        "resource_open_seconds", incident_defaults.resource_open_seconds
-    )
-    if (
-        isinstance(seconds, bool)
-        or not isinstance(seconds, int | float)
-        or not math.isfinite(seconds)
-    ):
-        raise ConfigError("incidents.resource_open_seconds must be a number")
-    if not 0 <= seconds <= 3600:
-        raise ConfigError("incidents.resource_open_seconds must be between 0 and 3600")
+    def seconds(name: str) -> float:
+        value = incident_data.get(name, getattr(incident_defaults, name))
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+        ):
+            raise ConfigError(f"incidents.{name} must be a number")
+        if not 0 <= value <= 3600:
+            raise ConfigError(f"incidents.{name} must be between 0 and 3600")
+        return float(value)
 
     return IncidentConfig(
         resource_open_cycles=cycles("resource_open_cycles"),
         recovery_cycles=cycles("recovery_cycles"),
         gpu_idle_memory_cycles=cycles("gpu_idle_memory_cycles"),
-        resource_open_seconds=float(seconds),
+        resource_open_seconds=seconds("resource_open_seconds"),
+        gpu_idle_memory_seconds=seconds("gpu_idle_memory_seconds"),
     )
 
 
