@@ -3,8 +3,8 @@
 This document records the current cross-dimensional assessment of Mocop. It
 separates measured evidence from architectural expectations and from work that
 has not been measured. Every figure names the date it was measured; the runtime
-profile and coverage below were re-measured on 2026-09-05 against the tree
-that follows 0.11.0, while the live-deployment collection figures date from the
+profile and coverage below were re-measured on 2026-09-05 against the 0.12.0
+tree, while the live-deployment collection figures date from the
 0.9.0 era and are labelled as such. Detailed benchmark history remains in
 [Performance](PERFORMANCE.md); security claims remain in
 [Security](SECURITY.md).
@@ -39,7 +39,7 @@ already authenticated snapshot. Its weak-map cache follows immutable GPU object
 lifetimes, so it adds neither remote commands nor retained copies of old
 snapshots.
 
-## Reproducible runtime profile (measured 2026-09-05, post-0.11.0 tree)
+## Reproducible runtime profile (measured 2026-09-05, 0.12.0)
 
 Run the opt-in backend profile with:
 
@@ -52,7 +52,7 @@ GPUs per host, and four processes per GPU; the third ran on a host with two GPU
 training jobs active and marks the upper end of every range. Three warm-ups
 preceded measured latency samples. Stable sizes are shown exactly; timing ranges
 show the observed runs rather than selecting the fastest one. The snapshot grew from
-2,777,329 bytes at 0.9.0 because 0.11.0 added per-process CPU and memory
+2,777,329 bytes at 0.9.0 because 0.12.0 added per-process CPU and memory
 footprint fields; every other figure is within run-to-run noise of the 0.9.0
 baseline.
 
