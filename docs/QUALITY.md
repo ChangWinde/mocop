@@ -14,7 +14,7 @@ that follows 0.11.0, while the live-deployment collection figures date from the
 | Dimension | Current assessment | Evidence | Residual boundary |
 |---|---|---|---|
 | Collection performance | Strong at the intended fleet size | A live 11-node, 47-GPU deployment (0.9.0, 2026-08-15) used 0.233% main-process CPU and 31.7 MiB RSS at a five-second cadence; the complete cgroup used 1.245% CPU and 48.0 MiB. Local controllable collection overhead was 0.79 ms of a 31.43 ms sample. | SSH setup, network delay, and `nvidia-smi` dominate and vary by site. |
-| State and serialization | Strong, with a clear scale trigger | The reproducible 200-host/1,600-GPU/6,400-process fixture built a 2.86 MiB snapshot. Cold JSON serialization measured 7.35–7.64 ms median; revision-cached JSON and OpenMetrics retrieval measured about 0.002 ms median. | The full snapshot grows linearly with active process records; re-profile before exceeding 200 hosts or if browser transfer becomes visible. |
+| State and serialization | Strong, with a clear scale trigger | The reproducible 200-host/1,600-GPU/6,400-process fixture built a 2.86 MiB snapshot. Cold JSON serialization measured 7.35–7.64 ms median; revision-cached JSON and OpenMetrics retrieval measured about 0.002 ms median. Restoring a copy of a 476 MB live history (2 million GPU points) takes 0.4 s through the tables' primary keys, down from 2.85 s idle and 9–18 s under writer contention. | The full snapshot grows linearly with active process records; re-profile before exceeding 200 hosts or if browser transfer becomes visible. |
 | Browser responsiveness | Strong for current bounded views | The 65,536-process browser fixture retained only 200 search rows. Two consecutive runs measured 90.4–96.0 ms cold search, 26.9–30.6 ms bounded warm medians, 1.6–1.7 ms cold GPU-summary derivation, and at most 0.1 ms cached summary medians. | Browser timings are diagnostic, not CI thresholds; low-power clients need separate profiling. |
 | Memory and retention | Bounded by design and acceptable in measured deployments | Production observation measured 31.7 MiB main-process RSS. The synthetic large fixture attributed 10.30 MiB to `StateStore`; a bounded 20-host/160-GPU retention soak changed traced allocation by 12.9 KiB (0.37%) after stabilization. | The synthetic process RSS of 73.02 MiB includes the fixture, payloads, tracing, and interpreter, so it is not an idle-service claim. Multi-day live soak remains environment-specific release evidence. |
 | Robustness | Strong defense-in-depth | Probe deadlines, output caps, process-group cancellation, per-host isolation, bounded queues, authenticated HTTP, framing/authority checks, and persistence failure isolation have focused unit and integration coverage. | Correct configuration, private capability storage, OpenSSH host verification, and protected transport remain operator responsibilities. |
@@ -102,7 +102,7 @@ The verification surface intentionally includes more than happy-path unit tests:
   layout, keyboard focus, bounded process views, filters, drill-down, copy
   actions, and global search transitions.
 
-The 2026-09-05 Python 3.14 run executed 555 tests and measured 89% combined
+The 2026-09-05 Python 3.14 run executed 559 tests and measured 89% combined
 statement/branch coverage with Coverage.py 7.15.4 (the 2026-08-16 0.9.0 baseline
 was 467 tests at 88%). CI enforces a conservative 85% floor as a
 regression signal; the focused contracts and failure-injection oracles remain
