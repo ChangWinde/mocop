@@ -110,6 +110,10 @@ class IncidentPolicy(Protocol):
 
     def retain_hosts(self, hosts: set[str]) -> None: ...
 
+    def recovery_cycles(self) -> int:
+        """Healthy samples a restored condition needs before it resolves."""
+        ...
+
 
 class ThresholdIncidentPolicy:
     """Converts one probe result into stable, actionable incident conditions."""
@@ -477,6 +481,9 @@ class ThresholdIncidentPolicy:
                 )
         return conditions
 
+    def recovery_cycles(self) -> int:
+        return self._incidents.recovery_cycles
+
     def observed_domains(self, result: ProbeResult) -> frozenset[str]:
         """Telemetry domains for which this sample carries fresh, valid data.
 
@@ -594,9 +601,14 @@ class IncidentTracker:
         # and the first live sample confirms, recovers, or freezes them under
         # the same rules as any later sample. A host with restored conditions
         # therefore skips first-sample initialization.
+        recovery_cycles = policy.recovery_cycles()
         for restored in open_incidents:
             host, key = restored.host, restored.condition.key
-            self._active.setdefault(host, {})[key] = restored.condition
+            # The persisted transition does not carry cycle counts; recovery
+            # of a restored condition follows the configured policy.
+            self._active.setdefault(host, {})[key] = replace(
+                restored.condition, recovery_cycles=recovery_cycles
+            )
             self._candidates.setdefault(host, {})
             self._recoveries.setdefault(host, {})
             self._severity_changes.setdefault(host, {})

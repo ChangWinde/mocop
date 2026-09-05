@@ -399,6 +399,28 @@ class IncidentTrackerTests(unittest.TestCase):
         tracker.remove_hosts({"node-b"})
         self.assertEqual(tracker.snapshot(20)["active"], [])
 
+        # The persisted transition carries no cycle counts, so recovery of a
+        # restored condition follows the configured policy, not a default.
+        patient = IncidentTracker(
+            ThresholdIncidentPolicy(
+                ThresholdConfig(), incidents=IncidentConfig(recovery_cycles=4)
+            ),
+            20,
+            open_incidents=(restored,),
+        )
+        healthy = ProbeResult(
+            "node-a",
+            "online",
+            1,
+            system=system(20, 20),
+            observed_at="2026-08-09T02:00:00Z",
+        )
+        for _ in range(3):
+            self.assertEqual(patient.update(healthy), ())
+        self.assertEqual(
+            [event.state for event in patient.update(healthy)], ["resolved"]
+        )
+
     def test_only_condition_and_severity_transitions_create_events(self) -> None:
         warning = ProbeResult("node-a", "online", 1, (gpu(82),), system=system(90, 90))
         self.tracker.update(warning)
