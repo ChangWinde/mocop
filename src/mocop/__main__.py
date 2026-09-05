@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import secrets
 import shlex
@@ -10,7 +11,15 @@ import sys
 import threading
 from pathlib import Path
 
-from .config import ConfigError, load_config, load_private_config, resolve_config_path
+from . import __version__
+from . import client as api_client
+from .config import (
+    ConfigError,
+    MonitorConfig,
+    load_config,
+    load_private_config,
+    resolve_config_path,
+)
 from .discovery import OpenSshConfigHostSource
 from .doctor import run_doctor
 from .inventory import ConfigInventory
@@ -18,7 +27,6 @@ from .lifecycle import (
     LifecycleError,
     UserServiceManager,
     access_token_path,
-    ensure_access_token,
     initialize_config,
     read_access_token,
     user_config_path,
@@ -41,9 +49,81 @@ from .updates import UpdateManager
 from .web import MonitorHttpServer
 
 
+def _add_target_identity_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    local_host_help: str,
+    without_local_flag: str,
+    without_local_help: str,
+    auto_discover_default: bool | None,
+) -> None:
+    """Options shared by ``deploy`` and ``migrate`` for the new machine's identity."""
+    identity = parser.add_mutually_exclusive_group()
+    identity.add_argument("--local-host", metavar="ALIAS", help=local_host_help)
+    identity.add_argument(
+        without_local_flag, action="store_true", help=without_local_help
+    )
+    parser.add_argument(
+        "--display-name",
+        help="dashboard label for the local host; presentation only",
+    )
+    parser.add_argument(
+        "--ssh-config",
+        default="~/.ssh/config",
+        help="OpenSSH client configuration to scan for aliases (default: %(default)s)",
+    )
+    admission = parser.add_mutually_exclusive_group()
+    admission.add_argument(
+        "--auto-discover",
+        dest="auto_discover",
+        action="store_true",
+        help="admit safe aliases from the SSH config automatically",
+    )
+    admission.add_argument(
+        "--no-auto-discover",
+        dest="auto_discover",
+        action="store_false",
+        help="monitor only the explicitly listed hosts",
+    )
+    parser.set_defaults(auto_discover=auto_discover_default)
+
+
+def _add_json_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--json", action="store_true", help="write a machine-readable report"
+    )
+
+
+def _emit_json(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _cli_failure(
+    message: str,
+    *,
+    as_json: bool,
+    code: str,
+    prefix: str,
+) -> int:
+    if as_json:
+        _emit_json({"ok": False, "code": code, "error": message})
+    else:
+        print(f"{prefix}: {message}", file=sys.stderr)
+    return 2
+
+
 def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="mocop: AI-native GPU cluster monitor over OpenSSH."
+        prog="mocop",
+        description=(
+            "mocop: AI-native GPU cluster monitor over OpenSSH. "
+            "HTTP contract: GET /api/meta."
+        ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "--config",
@@ -96,6 +176,7 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="SSH_ALIAS",
         help="SSH host alias to monitor; repeat for multiple servers",
     )
+    _add_json_flag(init_parser)
 
     deploy_parser = commands.add_parser(
         "deploy", help="configure and start Mocop on a fresh monitoring server"
@@ -114,43 +195,45 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="SSH_ALIAS",
         help="explicit SSH alias to monitor; repeat for multiple servers",
     )
-    deploy_identity = deploy_parser.add_mutually_exclusive_group()
-    deploy_identity.add_argument("--local-host", metavar="ALIAS")
-    deploy_identity.add_argument(
-        "--no-local", action="store_true", help="do not monitor this server locally"
+    _add_target_identity_arguments(
+        deploy_parser,
+        local_host_help=(
+            "safe alias that identifies this machine in the inventory "
+            "(default: the current hostname)"
+        ),
+        without_local_flag="--no-local",
+        without_local_help="do not monitor this server locally",
+        auto_discover_default=True,
     )
-    deploy_parser.add_argument("--display-name")
-    deploy_parser.add_argument("--ssh-config", default="~/.ssh/config")
-    deploy_admission = deploy_parser.add_mutually_exclusive_group()
-    deploy_admission.add_argument(
-        "--auto-discover", dest="auto_discover", action="store_true"
-    )
-    deploy_admission.add_argument(
-        "--no-auto-discover", dest="auto_discover", action="store_false"
-    )
-    deploy_parser.set_defaults(auto_discover=True)
+    _add_json_flag(deploy_parser)
 
     migrate_parser = commands.add_parser(
         "migrate", help="generate a new private config from another installation"
     )
-    migrate_parser.add_argument("--from-config", type=Path, required=True)
+    migrate_parser.add_argument(
+        "--from-config",
+        type=Path,
+        required=True,
+        help="existing configuration to migrate; it is read, never modified",
+    )
     migrate_parser.add_argument(
         "--config",
         type=Path,
         default=argparse.SUPPRESS,
         help="new configuration path; it must not already exist",
     )
-    local_identity = migrate_parser.add_mutually_exclusive_group()
-    local_identity.add_argument("--local-host", metavar="ALIAS")
-    local_identity.add_argument("--drop-local-host", action="store_true")
-    migrate_parser.add_argument("--display-name")
-    migrate_parser.add_argument("--ssh-config", default="~/.ssh/config")
-    admission = migrate_parser.add_mutually_exclusive_group()
-    admission.add_argument("--auto-discover", dest="auto_discover", action="store_true")
-    admission.add_argument(
-        "--no-auto-discover", dest="auto_discover", action="store_false"
+    # None keeps the source installation's auto_discover policy.
+    _add_target_identity_arguments(
+        migrate_parser,
+        local_host_help=(
+            "safe alias for this machine when the source monitored itself "
+            "(default: the current hostname)"
+        ),
+        without_local_flag="--drop-local-host",
+        without_local_help="the new monitor must not collect from itself",
+        auto_discover_default=None,
     )
-    migrate_parser.set_defaults(auto_discover=None)
+    _add_json_flag(migrate_parser)
 
     config_parser = commands.add_parser(
         "config", help="inspect the monitor configuration"
@@ -169,21 +252,35 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         default=argparse.SUPPRESS,
         help="configuration path to validate",
     )
+    _add_json_flag(check_parser)
 
     service_parser = commands.add_parser(
         "service", help="manage the user-level systemd service"
     )
     service_actions = service_parser.add_subparsers(dest="action", required=True)
-    install_parser = service_actions.add_parser("install")
+    install_parser = service_actions.add_parser(
+        "install",
+        help=(
+            "generate, enable, start, and verify the user unit, then print the "
+            "dashboard capability URL"
+        ),
+    )
     install_parser.add_argument(
         "--config",
         type=Path,
         default=argparse.SUPPRESS,
         help="configuration used by the service",
     )
+    _add_json_flag(install_parser)
     # status and uninstall operate on the fixed unit; they take no --config.
-    service_actions.add_parser("status")
-    service_actions.add_parser("uninstall")
+    status_parser = service_actions.add_parser(
+        "status", help="show systemd status for the generated unit"
+    )
+    _add_json_flag(status_parser)
+    uninstall_parser = service_actions.add_parser(
+        "uninstall", help="stop and remove the generated unit only"
+    )
+    _add_json_flag(uninstall_parser)
 
     doctor_parser = commands.add_parser(
         "doctor",
@@ -224,16 +321,60 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
             "latency, GPU and process counts, and workload coverage"
         ),
     )
-    doctor_parser.add_argument(
-        "--json", action="store_true", help="write a machine-readable report"
+    _add_json_flag(doctor_parser)
+
+    api_parser = commands.add_parser(
+        "api",
+        help=(
+            "GET one public or authenticated route from the running service "
+            "and write the response body to stdout"
+        ),
+        description=(
+            "Read the running monitor without spelling the listen address or "
+            "the Bearer header: the listener comes from the configuration and "
+            "the capability from the private access-token file beside it. "
+            "Routes the dashboard reserves for itself (reader and writer tiers) "
+            "are refused with DASHBOARD_ONLY. /api/events streams until "
+            "interrupted. Exit 0 on a 2xx, 1 on any other HTTP status or an "
+            "unreachable service, 2 on a usage or configuration problem; a "
+            "non-zero exit always leaves a JSON error envelope on stdout."
+        ),
+    )
+    api_parser.add_argument(
+        "path",
+        metavar="PATH",
+        help="absolute API path with optional query, e.g. /api/capacity?gpus=2",
+    )
+    api_parser.add_argument(
+        "--config",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="configuration naming the listener and the access-token location",
+    )
+    api_parser.add_argument(
+        "--token-file",
+        type=Path,
+        default=None,
+        help="capability file (default: the access-token file beside the config)",
+    )
+    api_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        metavar="SECONDS",
+        help="socket timeout for the request (default: 10)",
     )
     return parser.parse_args(argv)
 
 
 def _run_monitor(args: argparse.Namespace) -> int:
-    if args.managed_service and args.config is None:
+    if args.managed_service and (args.config is None or args.access_token_file is None):
+        # The generated unit always passes both. A unit predating the
+        # capability (0.8.x) must be regenerated with `mocop service install`
+        # rather than silently minting a token nobody was shown.
         print(
-            "Configuration error: --managed-service requires --config",
+            "Configuration error: --managed-service requires --config and "
+            "--access-token-file; re-run `mocop service install`",
             file=sys.stderr,
         )
         return 2
@@ -251,20 +392,10 @@ def _run_monitor(args: argparse.Namespace) -> int:
     except (ConfigError, RuntimeError, UnicodeError, OSError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
-    access_token = None
-    token_path = args.access_token_file
-    if args.managed_service and token_path is None:
-        # Units installed before capability authentication was introduced do
-        # not carry --access-token-file. Derive and create the same private
-        # per-install file so a package upgrade cannot crash-loop the service.
+    access_token = ""
+    if args.access_token_file is not None:
         try:
-            token_path = ensure_access_token(config_path)
-        except LifecycleError as exc:
-            print(f"Configuration error: {exc}", file=sys.stderr)
-            return 2
-    if token_path is not None:
-        try:
-            access_token = read_access_token(token_path)
+            access_token = read_access_token(args.access_token_file)
         except LifecycleError as exc:
             print(f"Configuration error: {exc}", file=sys.stderr)
             return 2
@@ -322,8 +453,6 @@ def _run_monitor(args: argparse.Namespace) -> int:
         state=state,
     )
     if args.once:
-        import json
-
         monitor.poll_once()
         snapshot = state.snapshot()
         print(json.dumps(snapshot, ensure_ascii=False, indent=2))
@@ -429,8 +558,12 @@ def _run_doctor(args: argparse.Namespace) -> int:
         config_path = resolve_config_path(args.config)
         config = load_config(config_path)
     except ConfigError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
-        return 2
+        return _cli_failure(
+            str(exc),
+            as_json=args.json,
+            code=exc.code,
+            prefix="Configuration error",
+        )
     return run_doctor(
         config,
         host_filter=tuple(args.hosts),
@@ -446,51 +579,132 @@ def _environment_state(name: str) -> str:
     return "set" if os.environ.get(name) else "unset"
 
 
+def _config_check_report(config_path: Path, config: MonitorConfig) -> dict[str, object]:
+    """One report feeds both renderers; it names environment variables, never values."""
+    if config.topology is not None:
+        topology: dict[str, object] = {
+            "source": "configured",
+            "links": len(config.topology.links),
+        }
+    elif config.ssh_discovery.mode == "topology":
+        topology = {"source": "resolved", "links": None}
+    else:
+        topology = {"source": "none", "links": None}
+    return {
+        "configPath": str(config_path),
+        "hosts": len(config.hosts),
+        "localHost": config.local_host,
+        "sshDiscovery": {
+            "mode": config.ssh_discovery.mode,
+            "refreshSeconds": config.ssh_discovery.refresh_seconds,
+            "resolveTimeoutSeconds": config.ssh_discovery.resolve_timeout_seconds,
+        },
+        "persistence": config.persistence.enabled,
+        "workloads": config.workloads.mode,
+        "topology": topology,
+        "updates": config.updates.mode,
+        "listen": {"host": config.listen_host, "port": config.listen_port},
+        "webhooks": [
+            {
+                "name": webhook.name,
+                "urlEnv": webhook.url_env,
+                "urlEnvState": _environment_state(webhook.url_env),
+                "secretEnv": webhook.secret_env,
+                "secretEnvState": (
+                    _environment_state(webhook.secret_env)
+                    if webhook.secret_env is not None
+                    else None
+                ),
+            }
+            for webhook in config.webhooks
+        ],
+    }
+
+
+def _print_config_check_report(report: dict[str, object]) -> None:
+    print(f"configuration OK: {report['configPath']}")
+    local_note = f" (local: {report['localHost']})" if report["localHost"] else ""
+    print(f"hosts: {report['hosts']}{local_note}")
+    discovery = report["sshDiscovery"]
+    assert isinstance(discovery, dict)
+    print(
+        f"ssh discovery: {discovery['mode']} "
+        f"(refresh {discovery['refreshSeconds']}s, "
+        f"resolve timeout {discovery['resolveTimeoutSeconds']:g}s)"
+    )
+    print(f"persistence: {'enabled' if report['persistence'] else 'disabled'}")
+    print(f"workloads: {report['workloads']}")
+    print(f"updates: {report['updates']}")
+    topology = report["topology"]
+    assert isinstance(topology, dict)
+    if topology["source"] == "configured":
+        print(f"topology: configured ({topology['links']} links)")
+    elif topology["source"] == "resolved":
+        print("topology: resolved from SSH at runtime")
+    else:
+        print("topology: none")
+    webhooks = report["webhooks"]
+    assert isinstance(webhooks, list)
+    if not webhooks:
+        print("webhooks: none")
+        return
+    print(f"webhooks: {len(webhooks)}")
+    for webhook in webhooks:
+        references = [f"url_env {webhook['urlEnv']} ({webhook['urlEnvState']})"]
+        if webhook["secretEnv"] is not None:
+            references.append(
+                f"secret_env {webhook['secretEnv']} ({webhook['secretEnvState']})"
+            )
+        print(f"  {webhook['name']}: {', '.join(references)}")
+
+
+def _run_api(args: argparse.Namespace) -> int:
+    """Forward one GET to the running service; the body is the whole output."""
+    try:
+        response = api_client.request(
+            args.path,
+            config_path=args.config,
+            token_file=args.token_file,
+            timeout=args.timeout,
+        )
+        api_client.write_response(response, sys.stdout.buffer)
+    except api_client.ApiClientError as exc:
+        # Also reached when a followed event stream falls silent: the frames
+        # already written are complete, and the envelope follows them.
+        _emit_json({"error": str(exc), "code": exc.code})
+        return exc.exit_code
+    except KeyboardInterrupt:
+        # Ctrl-C on an event stream is the normal way to stop following it.
+        return 0
+    except BrokenPipeError:
+        # `mocop api ... | head` closed the pipe; hand stdout to /dev/null so
+        # the interpreter's final flush cannot raise the same error again.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
+    return 0 if 200 <= response.status < 300 else 1
+
+
 def _run_config_check(args: argparse.Namespace) -> int:
     """Parse and validate only: no web server, no SSH connections."""
     try:
         config_path = resolve_config_path(args.config)
         config = load_config(config_path)
     except ConfigError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
-        return 2
-    print(f"configuration OK: {config_path}")
-    local_note = f" (local: {config.local_host})" if config.local_host else ""
-    print(f"hosts: {len(config.hosts)}{local_note}")
-    print(
-        "ssh discovery: "
-        f"{config.ssh_discovery.mode} "
-        f"(refresh {config.ssh_discovery.refresh_seconds}s, "
-        f"resolve timeout {config.ssh_discovery.resolve_timeout_seconds:g}s)"
-    )
-    print(f"persistence: {'enabled' if config.persistence.enabled else 'disabled'}")
-    print(f"workloads: {config.workloads.mode}")
-    if config.topology is None:
-        print(
-            "topology: resolved from SSH at runtime"
-            if config.ssh_discovery.mode == "topology"
-            else "topology: none"
+        return _cli_failure(
+            str(exc),
+            as_json=args.json,
+            code=exc.code,
+            prefix="Configuration error",
         )
+    report = _config_check_report(config_path, config)
+    if args.json:
+        _emit_json({"ok": True, **report})
     else:
-        print(f"topology: configured ({len(config.topology.links)} links)")
-    if not config.webhooks:
-        print("webhooks: none")
-        return 0
-    print(f"webhooks: {len(config.webhooks)}")
-    for webhook in config.webhooks:
-        references = [
-            f"url_env {webhook.url_env} ({_environment_state(webhook.url_env)})"
-        ]
-        if webhook.secret_env is not None:
-            references.append(
-                f"secret_env {webhook.secret_env} "
-                f"({_environment_state(webhook.secret_env)})"
-            )
-        print(f"  {webhook.name}: {', '.join(references)}")
+        _print_config_check_report(report)
     return 0
 
 
-def _install_service(config_path: Path) -> int:
+def _install_service(config_path: Path, *, as_json: bool) -> int:
     manager = UserServiceManager(
         config_path=config_path,
         unit_path=user_unit_path(),
@@ -519,22 +733,45 @@ def _install_service(config_path: Path) -> int:
         raise
     if not active or not healthy:
         manager.rollback_install()
-        print("Service did not become healthy; the previous unit was restored")
-        print("Inspect it with: systemctl --user status mocop")
-        print("Logs: journalctl --user -u mocop -f")
+        if as_json:
+            _emit_json(
+                {
+                    "ok": False,
+                    "code": "SERVICE_UNHEALTHY",
+                    "error": (
+                        "Service did not become healthy; the previous unit was restored"
+                    ),
+                    "configPath": str(config_path),
+                }
+            )
+        else:
+            print("Service did not become healthy; the previous unit was restored")
+            print("Inspect it with: systemctl --user status mocop")
+            print("Logs: journalctl --user -u mocop -f")
         return 1
     assert token is not None
     manager.commit_install()
-    print(f"Installed and started {manager.unit_path}")
-    print(
-        f"Dashboard: {_http_url(config.listen_host, config.listen_port)}"
-        f"#access_token={token}"
+    dashboard_url = (
+        f"{_http_url(config.listen_host, config.listen_port)}#access_token={token}"
     )
+    if as_json:
+        _emit_json(
+            {
+                "ok": True,
+                "unitPath": str(manager.unit_path),
+                "dashboardUrl": dashboard_url,
+                "configPath": str(config_path),
+            }
+        )
+        return 0
+    print(f"Installed and started {manager.unit_path}")
+    print(f"Dashboard: {dashboard_url}")
     print("Logs: journalctl --user -u mocop -f")
     return 0
 
 
 def _run_lifecycle(args: argparse.Namespace) -> int:
+    as_json = args.json
     if args.command == "migrate":
         target = args.config or user_config_path()
         result = migrate_config(
@@ -547,6 +784,26 @@ def _run_lifecycle(args: argparse.Namespace) -> int:
             ssh_config=args.ssh_config,
             auto_discover=args.auto_discover,
         )
+        target_argument = shlex.quote(str(result.target))
+        next_steps = (
+            f"mocop config check --config {target_argument}",
+            f"mocop doctor --no-connect --config {target_argument}",
+            f"mocop service install --config {target_argument}",
+        )
+        if as_json:
+            _emit_json(
+                {
+                    "ok": True,
+                    "target": str(result.target),
+                    "source": str(result.source),
+                    "oldLocalHost": result.old_local_host,
+                    "newLocalHost": result.new_local_host,
+                    "autoDiscover": result.auto_discover,
+                    "droppedFields": list(result.dropped_fields),
+                    "next": list(next_steps),
+                }
+            )
+            return 0
         print(f"Migrated configuration: {result.target}")
         print(f"Source preserved: {result.source}")
         if result.old_local_host or result.new_local_host:
@@ -561,15 +818,25 @@ def _run_lifecycle(args: argparse.Namespace) -> int:
         if result.dropped_fields:
             print(f"Dropped old-machine metadata: {', '.join(result.dropped_fields)}")
         print("No capability, secrets, service unit, or history was copied.")
-        target_argument = shlex.quote(str(result.target))
-        print(f"Next: mocop config check --config {target_argument}")
-        print(f"Then: mocop doctor --no-connect --config {target_argument}")
-        print(f"Then: mocop service install --config {target_argument}")
+        print(f"Next: {next_steps[0]}")
+        print(f"Then: {next_steps[1]}")
+        print(f"Then: {next_steps[2]}")
         return 0
 
     if args.command == "init":
         path = args.config or user_config_path()
         created = initialize_config(path, args.hosts)
+        next_steps = ("mocop doctor", "mocop service install")
+        if as_json:
+            _emit_json(
+                {
+                    "ok": True,
+                    "configPath": str(created),
+                    "hostsAdded": len(args.hosts),
+                    "next": list(next_steps),
+                }
+            )
+            return 0
         print(f"Created configuration: {created}")
         if not args.hosts:
             print("Add SSH host aliases to the hosts list before starting mocop.")
@@ -603,23 +870,31 @@ def _run_lifecycle(args: argparse.Namespace) -> int:
             ssh_config=args.ssh_config,
             auto_discover=args.auto_discover,
         )
-        print(f"Fresh deployment configuration: {created}")
-        result = _install_service(created)
-        if result != 0:
+        if not as_json:
+            print(f"Fresh deployment configuration: {created}")
+        result = _install_service(created, as_json=as_json)
+        if result != 0 and not as_json:
             print(f"Configuration retained for diagnosis: {created}")
         return result
 
     config_path = args.config or user_config_path()
     if args.action == "install":
-        return _install_service(config_path)
+        return _install_service(config_path, as_json=as_json)
     manager = UserServiceManager(
         config_path=config_path,
         unit_path=user_unit_path(),
         python_executable=Path(sys.executable),
     )
     if args.action == "status":
+        if as_json:
+            report = manager.inspect()
+            _emit_json({"ok": True, **report})
+            return 0 if report["active"] else 1
         return manager.status()
     manager.uninstall()
+    if as_json:
+        _emit_json({"ok": True, "unitPath": str(manager.unit_path)})
+        return 0
     print(f"Stopped and removed {manager.unit_path}")
     return 0
 
@@ -631,11 +906,19 @@ def _http_url(host: str, port: int) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
+    if args.command is not None and (args.once or args.strict):
+        print(
+            "--once and --strict apply only to the default monitor command",
+            file=sys.stderr,
+        )
+        return 2
     if args.strict and not args.once:
         print("--strict requires --once", file=sys.stderr)
         return 2
     if args.command is None:
         return _run_monitor(args)
+    if args.command == "api":
+        return _run_api(args)
     if args.command == "config":
         return _run_config_check(args)
     if args.command == "doctor":
@@ -643,8 +926,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _run_lifecycle(args)
     except LifecycleError as exc:
-        print(f"Setup error: {exc}", file=sys.stderr)
-        return 2
+        return _cli_failure(
+            str(exc), as_json=args.json, code=exc.code, prefix="Setup error"
+        )
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@
 
 Mocop is a local web dashboard for NVIDIA GPU clusters. It uses existing OpenSSH aliases to collect GPU, CPU, memory, swap, disk, and network data, then streams each host result to the browser as soon as it completes.
 
-Remote hosts need no agent, database, Python installation, or monitoring port. They need Linux `/proc` and `nvidia-smi` for NVIDIA GPU data. Mocop itself uses the Python standard library and the system OpenSSH client.
+Remote hosts need no agent, database, Python installation, or monitoring port. They need Linux `/proc`; `nvidia-smi` is required only for NVIDIA GPU data, and a host without it reports its system metrics with GPU status `no_nvidia_smi`. Mocop itself uses the Python standard library and the system OpenSSH client.
 
 Here, **AI-native** means that the interface is built around GPU capacity, task placement, and failure diagnosis. Mocop does not call an AI service or upload telemetry.
 
@@ -51,17 +51,17 @@ English README, API, operations, and engineering references remain maintained.
 
 - GPU utilization, VRAM, temperature, power, model, driver, hardware health, and
   scan-friendly per-GPU process summaries
-- GPU capacity matching plus a capacity watch: a banner and opt-in
-  notification fire when idle GPUs satisfy it, plus scheduling heatmap,
-  connection map, program search, process filters, attribution filters,
-  `ssh` copy, and CSV export
+- GPU capacity matching in the dashboard and as `GET /api/capacity` for
+  agents, plus a capacity watch whose banner and opt-in notification fire when
+  idle GPUs satisfy it; scheduling heatmap, connection map, program search,
+  process and attribution filters, `ssh` copy, and CSV export
 - CPU, load, memory, swap, disk capacity and I/O, network rate, uptime, and kernel pressure stall (PSI) telemetry
-- Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, and timed maintenance
-- Independent per-host scheduling, possible shared-path grouping, and optional HTTPS webhooks
+- Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, timed maintenance
+- Independent per-host scheduling, shared-path grouping, optional HTTPS webhooks
 - Config-backed host inventory, expected GPU counts, local-host collection, and host groups
-- Per-GPU trends and process timelines, with optional bounded SQLite retention and read-only Slurm/Kubernetes/Docker/Podman context
+- Per-GPU trends and process timelines, optional bounded SQLite retention, read-only Slurm/Kubernetes/Docker/Podman context
 - Per-owner GPU occupancy and idle-share rollups over a selectable window
-- Six visual styles, six independent accents, compact mode, saved ordering, and validated local backgrounds
+- Six visual styles, six accents, compact mode, saved ordering, validated local backgrounds
 - Opt-in release checks and one-click verified self-update
 - OpenMetrics 1.0 endpoint for Prometheus and Grafana
 
@@ -100,7 +100,11 @@ ssh gpu-node-01 true
 ssh -o BatchMode=yes gpu-node-01 true
 ```
 
-Keep `ProxyJump`, `ProxyCommand`, ports, users, and identities in OpenSSH. New configurations use bounded, connection-free `ssh -G` resolution to identify proxy aliases, keep automatically discovered jump hosts out of the probe inventory, build the display topology, and group targets by their closest jump alias. Direct targets sharing a numbered alias prefix (such as `gpu-1` and `gpu-2`) form a fallback group. Explicit hosts, exclusions, groups, and configured topology override inference. Git remotes remain filtered separately.
+Keep `ProxyJump`, `ProxyCommand`, ports, users, and identities in OpenSSH. New configurations resolve aliases with bounded, connection-free `ssh -G` and infer from the result:
+
+- automatically discovered jump hosts stay out of the probe inventory;
+- targets are grouped by their closest jump alias, or by a shared numbered prefix (`gpu-1`, `gpu-2`) when direct;
+- explicit hosts, exclusions, groups, and a configured topology always override inference; Git remotes are filtered separately.
 
 ### 2. Install and deploy
 
@@ -109,7 +113,7 @@ uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.11.0"
 "$(uv tool dir --bin)/mocop" deploy --display-name monitor-0
 ```
 
-`mocop deploy` needs no inventory JSON on a fresh server: it creates a `0600` config, monitors the current machine locally, discovers safe aliases from `~/.ssh/config`, excludes resolved jump hosts, enables topology grouping, and installs and verifies the user service. The explicit bin path works before a new shell picks up uv's tool directory. The command refuses existing config or capability state; use `mocop service install` for an existing setup.
+`mocop deploy` needs no inventory JSON on a fresh server: it creates a `0600` config, monitors the current machine locally, discovers safe aliases from `~/.ssh/config`, and installs and verifies the user service. The explicit bin path works before a new shell picks up uv's tool directory; later commands assume a new shell (or `uv tool update-shell`). Deploy refuses an existing `config.json`, `access-token`, or `environment` file — use `mocop service install` for an existing setup — and without a systemd user manager (containers, some WSL setups) run `mocop init` plus a foreground `mocop` instead.
 
 ### 3. Validate the deployment and SSH path
 
@@ -118,23 +122,17 @@ mocop config check
 mocop doctor
 ```
 
-`mocop config check` parses and validates the configuration without starting the web server or opening any SSH connection. It reports the resolved config path, host count, persistence/workload/topology state, and each webhook's environment-variable names with their set/unset status — never their values. It exits `0` when the configuration is valid and `2` when it is not.
+`mocop config check` validates the configuration without a web server or SSH connection, reports the resolved path, host count, and persistence/workload/topology/webhook state (never secret values), and exits `0` when valid or `2` when not.
 
-`mocop doctor` then verifies non-interactive SSH reachability and connection reuse for every monitored alias (exit `0` when every alias is usable, `1` otherwise).
+`mocop doctor` then verifies non-interactive SSH reachability and connection reuse for every monitored alias: exit `0` when every alias is usable, `1` when at least one failed, `2` for a configuration or usage error. Both accept `--json`; the [operations runbook](docs/OPERATIONS.md#command-reference-and-exit-codes) lists every command, flag, and exit code.
 
 ### 4. Open the dashboard
 
-Open the exact `Dashboard:` capability URL printed by `mocop deploy`, for example `http://127.0.0.1:8787/#access_token=...`. The fragment is not sent over HTTP;
-the page removes it immediately and keeps the capability in tab-scoped
-`sessionStorage`, so reloads and the managed restart flow remain authenticated.
-Closing the tab or opening an independent tab requires the printed URL again. Deployment installs,
-enables, starts, and verifies a user-level systemd service. It does not change
-the system linger policy.
-
-A bare dashboard or trusted forwarded URL now opens a token prompt instead of an
-empty dashboard. Paste the contents of the managed `access-token` file; Mocop
-validates it before storing it in the tab session. Invalid credentials are neither
-retained nor retried automatically.
+Open the exact `Dashboard:` capability URL printed by `mocop deploy`, for example `http://127.0.0.1:8787/#access_token=...`. The page keeps the capability in tab-scoped
+`sessionStorage`, so reloads stay authenticated; a new tab either needs the printed
+URL again or prompts for the contents of the `access-token` file beside the
+configuration (`~/.config/mocop/access-token` by default). The
+[API reference](docs/API.md#scope-and-compatibility) owns the capability rules.
 
 Run `mocop` for a foreground process, or manage the service with:
 
@@ -162,7 +160,9 @@ disabled by default. After a manual edit, run `mocop config check` and follow th
 - Search from **All servers** for programs across the fleet, or select a server to
   scope by process, command, PID, owner, workload, queue, host, model, or UUID.
 - Scan process count, largest allocation, memory coverage, and freshness in the
-  main GPU table; open a GPU for bounded process filters, sorting, and copy actions.
+  main GPU table; open a GPU for task rows led by the real entry point (for example
+  `train.dragon_video2motion` rather than `python`), environment and footprint
+  chips, click-to-expand command lines, bounded filters, sorting, and copy actions.
 - Open incidents for evidence and acknowledgement/silence, or schedule maintenance
   while collection continues.
 - Use **Probe now**, **Match capacity**, and **Settings → Monitored nodes** for the
@@ -172,19 +172,20 @@ disabled by default. After a manual edit, run `mocop config check` and follow th
 
 ## HTTP API
 
-Everything the dashboard shows is also a small JSON API with stable
-machine-readable error codes, a public self-describing `GET /api/meta` endpoint,
-and P/A/R/W access tiers. Telemetry, SSE, and OpenMetrics require the
-per-install Bearer capability; only API discovery and health/readiness are
-public. See the [API reference](docs/API.md) for authenticated curl examples,
-every endpoint and field, and why non-viewer automation must not send the
-`X-Monitor-Request: dashboard` header.
+Everything the dashboard shows is also a small JSON API with stable error codes
+and P/A/R/W access tiers. `GET /api/meta` names every route's tier, query
+bounds, POST body fields, error-code catalog, and documentation URL; a `403`
+says where the capability lives. On the monitor host, `mocop api PATH` performs
+any public or authenticated GET with the listener and capability taken from the
+configuration. Only discovery and health are public; the
+[API reference](docs/API.md) has curl examples and explains why non-viewer
+automation must not send `X-Monitor-Request: dashboard`.
 
 ## Metrics and troubleshooting
 
 Authenticated `GET /metrics` exports the current snapshot as OpenMetrics 1.0
-without starting a probe. The [API reference](docs/API.md) owns the Prometheus
-configuration and metric contract. These commands cover the first diagnosis:
+without starting a probe; the [API reference](docs/API.md) owns the metric
+contract. First diagnosis:
 
 ```bash
 journalctl --user -u mocop -f              # follow the service logs live
@@ -194,19 +195,18 @@ mocop doctor --probe                       # one bounded production probe per al
 ```
 
 Hosts are scheduled independently; failed samples stay visibly stale and retry
-with bounded backoff. See [Operations](docs/OPERATIONS.md) for service recovery and
-exit codes, and [Performance](docs/PERFORMANCE.md) before changing cadence or
-concurrency.
+with bounded backoff. See [Operations](docs/OPERATIONS.md) for recovery and exit
+codes, and [Performance](docs/PERFORMANCE.md) before changing cadence.
 
 ## Security
 
 Mocop accepts only explicit SSH aliases and runs one fixed, read-only probe. It enforces host-key checking, batch mode, timeouts, output limits, bounded concurrency, private atomic configuration writes, and safe rendering of remote text.
 
-The service has no built-in user accounts and listens on `127.0.0.1` by default.
-A private per-install Bearer capability protects telemetry, metrics, SSE, and
-writes from unrelated local users, but grants one complete operator role. If you
-expose Mocop remotely, use authenticated TLS or a private VPN: a Bearer header
-over plain HTTP has no network confidentiality or server authentication.
+The service has no user accounts and listens on `127.0.0.1` by default. A
+private per-install Bearer capability protects every private route from other
+local users but grants one complete operator role. Expose Mocop remotely only
+behind authenticated TLS or a private VPN: Bearer over plain HTTP has no
+network confidentiality or server authentication.
 
 Read the [threat model](docs/SECURITY.md) and [security policy](.github/SECURITY.md) before changing a trust boundary.
 
@@ -230,13 +230,11 @@ canonical ownership, update triggers, language policy, and ADR lifecycle.
 
 ```bash
 python3 -m unittest discover -s tests -t . -p 'test_*.py'
-uvx --from ruff==0.12.11 ruff check .
-uvx --from ruff==0.12.11 ruff format --check .
-for t in capacity_match capacity_watch csv_export dashboard_auth process_search update_pill; do node "tests/${t}_test.mjs"; done
-node --experimental-websocket tests/browser_smoke.mjs
 ```
 
-See [CONTRIBUTING.md](.github/CONTRIBUTING.md) before changing code, tests,
+[CONTRIBUTING.md](.github/CONTRIBUTING.md) owns the complete quality-gate list
+(lint, coverage, browser leaf contracts, and the real-browser smoke test) and
+the commit and documentation rules; read it before changing code, tests,
 documentation, or public contracts.
 
 ## License

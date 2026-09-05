@@ -21,6 +21,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import TextIO
 
+from . import probe
 from .config import MonitorConfig, is_safe_alias
 from .discovery import OpenSshConfigHostSource
 from .lifecycle import user_unit_path
@@ -31,13 +32,30 @@ from .probe import (
     _BoundedProcessResult,
     _ProcessCancelled,
     _ProcessOutputLimitExceeded,
-    _run_bounded_process,
     _safe_ssh_failure,
+    ssh_environment,
 )
 from .remote_script import _COMBINED_QUERY_FIELDS
+from .ssh_topology import resolve_ssh_options
 
 _SSH_G_TIMEOUT_SECONDS = 10
-_SSH_G_MAX_OUTPUT_BYTES = 262_144
+
+
+def _refuse(message: str, code: str, as_json: bool, stdout: TextIO) -> int:
+    """Exit 2 for a usage or discovery refusal; JSON stays on stdout."""
+    if as_json:
+        json.dump(
+            {"ok": False, "code": code, "error": message},
+            stdout,
+            ensure_ascii=False,
+            indent=2,
+        )
+        stdout.write("\n")
+    else:
+        print(message, file=sys.stderr)
+    return 2
+
+
 _PROBE_MAX_OUTPUT_BYTES = 65_536
 _REUSE_MODES = frozenset({"auto", "autoask", "yes", "ask"})
 _SERVER_ALIVE_COUNT_MAX = 2
@@ -81,12 +99,6 @@ printf '__MARKER__\t%s\t%s\t%s\t%s\n' "$t0" "$t1" "$t2" "$nvidia_status"
 """.replace("__COMBINED_QUERY__", ",".join(_COMBINED_QUERY_FIELDS)).replace(
     "__MARKER__", _PROFILE_MARKER
 )
-
-
-def _environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment["LC_ALL"] = "C"
-    return environment
 
 
 def _effective_probe_timeout_seconds(alias: str, config: MonitorConfig) -> float:
@@ -133,41 +145,6 @@ def _stage_timeout(deadline: float, stage_timeout_seconds: float) -> float | Non
     return min(stage_timeout_seconds, remaining)
 
 
-def _resolved_options(
-    alias: str,
-    config: MonitorConfig,
-    *,
-    timeout_seconds: float = _SSH_G_TIMEOUT_SECONDS,
-    process_registry: _ActiveProcessRegistry | None = None,
-) -> dict[str, str] | None:
-    """Return the lowercase OpenSSH options `ssh -G` resolves for the alias."""
-    try:
-        completed = _run_bounded_process(
-            ["ssh", "-G", "-F", str(config.ssh_config), "--", alias],
-            input_text="",
-            timeout_seconds=timeout_seconds,
-            max_output_bytes=_SSH_G_MAX_OUTPUT_BYTES,
-            environment=_environment(),
-            process_registry=process_registry,
-        )
-    except (
-        OSError,
-        subprocess.TimeoutExpired,
-        _ProcessOutputLimitExceeded,
-        _ProcessCancelled,
-    ):
-        return None
-    if completed.returncode != 0:
-        return None
-    options: dict[str, str] = {}
-    for line in completed.stdout.splitlines():
-        key, _, value = line.partition(" ")
-        key = key.strip().lower()
-        if key in _QUERY_KEYS:
-            options[key] = value.strip()
-    return options
-
-
 def _run_remote(
     alias: str,
     config: MonitorConfig,
@@ -211,12 +188,12 @@ def _run_remote(
     command += ["--", alias, *remote_args]
     started = time.monotonic()
     try:
-        completed = _run_bounded_process(
+        completed = probe._run_bounded_process(
             command,
             input_text=input_text,
             timeout_seconds=timeout_seconds,
             max_output_bytes=max_output_bytes,
-            environment=_environment(),
+            environment=ssh_environment(),
             process_registry=process_registry,
         )
     except subprocess.TimeoutExpired:
@@ -501,9 +478,10 @@ def _diagnose_host(
         report["reachable"] = False
         warnings.append(_BUDGET_EXHAUSTED)
         return report
-    options = _resolved_options(
+    options = resolve_ssh_options(
         alias,
         config,
+        _QUERY_KEYS,
         timeout_seconds=resolve_timeout,
         process_registry=process_registry,
     )
@@ -590,12 +568,12 @@ _FIND_SPEC_CODE = (
 def _installed_package_dir(python_path: Path) -> Path | None:
     """Ask the unit's interpreter where the mocop package is installed."""
     try:
-        completed = _run_bounded_process(
+        completed = probe._run_bounded_process(
             [str(python_path), "-c", _FIND_SPEC_CODE],
             input_text="",
             timeout_seconds=_SSH_G_TIMEOUT_SECONDS,
             max_output_bytes=_PROBE_MAX_OUTPUT_BYTES,
-            environment=_environment(),
+            environment=ssh_environment(),
         )
     except (OSError, subprocess.TimeoutExpired, _ProcessOutputLimitExceeded):
         return None
@@ -649,20 +627,20 @@ def _service_start_epoch() -> tuple[float, str] | None:
         "mocop.service",
         "--property=ActiveState,ExecMainStartTimestamp,ExecMainStartTimestampMonotonic",
     ]
-    completed = _run_bounded_process(
+    completed = probe._run_bounded_process(
         [*show_command, "--timestamp=unix"],
         input_text="",
         timeout_seconds=_SSH_G_TIMEOUT_SECONDS,
         max_output_bytes=_PROBE_MAX_OUTPUT_BYTES,
-        environment=_environment(),
+        environment=ssh_environment(),
     )
     if completed.returncode != 0:
-        completed = _run_bounded_process(
+        completed = probe._run_bounded_process(
             show_command,
             input_text="",
             timeout_seconds=_SSH_G_TIMEOUT_SECONDS,
             max_output_bytes=_PROBE_MAX_OUTPUT_BYTES,
-            environment=_environment(),
+            environment=ssh_environment(),
         )
     if completed.returncode != 0:
         return None
@@ -759,24 +737,37 @@ def run_doctor(
 ) -> int:
     """Diagnose configured aliases; return 0 when every alias is usable."""
     if profile and not probe_connection:
-        print("--profile requires live connection tests", file=sys.stderr)
-        return 2
+        return _refuse(
+            "--profile requires live connection tests",
+            "INVALID_ARGUMENTS",
+            as_json,
+            stdout,
+        )
     if collect and not probe_connection:
-        print("--probe requires live connection tests", file=sys.stderr)
-        return 2
+        return _refuse(
+            "--probe requires live connection tests",
+            "INVALID_ARGUMENTS",
+            as_json,
+            stdout,
+        )
     try:
         monitored_hosts = OpenSshConfigHostSource().hosts(config)
     except (OSError, ValueError) as exc:
-        print(f"host discovery failed: {exc}", file=sys.stderr)
-        return 2
+        return _refuse(
+            f"host discovery failed: {exc}",
+            "HOST_DISCOVERY_FAILED",
+            as_json,
+            stdout,
+        )
     if host_filter:
         unknown = tuple(host for host in host_filter if host not in monitored_hosts)
         if unknown:
-            print(
+            return _refuse(
                 f"unknown monitored aliases: {', '.join(sorted(unknown))}",
-                file=sys.stderr,
+                "UNKNOWN_HOST",
+                as_json,
+                stdout,
             )
-            return 2
         selected_hosts = tuple(host for host in monitored_hosts if host in host_filter)
     else:
         selected_hosts = monitored_hosts
@@ -823,12 +814,18 @@ def run_doctor(
                 for future in done:
                     ordered_reports[indexed[future]] = future.result()
             reports = [report for report in ordered_reports if report is not None]
+        if selected_local_host is not None:
+            local_report = {
+                "alias": selected_local_host,
+                "local": True,
+                "reachable": True,
+                "transport": "local",
+            }
+            reports.insert(selected_hosts.index(selected_local_host), local_report)
     except BaseException:
         process_registry.cancel()
         if collection_probe is not None:
-            cancel_probe = getattr(collection_probe, "cancel", None)
-            if callable(cancel_probe):
-                cancel_probe()
+            collection_probe.cancel()
         for future in futures:
             future.cancel()
         if executor is not None:
@@ -847,6 +844,7 @@ def run_doctor(
 
     if as_json:
         document: dict[str, object] = {
+            "ok": not failed,
             "transportDiscipline": transport,
             "localHost": selected_local_host,
             "hosts": reports,
@@ -854,7 +852,7 @@ def run_doctor(
         }
         if service is not None:
             document["service"] = service
-        json.dump(document, stdout, indent=2)
+        json.dump(document, stdout, ensure_ascii=False, indent=2)
         stdout.write("\n")
     else:
         stdout.write(
@@ -866,6 +864,8 @@ def run_doctor(
         if selected_local_host:
             stdout.write(f"{selected_local_host}: local target, SSH not used\n")
         for report in reports:
+            if report.get("local"):
+                continue
             _write_text_report(report, stdout)
         if not remote_hosts and selected_local_host is None:
             stdout.write("no remote SSH aliases are configured\n")

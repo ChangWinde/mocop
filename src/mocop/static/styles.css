@@ -386,7 +386,6 @@ h1, h2, h3 { font-family: var(--font-display); }
   font-size: 9px;
   white-space: nowrap;
 }
-.update-pill[hidden] { display: none; }
 .update-pill.available { border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line)); color: var(--accent-2); background: var(--accent-2-soft); cursor: pointer; }
 .update-pill.available:hover:not(:disabled) { color: var(--text); }
 .update-pill.busy { color: var(--muted); }
@@ -584,8 +583,6 @@ html[data-style="glass"] .metric-card.primary {
 .server-stats > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .server-stats > span:last-child:not(:first-child) { flex: 0 0 auto; margin-left: 7px; }
 .server-stats .issue-text { color: #d88890; }
-.server-load { width: 45px; height: 2px; overflow: hidden; border-radius: 5px; background: var(--line-soft); }
-.server-load i { display: block; height: 100%; background: var(--blue); }
 .server-item[draggable="true"] { cursor: grab; }
 .server-item.dragging { opacity: .44; cursor: grabbing; }
 .server-item.drag-target { border-color: rgba(120,148,255,.45); background: rgba(120,148,255,.09); }
@@ -883,7 +880,6 @@ body.hide-gpu-power .gpu-col-power { display: none !important; }
 .capacity-watch-status.armed { color: color-mix(in srgb, var(--accent-2) 65%, var(--muted)); }
 .capacity-watch-status.ready { color: #5de0a0; }
 .capacity-watch-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 14px; padding: 11px 14px; border: 1px solid rgba(93, 224, 160, 0.28); border-radius: 10px; color: #5de0a0; background: rgba(93, 224, 160, 0.08); font-size: 11px; }
-.capacity-watch-banner[hidden] { display: none; }
 .capacity-watch-banner strong { min-width: 0; font-weight: 600; }
 .capacity-watch-banner-actions { display: flex; flex: 0 0 auto; gap: 8px; }
 .capacity-rule { min-height: 38px; display: flex; align-items: center; gap: 8px; margin: 0 20px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--accent-2) 18%, transparent); border-radius: 9px; color: color-mix(in srgb, var(--accent-2) 65%, var(--muted)); background: var(--accent-2-soft); font-size: 9px; line-height: 1.5; }
@@ -1315,7 +1311,6 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
 .gpu-task-memory strong { font-size: 9px; font-weight: 620; }
 .gpu-task-memory small { color: var(--muted-2); font-size: 7px; }
 .gpu-task-workload { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 5px; }
-.gpu-task-workload[hidden] { display: none; }
 .gpu-task-workload span, .gpu-task-workload button { padding: 3px 6px; border: 1px solid var(--line-soft); border-radius: 999px; color: var(--muted); background: transparent; font: inherit; font-size: 8px; }
 .gpu-task-workload button { cursor: pointer; }
 .gpu-task-workload button:hover { border-color: color-mix(in srgb, var(--blue) 40%, var(--line)); color: var(--text); background: var(--blue-soft); }
@@ -1342,6 +1337,7 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
 .incident-diagnosis, .incident-actions { min-width: 0; padding: 20px; background: var(--panel-background); }
 .incident-detail-status { padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--amber) 24%, var(--line)); border-radius: 10px; color: var(--amber); background: color-mix(in srgb, var(--amber) 6%, var(--panel-deep)); font-size: 9px; line-height: 1.55; }
 .incident-detail-status.critical { color: var(--red); border-color: color-mix(in srgb, var(--red) 26%, var(--line)); background: color-mix(in srgb, var(--red) 5%, var(--panel-deep)); }
+.incident-detail-status.resolved { color: var(--green); border-color: color-mix(in srgb, var(--green) 26%, var(--line)); background: color-mix(in srgb, var(--green) 6%, var(--panel-deep)); }
 .incident-diagnosis > p { margin: 15px 0; color: var(--muted); font-size: 10px; line-height: 1.7; }
 .incident-evidence { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
 .incident-evidence-item { min-width: 0; padding: 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel-solid); }
@@ -1363,8 +1359,7 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
 .incident-action-feedback.success { color: var(--green); }
 .incident-action-feedback.error { color: var(--red); }
 
-.empty-state { min-height: 330px; place-content: center; text-align: center; }
-.empty-state:not([hidden]) { display: grid; }
+.empty-state { min-height: 330px; display: grid; place-content: center; text-align: center; }
 .empty-glyph { width: 46px; height: 46px; display: grid; place-items: center; margin: 0 auto 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-deep); }
 .empty-glyph i { width: 14px; height: 14px; border: 1px solid var(--muted-2); border-radius: 3px; }
 .empty-state strong { font-size: 12px; }

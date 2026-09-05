@@ -126,11 +126,11 @@ rendering.
 
 ## Fresh-host fast deployment
 
-After installing the package on a server with a user-level systemd manager and an
-operator-owned OpenSSH configuration, deploy Mocop with one local command:
+After installing the release pinned in the [README quick start](../README.md#quick-start)
+on a server with a user-level systemd manager and an operator-owned OpenSSH
+configuration, deploy Mocop with one local command:
 
 ```bash
-uv tool install "git+https://github.com/ChangWinde/mocop.git@v0.11.0"
 "$(uv tool dir --bin)/mocop" deploy --display-name monitor-0
 ```
 
@@ -140,7 +140,8 @@ the local target, enables automatic alias admission and resolved topology discov
 then installs and health-checks the user service. Use repeatable `--host SSH_ALIAS` for
 targets absent from OpenSSH discovery, `--local-host ALIAS` to choose the internal local
 identity, `--no-local` for a controller-only monitor, and `--no-auto-discover` for an
-explicit-only inventory.
+explicit-only inventory. `--display-name` labels the local target and therefore
+requires one: it is rejected together with `--no-local`.
 
 Fresh deployment refuses an existing config, sibling `access-token`, or sibling
 `environment`; it never overwrites or silently adopts an old installation. Use
@@ -235,6 +236,46 @@ file, SQLite state, browser storage, journal entries, SSH material/control socke
 the installed Python package, and the login linger policy. Review and back up those
 items before any separate manual cleanup; clearing them is not part of uninstall and
 may be irreversible.
+
+## Command reference and exit codes
+
+Most commands accept `--config PATH`; without it Mocop uses `MOCOP_CONFIG`, then
+`~/.config/mocop/config.json`, then a development-only `./config/mocop.json`, then
+the bundled empty configuration. `service status` and `service uninstall` operate
+on the generated unit and reject `--config`. `mocop --help` and
+`mocop <command> --help` describe every flag. `--once` and `--strict` apply only
+to the default monitor command.
+
+| Command | Purpose | Notable flags |
+|---|---|---|
+| `mocop` | Foreground monitor with an ephemeral capability printed once | `--once` (print one JSON snapshot and exit), `--strict` (with `--once`, fail unless every host is online), `--version` |
+| `mocop deploy` | Create a private config and install the verified user service on a fresh host | `--host ALIAS` (repeatable), `--local-host ALIAS` / `--no-local`, `--display-name`, `--ssh-config`, `--auto-discover` / `--no-auto-discover`, `--json` |
+| `mocop init` | Create a private config only, never overwriting one | `--host ALIAS` (repeatable), `--json` |
+| `mocop migrate` | Generate a new private config from another installation's config | `--from-config PATH` (required), the same identity flags as `deploy`, `--drop-local-host`, `--json` |
+| `mocop api PATH` | GET one public or authenticated route from the running service and write the body to stdout; reader/writer routes are refused (`DASHBOARD_ONLY`) | `--token-file PATH` (default: the access-token file beside the config), `--timeout SECONDS` |
+| `mocop config check` | Validate the configuration without a web server or SSH | `--json` (one JSON document on stdout, also for a rejected configuration) |
+| `mocop doctor` | Read-only SSH reachability and connection-reuse diagnosis | `--host ALIAS` (repeatable filter), `--no-connect`, `--probe` (one production collection per alias), `--profile` (latency breakdown), `--json` |
+| `mocop service install` | Generate, enable, start, and verify the unit; print the capability URL | `--json` |
+| `mocop service status` | `systemctl --user status` for the generated unit | `--json` (`{ok, active, unitPath}`; journal text stays on the text path) |
+| `mocop service uninstall` | Stop and remove only the generated unit | `--json` |
+
+Exit codes are stable for automation:
+
+| Code | Meaning |
+|---|---|
+| `0` | Success; for `doctor`, every selected alias is usable; for `api`, a 2xx response |
+| `1` | Runtime failure: `doctor` found at least one unusable alias, `--once --strict` found a host without an online sample, the listener could not bind, the collector stopped, `service install` could not verify the service, or `api` received a non-2xx status or could not connect |
+| `2` | Configuration or usage error: invalid or unreadable configuration, a `doctor` flag conflict or unknown `--host`, a lifecycle refusal (existing files, invalid alias), a managed unit missing its generated arguments, or an `api` target that is malformed, dashboard-only, or has no readable capability |
+| `75` | Supervised restart requested from the dashboard or self-update; systemd's restart policy starts the replacement |
+
+Every `--json` command writes one `{ok, ...}` document to stdout, including
+refusals (`ok: false` plus a stable `code`). `config check`, `doctor`, `init`,
+`deploy`, `migrate`, and the three `service` actions all accept `--json`.
+`mocop --once` writes a snapshot document. `mocop api` is always
+machine-readable: stdout is the server's response body, and a non-zero exit
+leaves the server's or the client's `{error, code}` envelope there
+(`INVALID_TARGET`, `DASHBOARD_ONLY`, `TOKEN_UNAVAILABLE`, `CONNECTION_FAILED`,
+or the configuration code). Text-mode diagnostics stay on stderr.
 
 ## Related references
 

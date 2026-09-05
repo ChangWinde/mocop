@@ -14,6 +14,7 @@ from .config import (
     load_private_config_document,
 )
 from .lifecycle import LifecycleError
+from .privatefiles import PRIVATE_FILE_MODE
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,11 +113,9 @@ def _write_private_target(path: Path, data: dict[str, object]) -> None:
             "new installation receives a fresh capability"
         )
     payload = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     try:
-        descriptor = os.open(path, flags, 0o600)
+        descriptor = os.open(path, flags, PRIVATE_FILE_MODE)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
             stream.flush()

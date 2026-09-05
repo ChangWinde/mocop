@@ -52,9 +52,19 @@ def incident() -> IncidentEvent:
     )
 
 
-class _RecordingSender:
+class _FakeSender:
+    """In-memory WebhookSender; nothing to release on close."""
+
     def __init__(self) -> None:
         self.calls = []
+
+    def close(self, timeout_seconds: float = 0.0) -> None:
+        del timeout_seconds
+
+
+class _RecordingSender(_FakeSender):
+    def __init__(self) -> None:
+        super().__init__()
         self.delivered = threading.Event()
 
     def send(self, endpoint, body, headers):
@@ -65,27 +75,21 @@ class _RecordingSender:
         return DeliveryResult(True, False)
 
 
-class _ImmediateSender:
-    def __init__(self) -> None:
-        self.calls = []
-
+class _ImmediateSender(_FakeSender):
     def send(self, endpoint, body, headers):
         self.calls.append((endpoint, body, headers))
         return DeliveryResult(True, False)
 
 
-class _AlwaysRetryableSender:
-    def __init__(self) -> None:
-        self.calls = []
-
+class _AlwaysRetryableSender(_FakeSender):
     def send(self, endpoint, body, headers):
         self.calls.append((endpoint, body, headers))
         return DeliveryResult(False, True)
 
 
-class _GateSender:
+class _GateSender(_FakeSender):
     def __init__(self) -> None:
-        self.calls = []
+        super().__init__()
         self.started = threading.Event()
         self.release = threading.Event()
 

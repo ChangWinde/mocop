@@ -1,10 +1,11 @@
 # Mocop HTTP API
 
 This is the complete reference for Mocop's HTTP API. It is written for both
-human operators and automation ("agents"): every route, header requirement,
-response field, and stable error code below is verified against the route
-manifest (`API_ROUTES` in `src/mocop/web.py`) by a repository test, so the
-document and the running server cannot drift apart silently.
+human operators and automation ("agents"). A repository test
+(`tests/test_docs.py`) checks every route, method, and access tier below against
+the live manifest (`API_ROUTES` in `src/mocop/api_manifest.py`), checks that every
+documented error code exists, and a second test proves each manifested tier is
+the tier its handler enforces. Field-level examples are maintained by hand.
 
 ## Scope and compatibility
 
@@ -17,13 +18,15 @@ document and the running server cannot drift apart silently.
 - **Collection protocol:** the bundled remote script and parser accept only
   current `MONITOR_V8`. It is an internal single-version contract, distinct
   from the HTTP API/schema versions; see [ADR-0016](adr/0016-single-version-protocol-and-agent-api.md).
-- **Deprecation policy:** a deprecated endpoint keeps working and answers
-  with a `Deprecation: true` response header. Deprecations and removals are
-  announced in [CHANGELOG.md](CHANGELOG.md). Currently deprecated:
-  `GET /api/service` and `POST /api/settings/poll-interval`.
+- **Deprecation policy:** a deprecated endpoint keeps working for at least
+  two minor releases and answers with a `Deprecation: true` response header.
+  Deprecations and removals are announced in [CHANGELOG.md](CHANGELOG.md).
+  No endpoint is currently deprecated.
 - **Self-description:** `GET /api/meta` returns the exact endpoint manifest
-  (method, path, access tier) plus capability flags, so an agent can discover
-  what this deployment supports before calling anything else.
+  (method, path, access tier, GET query schema, POST body schema and byte
+  cap), capability flags, field conventions, writer requirements, and the
+  error-code catalog, so an agent can discover what this deployment supports
+  before calling anything else.
 
 ## Base URL and transport conventions
 
@@ -36,8 +39,10 @@ document and the running server cannot drift apart silently.
   timezones and no sub-second precision anywhere in the API.
 - **Caching:** JSON, SSE, and OpenMetrics responses are `Cache-Control:
   no-store`. Static dashboard assets (`/`, `/index.html`, `/app.js`,
-  `/styles.css`, `/favicon.svg`) are `no-cache` with a strong content
-  `ETag`; a matching `If-None-Match` yields `304 Not Modified`.
+  `/styles.css`, `/favicon.svg`) are   `no-cache` with a strong content
+  `ETag`; a matching `If-None-Match` yields `304 Not Modified`. Every path
+  listed in `STATIC_ROUTES` (`src/mocop/static_assets.py`) is cached this way,
+  including the dashboard leaf scripts.
 - `HEAD` is supported on every `GET` route except `GET /api/events`
   (the event stream answers `405` with `Allow: GET`).
 - A `GET`/`HEAD` request that declares a body is rejected with
@@ -45,7 +50,7 @@ document and the running server cannot drift apart silently.
 - `OPTIONS` always answers `403 UNTRUSTED_ORIGIN`: the API intentionally has
   no cross-origin contract and never grants CORS permission.
 - **Connection bounds:** at most 64 concurrent connections (excess
-  connections receive a bare `503` with an empty body, not JSON) and at most
+  connections receive a canned JSON `503 CONNECTION_LIMIT`) and at most
   16 concurrent event-stream clients (the 17th receives a JSON `503`).
 - Unknown paths and wrong methods under the API family (`/api/...`,
   `/healthz`, `/readyz`, `/metrics`) answer with the JSON error envelope:
@@ -57,10 +62,13 @@ document and the running server cannot drift apart silently.
 - **Authentication:** every API and OpenMetrics route except `/api/meta`,
   `/healthz`, and `/readyz` requires exactly one `Authorization: Bearer
   <capability>` header.
-  `mocop service install` creates the capability as a private `0600` file and
-  prints a fragment URL; a foreground `mocop` process creates an ephemeral
-  capability and prints its fragment URL. URL fragments are never sent over
-  HTTP. The dashboard scrubs the fragment immediately and retains it only in
+  `mocop service install` creates the capability as a private `0600` file
+  named `access-token` beside the configuration it was given
+  (`~/.config/mocop/access-token` for the default layout, or next to the
+  `--config` path) and prints a fragment URL; a foreground `mocop` process
+  creates an ephemeral capability that exists only in its terminal output.
+  A missing or wrong capability answers `403 AUTHENTICATION_REQUIRED`. URL
+  fragments are never sent over HTTP. The dashboard scrubs the fragment immediately and retains it only in
   tab-scoped `sessionStorage`; it never creates an ambient Cookie or persistent
   `localStorage`/IndexedDB credential. When no fragment or stored capability is
   available, the dashboard presents a non-dismissible token prompt. It stores
@@ -156,12 +164,25 @@ returns `N/A`; `latencyMs`, `lastSuccessAt`, `nextRetryAt`, `message` are
 
 Write bodies are parsed strictly: duplicate keys, unknown keys, missing
 keys, non-finite numbers (`NaN`/`Infinity`), and boolean values where
-numbers are expected are all rejected. Each write route has a hard body
-cap:
+numbers are expected are all rejected. Every route validates its body in
+the same order, against the `body` schema `GET /api/meta` publishes for it:
+
+1. not a JSON object, or a key set the route does not accept
+   (`exactKeys`, the non-empty subset for collector settings, or the exact
+   `{}` for `empty` bodies) → `INVALID_SCHEMA`;
+2. a field of the wrong JSON type (`alias`, `enum`, `text`, and
+   `timestamp` are strings — `timestamp` may be `null` where `nullable` is
+   set; `integer` and `number` are non-boolean numbers) → `INVALID_SCHEMA`;
+3. a well-typed value outside the published safe alias grammar, `values`,
+   `minimum`/`maximum`, or the `text` visible-length `maximum` →
+   `INVALID_SETTINGS`;
+4. route-specific cross-field rules (listed per endpoint) →
+   `INVALID_SETTINGS`.
+
+Each write route has a hard body cap:
 
 | Route | Body cap (bytes) |
 |---|---|
-| `POST /api/settings/poll-interval` | 128 |
 | `POST /api/settings/collector` | 512 |
 | `POST /api/settings/hosts` | 512 |
 | `POST /api/settings/maintenance` | 512 |
@@ -170,6 +191,7 @@ cap:
 | `POST /api/probe` | 512 |
 | `POST /api/notifications/test` | 32 |
 | `POST /api/service/restart` | 32 |
+| `POST /api/update/apply` | 32 |
 
 ### Error envelope and stable codes
 
@@ -182,7 +204,11 @@ Every API error response is a JSON object:
 `code` is stable and safe to branch on; `error` is for humans and may be
 reworded. One exception: the `POST /api/probe` conflict/rate-limit/unknown
 responses carry the probe status body *plus* a `code` field instead of an
-`error` key (see the endpoint entry).
+`error` key (see the endpoint entry). `403 AUTHENTICATION_REQUIRED` additionally
+carries `hint` (where the capability lives and which header to send) and
+`documentation` (this reference for the running release), so a cold client can
+recover without any out-of-band knowledge; the capability value itself is
+never included.
 
 | Code | HTTP | Meaning |
 |---|---|---|
@@ -190,15 +216,16 @@ responses carry the probe status body *plus* a `code` field instead of an
 | `INVALID_REQUEST_FRAMING` | 400 | Ambiguous `Transfer-Encoding`/`Content-Length`, duplicate length, or non-decimal length. |
 | `INVALID_REQUEST_TARGET` | 400 | The request URL could not be parsed. |
 | `REQUEST_BODY_NOT_ALLOWED` | 400 | A `GET`/`HEAD` request declared a body. |
-| `QUERY_NOT_ALLOWED` | 400 | This route accepts no query parameters. |
+| `QUERY_NOT_ALLOWED` | 400 | This route accepts no query parameters (every GET whose manifest `query` is empty, and every POST). |
 | `UNKNOWN_QUERY_PARAMETER` | 400 | A query parameter outside the route's allowlist. |
 | `INVALID_QUERY` | 400 | A malformed `host`, `gpu`, or `limit` query value. |
 | `INVALID_LIMIT` | 400 | `limit` is not an integer within the route's bounds. |
 | `INVALID_HOURS` | 400 | `hours` is not an integer within the route's bounds. |
+| `INVALID_CAPACITY_REQUEST` | 400 | `gpus`, `min_vram_gib`, or `model` on `/api/capacity` is malformed or out of bounds. |
 | `INVALID_HOST` | 400 | The `host` query value is not a safe alias. |
 | `INVALID_JSON` | 400 | The body is not valid strict JSON (duplicate keys and non-finite numbers included). |
-| `INVALID_SCHEMA` | 400 | The JSON body does not match the route's exact schema. |
-| `INVALID_SETTINGS` | 400 | Schema-valid values outside documented bounds or invalid for the current configuration. |
+| `INVALID_SCHEMA` | 400 | The body is not an object, its key set does not match the route (see `body` in `/api/meta`), or a field has the wrong JSON type. |
+| `INVALID_SETTINGS` | 400 | Well-typed values outside the published grammar, `values`, bounds, or text length; cross-field rules; or values invalid for the current configuration. |
 | `UNTRUSTED_ORIGIN` | 403 | Missing/untrusted `Host`, marker header, `Origin`, or cross-site Fetch Metadata; also every `OPTIONS`. |
 | `AUTHENTICATION_REQUIRED` | 403 | Bearer capability is missing, duplicated, or incorrect. |
 | `NOT_FOUND` | 404 | Unknown API-family path. |
@@ -212,10 +239,10 @@ responses carry the probe status body *plus* a `code` field instead of an
 | `PAYLOAD_TOO_LARGE` | 413 | Body missing, empty, or beyond the route's byte cap. |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type` is not `application/json`. |
 | `RATE_LIMITED` | 429 | Manual probe cooldown (with `Retry-After` header) or notification-test cooldown. |
-| `INTERNAL_ERROR` | 500 | The host-group change failed unexpectedly. |
 | `SERVICE_UNAVAILABLE` | 503 | The capability is not available (no config controller, restart not supervised, manual probing disabled, SSE slots exhausted, scan/persist failure). |
 | `METRICS_LIMIT_EXCEEDED` | 503 | Rendering would exceed the fixed 100,000-series OpenMetrics budget. |
 | `NOTIFICATIONS_DISABLED` | 503 | Notification test requested but no webhook is configured. |
+| `CONNECTION_LIMIT` | 503 | The process already has 64 concurrent HTTP connections. |
 
 ### Retries and idempotency
 
@@ -244,23 +271,44 @@ responses carry the probe status body *plus* a `code` field instead of an
 
 ## Quick start
 
-Copy-paste examples against a default managed deployment. The capability file
-is beside the selected configuration; this example uses the default path. Do
-not put the value in logs, shell history, or source control.
+On the monitor host itself, `mocop api PATH` performs any P- or A-tier GET
+without this plumbing: it reads the listener from the configuration and the
+capability from the private file beside it, writes the response body to
+stdout unchanged, and exits `0` on a 2xx, `1` on any other status (the
+server's error envelope is the output) or an unreachable service, and `2`
+for usage or configuration problems. R- and W-tier paths are refused with
+`DASHBOARD_ONLY` because they belong to the same-origin dashboard.
+
+```bash
+mocop api '/api/capacity?gpus=4&min_vram_gib=40' | jq '.candidates[] | select(.satisfies) | .host'
+mocop api /api/events        # streams until interrupted
+```
+
+The remaining examples are copy-paste `curl` calls for any other host. The
+capability file is beside the selected configuration; this example uses the
+default path. Do not put the value in logs, shell history, or source control.
 
 ```bash
 MOCOP_TOKEN="$(<"${XDG_CONFIG_HOME:-$HOME/.config}/mocop/access-token")"
 ```
 
-1. Public liveness — no capability required at the P tier:
+1. Discover, then check liveness — both public at the P tier. The manifest
+   tells an agent every route, its tier, its query parameters, and where this
+   document lives for the running release:
 
 ```bash
+curl -s http://127.0.0.1:8787/api/meta | jq '.documentation, .endpoints[] | select(.path == "/api/capacity")'
 curl -s http://127.0.0.1:8787/healthz | jq '.status'
 ```
 
-2. A-tier automation read — authenticate, but do not send the viewer marker:
+2. A-tier automation reads — authenticate, but do not send the viewer marker.
+   The placement question is one bounded call; the full snapshot is for
+   everything else:
 
 ```bash
+curl -s -H "Authorization: Bearer ${MOCOP_TOKEN}" \
+  'http://127.0.0.1:8787/api/capacity?gpus=4&min_vram_gib=40' \
+  | jq '.candidates[] | select(.satisfies) | {host, model, free: .minimumFreeMiB}'
 curl -s -H "Authorization: Bearer ${MOCOP_TOKEN}" \
   http://127.0.0.1:8787/api/snapshot | jq '.stats.onlineServers'
 ```
@@ -319,9 +367,9 @@ This table matches the server's route manifest exactly.
 | GET | `/api/events` | A | SSE stream of snapshots with named heartbeats. |
 | GET | `/api/history` | A | Per-host resource trend points. |
 | GET | `/api/usage` | A | Per-owner GPU occupancy and idle-occupancy rollup. |
+| GET | `/api/capacity` | A | Ranked same-host, same-model GPU groups that can take a job. |
 | GET | `/api/incidents` | A | Active conditions, transition events, correlations. |
 | GET | `/api/meta` | P | API self-description: versions, capabilities, endpoints. |
-| GET | `/api/service` | A | **Deprecated** alias of the `/api/meta` capabilities block. |
 | GET | `/healthz` | P | Liveness plus cumulative transport retries. |
 | GET | `/readyz` | P | Readiness; `503` until the first successful sample. |
 | GET | `/metrics` | A | OpenMetrics 1.0 exposition of the current snapshot. |
@@ -331,7 +379,6 @@ This table matches the server's route manifest exactly.
 | GET | `/api/topology` | R | Display-only connection tree. |
 | GET | `/api/update` | R | Release-currency status of this installation. |
 | POST | `/api/settings/collector` | W | Update any subset of the collector settings. |
-| POST | `/api/settings/poll-interval` | W | **Deprecated** single-field cadence alias. |
 | POST | `/api/settings/hosts` | W | Add or remove one monitored host. |
 | POST | `/api/settings/maintenance` | W | Start or clear one maintenance window. |
 | POST | `/api/settings/host-group` | W | Assign or clear one host's group. |
@@ -353,7 +400,7 @@ Top-level fields:
 | Field | Type | Description |
 |---|---|---|
 | `version` | int | Monotonic state revision; increases on every observable change. |
-| `appVersion` | string | Mocop release, e.g. `"0.9.0"`. |
+| `appVersion` | string | The running Mocop release; compare it with the tag you installed. |
 | `incidentVersion` | int | Incident-view revision; also advances on action/maintenance expiry. |
 | `generatedAt` | timestamp | When this snapshot projection was assembled (per state revision, not per request). |
 | `startedAt` | timestamp | Process start; changes prove a restart happened. |
@@ -492,10 +539,9 @@ rejected with `405`.
 - At most 16 concurrent stream clients; the next connect receives
   `503 SERVICE_UNAVAILABLE`.
 
-The authenticated dashboard uses `fetch()` and incrementally decodes the SSE
-stream because the browser `EventSource` API cannot attach an `Authorization`
-header. Native `EventSource` is used only when the server was explicitly
-started without an access token (for compatibility/testing).
+The dashboard uses `fetch()` and incrementally decodes the SSE stream because
+the browser `EventSource` API cannot attach an `Authorization` header. Every
+Mocop server requires the capability, so there is no unauthenticated stream.
 
 ### GET /api/history
 
@@ -561,11 +607,53 @@ Response fields:
 
 Owner attribution requires `workloads.mode` `identity` or `auto`; with
 `disabled` everything aggregates under `owner: null`. Idle classification
-skips sample gaps longer than four poll cycles (offline stretches are never
-counted as measured activity).
+skips sample gaps longer than 60 seconds; the bound is fixed and independent of
+the poll cadence, so a later cadence change cannot rewrite historical rollups,
+and offline stretches are never counted as measured activity.
 
 Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_HOURS`,
 `INVALID_LIMIT`.
+
+### GET /api/capacity
+
+Answer the placement question directly: which hosts can take a job that needs
+`gpus` devices on one host, each with at least `min_vram_gib` GiB free, optionally
+of one exact `model` name. Tier A. Query: `gpus` (integer 1–256, default 1),
+`min_vram_gib` (integer 0–512, default 0), `model` (exact GPU name as reported in
+the snapshot, or `any`, the default). The server ranks the current in-memory
+snapshot; it never opens an SSH connection or reserves anything, so treat the
+answer as an observation to act on quickly.
+
+```json
+{
+  "generatedAt": "…", "lastPollCompletedAt": "…",
+  "request": {"gpuCount": 2, "minVramGiB": 40, "model": "any"},
+  "satisfying": 1, "excludedMaintenance": 0, "excludedHealth": 1,
+  "candidates": [
+    {"host": "gpu-02", "model": "NVIDIA H100 80GB HBM3", "total": 8,
+     "satisfies": true, "deficit": 0, "minimumFreeMiB": 79000,
+     "averageUtilization": 2.0, "cpuUsagePct": 12.5,
+     "available": [{"index": 0, "uuid": "GPU-…", "freeVramMiB": 80000,
+                    "utilizationPct": 1, "temperatureC": 45}]}
+  ]
+}
+```
+
+A candidate is one host/model group. A GPU is *available* when its utilization
+is below `thresholds.gpu_busy_pct`, its free VRAM meets the request, its
+temperature is below `thresholds.gpu_temperature_warning_c` (an unknown
+temperature does not disqualify), and no hardware condition (`gpu_ecc`,
+`gpu_memory_repair`, `gpu_slowdown`, `gpu_temperature`) names it. Hosts in a
+maintenance window are counted in `excludedMaintenance`; hosts with an active
+`connectivity`, `gpu_availability`, or `gpu_count` condition — including
+acknowledged or silenced ones — in `excludedHealth`; stale and offline hosts are
+skipped silently. Candidates are ordered by: satisfies the request, smallest
+deficit, most available GPUs, largest minimum free VRAM, lowest average
+utilization, then host name. The dashboard's capacity matcher and watch use the
+identical ranking in the browser; `tests/fixtures/capacity_match.json` pins the
+two implementations to one result.
+
+Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_CAPACITY_REQUEST`.
 
 ### GET /api/incidents
 
@@ -624,35 +712,79 @@ Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_LIMIT`.
 
 ### GET /api/meta
 
-API self-description. Tier P. Query: rejected (`QUERY_NOT_ALLOWED`).
+API self-description. Tier P. Query: rejected (`QUERY_NOT_ALLOWED`). This is
+the one response an agent needs before calling anything else: it names the
+versions, the capabilities of this deployment, GET query schemas, POST body
+field lists, writer requirements, the error-code catalog, and where this
+document lives for the running release.
 
 ```json
 {
   "apiVersion": "2",
-  "appVersion": "0.9.0",
+  "appVersion": "<release>",
   "schemaVersion": 1,
+  "documentation": "https://github.com/ChangWinde/mocop/blob/v<release>/docs/API.md",
   "capabilities": {
     "restartSupported": true,
     "manualProbeSupported": true,
-    "configurationWriteSupported": true
+    "configurationWriteSupported": true,
+    "updateSupported": true
   },
+  "conventions": {
+    "envelope": "camelCase",
+    "telemetry": "snake_case",
+    "incidentActionWrite": "camelCase",
+    "incidentActionStored": "snake_case"
+  },
+  "write": {
+    "contentType": "application/json",
+    "authorization": "Bearer",
+    "sameOrigin": true,
+    "dashboardMarker": "X-Monitor-Request: dashboard"
+  },
+  "errorCodes": [{"code": "INVALID_SCHEMA", "status": 400}],
   "endpoints": [
-    {"method": "GET", "path": "/api/snapshot", "access": "authenticated"}
+    {"method": "GET", "path": "/api/history", "access": "authenticated",
+     "query": {"host": {"type": "alias", "required": true},
+               "limit": {"type": "integer", "required": false,
+                         "minimum": 2, "maximum": 300, "default": 120}},
+     "responseType": "application/json"},
+    {"method": "POST", "path": "/api/settings/hosts", "access": "writer",
+     "bodyLimitBytes": 512,
+     "body": {"type": "object", "exactKeys": true,
+              "fields": {"action": {"type": "enum", "required": true,
+                                    "values": ["add", "remove"]},
+                         "host": {"type": "alias", "required": true}}},
+     "responseType": "application/json"}
   ]
 }
 ```
 
-`endpoints` lists every route with its access tier (`public`, `authenticated`,
-`reader`, `writer`). `restartSupported` is true only under the supervised user
-service; `manualProbeSupported` requires the live scheduler;
-`configurationWriteSupported` reports whether the active configuration file
-is dashboard-writable (file metadata only, no SSH).
-
-### GET /api/service
-
-**Deprecated** (`Deprecation: true` header) alias of the `/api/meta`
-capabilities block. Tier A. Query: rejected. Returns
-`{"restartSupported": bool}`. Use `GET /api/meta` instead.
+`endpoints` lists every route in the manifest with its access tier (`public`,
+`authenticated`, `reader`, `writer`). GET routes carry `query`: the complete
+set of accepted parameter names (an empty object means the route rejects any
+query string), each with a `type` of `alias` (a safe SSH alias), `identity`
+(a bounded GPU identity), `text` (1–128 printable characters), or `integer`
+(with `minimum`, `maximum`, and the `default` used when omitted), plus
+`required`. POST routes carry `bodyLimitBytes` and `body`: the exact JSON
+object (`exactKeys: true`), a non-empty field subset (`exactKeys: false`), or
+an empty object (`empty: true`). Each body field has a `type` of `alias`,
+`enum` (with `values`), `integer` or `number` (with `values` or
+`minimum`/`maximum`), `text` (with the visible-length `maximum`), or
+`timestamp` (`nullable` where `null` is meaningful), plus `required` and a
+`notes` sentence for any cross-field rule; the server validates bodies in the
+order described under *Strict JSON on writes*. `responseType` is
+`application/json` except for the `/api/events` stream and `/metrics`.
+`restartSupported` is true only
+under the supervised user service; `manualProbeSupported` requires the live
+scheduler; `configurationWriteSupported` reports whether the active
+configuration file is dashboard-writable (file metadata only, no SSH);
+`updateSupported` is true when a self-update manager is wired. `write` names
+the Bearer header, `application/json` content type, same-origin Host/Origin
+rule, and the `X-Monitor-Request: dashboard` marker. `errorCodes` lists every
+stable `code` with its HTTP status. The manifest is generated from the same
+table the request handlers validate against, so it cannot describe a
+parameter the server does not accept.
 
 ### GET /healthz
 
@@ -778,16 +910,9 @@ Omitted fields keep their current values. Response `200`:
 ```
 
 Errors: `INVALID_SCHEMA` (unknown key, empty object, `connectTimeoutSeconds`
-included, out-of-range type), `INVALID_SETTINGS` (bounds/cross-field),
-`503 SERVICE_UNAVAILABLE`.
-
-### POST /api/settings/poll-interval
-
-**Deprecated** (`Deprecation: true` header) single-field alias of the
-collector route. Tier W. Body cap 128 bytes. Body: exactly
-`{"pollIntervalSeconds": 2–60}`. Response `200`: `{version, startedAt,
-pollIntervalSeconds, collectionStaleAfterSeconds}`. Use
-`POST /api/settings/collector` instead.
+included, wrong value type), `INVALID_SETTINGS` (documented bounds or the
+`probeTimeoutSeconds > connectTimeoutSeconds` cross-field rule against the
+merged effective configuration), `503 SERVICE_UNAVAILABLE`.
 
 ### POST /api/settings/hosts
 
@@ -802,8 +927,9 @@ Add or remove one monitored host. Tier W. Body cap 512 bytes. Body: exactly
   is on.
 
 Response `200`: the full inventory snapshot (same shape as
-`GET /api/inventory`). Errors: `INVALID_SCHEMA`, `409 INVENTORY_CHANGED`
-(not eligible / not active / configuration changed underneath — re-read
+`GET /api/inventory`). Errors: `INVALID_SCHEMA`, `INVALID_SETTINGS`
+(unknown `action` or an unsafe alias), `409 INVENTORY_CHANGED` (not
+eligible / not active / configuration changed underneath — re-read
 inventory first), `503 SERVICE_UNAVAILABLE`.
 
 ### POST /api/settings/maintenance
@@ -828,7 +954,7 @@ Assign or clear one explicitly configured host's group. Tier W. Body cap
 512 bytes. Body: exactly `{"host", "group"}`; empty/whitespace `group`
 clears; at most 48 visible characters. Response `200`: the full inventory
 snapshot. Errors: `INVALID_SCHEMA`, `INVALID_SETTINGS`,
-`409 INVENTORY_CHANGED`, `500 INTERNAL_ERROR`, `503 SERVICE_UNAVAILABLE`.
+`409 INVENTORY_CHANGED`, `503 SERVICE_UNAVAILABLE`.
 
 ### POST /api/settings/incident-action
 
@@ -873,7 +999,8 @@ Non-success responses carry the same status body **plus `code`** (no
 
 A duplicate request while one is already queued answers `202` with
 `status: "queued"` again (coalesced). Schema and availability failures use
-the normal envelope (`INVALID_SCHEMA`, `503 SERVICE_UNAVAILABLE`).
+the normal envelope (`INVALID_SCHEMA`, `INVALID_SETTINGS` for an unsafe
+alias, `503 SERVICE_UNAVAILABLE`).
 
 ### POST /api/notifications/test
 
@@ -1073,5 +1200,5 @@ Every `host` value in queries and write bodies must match:
 One leading letter or digit, then up to 252 further letters, digits, dots,
 underscores, or hyphens — the same grammar the configuration enforces for
 OpenSSH aliases. Values that fail it are rejected before any lookup
-(`INVALID_HOST`, `INVALID_QUERY`, or `INVALID_SCHEMA` depending on the
-route).
+(`INVALID_HOST` or `INVALID_QUERY` in a query string, `INVALID_SETTINGS` in
+a write body).

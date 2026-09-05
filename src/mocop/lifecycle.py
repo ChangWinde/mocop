@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import errno
-import fcntl
 import http.client
 import json
 import os
@@ -21,6 +20,12 @@ from .config import (
     load_config,
     load_private_config,
 )
+from .privatefiles import (
+    PRIVATE_FILE_MODE,
+    acquire_private_lock,
+    is_private_regular_file,
+    release_private_lock,
+)
 
 SERVICE_NAME = "mocop.service"
 ACCESS_TOKEN_NAME = "access-token"
@@ -31,6 +36,8 @@ _UnitBackup = tuple[str, bytes | str | None, int]
 
 class LifecycleError(RuntimeError):
     """Raised when local setup or service management cannot complete safely."""
+
+    code = "LIFECYCLE_ERROR"
 
 
 def user_config_path(environ: dict[str, str] | None = None) -> Path:
@@ -60,12 +67,10 @@ def access_token_path(config_path: Path) -> Path:
 def ensure_access_token(config_path: Path) -> Path:
     """Create or validate the private per-install dashboard credential."""
     path = access_token_path(config_path)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     token = secrets.token_urlsafe(32)
     try:
-        descriptor = os.open(path, flags, 0o600)
+        descriptor = os.open(path, flags, PRIVATE_FILE_MODE)
     except FileExistsError:
         read_access_token(path)
         return path
@@ -85,17 +90,9 @@ def ensure_access_token(config_path: Path) -> Path:
 def read_access_token(path: Path) -> str:
     descriptor = -1
     try:
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(path, flags)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
-            or metadata.st_mode & 0o077
-            or not 32 <= metadata.st_size <= 256
-        ):
+        if not is_private_regular_file(metadata) or not 32 <= metadata.st_size <= 256:
             raise LifecycleError("dashboard access token must be a private file")
         with os.fdopen(descriptor, "r", encoding="ascii") as stream:
             descriptor = -1
@@ -162,7 +159,7 @@ def initialize_config(
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     try:
-        descriptor = os.open(target, flags, 0o600)
+        descriptor = os.open(target, flags, PRIVATE_FILE_MODE)
     except FileExistsError as exc:
         raise LifecycleError(f"configuration already exists: {target}") from exc
     except OSError as exc:
@@ -350,38 +347,16 @@ class UserServiceManager:
         self.unit_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         _require_private_directory(self.unit_path.parent)
         lock_path = self.unit_path.with_name(f".{SERVICE_NAME}.lock")
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
         try:
-            descriptor = os.open(lock_path, flags, 0o600)
-            metadata = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != os.getuid()
-                or metadata.st_mode & 0o077
-            ):
-                raise LifecycleError("service lifecycle lock is not private")
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-        except LifecycleError:
-            if "descriptor" in locals():
-                os.close(descriptor)
-            raise
+            self._lifecycle_lock_fd = acquire_private_lock(lock_path)
         except OSError as exc:
-            if "descriptor" in locals():
-                os.close(descriptor)
             raise LifecycleError("cannot lock service lifecycle operations") from exc
-        self._lifecycle_lock_fd = descriptor
 
     def _release_lifecycle_lock(self) -> None:
         descriptor = self._lifecycle_lock_fd
         self._lifecycle_lock_fd = None
-        if descriptor is None:
-            return
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        finally:
-            os.close(descriptor)
+        if descriptor is not None:
+            release_private_lock(descriptor)
 
     def _checked(self, *arguments: str) -> None:
         command = ("systemctl", "--user", *arguments)
@@ -407,12 +382,8 @@ class UserServiceManager:
                     raise LifecycleError(
                         f"cannot inspect service environment: {environment_path}"
                     ) from exc
-                if (
-                    not stat.S_ISREG(metadata.st_mode)
-                    or environment_path.is_symlink()
-                    or metadata.st_uid != os.getuid()
-                    or metadata.st_mode & 0o077
-                ):
+                # lstat metadata already reports a symlink as non-regular.
+                if not is_private_regular_file(metadata):
                     raise LifecycleError(
                         "service environment must be a private regular file owned "
                         "by the current user"
@@ -543,6 +514,18 @@ class UserServiceManager:
         except OSError as exc:
             raise LifecycleError(f"cannot read service unit: {self.unit_path}") from exc
 
+    def inspect(self) -> dict[str, object]:
+        """Machine-readable unit state: never dumps ``systemctl`` text."""
+        active = (
+            self._run(("systemctl", "--user", "is-active", "--quiet", SERVICE_NAME))
+            == 0
+        )
+        return {
+            "active": active,
+            "unitPath": str(self.unit_path),
+            "unit": SERVICE_NAME,
+        }
+
     def status(self) -> int:
         result = self._run(
             ("systemctl", "--user", "status", "--no-pager", SERVICE_NAME)
@@ -616,11 +599,7 @@ class UserServiceManager:
                 payload = response.read(4097)
                 if response.status == 200 and len(payload) <= 4096:
                     meta = json.loads(payload)
-                    if (
-                        isinstance(meta, dict)
-                        and meta.get("apiVersion") == "2"
-                        and meta.get("authenticationRequired") is True
-                    ):
+                    if isinstance(meta, dict) and meta.get("apiVersion") == "2":
                         connection.request("GET", "/api/snapshot")
                         protected = connection.getresponse()
                         protected.read()

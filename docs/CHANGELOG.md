@@ -22,12 +22,160 @@ All notable changes are documented here. This project follows Semantic Versionin
 - The truncated command line in a task row expands in place on click
   instead of requiring copy-and-paste to read the training config.
 
+- `mocop deploy --help`, `mocop migrate --help`, and `mocop service --help`
+  now describe every flag and action, and help output names the program
+  `mocop` instead of `__main__.py`. The operations runbook gained a command,
+  flag, and exit-code reference (`0`, `1`, `2`, `75`).
+- `GET /api/meta` is now a complete machine-readable contract: every GET
+  route lists its accepted `query` parameters with type, bounds, and default,
+  every write lists its `body` field schema and `bodyLimitBytes`, every route
+  names its `responseType`, and the document also publishes `conventions`,
+  writer requirements, the error-code catalog, and a `documentation` URL for
+  the running release. The manifest is generated from the same declarative
+  table (`api_manifest.py`) the handlers validate against, replacing five
+  hand-written query parsers.
+- `mocop --version` prints the package version. `init`, `deploy`, `migrate`,
+  and every `service` action accept `--json` and write one `{ok, code?, ...}`
+  document, matching `config check --json` and `doctor --json`. Refusals stay
+  on that envelope so an agent never has to parse English from stderr.
+- `mocop api PATH` asks the running service any public or authenticated GET
+  question from the monitor host without knowing the listen address, the
+  capability file, or the Bearer header: both come from the configuration
+  directory, the response body is written to stdout unchanged (`/api/events`
+  streams until interrupted), and the exit code follows the CLI table (`0` for
+  a 2xx, `1` for any other status or an unreachable service, `2` for usage or
+  configuration problems) with a JSON `{error, code}` envelope on every
+  failure. Reader and writer routes are refused with `DASHBOARD_ONLY` because
+  their marker header and same-origin checks belong to the dashboard.
+- `GET /api/meta` capabilities now include `updateSupported`. Excess
+  connections answer `503 CONNECTION_LIMIT` as JSON instead of an empty body.
+- `403 AUTHENTICATION_REQUIRED` responses carry a `hint` naming the header to
+  send and where the capability file lives, plus the `documentation` URL, so
+  an agent can recover from a cold start without out-of-band knowledge.
+- `mocop config check --json` writes the validation report as one JSON
+  document on stdout (also for a rejected configuration), matching
+  `doctor --json`.
+- `GET /api/capacity?gpus=N&min_vram_gib=G&model=M` answers the placement
+  question from one bounded authenticated call: ranked same-host, same-model
+  GPU groups with the available devices, deficit, minimum free VRAM, and the
+  maintenance and health exclusions, using exactly the dashboard's matching
+  rules. A shared fixture pins the browser leaf and the new `capacity.py` to
+  one ranking, and the browser leaf now orders hosts by code point instead of
+  the locale so both agree everywhere.
+- `tests/gpu_tasks_test.mjs` now runs in CI: the workflow globs every browser
+  leaf and contract test instead of maintaining a list that had drifted.
+- `AGENTS.md` at the repository root is the entry point AI coding agents read
+  by convention: the reading order, the drift tests that enforce each
+  contract, the boundaries that must hold, and how to operate a deployment,
+  each pointing at the document that owns the detail.
+
 ### Changed
+
+- `doctor --json` now includes the local host in `hosts[]` (with
+  `local: true`) and adds `ok` alongside the existing `status` field.
+  `--once` / `--strict` with a subcommand are rejected as usage errors.
+  Inventory payloads must publish `infrastructureHosts` and
+  `sshDiscoveryMode`; the dashboard no longer defaults those fields.
 
 - Workload record parsing moved from `probe.py` into a new `workloads.py`
   module, and the GPU task projections moved from `app.js` into the
   `gpu-tasks.js` leaf ([ADR-0021](adr/0021-incremental-module-boundaries.md));
-  both budgets ratcheted down.
+  both budgets ratcheted down. The per-owner GPU occupancy rollup behind
+  `GET /api/usage` moved from `StateStore` into a pure `usage.py` module that
+  takes a copied timeline and is unit-tested on its own; `service.py`
+  ratcheted from 2,725 to 2,425 lines. The test-only
+  `parse_linux_resource_payload` wrapper left `probe.py` for the test module,
+  and the doctor and the route resolver share one `ssh -G` option resolver in
+  `ssh_topology.py` instead of two copies that had already drifted on how a
+  bare option line is read.
+- The dashboard's payload normalizers (snapshot and incidents envelopes,
+  inventory, collector settings, maintenance windows, host groups, topology)
+  moved from `app.js` into the `api-contracts.js` leaf, which now has its own
+  Node contract test covering every accepted shape and rejection. The host
+  trend and per-GPU history loaders, previously two copies of the same
+  bounded-backoff state machine spread over sixteen `view` fields, now share
+  the `keyed-loader.js` leaf, whose retry, single-flight, and stale-response
+  rules are tested with fake timers; selecting another host now also drops a
+  pending history retry. The custom-background code (IndexedDB storage,
+  container sniffing, size caps, WebP re-encoding) moved into the
+  `background-asset.js` leaf over injected browser primitives, so its quality
+  bisection and shrink loop are tested in Node for the first time; `format.js`
+  gained the contract test the leaf pattern always required, and a repository
+  test now checks that every leaf is routed, loaded before `app.js`, and
+  tested. The `app.js` ceiling ratcheted down to 6,100 lines.
+- Every HTTP server instance now requires the Bearer capability: the
+  unauthenticated server mode that only tests used is gone, `GET /api/meta`
+  no longer reports the constant `authenticationRequired` flag, and the
+  dashboard prompts for a missing capability without a `/api/meta` round trip.
+- `GET /api/update` now enforces the reader tier its manifest entry always
+  advertised (a marker-less request answers `403 UNTRUSTED_ORIGIN`), and a
+  test proves every manifested tier against its handler.
+- Every GET route whose manifest `query` is empty now answers a query string
+  with `400 QUERY_NOT_ALLOWED`; `/api/snapshot`, `/api/events`, `/healthz`,
+  and `/readyz` used to ignore one silently while five other routes rejected
+  it. The rule is enforced once in the dispatcher from the manifest, and a
+  test checks it for every route.
+- Every write route now validates its body through the same manifest the
+  `/api/meta` `body` schemas are generated from, in one documented order:
+  shape and JSON-type problems are `INVALID_SCHEMA`, well-typed values
+  outside the published alias grammar, `values`, bounds, or text length are
+  `INVALID_SETTINGS`, and only cross-field rules stay in the handlers.
+  `POST /api/settings/hosts` and `POST /api/probe` therefore answer an unsafe
+  alias or unknown action with `INVALID_SETTINGS` (previously
+  `INVALID_SCHEMA`), and a non-integer `durationSeconds` is `INVALID_SCHEMA`
+  (previously `INVALID_SETTINGS`). The manifest also publishes the text
+  `maximum` of every reason, group, and condition-key field, `nullable` on
+  `incidentStartedAt`, the three request-framing codes it had omitted, and
+  drops the one-route `500 INTERNAL_ERROR`: a host-group persist failure is
+  `503 SERVICE_UNAVAILABLE` like every other configuration write. The
+  collector bounds and the dashboard duration set now have one owner
+  (`api_manifest.py`) instead of copies in `web.py` and `inventory.py`, and
+  `web.py` shrank by 230 lines.
+- A managed unit that omits `--access-token-file` now exits `2` with a
+  message pointing at `mocop service install` instead of minting a token
+  nobody was shown; units generated since 0.9.0 always pass the flag.
+- The dashboard search box re-renders only the program-search panel and GPU
+  table, and GPU groups are keyed on the rows they show rather than on the
+  query text, so typing no longer rebuilds every visible group. Active
+  incidents are indexed by host on acceptance; the GPU history, capacity
+  candidate, owner, webhook endpoint, and All-servers resource views rebuild
+  their DOM only when the data they show changes; and the per-second tick
+  compares before it writes and skips cosmetic updates while the tab is hidden.
+- Documentation gives each fact one owner: CONTRIBUTING.md owns the quality
+  gate list, OPERATIONS.md the systemd unit and pinned install command,
+  PERFORMANCE.md the architecture thresholds, API.md the capability rules.
+  The architecture table lists every module and browser leaf, QUALITY.md
+  re-measures the runtime profile and coverage against the current tree, and
+  six ADRs record how later releases changed their decisions.
+
+### Fixed
+
+- The capacity-watch notification and title marker now fire while the tab is
+  in the background. They were evaluated inside the `requestAnimationFrame`
+  render, which browsers pause for hidden documents, so the alert the feature
+  exists for arrived only when the operator returned to the tab.
+- The release pill now starts on the polling recovery path, not only when the
+  first snapshot arrives over the live stream.
+- The owners dialog shows when its data was last collected instead of a
+  static "实时更新" label.
+- The incident detail dialog no longer overwrites a reason the operator is
+  typing every time a snapshot arrives, and a condition that recovers while
+  the dialog is open is shown as resolved with its actions withdrawn instead
+  of closing the dialog under the cursor.
+- Fleet rail items are valid HTML: the rows inside each `<button>` are now
+  phrasing content, so assistive technology no longer has to flatten them.
+
+### Removed
+
+- `GET /api/service` and `POST /api/settings/poll-interval`, deprecated in
+  0.9.0. Use the `capabilities` block of `GET /api/meta` and
+  `POST /api/settings/collector` (any non-empty subset) instead.
+- Dashboard fallbacks for server shapes that cannot occur (older snapshot,
+  collector, maintenance, and capability payloads, the native `EventSource`
+  transport, browser-side threshold defaults, and the `createImageBitmap`
+  and `indexedDB` feature probes), plus unused leaf exports, dead CSS, and
+  Python methods, protocol duck-typing, and Linux flag probes with no callers
+  or purpose.
 
 ## [0.11.0] - 2026-08-25
 

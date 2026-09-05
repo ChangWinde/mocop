@@ -4,7 +4,13 @@ Thank you for improving Mocop. Keep changes focused on fast, reliable, GPU-first
 
 ## Development setup
 
-Python 3.10 or newer and OpenSSH are required. The runtime has no third-party Python dependencies.
+Python 3.10 or newer, Node.js, a Chrome or Chromium binary for the browser smoke
+test, and OpenSSH are required. The runtime has no third-party Python
+dependencies.
+
+This is the canonical quality-gate list; `.github/workflows/ci.yml` runs the
+same commands and the READMEs and documentation portal link here instead of
+repeating it.
 
 ```bash
 python3 -m unittest discover -s tests -t . -v
@@ -13,20 +19,8 @@ uvx --from coverage==7.15.4 coverage report --fail-under=85
 python3 -m compileall -q src/mocop tests
 uvx --from ruff==0.12.11 ruff check .
 uvx --from ruff==0.12.11 ruff format --check .
-node --check src/mocop/static/app.js
-node --check src/mocop/static/capacity-match.js
-node --check src/mocop/static/capacity-watch.js
-node --check src/mocop/static/csv-export.js
-node --check src/mocop/static/dashboard-auth.js
-node --check src/mocop/static/format.js
-node --check src/mocop/static/process-search.js
-node --check src/mocop/static/update-pill.js
-node tests/capacity_match_test.mjs
-node tests/capacity_watch_test.mjs
-node tests/csv_export_test.mjs
-node tests/dashboard_auth_test.mjs
-node tests/process_search_test.mjs
-node tests/update_pill_test.mjs
+for script in src/mocop/static/*.js; do node --check "$script"; done
+for test in tests/*_test.mjs; do node "$test"; done
 node --experimental-websocket tests/browser_smoke.mjs
 ```
 
@@ -76,7 +70,7 @@ Scopes use lowercase path-like names such as `repo`, `core`, `config`, `probe`, 
 [tests/fix]: stabilize browser smoke test
 ```
 
-The complete subject must be at most 72 characters, and the imperative summary must not end with a period. Use a body when the rationale or trade-offs are not evident from the diff. The local `commit-msg` hook checks new commits, and CI validates the complete reachable history. Git-generated merge and revert subjects are accepted only when their commit metadata proves their origin.
+The complete subject must be at most 72 characters, and the imperative summary must not end with a period. Use a body when the rationale or trade-offs are not evident from the diff. The local `commit-msg` hook checks new commits, and CI validates the complete reachable history. Git-generated merge and revert subjects are accepted only when their commit metadata proves their origin. A commit that reached the protected branch before its rule was enforced is listed by full SHA with a reason in `HISTORICAL_EXEMPTIONS` inside `.github/scripts/check_commit_message.py`; a repository test pins that list, so adding to it is a reviewed change, never a silent one.
 
 Do not mix generated output, unrelated formatting, or local configuration into a commit. Before committing, inspect staged paths and run the checks relevant to the change.
 

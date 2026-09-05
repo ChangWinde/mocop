@@ -333,9 +333,7 @@ class UpdateManager:
             self._fail("neither pip nor uv is available to install the wheel")
             return False
         result = self._run(
-            ["uv", "tool", "install", "--force", "--from", str(wheel_path), "mocop"]
-            if shutil.which("uv")
-            else [uv, "tool", "install", "--force", "--from", str(wheel_path), "mocop"],
+            [uv, "tool", "install", "--force", "--from", str(wheel_path), "mocop"],
             _INSTALL_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:

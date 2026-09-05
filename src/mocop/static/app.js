@@ -4,24 +4,24 @@ const {
   age, appendStreamChunk, clamp, combinedMetric, duration, durationSince, format,
   memory, numeric, optionalMetric, rate, ratio, retryCountdown, shortTime, storage,
 } = globalThis.MocopFormat.create();
+// Payload contracts: every normalizer returns a bounded projection or throws,
+// so renderers can dereference server data unguarded.
+const {
+  safeStoredHosts,
+  assertSnapshotEnvelope,
+  assertIncidentsEnvelope,
+  normalizeCollectorSettings,
+  normalizeInventory,
+  normalizeTopology,
+} = globalThis.MocopApiContracts.create();
 
 const PREFERENCE_STORAGE_KEY = "mocop.preferences.v1";
-const VISUAL_ASSET_DATABASE = "mocop.visual-assets.v1";
-const VISUAL_ASSET_STORE = "assets";
-const BACKGROUND_ASSET_KEY = "background";
-const MAX_BACKGROUND_BYTES = 8 * 1024 * 1024;
-const MAX_BACKGROUND_SOURCE_BYTES = 32 * 1024 * 1024;
-const MAX_BACKGROUND_DIMENSION = 8192;
-const MAX_BACKGROUND_PIXELS = 32_000_000;
-const MAX_COMPRESSED_BACKGROUND_DIMENSION = 4096;
-const MAX_COMPRESSED_BACKGROUND_PIXELS = 12_000_000;
 const MAX_GPU_DETAIL_PROCESSES = 100;
 const MAX_PROGRAM_SEARCH_RESULTS = 200;
 const MAX_SEARCH_QUERY_LENGTH = 120;
 const MAX_HEATMAP_COLUMNS = 8;
 const GPU_PROCESS_FRESHNESS_WARNING_MS = 90_000;
 const gpuProcessSummaryCache = new WeakMap();
-const BACKGROUND_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
 const DEFAULT_PREFERENCES = Object.freeze({
   serverSort: "custom",
   serverOrder: [],
@@ -48,7 +48,6 @@ const VISUAL_STYLE_VALUES = new Set([
 const ACCENT_VALUES = new Set(["cobalt", "cyan", "violet", "emerald", "amber", "rose"]);
 const DENSITY_VALUES = new Set(["comfortable", "compact"]);
 const SERVER_FILTER_VALUES = new Set(["all", "issues", "busy", "available", "stale"]);
-const TOPOLOGY_TRANSPORT_VALUES = new Set(["ssh", "frp-stcp", "frp-xtcp", "vpn"]);
 const TOPOLOGY_TRANSPORT_LABELS = Object.freeze({
   ssh: "SSH",
   "frp-stcp": "FRP · STCP",
@@ -61,12 +60,6 @@ function safeBackgroundVisibility(value) {
     ? value : DEFAULT_PREFERENCES.backgroundVisibility;
 }
 
-function safeStoredHosts(value) {
-  if (!Array.isArray(value)) return [];
-  return [...new Set(value.filter(
-    (host) => typeof host === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(host),
-  ))];
-}
 
 function loadPreferences() {
   try {
@@ -133,6 +126,12 @@ const fetch = (url, options = {}) => nativeFetch(url, {
       ? { Authorization: `Bearer ${dashboardAuthentication.token}` } : {}),
   },
 });
+// Every write route takes one JSON object and nothing else.
+const postJson = (url, body) => fetch(url, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
 
 const WORKLOAD_KIND_LABELS = {
   process: "进程",
@@ -142,11 +141,16 @@ const WORKLOAD_KIND_LABELS = {
   podman: "Podman",
 };
 
+// compareProcessSearchRecords and processSearchRank are not called by the
+// dashboard itself: the opt-in browser benchmark (tests/browser_smoke.mjs with
+// MOCOP_PROGRAM_SEARCH_BENCHMARK=1) evaluates them in this page to cross-check
+// the bounded heap against a full sort.
 const {
   compareProcessSearchRecords,
   gpuRecordMatchesSearch,
   normalizedSearchTerms,
   processMatchesSearch,
+  processMemoryRank,
   processSearchRank,
   searchProcessRecords,
 } = globalThis.MocopProcessSearch.create({
@@ -184,15 +188,6 @@ const view = {
   serverOrder: preferences.serverOrder,
   query: "",
   lastEventAt: 0,
-  history: null,
-  historyKey: "",
-  historyRequest: 0,
-  historyLoading: false,
-  historyError: false,
-  historyFetchKey: null,
-  historyRetryTimer: null,
-  historyRetryKey: "",
-  historyRetryDelayMs: 0,
   trendRenderKey: "",
   renderFrame: null,
   expandedHosts: new Set(),
@@ -206,6 +201,7 @@ const view = {
   singleTableCache: null,
   selectedPanelKey: "",
   incidents: null,
+  incidentsByHost: new Map(),
   attentionRenderKey: "",
   incidentRenderKey: "",
   incidentVersion: -1,
@@ -220,20 +216,11 @@ const view = {
   transportLabel: "连接中",
   refreshFeedbackTimer: null,
   cadenceSnapshotFloor: null,
-  connectionErrorTimer: null,
   snapshotFetchInFlight: null,
   draggedHost: null,
   suppressServerClick: false,
   selectedGpu: null,
-  gpuHistory: null,
-  gpuHistoryKey: "",
-  gpuHistoryFetchKey: null,
-  gpuHistoryRequest: 0,
-  gpuHistoryLoading: false,
-  gpuHistoryError: false,
-  gpuHistoryRetryTimer: null,
-  gpuHistoryRetryKey: "",
-  gpuHistoryRetryDelayMs: 0,
+  gpuHistoryRenderKey: "",
   gpuTaskQuery: "",
   gpuTaskIdentityFilter: "all",
   gpuTaskFeedbackTimer: null,
@@ -246,7 +233,16 @@ const view = {
   gpuTaskRowCache: new Map(),
   programSearchRowCache: new Map(),
   selectedIncident: null,
+  // The last live record for the selected condition, kept so the dialog can
+  // still explain a condition that recovered while it was open.
+  selectedIncidentRecord: null,
+  // What this code last wrote into the reason field; an operator edit makes
+  // the two differ, and then snapshots stop overwriting the field.
+  incidentReasonSeed: "",
   incidentActionPending: false,
+  notificationEndpointsKey: "",
+  capacityResultsKey: "",
+  ownersResultsKey: "",
   manualProbePending: false,
   notificationTestPending: false,
   capacityRequest: { gpuCount: 1, minVramGiB: 24, model: "any" },
@@ -475,8 +471,33 @@ const elements = {
   incidentOpenMaintenance: $("#incident-open-maintenance"),
   incidentActionFeedback: $("#incident-action-feedback"),
 };
+
+// The six feature dialogs are mutually exclusive modals; the authentication
+// prompt is deliberately not in this set so nothing can dismiss it.
+const FEATURE_DIALOGS = [
+  elements.settingsDialog,
+  elements.topologyDialog,
+  elements.gpuDetailDialog,
+  elements.capacityDialog,
+  elements.ownersDialog,
+  elements.incidentDetailDialog,
+];
+
+function openExclusiveDialog(dialog) {
+  FEATURE_DIALOGS.forEach((other) => {
+    if (other !== dialog && other.open) other.close();
+  });
+  if (!dialog.open) dialog.showModal();
+}
 const styleChoiceButtons = [...document.querySelectorAll("[data-style-choice]")];
 const accentChoiceButtons = [...document.querySelectorAll("[data-accent-choice]")];
+
+// Toggle buttons expose their state twice: visually and to assistive
+// technology.
+function setPressed(button, pressed) {
+  button.classList.toggle("active", pressed);
+  button.setAttribute("aria-pressed", String(pressed));
+}
 
 function create(tag, className, text) {
   const element = document.createElement(tag);
@@ -485,345 +506,13 @@ function create(tag, className, text) {
   return element;
 }
 
-// Binary presentation assets stay out of both synchronous preferences and the service.
-function openVisualAssetDatabase() {
-  return new Promise((resolve, reject) => {
-    if (!("indexedDB" in window)) {
-      reject(new Error("IndexedDB unavailable"));
-      return;
-    }
-    const request = indexedDB.open(VISUAL_ASSET_DATABASE, 1);
-    let settled = false;
-    const finish = (callback, value) => {
-      if (settled) {
-        if (value && typeof value.close === "function") value.close();
-        return;
-      }
-      settled = true;
-      callback(value);
-    };
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(VISUAL_ASSET_STORE)) {
-        request.result.createObjectStore(VISUAL_ASSET_STORE);
-      }
-    };
-    request.onsuccess = () => finish(resolve, request.result);
-    request.onerror = () => finish(
-      reject,
-      request.error || new Error("Unable to open browser storage"),
-    );
-    request.onblocked = () => finish(reject, new Error("Browser storage is blocked"));
-  });
-}
-
-async function transactVisualAsset(mode, operation) {
-  const database = await openVisualAssetDatabase();
-  return new Promise((resolve, reject) => {
-    let result;
-    let settled = false;
-    const finish = (callback, value) => {
-      if (settled) return;
-      settled = true;
-      database.close();
-      callback(value);
-    };
-    let transaction;
-    let request;
-    try {
-      transaction = database.transaction(VISUAL_ASSET_STORE, mode);
-      request = operation(transaction.objectStore(VISUAL_ASSET_STORE));
-    } catch (error) {
-      finish(reject, error);
-      return;
-    }
-    request.onsuccess = () => { result = request.result; };
-    transaction.oncomplete = () => finish(resolve, result);
-    transaction.onerror = () => finish(
-      reject,
-      transaction.error || request.error || new Error("Browser storage transaction failed"),
-    );
-    transaction.onabort = transaction.onerror;
-  });
-}
-
-function readStoredBackground() {
-  return transactVisualAsset("readonly", (store) => store.get(BACKGROUND_ASSET_KEY));
-}
-
-function writeStoredBackground(blob) {
-  return transactVisualAsset("readwrite", (store) => store.put(blob, BACKGROUND_ASSET_KEY));
-}
-
-function deleteStoredBackground() {
-  return transactVisualAsset("readwrite", (store) => store.delete(BACKGROUND_ASSET_KEY));
-}
-
-function decodeImage(blob) {
-  if (typeof createImageBitmap === "function") {
-    return createImageBitmap(blob).then((bitmap) => {
-      return {
-        source: bitmap,
-        width: bitmap.width,
-        height: bitmap.height,
-        release: () => bitmap.close(),
-      };
-    });
-  }
-  return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(blob);
-    const image = new Image();
-    let settled = false;
-    const finish = (callback, value) => {
-      if (settled) return;
-      settled = true;
-      callback(value);
-    };
-    image.onload = () => finish(resolve, {
-      source: image,
-      width: image.naturalWidth,
-      height: image.naturalHeight,
-      release: () => URL.revokeObjectURL(objectUrl),
-    });
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      finish(reject, new Error("无法解析图片内容"));
-    };
-    image.src = objectUrl;
-  });
-}
-
-async function decodeImageSize(blob) {
-  const decoded = await decodeImage(blob);
-  try {
-    return { width: decoded.width, height: decoded.height };
-  } finally {
-    decoded.release();
-  }
-}
-
-function asciiAt(bytes, offset, value) {
-  if (offset < 0 || offset + value.length > bytes.length) return false;
-  for (let index = 0; index < value.length; index += 1) {
-    if (bytes[offset + index] !== value.charCodeAt(index)) return false;
-  }
-  return true;
-}
-
-function uint32BigEndian(bytes, offset) {
-  if (offset + 4 > bytes.length) return null;
-  return (
-    bytes[offset] * 0x1000000
-    + bytes[offset + 1] * 0x10000
-    + bytes[offset + 2] * 0x100
-    + bytes[offset + 3]
-  );
-}
-
-function uint32LittleEndian(bytes, offset) {
-  if (offset + 4 > bytes.length) return null;
-  return (
-    bytes[offset]
-    + bytes[offset + 1] * 0x100
-    + bytes[offset + 2] * 0x10000
-    + bytes[offset + 3] * 0x1000000
-  );
-}
-
-async function isAnimatedImage(blob) {
-  // Container markers are checked before decode so a selected background cannot animate.
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  if (blob.type === "image/jpeg") {
-    if (bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) {
-      throw new Error("图片内容与文件格式不匹配");
-    }
-    return false;
-  }
-  if (blob.type === "image/png") {
-    if (
-      bytes[0] !== 0x89
-      || !asciiAt(bytes, 1, "PNG")
-      || bytes[4] !== 0x0d
-      || bytes[5] !== 0x0a
-      || bytes[6] !== 0x1a
-      || bytes[7] !== 0x0a
-    ) {
-      throw new Error("图片内容与文件格式不匹配");
-    }
-    for (let offset = 8; offset + 12 <= bytes.length;) {
-      const length = uint32BigEndian(bytes, offset);
-      if (length == null || length > bytes.length - offset - 12) return false;
-      if (asciiAt(bytes, offset + 4, "acTL")) return true;
-      if (asciiAt(bytes, offset + 4, "IEND")) return false;
-      offset += length + 12;
-    }
-    return false;
-  }
-  if (blob.type === "image/webp") {
-    if (!asciiAt(bytes, 0, "RIFF") || !asciiAt(bytes, 8, "WEBP")) {
-      throw new Error("图片内容与文件格式不匹配");
-    }
-    for (let offset = 12; offset + 8 <= bytes.length;) {
-      const length = uint32LittleEndian(bytes, offset + 4);
-      if (length == null || length > bytes.length - offset - 8) return false;
-      if (asciiAt(bytes, offset, "ANIM") || asciiAt(bytes, offset, "ANMF")) return true;
-      offset += 8 + length + (length % 2);
-    }
-    return false;
-  }
-  if (blob.type === "image/avif") {
-    const boxLength = uint32BigEndian(bytes, 0);
-    if (
-      boxLength == null
-      || (boxLength > 1 && boxLength > bytes.length)
-      || !asciiAt(bytes, 4, "ftyp")
-    ) {
-      throw new Error("图片内容与文件格式不匹配");
-    }
-    const headerLimit = Math.min(
-      bytes.length,
-      boxLength === 0 ? bytes.length : boxLength === 1 ? 256 : boxLength,
-    );
-    let hasAvifBrand = false;
-    let animated = false;
-    for (let offset = 8; offset + 4 <= headerLimit; offset += 1) {
-      hasAvifBrand ||= asciiAt(bytes, offset, "avif") || asciiAt(bytes, offset, "avis");
-      animated ||= asciiAt(bytes, offset, "avis");
-    }
-    if (!hasAvifBrand) throw new Error("图片内容与文件格式不匹配");
-    return animated;
-  }
-  return false;
-}
-
-async function validateBackgroundBlob(blob, maxBytes = MAX_BACKGROUND_BYTES) {
-  if (!(blob instanceof Blob) || !BACKGROUND_TYPES.has(blob.type)) {
-    throw new Error("仅支持 PNG、JPEG、WebP 或 AVIF 图片");
-  }
-  if (blob.size <= 0) {
-    throw new Error("图片内容不能为空");
-  }
-  if (blob.size > maxBytes) {
-    const limit = maxBytes === MAX_BACKGROUND_BYTES ? 8 : 32;
-    throw new Error(`图片大小不能超过 ${limit} MiB`);
-  }
-  if (await isAnimatedImage(blob)) {
-    throw new Error("不支持动态图片，请选择静态背景");
-  }
-  let dimensions;
-  try {
-    dimensions = await decodeImageSize(blob);
-  } catch (_error) {
-    throw new Error("图片已损坏或当前浏览器不支持该格式");
-  }
-  if (
-    dimensions.width <= 0
-    || dimensions.height <= 0
-    || dimensions.width > MAX_BACKGROUND_DIMENSION
-    || dimensions.height > MAX_BACKGROUND_DIMENSION
-    || dimensions.width * dimensions.height > MAX_BACKGROUND_PIXELS
-  ) {
-    throw new Error("图片尺寸不能超过 8192 像素或 32 百万像素");
-  }
-  return dimensions;
-}
-
-function canvasToWebp(canvas, quality) {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (!(blob instanceof Blob) || blob.size <= 0 || blob.type !== "image/webp") {
-        reject(new Error("当前浏览器不支持 WebP 图片压缩"));
-        return;
-      }
-      resolve(blob);
-    }, "image/webp", quality);
-  });
-}
-
-async function encodeCanvasWithinLimit(canvas) {
-  const highQuality = await canvasToWebp(canvas, 0.9);
-  if (highQuality.size <= MAX_BACKGROUND_BYTES) {
-    return { blob: highQuality, smallestSize: highQuality.size };
-  }
-
-  const lowQuality = await canvasToWebp(canvas, 0.5);
-  if (lowQuality.size > MAX_BACKGROUND_BYTES) {
-    return { blob: null, smallestSize: lowQuality.size };
-  }
-
-  let best = lowQuality;
-  let lowerQuality = 0.5;
-  let upperQuality = 0.9;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const quality = (lowerQuality + upperQuality) / 2;
-    const candidate = await canvasToWebp(canvas, quality);
-    if (candidate.size <= MAX_BACKGROUND_BYTES) {
-      best = candidate;
-      lowerQuality = quality;
-    } else {
-      upperQuality = quality;
-    }
-  }
-  return { blob: best, smallestSize: best.size };
-}
-
-async function compressBackgroundBlob(blob, dimensions) {
-  const decoded = await decodeImage(blob);
-  const canvas = document.createElement("canvas");
-  const initialScale = Math.min(
-    1,
-    MAX_COMPRESSED_BACKGROUND_DIMENSION / dimensions.width,
-    MAX_COMPRESSED_BACKGROUND_DIMENSION / dimensions.height,
-    Math.sqrt(MAX_COMPRESSED_BACKGROUND_PIXELS / (dimensions.width * dimensions.height)),
-  );
-  let width = Math.max(1, Math.floor(dimensions.width * initialScale));
-  let height = Math.max(1, Math.floor(dimensions.height * initialScale));
-
-  try {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      canvas.width = width;
-      canvas.height = height;
-      const context = canvas.getContext("2d");
-      if (!context) throw new Error("当前浏览器无法处理这张图片");
-      context.imageSmoothingEnabled = true;
-      context.imageSmoothingQuality = "high";
-      context.drawImage(decoded.source, 0, 0, width, height);
-
-      const encoded = await encodeCanvasWithinLimit(canvas);
-      if (encoded.blob) {
-        return encoded.blob;
-      }
-
-      const shrink = Math.min(
-        0.82,
-        Math.sqrt(MAX_BACKGROUND_BYTES / encoded.smallestSize) * 0.92,
-      );
-      const nextWidth = Math.max(1, Math.floor(width * shrink));
-      const nextHeight = Math.max(1, Math.floor(height * shrink));
-      if (nextWidth === width && nextHeight === height) break;
-      width = nextWidth;
-      height = nextHeight;
-    }
-  } finally {
-    decoded.release();
-    canvas.width = 1;
-    canvas.height = 1;
-  }
-  throw new Error("无法在安全限制内压缩这张图片");
-}
-
-async function prepareBackgroundBlob(blob) {
-  const dimensions = await validateBackgroundBlob(blob, MAX_BACKGROUND_SOURCE_BYTES);
-  if (blob.size <= MAX_BACKGROUND_BYTES) {
-    return { blob, dimensions, compressed: false };
-  }
-  const compressed = await compressBackgroundBlob(blob, dimensions);
-  const validatedDimensions = await validateBackgroundBlob(compressed);
-  return {
-    blob: compressed,
-    dimensions: validatedDimensions,
-    compressed: true,
-  };
-}
+// Binary presentation assets stay out of both synchronous preferences and the
+// service; the leaf owns storage, validation, and re-encoding.
+const backgroundAssets = globalThis.MocopBackgroundAsset.create({
+  indexedDB: globalThis.indexedDB,
+  createImageBitmap: (blob) => createImageBitmap(blob),
+  createCanvas: () => document.createElement("canvas"),
+});
 
 function backgroundSize(blob) {
   if (blob.size < 0.1 * 1024 * 1024) {
@@ -858,9 +547,9 @@ function renderBackground(blob) {
 
 async function loadStoredBackground() {
   try {
-    const blob = await readStoredBackground();
+    const blob = await backgroundAssets.readStored();
     if (!(blob instanceof Blob)) return;
-    await validateBackgroundBlob(blob);
+    await backgroundAssets.validate(blob);
     renderBackground(blob);
     setBackgroundStatus("已恢复当前浏览器保存的背景", "success");
   } catch (_error) {
@@ -877,13 +566,13 @@ async function selectBackgroundImage() {
   elements.backgroundImageInput.disabled = true;
   elements.removeBackgroundImage.disabled = true;
   setBackgroundStatus(
-    file.size > MAX_BACKGROUND_BYTES ? "正在浏览器本地优化图片…" : "正在安全读取图片…",
+    file.size > backgroundAssets.MAX_BYTES ? "正在浏览器本地优化图片…" : "正在安全读取图片…",
   );
   try {
-    const prepared = await prepareBackgroundBlob(file);
+    const prepared = await backgroundAssets.prepare(file);
     if (requestId !== view.backgroundRequestId) return;
     try {
-      await runBackgroundStorage(() => writeStoredBackground(prepared.blob));
+      await runBackgroundStorage(() => backgroundAssets.writeStored(prepared.blob));
       if (requestId !== view.backgroundRequestId) return;
       renderBackground(prepared.blob);
       const prefix = prepared.compressed
@@ -919,7 +608,7 @@ async function removeBackgroundImage() {
   elements.removeBackgroundImage.disabled = true;
   setBackgroundStatus("正在移除背景…");
   try {
-    await runBackgroundStorage(deleteStoredBackground);
+    await runBackgroundStorage(backgroundAssets.deleteStored);
     if (requestId !== view.backgroundRequestId) return;
     clearRenderedBackground();
     setBackgroundStatus("背景已从当前浏览器移除", "success");
@@ -989,8 +678,7 @@ function syncPreferenceControls() {
   );
   document.querySelectorAll(".fleet-filter").forEach((button) => {
     const selected = button.dataset.serverFilter === view.serverFilter;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-pressed", String(selected));
+    setPressed(button, selected);
   });
   styleChoiceButtons.forEach((button) => {
     const selected = button.dataset.styleChoice === preferences.visualStyle;
@@ -1062,11 +750,7 @@ function collectionHealth() {
     0,
     (Date.now() - completedAt) / 1000,
   );
-  const fallback = Math.max(15, numeric(view.snapshot.pollIntervalSeconds) * 3);
-  const staleAfterSeconds = numeric(
-    view.snapshot.collectionStaleAfterSeconds,
-    fallback,
-  );
+  const staleAfterSeconds = view.snapshot.collectionStaleAfterSeconds;
   return {
     state: elapsedSeconds > staleAfterSeconds ? "delayed" : "fresh",
     elapsedSeconds,
@@ -1092,9 +776,11 @@ function renderConnectionStatus() {
       title = `最近采集批次完成于 ${age(view.snapshot.lastPollCompletedAt)}`;
     }
   }
-  elements.connection.className = `connection ${kind}`;
-  elements.connectionText.textContent = label;
-  elements.connection.title = title;
+  // Runs every second: unchanged values must not invalidate style or layout.
+  const className = `connection ${kind}`;
+  if (elements.connection.className !== className) elements.connection.className = className;
+  if (elements.connectionText.textContent !== label) elements.connectionText.textContent = label;
+  if (elements.connection.title !== title) elements.connection.title = title;
 }
 
 function syncRefreshControl() {
@@ -1115,21 +801,9 @@ function syncRefreshControl() {
 }
 
 function acceptSnapshot(snapshot) {
-  // servers is part of the envelope: renderers dereference it unguarded, so
-  // a structurally broken snapshot must be rejected here instead of
-  // replacing good state and freezing every later render.
-  if (
-    !snapshot
-    || typeof snapshot !== "object"
-    || !Number.isSafeInteger(snapshot.version)
-    || typeof snapshot.startedAt !== "string"
-    || !Array.isArray(snapshot.servers)
-    || snapshot.servers.some(
-      (server) => !server || typeof server.host !== "string" || !Array.isArray(server.gpus),
-    )
-  ) {
-    throw new TypeError("Invalid snapshot envelope");
-  }
+  // A structurally broken snapshot must be rejected instead of replacing
+  // good state and freezing every later render.
+  assertSnapshotEnvelope(snapshot);
 
   const floor = view.cadenceSnapshotFloor;
   if (floor && snapshot.startedAt !== floor.startedAt) {
@@ -1174,23 +848,11 @@ async function updatePollInterval() {
   elements.refreshInterval.disabled = true;
   showRefreshFeedback("pending", `正在调整为 ${format(requested)} 秒`);
   try {
-    // The collector endpoint accepts a field subset; the poll-interval
-    // endpoint is deprecated and only kept server-side for older pages.
-    const response = await fetch("/api/settings/collector", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pollIntervalSeconds: requested }),
-    });
+    // One-field subset of POST /api/settings/collector.
+    const response = await postJson("/api/settings/collector", { pollIntervalSeconds: requested });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
-    // Newer services answer with the collector envelope; older ones with the
-    // flat poll-interval settings object. Both carry version/startedAt.
-    const settings = (
-      payload.collectorSettings
-      && typeof payload.collectorSettings === "object"
-      && !Array.isArray(payload.collectorSettings)
-    ) ? payload.collectorSettings : payload;
-    const pollIntervalSeconds = settings.pollIntervalSeconds;
+    const pollIntervalSeconds = payload.collectorSettings?.pollIntervalSeconds;
     if (
       !Number.isSafeInteger(payload.version)
       || typeof payload.startedAt !== "string"
@@ -1222,153 +884,8 @@ async function updatePollInterval() {
   }
 }
 
-function normalizeCollectorSettings(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new TypeError("Invalid collector settings response");
-  }
-  const pollIntervalSeconds = payload.pollIntervalSeconds;
-  const probeTimeoutSeconds = payload.probeTimeoutSeconds;
-  const maxWorkers = payload.maxWorkers;
-  if (
-    typeof pollIntervalSeconds !== "number"
-    || !Number.isFinite(pollIntervalSeconds)
-    || pollIntervalSeconds < 1
-    || pollIntervalSeconds > 3600
-    || typeof probeTimeoutSeconds !== "number"
-    || !Number.isFinite(probeTimeoutSeconds)
-    || probeTimeoutSeconds < 2
-    || probeTimeoutSeconds > 300
-    || !Number.isSafeInteger(maxWorkers)
-    || maxWorkers < 1
-    || maxWorkers > 64
-  ) {
-    throw new TypeError("Invalid collector settings response");
-  }
-  const settings = { pollIntervalSeconds, probeTimeoutSeconds, maxWorkers };
-  // Read-only field on newer services; older ones simply omit it.
-  const connectTimeoutSeconds = payload.connectTimeoutSeconds;
-  if (
-    typeof connectTimeoutSeconds === "number"
-    && Number.isFinite(connectTimeoutSeconds)
-    && connectTimeoutSeconds > 0
-    && connectTimeoutSeconds <= 300
-  ) {
-    settings.connectTimeoutSeconds = connectTimeoutSeconds;
-  }
-  return settings;
-}
 
-function normalizeInventory(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new TypeError("Invalid inventory response");
-  }
-  const configuredHosts = safeStoredHosts(payload.configuredHosts);
-  const activeHosts = safeStoredHosts(payload.activeHosts);
-  const availableHosts = safeStoredHosts(payload.availableHosts);
-  const collectorSettings = normalizeCollectorSettings(payload.collectorSettings);
-  const maintenanceWindows = normalizeMaintenanceWindows(
-    payload.maintenanceWindows,
-    configuredHosts,
-  );
-  const hostGroups = normalizeHostGroups(payload.hostGroups, configuredHosts);
-  const infrastructureHosts = safeStoredHosts(payload.infrastructureHosts || []);
-  const sshDiscoveryWarnings = Array.isArray(payload.sshDiscoveryWarnings)
-    ? payload.sshDiscoveryWarnings.filter((item) => typeof item === "string").slice(0, 1024)
-    : [];
-  const sshDiscoveryMode = payload.sshDiscoveryMode || "aliases";
-  if (
-    configuredHosts.length !== payload.configuredHosts?.length
-    || activeHosts.length !== payload.activeHosts?.length
-    || availableHosts.length !== payload.availableHosts?.length
-    || (payload.localHost != null && !safeStoredHosts([payload.localHost]).length)
-    || typeof payload.autoDiscover !== "boolean"
-    || typeof payload.writable !== "boolean"
-    || !Number.isSafeInteger(payload.ignoredCodeHostCount)
-    || !Number.isSafeInteger(payload.excludedHostCount)
-    || !["aliases", "topology"].includes(sshDiscoveryMode)
-    || infrastructureHosts.length !== (payload.infrastructureHosts || []).length
-  ) {
-    throw new TypeError("Invalid inventory response");
-  }
-  return {
-    configuredHosts,
-    activeHosts,
-    availableHosts,
-    localHost: payload.localHost,
-    autoDiscover: payload.autoDiscover,
-    writable: payload.writable,
-    ignoredCodeHostCount: Math.max(0, payload.ignoredCodeHostCount),
-    excludedHostCount: Math.max(0, payload.excludedHostCount),
-    collectorSettings,
-    maintenanceWindows,
-    hostGroups,
-    infrastructureHosts, sshDiscoveryWarnings, sshDiscoveryMode,
-  };
-}
 
-function normalizeTopology(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new TypeError("Invalid topology response");
-  }
-  if (payload.root == null && Array.isArray(payload.links) && payload.links.length === 0) {
-    return { root: null, links: [] };
-  }
-  const root = safeStoredHosts([payload.root])[0];
-  if (!root || !Array.isArray(payload.links) || payload.links.length > 512) {
-    throw new TypeError("Invalid topology response");
-  }
-  const targets = new Set();
-  const children = new Map();
-  const links = payload.links.map((link) => {
-    if (!link || typeof link !== "object" || Array.isArray(link)) {
-      throw new TypeError("Invalid topology link");
-    }
-    const keys = Object.keys(link);
-    if (
-      !["source", "target", "transport"].every((key) => keys.includes(key))
-      || keys.some((key) => !["source", "target", "transport", "label"].includes(key))
-    ) {
-      throw new TypeError("Invalid topology link");
-    }
-    const source = safeStoredHosts([link.source])[0];
-    const target = safeStoredHosts([link.target])[0];
-    const label = link.label == null ? null : link.label;
-    if (
-      !source
-      || !target
-      || source === target
-      || target === root
-      || targets.has(target)
-      || !TOPOLOGY_TRANSPORT_VALUES.has(link.transport)
-      || (label != null && (
-        typeof label !== "string"
-        || !label
-        || label !== label.trim()
-        || [...label].length > 64
-        || /\p{C}/u.test(label)
-      ))
-    ) {
-      throw new TypeError("Invalid topology link");
-    }
-    targets.add(target);
-    if (!children.has(source)) children.set(source, []);
-    children.get(source).push(target);
-    return { source, target, transport: link.transport, label };
-  });
-  const reachable = new Set([root]);
-  const pending = [root];
-  while (pending.length) {
-    (children.get(pending.pop()) || []).forEach((target) => {
-      if (reachable.has(target)) return;
-      reachable.add(target);
-      pending.push(target);
-    });
-  }
-  if (links.some((link) => !reachable.has(link.source) || !reachable.has(link.target))) {
-    throw new TypeError("Invalid topology tree");
-  }
-  return { root, links };
-}
 
 function displayHost(value) { const server = typeof value === "string" ? topologyServer(value) : value; return server?.displayName || server?.host || value || ""; }
 function topologyServer(host) {
@@ -1559,10 +1076,7 @@ async function fetchTopology() {
   view.topologyError = "";
   renderTopology();
   try {
-    const response = await fetch("/api/topology", {
-      cache: "no-store",
-      headers: { "X-Monitor-Request": "dashboard" },
-    });
+    const response = await fetch("/api/topology");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     view.topology = normalizeTopology(await response.json());
     view.topologyRevision += 1;
@@ -1576,64 +1090,7 @@ async function fetchTopology() {
   }
 }
 
-function normalizeHostGroups(payload, configuredHosts) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new TypeError("Invalid host groups response");
-  }
-  const configured = new Set(configuredHosts);
-  const groups = {};
-  Object.entries(payload).forEach(([host, group]) => {
-    if (
-      !configured.has(host)
-      || typeof group !== "string"
-      || !group
-      || group !== group.trim()
-      || [...group].length > 48
-      || /\p{C}/u.test(group)
-    ) {
-      throw new TypeError("Invalid host groups response");
-    }
-    groups[host] = group;
-  });
-  return groups;
-}
 
-function normalizeMaintenanceWindows(payload, configuredHosts) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new TypeError("Invalid maintenance windows response");
-  }
-  const configured = new Set(configuredHosts);
-  const allowedKeys = new Set(["until", "reason", "recurring", "active"]);
-  const windows = {};
-  Object.entries(payload).forEach(([host, window]) => {
-    const keys = window && typeof window === "object" && !Array.isArray(window)
-      ? Object.keys(window) : null;
-    if (
-      !configured.has(host)
-      || keys == null
-      || !keys.includes("until")
-      || !keys.includes("reason")
-      || keys.some((key) => !allowedKeys.has(key))
-      || (keys.includes("recurring") && typeof window.recurring !== "boolean")
-      || (keys.includes("active") && typeof window.active !== "boolean")
-      || typeof window.until !== "string"
-      || !Number.isFinite(Date.parse(window.until))
-      || typeof window.reason !== "string"
-      || [...window.reason].length > 120
-      || /\p{C}/u.test(window.reason)
-    ) {
-      throw new TypeError("Invalid maintenance windows response");
-    }
-    windows[host] = {
-      until: window.until,
-      reason: window.reason,
-      recurring: window.recurring === true,
-      // Older services only ever delivered live windows and omit the flag.
-      active: window.active !== false,
-    };
-  });
-  return windows;
-}
 
 function setCollectorSettingsStatus(kind, message) {
   elements.collectorSettingsStatus.className = kind;
@@ -1695,27 +1152,16 @@ async function saveCollectorSettings(event) {
   view.collectorSettingsSaving = true;
   syncCollectorSettings();
   try {
-    const response = await fetch("/api/settings/collector", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify(settings),
-    });
+    const response = await postJson("/api/settings/collector", settings);
     if (response.status === 400) {
-      // The service enforces probeTimeoutSeconds > connect_timeout_seconds.
-      // Newer services expose the value read-only via the inventory payload;
-      // older ones keep it server-side, so fall back to naming the config key.
-      const connectTimeout = view.inventory?.collectorSettings?.connectTimeoutSeconds;
+      // The service enforces probeTimeoutSeconds > connect_timeout_seconds
+      // and reports the read-only floor through the inventory payload.
+      const connectTimeout = view.inventory.collectorSettings.connectTimeoutSeconds;
       setCollectorSettingsStatus(
         "error",
-        `保存失败：单轮探测超时必须大于 SSH 连接超时（${
-          connectTimeout
-            ? `当前 ${format(connectTimeout, 1)} 秒`
-            : "connect_timeout_seconds，默认 5 秒"
-        }），且数值需在允许范围内`,
+        `保存失败：单轮探测超时必须大于 SSH 连接超时（当前 ${
+          format(connectTimeout, 1)
+        } 秒），且数值需在允许范围内`,
       );
       return;
     }
@@ -1997,9 +1443,7 @@ function focusPendingMaintenanceHost() {
   const row = [...elements.configuredHostList.querySelectorAll(".inventory-host")]
     .find((item) => item.dataset.host === host);
   if (!row) return;
-  if (typeof row.scrollIntoView === "function") {
-    row.scrollIntoView({ block: "center" });
-  }
+  row.scrollIntoView({ block: "center" });
   const target = row.querySelector('.maintenance-editor input[type="text"]')
     || row.querySelector(".maintenance-action");
   target?.focus();
@@ -2040,10 +1484,7 @@ async function refreshInventory() {
   view.inventoryMessageKind = "";
   renderInventory();
   try {
-    const response = await fetch("/api/inventory", {
-      cache: "no-store",
-      headers: { "X-Monitor-Request": "dashboard" },
-    });
+    const response = await fetch("/api/inventory");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     view.inventory = normalizeInventory(await response.json());
   } catch (_error) {
@@ -2064,15 +1505,7 @@ async function changeHostGroup(host, group) {
   view.inventoryMessageKind = "";
   renderInventory();
   try {
-    const response = await fetch("/api/settings/host-group", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify({ host, group }),
-    });
+    const response = await postJson("/api/settings/host-group", { host, group });
     if (response.status === 409) throw new RangeError("stale inventory");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     view.inventory = normalizeInventory(await response.json());
@@ -2101,15 +1534,7 @@ async function changeMaintenance(host, durationSeconds, reason) {
   view.inventoryMessageKind = "";
   renderInventory();
   try {
-    const response = await fetch("/api/settings/maintenance", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify({ host, durationSeconds, reason }),
-    });
+    const response = await postJson("/api/settings/maintenance", { host, durationSeconds, reason });
     if (response.status === 409) throw new RangeError("stale inventory");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     view.inventory = normalizeInventory(await response.json());
@@ -2140,18 +1565,8 @@ async function changeInventory(action, host) {
   view.inventoryMessageKind = "";
   renderInventory();
   try {
-    const response = await fetch("/api/settings/hosts", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify({ action, host }),
-    });
-    if (response.status === 409) {
-      throw new RangeError("stale inventory");
-    }
+    const response = await postJson("/api/settings/hosts", { action, host });
+    if (response.status === 409) throw new RangeError("stale inventory");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     view.inventory = normalizeInventory(await response.json());
     view.inventoryMessage = action === "add"
@@ -2161,18 +1576,16 @@ async function changeInventory(action, host) {
     if (action === "remove" && view.selectedHost === host) selectHost("all");
     await Promise.all([fetchSnapshot(), fetchTopology()]);
   } catch (error) {
-    view.inventoryMessage = error instanceof RangeError
-      ? "节点清单已变化，已重新扫描，请再试一次"
-      : "节点配置更新失败，请重新扫描并检查服务权限";
-    view.inventoryMessageKind = "error";
     if (error instanceof RangeError) {
+      // The service refused a stale view of the inventory: rescan now so
+      // the operator's retry runs against the current one.
       view.inventoryPendingHost = null;
       await refreshInventory();
       view.inventoryMessage = "节点清单已变化，已重新扫描，请再试一次";
-      view.inventoryMessageKind = "error";
-      renderInventory();
-      return;
+    } else {
+      view.inventoryMessage = "节点配置更新失败，请重新扫描并检查服务权限";
     }
+    view.inventoryMessageKind = "error";
   } finally {
     view.inventoryPendingHost = null;
     renderInventory();
@@ -2196,17 +1609,9 @@ function requestInventoryRemoval(host) {
   renderInventory();
 }
 
+// Threshold policy lives on the server; the accepted envelope guarantees it.
 function limits() {
-  return view.snapshot?.thresholds || {
-    cpu_warning_pct: 85,
-    memory_warning_pct: 90,
-    swap_warning_pct: 50,
-    disk_warning_pct: 85,
-    psi_memory_some_pct: 20,
-    psi_io_some_pct: 30,
-    gpu_temperature_warning_c: 80,
-    gpu_busy_pct: 10,
-  };
+  return view.snapshot.thresholds;
 }
 
 function serverStatus(server) {
@@ -2299,11 +1704,7 @@ function selectHost(host) {
   view.selectedHost = host;
   const fragment = host === "all" ? window.location.pathname : `#${encodeURIComponent(host)}`;
   window.history.replaceState(null, "", fragment);
-  view.history = null;
-  view.historyKey = "";
-  view.historyRequest += 1;
-  view.historyLoading = host !== "all";
-  view.historyError = false;
+  historyLoader.reset({ loading: host !== "all" });
   view.trendRenderKey = "";
   render();
   syncHistory();
@@ -2330,10 +1731,28 @@ function incidentConditionMessage(condition) {
   return condition.detail || resource;
 }
 
+// Validate the incidents envelope once and index active conditions by host,
+// so per-server and per-GPU renderers never rescan the whole fleet list.
+function acceptIncidents(incidents) {
+  assertIncidentsEnvelope(incidents);
+  const byHost = new Map();
+  incidents.active.forEach((condition) => {
+    const conditions = byHost.get(condition.host);
+    if (conditions) conditions.push(condition);
+    else byHost.set(condition.host, [condition]);
+  });
+  view.incidents = incidents;
+  view.incidentsByHost = byHost;
+  view.incidentVersion = incidents.version;
+}
+
+function hostConditions(host) {
+  return view.incidentsByHost.get(host) || [];
+}
+
 function serverConditions(server) {
-  if (!Array.isArray(view.incidents?.active)) return [];
-  return view.incidents.active
-    .filter((condition) => condition.host === server.host && condition.actionable !== false)
+  return hostConditions(server.host)
+    .filter((condition) => condition.actionable !== false)
     .map((condition) => ({
       id: condition.conditionKey,
       kind: condition.category,
@@ -2351,7 +1770,7 @@ function serverConditions(server) {
 }
 
 function incidentsSyncedWithSnapshot() {
-  return Array.isArray(view.incidents?.active)
+  return view.incidents != null
     && view.snapshot != null
     && view.incidentVersion === numeric(view.snapshot.incidentVersion, 0);
 }
@@ -2480,15 +1899,17 @@ function sshCopyButton(host) {
 }
 
 function renderOwners() {
-  if (!elements.ownersDialog?.open) return;
+  if (!elements.ownersDialog.open) return;
   if (!view.snapshot) {
     elements.ownersSummary.textContent = "等待 GPU 快照";
     return;
   }
+  elements.ownersUpdated.textContent = age(view.snapshot.lastPollCompletedAt);
   const owners = new Map();
   const hostLabels = new Map();
   let excludedOfflineHosts = 0;
   let oldestObservedAt = "";
+  let oldestObservedMs = Infinity;
   for (const server of view.snapshot.servers) {
     hostLabels.set(server.host, server.displayName || server.host);
     if (server.status !== "online") {
@@ -2501,15 +1922,10 @@ function renderOwners() {
     }
     for (const gpu of server.gpus) {
       const processes = gpu.processes || [];
-      if (
-        processes.length
-        && gpu.processes_observed_at
-        && Number.isFinite(Date.parse(gpu.processes_observed_at))
-        && (
-          !oldestObservedAt
-          || Date.parse(gpu.processes_observed_at) < Date.parse(oldestObservedAt)
-        )
-      ) {
+      const observedMs = processes.length && gpu.processes_observed_at
+        ? Date.parse(gpu.processes_observed_at) : NaN;
+      if (observedMs < oldestObservedMs) {
+        oldestObservedMs = observedMs;
         oldestObservedAt = gpu.processes_observed_at;
       }
       for (const process of processes) {
@@ -2559,10 +1975,10 @@ function renderOwners() {
   if (offlineNote) {
     offlineNote.title = "离线节点仅保留最后一次成功采集的进程，不代表当前占用";
   }
-  elements.ownersResults.replaceChildren();
   if (!ranked.length) {
     elements.ownersSummary.textContent = "当前快照没有 GPU 进程";
-    if (offlineNote) elements.ownersResults.append(offlineNote);
+    elements.ownersResults.replaceChildren(...(offlineNote ? [offlineNote] : []));
+    view.ownersResultsKey = "";
     return;
   }
   const visible = ranked.slice(0, 50);
@@ -2575,6 +1991,16 @@ function renderOwners() {
     + (hasUnknownVram ? " · 部分进程显存未知" : "")
     + (ranked.length > visible.length ? ` · 仅展示前 ${visible.length} 项` : "")
     + (oldestObservedAt ? ` · 数据截至 ${age(oldestObservedAt)}` : "");
+  // The summary above is cheap text; the cards are rebuilt only when what
+  // they show changes, so an open dialog does not churn on every snapshot.
+  const key = JSON.stringify([excludedOfflineHosts, visible.map((entry) => [
+    entry.label, entry.attributed, entry.vramMiB, entry.unknownVramKeys.size,
+    entry.gpus.size, entry.hosts.size, entry.processKeys.size, [...entry.kinds].sort(),
+    [...entry.hosts].sort().slice(0, 8).map((host) => hostLabels.get(host) || host),
+  ])]);
+  if (key === view.ownersResultsKey) return;
+  view.ownersResultsKey = key;
+  elements.ownersResults.replaceChildren();
   for (const entry of visible) {
     const card = create(
       "article",
@@ -2661,7 +2087,7 @@ async function fetchOwnersUsage() {
 }
 
 function renderOwnersUsage() {
-  if (!elements.ownersDialog?.open) return;
+  if (!elements.ownersDialog.open) return;
   elements.ownersUsageResults.replaceChildren();
   if (view.ownersUsageLoading) {
     elements.ownersUsageSummary.textContent = "正在统计占用账单…";
@@ -2738,6 +2164,7 @@ function renderCapacityMatcher() {
     elements.capacityResults.replaceChildren(
       create("div", "capacity-empty", "等待 GPU 告警数据同步后自动更新匹配结果"),
     );
+    view.capacityResultsKey = "";
     return;
   }
   const result = capacityMatches(view.capacityRequest);
@@ -2757,8 +2184,19 @@ function renderCapacityMatcher() {
     elements.capacityResults.replaceChildren(
       create("div", "capacity-empty", detail || "当前没有可用于匹配的在线 GPU 节点"),
     );
+    view.capacityResultsKey = "";
     return;
   }
+  // Cards only carry these fields; an unchanged projection keeps its DOM and
+  // the operator's focus, so the focus restoration below is the rare path.
+  const key = JSON.stringify(visible.map((candidate) => [
+    candidate.host, displayHost(candidate.host), candidate.model, candidate.total, candidate.satisfies,
+    candidate.deficit, candidate.minimumFreeMiB, candidate.averageUtilization,
+    candidate.cpuUsage,
+    candidate.available.map((gpu) => [gpu.index, gpu.memory_free_mib]),
+  ]));
+  if (key === view.capacityResultsKey) return;
+  view.capacityResultsKey = key;
   const activeElement = document.activeElement;
   const focusedKey = elements.capacityResults.contains(activeElement)
     ? activeElement.closest(".capacity-candidate")?.dataset.candidateKey || null
@@ -2771,9 +2209,17 @@ function renderCapacityMatcher() {
   }
 }
 
-// One watch, evaluated on every accepted snapshot regardless of dialog
-// visibility. The leaf owns the armed/notified edge and its cooldown; this
-// layer only projects the result into the banner, title, and notification.
+// One watch, settled synchronously at every data-acceptance site rather than
+// inside the requestAnimationFrame render: browsers pause rAF for hidden
+// documents, and a background tab is exactly where the notification and the
+// title marker must still fire. The leaf owns the armed/notified edge and its
+// cooldown; this layer only projects the result into banner, title, and
+// notification.
+function settleCapacityWatch() {
+  evaluateCapacityWatch();
+  renderCapacityWatchBanner();
+}
+
 function evaluateCapacityWatch() {
   const watch = view.capacityWatch;
   if (!watch || !view.snapshot || !incidentsSyncedWithSnapshot()) return;
@@ -2815,7 +2261,6 @@ function deliverCapacityWatchNotification(satisfied) {
 }
 
 function renderCapacityWatchControls() {
-  if (!elements.capacityWatchToggle) return;
   const watch = view.capacityWatch;
   if (!watch) {
     elements.capacityWatchToggle.textContent = "空闲时提醒我";
@@ -2838,13 +2283,13 @@ function renderCapacityWatchControls() {
 
 function renderCapacityWatchBanner() {
   const banner = elements.capacityWatchBanner;
-  if (!banner) return;
   const watch = view.capacityWatch;
   const show = Boolean(
     watch && watch.state === "notified" && !view.capacityWatchBannerDismissed,
   );
   banner.hidden = !show;
-  document.title = show ? `● ${view.baseDocumentTitle}` : view.baseDocumentTitle;
+  const title = show ? `● ${view.baseDocumentTitle}` : view.baseDocumentTitle;
+  if (document.title !== title) document.title = title;
   if (show) {
     elements.capacityWatchBannerText.textContent = capacityWatch.bannerText(
       watch,
@@ -2893,8 +2338,7 @@ function attentionIssues() {
   );
   const consumed = new Set();
   const issues = [];
-  const correlations = Array.isArray(view.incidents?.correlations)
-    ? view.incidents.correlations : [];
+  const correlations = view.incidents?.correlations || [];
   correlations.forEach((correlation) => {
     if (
       correlation?.kind !== "configured_shared_path"
@@ -3012,8 +2456,7 @@ function renderAttention() {
   document.querySelectorAll(".attention-filter").forEach((button) => {
     const count = counts[button.dataset.attentionFilter];
     const selected = button.dataset.attentionFilter === view.attentionFilter;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-pressed", String(selected));
+    setPressed(button, selected);
     button.disabled = count === 0;
     button.querySelector("span").textContent = count;
   });
@@ -3092,10 +2535,9 @@ function incidentDescription(event) {
 }
 
 function selectedIncidentRecord() {
-  if (!view.selectedIncident || !Array.isArray(view.incidents?.active)) return null;
-  return view.incidents.active.find((condition) =>
-    condition.host === view.selectedIncident.host
-      && condition.conditionKey === view.selectedIncident.conditionKey) || null;
+  if (!view.selectedIncident) return null;
+  return hostConditions(view.selectedIncident.host).find((condition) =>
+    condition.conditionKey === view.selectedIncident.conditionKey) || null;
 }
 
 function diagnosticEvidenceLabel(label) {
@@ -3175,19 +2617,22 @@ function localizedDiagnosis(condition) {
 
 function renderIncidentDetail() {
   if (!elements.incidentDetailDialog.open) return;
-  const condition = selectedIncidentRecord();
-  if (!condition) {
-    elements.incidentDetailDialog.close();
-    view.selectedIncident = null;
-    return;
-  }
+  const live = selectedIncidentRecord();
+  if (live) view.selectedIncidentRecord = live;
+  const condition = view.selectedIncidentRecord;
+  // A condition that recovers mid-edit stays on screen as resolved instead of
+  // closing under the operator's cursor; only the actions are withdrawn.
+  const resolved = live == null;
   const diagnosis = condition.diagnosis || {};
   const [diagnosisTitle, diagnosisSummary, diagnosisSteps] = localizedDiagnosis(condition);
-  const actionLabel = condition.action === "silenced"
-    ? "已静默" : condition.action === "acknowledged" ? "已确认" : "待处理";
+  const actionLabel = resolved
+    ? "已恢复"
+    : condition.action === "silenced"
+      ? "已静默" : condition.action === "acknowledged" ? "已确认" : "待处理";
   elements.incidentDetailHost.textContent = `${condition.host} · ${condition.resource || "资源"}`;
   elements.incidentDetailTitle.textContent = diagnosisTitle;
-  elements.incidentDetailStatus.className = `incident-detail-status ${condition.severity}`;
+  elements.incidentDetailStatus.className =
+    `incident-detail-status ${resolved ? "resolved" : condition.severity}`;
   elements.incidentDetailStatus.textContent = [
     condition.severity === "critical" ? "严重" : "警告",
     actionLabel,
@@ -3209,8 +2654,16 @@ function renderIncidentDetail() {
   const targetIndex = diagnosis.targetGpuIndex;
   elements.incidentOpenGpu.hidden = !Number.isInteger(targetIndex);
   elements.incidentOpenGpu.dataset.gpuIndex = Number.isInteger(targetIndex) ? targetIndex : "";
-  elements.incidentActionReason.value = condition.actionReason || "";
+  // Snapshots must not overwrite text the operator is still typing.
+  if (elements.incidentActionReason.value === view.incidentReasonSeed) {
+    view.incidentReasonSeed = condition.actionReason || "";
+    elements.incidentActionReason.value = view.incidentReasonSeed;
+  }
   elements.clearIncidentAction.hidden = !condition.action;
+  if (resolved && !view.incidentActionPending) {
+    elements.incidentActionFeedback.textContent = "该问题已恢复，无需再处理";
+    elements.incidentActionFeedback.className = "incident-action-feedback";
+  }
   [
     elements.acknowledgeIncident,
     elements.silenceIncident,
@@ -3218,7 +2671,7 @@ function renderIncidentDetail() {
     elements.incidentOpenMaintenance,
     elements.incidentActionDuration,
     elements.incidentActionReason,
-  ].forEach((element) => { element.disabled = view.incidentActionPending; });
+  ].forEach((element) => { element.disabled = view.incidentActionPending || resolved; });
 }
 
 function openIncidentDetail(condition) {
@@ -3226,11 +2679,11 @@ function openIncidentDetail(condition) {
     host: condition.host,
     conditionKey: condition.conditionKey,
   };
+  view.selectedIncidentRecord = condition;
+  view.incidentReasonSeed = elements.incidentActionReason.value;
   elements.incidentActionFeedback.textContent = "";
   elements.incidentActionFeedback.className = "incident-action-feedback";
-  if (elements.settingsDialog.open) elements.settingsDialog.close();
-  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
-  if (!elements.incidentDetailDialog.open) elements.incidentDetailDialog.showModal();
+  openExclusiveDialog(elements.incidentDetailDialog);
   renderIncidentDetail();
 }
 
@@ -3244,24 +2697,19 @@ async function updateIncidentAction(action) {
   const duration = action === "clear"
     ? 0 : Number.parseInt(elements.incidentActionDuration.value, 10);
   try {
-    const response = await fetch("/api/settings/incident-action", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify({
-        host: condition.host,
-        conditionKey: condition.conditionKey,
-        incidentStartedAt: action === "clear"
-          ? null : (condition.firstObservedAt || condition.observedAt),
-        action,
-        durationSeconds: duration,
-        reason: action === "clear" ? "" : elements.incidentActionReason.value,
-      }),
+    const response = await postJson("/api/settings/incident-action", {
+      host: condition.host,
+      conditionKey: condition.conditionKey,
+      incidentStartedAt: action === "clear"
+        ? null : (condition.firstObservedAt || condition.observedAt),
+      action,
+      durationSeconds: duration,
+      reason: action === "clear" ? "" : elements.incidentActionReason.value,
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "保存失败");
+    // The saved text is now the server's; let later renders sync it again.
+    view.incidentReasonSeed = elements.incidentActionReason.value;
     view.incidentVersion = -1;
     view.incidentLoadingVersion = null;
     await syncIncidents();
@@ -3333,8 +2781,8 @@ function renderIncidents() {
       observedAge,
     );
     item.addEventListener("click", () => {
-      const active = view.incidents.active?.find((condition) =>
-        condition.host === event.host && condition.conditionKey === event.conditionKey);
+      const active = hostConditions(event.host).find((condition) =>
+        condition.conditionKey === event.conditionKey);
       if (active) openIncidentDetail(active);
       else selectHost(event.host);
     });
@@ -3348,8 +2796,7 @@ function normalizeSelection() {
   if (view.selectedHost === "all" || !view.snapshot) return;
   if (view.snapshot.servers.some((server) => server.host === view.selectedHost)) return;
   view.selectedHost = "all";
-  view.history = null;
-  view.historyKey = "";
+  historyLoader.reset();
   window.history.replaceState(null, "", window.location.pathname);
 }
 
@@ -3392,7 +2839,8 @@ function serverGpuUsage(server) {
 }
 
 function serverUtilizationRow(label, value, kind, warning = false) {
-  const row = create("div", `server-util-row ${kind}${warning ? " warning" : ""}`);
+  // Phrasing content only: these rows live inside <button> fleet items.
+  const row = create("span", `server-util-row ${kind}${warning ? " warning" : ""}`);
   const track = create("span", "server-util-track");
   const bar = create("i");
   bar.style.width = `${clamp(value)}%`;
@@ -3430,32 +2878,34 @@ function serverStatusRank(server) {
 function orderedServers(servers) {
   const original = syncServerOrder(view.snapshot.servers);
   const order = new Map(original.map((host, index) => [host, index]));
-  return servers.slice().sort((a, b) => {
+  const position = (server) => numeric(order.get(server.host), Number.MAX_SAFE_INTEGER);
+  // Derived metrics are computed once per server, not once per comparison.
+  const keyed = servers.map((server) => ({
+    server,
+    group: view.serverSort === "group" ? hostGroupName(server) : "",
+    status: view.serverSort === "status" ? serverStatusRank(server) : 0,
+    gpu: view.serverSort === "gpu" ? numeric(serverGpuUsage(server), -1) : 0,
+    cpu: view.serverSort === "cpu" ? numeric(server.system?.cpu_usage_pct, -1) : 0,
+  }));
+  keyed.sort((a, b) => {
     if (view.serverSort === "group") {
-      const firstGroup = hostGroupName(a);
-      const secondGroup = hostGroupName(b);
-      if (!firstGroup && secondGroup) return 1;
-      if (firstGroup && !secondGroup) return -1;
-      return firstGroup.localeCompare(secondGroup)
-        || numeric(order.get(a.host), Number.MAX_SAFE_INTEGER)
-        - numeric(order.get(b.host), Number.MAX_SAFE_INTEGER);
+      if (!a.group && b.group) return 1;
+      if (a.group && !b.group) return -1;
+      return a.group.localeCompare(b.group) || position(a.server) - position(b.server);
     }
-    if (view.serverSort === "host") return a.host.localeCompare(b.host);
+    if (view.serverSort === "host") return a.server.host.localeCompare(b.server.host);
     if (view.serverSort === "status") {
-      return serverStatusRank(a) - serverStatusRank(b)
-        || a.host.localeCompare(b.host);
+      return a.status - b.status || a.server.host.localeCompare(b.server.host);
     }
     if (view.serverSort === "gpu") {
-      return numeric(serverGpuUsage(b), -1) - numeric(serverGpuUsage(a), -1)
-        || a.host.localeCompare(b.host);
+      return b.gpu - a.gpu || a.server.host.localeCompare(b.server.host);
     }
     if (view.serverSort === "cpu") {
-      return numeric(b.system?.cpu_usage_pct, -1) - numeric(a.system?.cpu_usage_pct, -1)
-        || a.host.localeCompare(b.host);
+      return b.cpu - a.cpu || a.server.host.localeCompare(b.server.host);
     }
-    return numeric(order.get(a.host), Number.MAX_SAFE_INTEGER)
-      - numeric(order.get(b.host), Number.MAX_SAFE_INTEGER);
+    return position(a.server) - position(b.server);
   });
+  return keyed.map((entry) => entry.server);
 }
 
 function hostGroupName(server) {
@@ -3506,15 +2956,13 @@ function enableServerDrag(item, host) {
   item.addEventListener("dragstart", (event) => {
     view.draggedHost = host;
     item.classList.add("dragging");
-    if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", host);
-    }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", host);
   });
   item.addEventListener("dragover", (event) => {
     if (!view.draggedHost || view.draggedHost === host) return;
     event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    event.dataTransfer.dropEffect = "move";
     item.classList.add("drag-target");
   });
   item.addEventListener("dragleave", () => item.classList.remove("drag-target"));
@@ -3523,7 +2971,7 @@ function enableServerDrag(item, host) {
     item.classList.remove("drag-target");
     view.suppressServerClick = true;
     reorderServer(
-      view.draggedHost || event.dataTransfer?.getData("text/plain"),
+      view.draggedHost || event.dataTransfer.getData("text/plain"),
       host,
     );
   });
@@ -3559,14 +3007,8 @@ function renderSummary() {
     -Infinity,
     ...currentGpus.map((gpu) => numeric(gpu.temperature_c, -Infinity)),
   );
-  const actionableIssues = numeric(
-    snapshot.stats.actionableIssueServers,
-    snapshot.stats.issueServers,
-  );
-  const actionableCritical = numeric(
-    snapshot.stats.actionableCriticalIncidents,
-    snapshot.stats.criticalIncidents,
-  );
+  const actionableIssues = numeric(snapshot.stats.actionableIssueServers);
+  const actionableCritical = numeric(snapshot.stats.actionableCriticalIncidents);
   const maintenanceServers = numeric(snapshot.stats.maintenanceServers);
   const serverCritical = actionableCritical > 0
     || (actionableIssues > 0
@@ -3612,7 +3054,7 @@ function renderSummary() {
     }
   } else {
     elements.serverDetail.textContent = actionableIssues
-      ? `${actionableIssues} 台需关注 · ${numeric(snapshot.stats.actionableIncidents, snapshot.stats.activeIncidents)} 个待处理问题`
+      ? `${actionableIssues} 台需关注 · ${numeric(snapshot.stats.actionableIncidents)} 个待处理问题`
       : maintenanceServers && snapshot.stats.activeIncidents
         ? `${maintenanceServers} 台维护中 · ${snapshot.stats.activeIncidents} 个活动问题已静默`
         : maintenanceServers
@@ -3649,7 +3091,7 @@ function renderSummary() {
   const cycleMilliseconds = snapshot.lastPollDurationMs;
   const cycleText = cycleMilliseconds == null
     ? "等待首批完成"
-    : `最近批次 ${(numeric(cycleMilliseconds) / 1000).toLocaleString("zh-CN", { maximumFractionDigits: 1 })} 秒`;
+    : `最近批次 ${format(numeric(cycleMilliseconds) / 1000, 1)} 秒`;
   const cycleSlow = cycleMilliseconds != null
     && numeric(cycleMilliseconds) > numeric(snapshot.pollIntervalSeconds) * 1000;
   const collectionDelayed = collectionHealth().state === "delayed";
@@ -3686,21 +3128,11 @@ function renderServiceRestartStatus(message = "", kind = "") {
 }
 
 async function fetchRestartCapability() {
-  // Newer services describe themselves via /api/meta; the deprecated
-  // /api/service endpoint remains the fallback for older services.
-  const metaResponse = await fetch("/api/meta", { cache: "no-store" }).catch(() => null);
-  if (metaResponse?.ok) {
-    const meta = await metaResponse.json().catch(() => null);
-    const supported = meta?.capabilities?.restartSupported;
-    if (typeof supported === "boolean") return supported;
-  }
-  const response = await fetch("/api/service", { cache: "no-store" });
+  const response = await fetch("/api/meta");
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const capability = await response.json();
-  if (typeof capability.restartSupported !== "boolean") {
-    throw new TypeError("Invalid service capability");
-  }
-  return capability.restartSupported;
+  const supported = (await response.json()).capabilities?.restartSupported;
+  if (typeof supported !== "boolean") throw new TypeError("Invalid service capability");
+  return supported;
 }
 
 async function fetchServiceCapability() {
@@ -3726,7 +3158,7 @@ async function waitForServiceRestart(previousStartedAt) {
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch("/api/snapshot", { cache: "no-store" });
+      const response = await fetch("/api/snapshot");
       if (response.ok) {
         const snapshot = await response.json();
         if (
@@ -3759,15 +3191,7 @@ async function restartManagedService() {
   renderServiceRestartStatus();
   setConnection("connecting", "正在重启");
   try {
-    const response = await fetch("/api/service/restart", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: "{}",
-    });
+    const response = await postJson("/api/service/restart", {});
     if (!response.ok) {
       view.serviceRestarting = false;
       renderServiceRestartStatus("服务拒绝了重启请求，请刷新状态后重试", "error");
@@ -3836,13 +3260,18 @@ function notificationEndpointRow(endpoint) {
   const label = create("strong", "", name);
   label.title = name;
   identity.append(label);
-  const metaParts = [`待发 ${format(queued)}`, `累计失败 ${format(dropped)}`];
-  if (endpoint.lastSuccessAt) metaParts.push(`最近成功 ${age(endpoint.lastSuccessAt)}`);
+  const meta = create("small", "", `待发 ${format(queued)} · 累计失败 ${format(dropped)}`);
+  if (endpoint.lastSuccessAt) {
+    // A live relative time that the per-second tick refreshes in place.
+    const since = create("span", "age-relative", age(endpoint.lastSuccessAt));
+    since.dataset.ageAt = endpoint.lastSuccessAt;
+    meta.append(" · 最近成功 ", since);
+  }
   const state = create("em", healthy ? "success" : "error");
   const lastError = typeof endpoint.lastError === "string" ? endpoint.lastError : "";
   state.textContent = healthy ? "正常" : lastError || "投递异常";
   if (!healthy && lastError) state.title = lastError;
-  row.append(identity, create("small", "", metaParts.join(" · ")), state);
+  row.append(identity, meta, state);
   return row;
 }
 
@@ -3854,21 +3283,16 @@ function renderNotificationEndpoints(notifications) {
       (endpoint) => endpoint && typeof endpoint === "object" && !Array.isArray(endpoint),
     )
     : [];
-  if (!endpoints.length) {
-    elements.notificationEndpoints.hidden = true;
-    elements.notificationEndpoints.replaceChildren();
-    return;
-  }
-  elements.notificationEndpoints.replaceChildren(
-    ...endpoints.slice(0, 12).map(notificationEndpointRow),
-  );
-  elements.notificationEndpoints.hidden = false;
+  const visible = endpoints.slice(0, 12);
+  // Rebuild only when the delivery state itself changed, not on every snapshot.
+  const key = JSON.stringify(visible);
+  if (key === view.notificationEndpointsKey) return;
+  view.notificationEndpointsKey = key;
+  elements.notificationEndpoints.hidden = !visible.length;
+  elements.notificationEndpoints.replaceChildren(...visible.map(notificationEndpointRow));
 }
 
-function downloadJson(value, filename) {
-  const blob = new Blob([`${JSON.stringify(value, null, 2)}\n`], {
-    type: "application/json;charset=utf-8",
-  });
+function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -3880,15 +3304,19 @@ function downloadJson(value, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+function downloadJson(value, filename) {
+  downloadBlob(
+    new Blob([`${JSON.stringify(value, null, 2)}\n`], { type: "application/json;charset=utf-8" }),
+    filename,
+  );
+}
+
 async function exportDiagnostics() {
   elements.exportDiagnostics.disabled = true;
   try {
     const query = view.selectedHost === "all"
       ? "" : `?host=${encodeURIComponent(view.selectedHost)}`;
-    const response = await fetch(`/api/diagnostics${query}`, {
-      cache: "no-store",
-      headers: { "X-Monitor-Request": "dashboard" },
-    });
+    const response = await fetch(`/api/diagnostics${query}`);
     const bundle = await response.json();
     if (!response.ok) throw new Error(bundle.error || "诊断导出失败");
     const scope = view.selectedHost === "all" ? "fleet" : view.selectedHost;
@@ -3906,14 +3334,7 @@ async function testNotifications() {
   elements.notificationTest.disabled = true;
   elements.notificationTestStatus.textContent = "正在加入安全投递队列…";
   try {
-    const response = await fetch("/api/notifications/test", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: "{}",
-    });
+    const response = await postJson("/api/notifications/test", {});
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "测试投递失败");
     elements.notificationTestStatus.textContent = "测试通知已排队，请查看最新投递状态";
@@ -3932,14 +3353,7 @@ async function requestManualProbe() {
   elements.probeNow.disabled = true;
   elements.probeNow.textContent = "正在排队";
   try {
-    const response = await fetch("/api/probe", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Monitor-Request": "dashboard",
-      },
-      body: JSON.stringify({ host }),
-    });
+    const response = await postJson("/api/probe", { host });
     const result = await response.json();
     if (!response.ok && result.status !== "in_progress") {
       throw new Error(result.error || result.status || "探测请求失败");
@@ -3972,16 +3386,16 @@ function serverItem(server, selectedHost) {
   });
   enableServerDrag(item, server.host);
 
-  const main = create("div", "server-main");
-  const identity = create("div", "server-main");
+  const main = create("span", "server-main");
+  const identity = create("span", "server-main");
   identity.append(create("i", `status-dot ${stateClass}`), create("span", "server-name", displayHost(server)));
   const group = hostGroupName(server);
   if (group) identity.append(create("span", "server-group-badge", group));
   const gpuLabel = `${server.gpus.length} GPU${server.stale ? " · 历史" : ""}`;
   main.append(identity, create("span", "server-gpu-count", gpuLabel));
 
-  const stats = create("div", "server-stats");
-  const utilization = create("div", "server-utilization");
+  const stats = create("span", "server-stats");
+  const utilization = create("span", "server-utilization");
   const gpuUsage = serverGpuUsage(server);
   utilization.append(
     serverUtilizationRow(
@@ -4069,8 +3483,8 @@ function fleetAllItem(label, gpuCount) {
   item.dataset.host = "all";
   if (view.selectedHost === "all") item.setAttribute("aria-current", "true");
   item.addEventListener("click", () => selectHost("all"));
-  const main = create("div", "server-main");
-  const identity = create("div", "server-main");
+  const main = create("span", "server-main");
+  const identity = create("span", "server-main");
   identity.append(
     create("i", "status-dot online"),
     create("span", "server-name", label),
@@ -4136,7 +3550,7 @@ function renderServers() {
   [...view.fleetGroupCache.keys()].forEach((group) => {
     if (!visibleGroupKeys.has(group)) view.fleetGroupCache.delete(group);
   });
-  const focusedHost = document.activeElement?.closest?.(".server-item")?.dataset.host;
+  const focusedHost = document.activeElement?.closest(".server-item")?.dataset.host;
   reconcileChildren(elements.serverList, desired);
   if (focusedHost && !document.activeElement?.isConnected) {
     [...elements.serverList.querySelectorAll(".server-item")]
@@ -4404,8 +3818,7 @@ function renderHeatmap() {
   });
   document.querySelectorAll(".heatmap-mode").forEach((button) => {
     const selected = button.dataset.heatMetric === view.heatMetric;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-pressed", String(selected));
+    setPressed(button, selected);
   });
   reconcileChildren(elements.heatmapGrid, [
     heatmapAxis(columns),
@@ -4515,23 +3928,31 @@ function chartPositions(points) {
   };
 }
 
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+
+function svgElement(tag, attributes) {
+  const element = document.createElementNS(SVG_NAMESPACE, tag);
+  Object.entries(attributes).forEach(([name, value]) => element.setAttribute(name, value));
+  return element;
+}
+
+// Every trend chart shares one 220x54 canvas with a baseline at y=50.
+function chartCanvas() {
+  const svg = svgElement("svg", {
+    viewBox: "0 0 220 54", preserveAspectRatio: "none", "aria-hidden": "true",
+  });
+  svg.append(svgElement("line", {
+    x1: "0", x2: "220", y1: "50", y2: "50", class: "chart-baseline",
+  }));
+  return svg;
+}
+
 function sparkline(points, accessor, color, maximum = null) {
-  const namespace = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(namespace, "svg");
-  svg.setAttribute("viewBox", "0 0 220 54");
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.setAttribute("aria-hidden", "true");
+  const svg = chartCanvas();
   const values = points.map(accessor);
   const finite = values.filter((value) => Number.isFinite(value));
   const ceiling = maximum ?? Math.max(1, ...finite);
   const { xs, gapBefore } = chartPositions(points);
-  const baseline = document.createElementNS(namespace, "line");
-  baseline.setAttribute("x1", "0");
-  baseline.setAttribute("x2", "220");
-  baseline.setAttribute("y1", "50");
-  baseline.setAttribute("y2", "50");
-  baseline.setAttribute("class", "chart-baseline");
-  svg.append(baseline);
   const segments = [];
   let current = [];
   values.forEach((value, index) => {
@@ -4550,24 +3971,18 @@ function sparkline(points, accessor, color, maximum = null) {
   if (current.length) segments.push(current);
   segments.forEach((segment) => {
     if (segment.length === 1) {
-      const dot = document.createElementNS(namespace, "circle");
-      dot.setAttribute("cx", segment[0][0].toFixed(1));
-      dot.setAttribute("cy", segment[0][1].toFixed(1));
-      dot.setAttribute("r", "1.6");
-      dot.setAttribute("fill", color);
-      svg.append(dot);
+      svg.append(svgElement("circle", {
+        cx: segment[0][0].toFixed(1), cy: segment[0][1].toFixed(1), r: "1.6", fill: color,
+      }));
       return;
     }
-    const line = document.createElementNS(namespace, "polyline");
-    line.setAttribute(
-      "points",
-      segment.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "),
-    );
-    line.setAttribute("fill", "none");
-    line.setAttribute("stroke", color);
-    line.setAttribute("stroke-width", "2");
-    line.setAttribute("vector-effect", "non-scaling-stroke");
-    svg.append(line);
+    svg.append(svgElement("polyline", {
+      points: segment.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "),
+      fill: "none",
+      stroke: color,
+      "stroke-width": "2",
+      "vector-effect": "non-scaling-stroke",
+    }));
   });
   return svg;
 }
@@ -4598,28 +4013,17 @@ function transportRetryCard(points) {
     create("span", "", "链路重试"),
     create("strong", "", `${format(retriedXs.length)} 次`),
   );
-  const namespace = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(namespace, "svg");
-  svg.setAttribute("viewBox", "0 0 220 54");
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.setAttribute("aria-hidden", "true");
-  const baseline = document.createElementNS(namespace, "line");
-  baseline.setAttribute("x1", "0");
-  baseline.setAttribute("x2", "220");
-  baseline.setAttribute("y1", "50");
-  baseline.setAttribute("y2", "50");
-  baseline.setAttribute("class", "chart-baseline");
-  svg.append(baseline);
+  const svg = chartCanvas();
   retriedXs.forEach((x) => {
-    const marker = document.createElementNS(namespace, "line");
-    marker.setAttribute("x1", x.toFixed(1));
-    marker.setAttribute("x2", x.toFixed(1));
-    marker.setAttribute("y1", "18");
-    marker.setAttribute("y2", "50");
-    marker.setAttribute("stroke", "#f5b95f");
-    marker.setAttribute("stroke-width", "2");
-    marker.setAttribute("vector-effect", "non-scaling-stroke");
-    svg.append(marker);
+    svg.append(svgElement("line", {
+      x1: x.toFixed(1),
+      x2: x.toFixed(1),
+      y1: "18",
+      y2: "50",
+      stroke: "#f5b95f",
+      "stroke-width": "2",
+      "vector-effect": "non-scaling-stroke",
+    }));
   });
   card.append(
     top,
@@ -4636,12 +4040,12 @@ function renderTrends() {
     return;
   }
   elements.trendPanel.hidden = false;
-  const points = view.history?.points || [];
+  const points = historyLoader.state.value?.points || [];
   const latestPoint = points.at(-1)?.observedAt || "none";
-  const renderKey = `${view.selectedHost}:${view.historyLoading}:${view.historyError}:${points.length}:${latestPoint}`;
+  const renderKey = `${view.selectedHost}:${historyLoader.state.loading}:${historyLoader.state.error}:${points.length}:${latestPoint}`;
   if (renderKey === view.trendRenderKey) return;
   view.trendRenderKey = renderKey;
-  if (view.historyLoading && !view.history) {
+  if (historyLoader.state.loading && !historyLoader.state.value) {
     elements.trendRange.textContent = "正在读取历史";
     elements.trendGrid.replaceChildren(create("div", "trend-empty", "正在收集和加载趋势样本…"));
     return;
@@ -4651,7 +4055,7 @@ function renderTrends() {
     elements.trendGrid.replaceChildren(create(
       "div",
       "trend-empty",
-      view.historyError ? "历史读取失败，稍后自动重试" : "首次成功采集后将显示趋势",
+      historyLoader.state.error ? "历史读取失败，稍后自动重试" : "首次成功采集后将显示趋势",
     ));
     return;
   }
@@ -4668,55 +4072,26 @@ function renderTrends() {
   elements.trendGrid.replaceChildren(...cards);
 }
 
-async function syncHistory() {
+// Host trend history for the selected server, keyed on lastSuccessAt: only a
+// successful sample can add points, so failed probes never trigger refetches.
+const historyLoader = globalThis.MocopKeyedLoader.create({
+  load: async (key) => {
+    const host = key.split(":")[0];
+    const response = await fetch(`/api/history?host=${encodeURIComponent(host)}&limit=120`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const history = await response.json();
+    // The selection moved while this was in flight: keep whatever is shown.
+    return view.selectedHost === history.host ? history : undefined;
+  },
+  retry: () => syncHistory(),
+  onSettled: () => renderTrends(),
+});
+
+function syncHistory() {
   if (!view.snapshot || view.selectedHost === "all") return;
   const server = view.snapshot.servers.find((item) => item.host === view.selectedHost);
   if (!server) return;
-  const key = `${server.host}:${server.lastSuccessAt || "pending"}`;
-  // The key is confirmed only after a successful load, so a failed request
-  // stays retryable; the single backoff timer owns retries for a failed key
-  // even when lastSuccessAt never advances (offline node).
-  if (key === view.historyKey || key === view.historyFetchKey) return;
-  if (view.historyRetryTimer != null) {
-    if (key === view.historyRetryKey) return;
-    clearTimeout(view.historyRetryTimer);
-    view.historyRetryTimer = null;
-    view.historyRetryKey = "";
-  }
-  view.historyFetchKey = key;
-  view.historyLoading = true;
-  renderTrends();
-  const request = ++view.historyRequest;
-  try {
-    const response = await fetch(`/api/history?host=${encodeURIComponent(server.host)}&limit=120`, { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const history = await response.json();
-    if (request !== view.historyRequest || view.selectedHost !== history.host) return;
-    view.history = history;
-    view.historyKey = key;
-    view.historyError = false;
-    view.historyRetryDelayMs = 0;
-  } catch (_error) {
-    if (request !== view.historyRequest) return;
-    // Existing trend samples stay on screen through transient fetch failures.
-    view.historyError = true;
-    view.historyRetryDelayMs = Math.min(
-      30_000,
-      Math.max(4_000, view.historyRetryDelayMs * 2),
-    );
-    view.historyRetryKey = key;
-    view.historyRetryTimer = setTimeout(() => {
-      view.historyRetryTimer = null;
-      view.historyRetryKey = "";
-      syncHistory();
-    }, view.historyRetryDelayMs);
-  } finally {
-    if (view.historyFetchKey === key) view.historyFetchKey = null;
-    if (request === view.historyRequest) {
-      view.historyLoading = false;
-      renderTrends();
-    }
-  }
+  historyLoader.request(`${server.host}:${server.lastSuccessAt || "pending"}`);
 }
 
 function renderDisks(system) {
@@ -4766,11 +4141,8 @@ function miniMetric(value, suffix, usage, className = "") {
 function gpuState(gpu, server) {
   if (server.stale) return ["历史数据", "stale"];
   const identity = String(gpu.uuid || gpu.index);
-  const activeConditions = Array.isArray(view.incidents?.active)
-    ? view.incidents.active : [];
-  const gpuConditions = activeConditions.filter(
-    (condition) => condition.host === server.host
-      && String(condition.conditionKey || "").endsWith(`:${identity}`),
+  const gpuConditions = hostConditions(server.host).filter(
+    (condition) => String(condition.conditionKey || "").endsWith(`:${identity}`),
   );
   if (gpuConditions.some((condition) => [
     "gpu_ecc", "gpu_memory_repair", "gpu_slowdown",
@@ -4841,11 +4213,6 @@ function gpuProcessSummarySignature(gpu) {
     topName: summary.topProcess?.name,
     topMemory: summary.topMemoryMiB,
   };
-}
-
-function gpuProcessMemoryRank(a, b) {
-  return numeric(b.used_memory_mib, -1) - numeric(a.used_memory_mib, -1)
-    || numeric(a.pid) - numeric(b.pid);
 }
 
 function programSearchKey({ server, gpu, process }) {
@@ -5228,8 +4595,17 @@ function selectedGpuRecord() {
 }
 
 function renderGpuHistory() {
-  const points = view.gpuHistory?.points || [];
-  if (view.gpuHistoryLoading && !view.gpuHistory) {
+  const points = gpuHistoryLoader.state.value?.points || [];
+  // Mirror renderTrends: the cards and timeline only change when the fetched
+  // history does, not on every snapshot that arrives while the dialog is open.
+  const eventCount = gpuHistoryLoader.state.value?.processEvents?.length ?? 0;
+  const renderKey = [
+    gpuHistoryLoader.state.key, gpuHistoryLoader.state.loading, gpuHistoryLoader.state.error,
+    points.length, points.at(-1)?.observedAt || "none", eventCount,
+  ].join(":");
+  if (renderKey === view.gpuHistoryRenderKey) return;
+  view.gpuHistoryRenderKey = renderKey;
+  if (gpuHistoryLoader.state.loading && !gpuHistoryLoader.state.value) {
     elements.gpuHistoryRange.textContent = "正在读取";
     elements.gpuHistoryGrid.replaceChildren(
       create("div", "gpu-history-empty", "正在加载单卡历史…"),
@@ -5237,7 +4613,7 @@ function renderGpuHistory() {
     elements.gpuProcessTimeline.replaceChildren();
     return;
   }
-  elements.gpuHistoryRange.textContent = view.gpuHistoryError && !points.length
+  elements.gpuHistoryRange.textContent = gpuHistoryLoader.state.error && !points.length
     ? "读取失败" : historyDuration(points);
   if (!points.length) {
     // A failed request must read as a failure, not as "no samples yet";
@@ -5246,7 +4622,7 @@ function renderGpuHistory() {
       create(
         "div",
         "gpu-history-empty",
-        view.gpuHistoryError ? "历史读取失败，稍后重试" : "完成两次成功采集后显示趋势",
+        gpuHistoryLoader.state.error ? "历史读取失败，稍后重试" : "完成两次成功采集后显示趋势",
       ),
     );
   } else {
@@ -5261,14 +4637,14 @@ function renderGpuHistory() {
       trendCard("功耗", points, (point) => optionalMetric(point, "powerDrawW"), (value) => `${format(value, 1)} W`, "#5de0a0"),
     );
   }
-  const events = Array.isArray(view.gpuHistory?.processEvents)
-    ? view.gpuHistory.processEvents.slice().reverse() : [];
+  const events = Array.isArray(gpuHistoryLoader.state.value?.processEvents)
+    ? gpuHistoryLoader.state.value.processEvents.slice().reverse() : [];
   if (!events.length) {
     elements.gpuProcessTimeline.replaceChildren(
       create(
         "div",
         "gpu-history-empty",
-        view.gpuHistoryError && !view.gpuHistory
+        gpuHistoryLoader.state.error && !gpuHistoryLoader.state.value
           ? "历史读取失败，稍后重试" : "暂未记录到进程进入或退出",
       ),
     );
@@ -5288,62 +4664,27 @@ function renderGpuHistory() {
   }));
 }
 
-function clearGpuHistoryRetry() {
-  if (view.gpuHistoryRetryTimer != null) clearTimeout(view.gpuHistoryRetryTimer);
-  view.gpuHistoryRetryTimer = null;
-  view.gpuHistoryRetryKey = "";
-}
 
-async function syncGpuHistory(record) {
-  if (!record || !elements.gpuDetailDialog.open) return;
-  const gpuId = String(record.gpu.uuid || `index:${record.gpu.index}`);
-  // Keyed on lastSuccessAt: only a successful sample can add history points,
-  // so failed probe attempts no longer trigger refetches. The key is
-  // confirmed only after a successful load, keeping failures retryable
-  // through the single backoff timer (mirrors syncHistory).
-  const key = `${record.server.host}|${gpuId}|${record.server.lastSuccessAt || ""}`;
-  if (key === view.gpuHistoryKey || key === view.gpuHistoryFetchKey) return;
-  if (view.gpuHistoryRetryTimer != null) {
-    if (key === view.gpuHistoryRetryKey) return;
-    clearGpuHistoryRetry();
-  }
-  view.gpuHistoryFetchKey = key;
-  view.gpuHistoryLoading = true;
-  const request = ++view.gpuHistoryRequest;
-  renderGpuHistory();
-  try {
+// Per-GPU history and process timeline for the open detail dialog, keyed on
+// the host's lastSuccessAt exactly like the host trend loader.
+const gpuHistoryLoader = globalThis.MocopKeyedLoader.create({
+  load: async (key) => {
+    const [host, gpuId] = key.split("|");
     const response = await fetch(
-      `/api/gpu-history?host=${encodeURIComponent(record.server.host)}&gpu=${encodeURIComponent(gpuId)}&limit=120`,
+      `/api/gpu-history?host=${encodeURIComponent(host)}&gpu=${encodeURIComponent(gpuId)}&limit=120`,
     );
     const history = await response.json();
     if (!response.ok) throw new Error(history.error || "GPU history unavailable");
-    if (request !== view.gpuHistoryRequest) return;
-    view.gpuHistory = history;
-    view.gpuHistoryKey = key;
-    view.gpuHistoryError = false;
-    view.gpuHistoryRetryDelayMs = 0;
-  } catch (_error) {
-    if (request !== view.gpuHistoryRequest) return;
-    // Existing samples stay on screen; the bounded backoff owns retries for
-    // this same dialog and key.
-    view.gpuHistoryError = true;
-    view.gpuHistoryRetryDelayMs = Math.min(
-      30_000,
-      Math.max(4_000, view.gpuHistoryRetryDelayMs * 2),
-    );
-    view.gpuHistoryRetryKey = key;
-    view.gpuHistoryRetryTimer = setTimeout(() => {
-      view.gpuHistoryRetryTimer = null;
-      view.gpuHistoryRetryKey = "";
-      syncGpuHistory(selectedGpuRecord());
-    }, view.gpuHistoryRetryDelayMs);
-  } finally {
-    if (view.gpuHistoryFetchKey === key) view.gpuHistoryFetchKey = null;
-    if (request === view.gpuHistoryRequest) {
-      view.gpuHistoryLoading = false;
-      renderGpuHistory();
-    }
-  }
+    return history;
+  },
+  retry: () => syncGpuHistory(selectedGpuRecord()),
+  onSettled: () => renderGpuHistory(),
+});
+
+function syncGpuHistory(record) {
+  if (!record || !elements.gpuDetailDialog.open) return;
+  const gpuId = String(record.gpu.uuid || `index:${record.gpu.index}`);
+  gpuHistoryLoader.request(`${record.server.host}|${gpuId}|${record.server.lastSuccessAt || ""}`);
 }
 
 function syncGpuTaskIdentityFilters(processes) {
@@ -5357,8 +4698,7 @@ function syncGpuTaskIdentityFilters(processes) {
     const filter = button.dataset.gpuTaskFilter;
     const active = filter === view.gpuTaskIdentityFilter;
     button.textContent = `${labels[filter]} ${counts[filter]}`;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
+    setPressed(button, active);
   });
 }
 
@@ -5392,12 +4732,12 @@ function renderGpuDetail() {
   const sortByName = preferences.gpuTaskSort === "name";
   if (sortByDuration) {
     matchingProcesses.sort((a, b) => gpuProcessStartMs(a) - gpuProcessStartMs(b)
-      || gpuProcessMemoryRank(a, b));
+      || processMemoryRank(a, b));
   } else if (sortByName) {
     matchingProcesses.sort((a, b) => gpuTaskDisplayName(a).localeCompare(gpuTaskDisplayName(b))
       || numeric(a.pid) - numeric(b.pid));
   } else {
-    matchingProcesses.sort(gpuProcessMemoryRank);
+    matchingProcesses.sort(processMemoryRank);
   }
   let visibleProcesses = matchingProcesses.slice(0, MAX_GPU_DETAIL_PROCESSES);
   const selectedProcess = view.selectedProcessKey
@@ -5578,18 +4918,9 @@ function openGpuDetail(server, gpu, { processQuery = "", processKey = "" } = {})
   view.gpuTaskIdentityFilter = "all";
   view.selectedProcessKey = String(processKey);
   elements.gpuTaskSearch.value = view.gpuTaskQuery;
-  view.gpuHistory = null;
-  view.gpuHistoryKey = "";
-  view.gpuHistoryFetchKey = null;
-  view.gpuHistoryError = false;
-  view.gpuHistoryRetryDelayMs = 0;
-  clearGpuHistoryRetry();
-  view.gpuHistoryRequest += 1;
-  if (elements.settingsDialog.open) elements.settingsDialog.close();
-  if (elements.capacityDialog.open) elements.capacityDialog.close();
-  if (elements.ownersDialog.open) elements.ownersDialog.close();
-  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
-  if (!elements.gpuDetailDialog.open) elements.gpuDetailDialog.showModal();
+  gpuHistoryLoader.reset();
+  view.gpuHistoryRenderKey = "";
+  openExclusiveDialog(elements.gpuDetailDialog);
   renderGpuDetail();
   const target = view.selectedProcessKey
     ? view.gpuTaskRowCache.get(view.selectedProcessKey)?.item : null;
@@ -5756,22 +5087,16 @@ const { buildCsv } = globalThis.MocopCsvExport.create({
 function exportVisibleCsv() {
   const records = visibleOrderedRecords();
   if (!records.length) return;
-  const blob = new Blob([buildCsv(records)], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
   const now = new Date();
   const date = [
     now.getFullYear(),
     String(now.getMonth() + 1).padStart(2, "0"),
     String(now.getDate()).padStart(2, "0"),
   ].join("-");
-  anchor.href = url;
-  anchor.download = `gpu-monitor-${view.selectedHost}-${date}.csv`;
-  anchor.hidden = true;
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  downloadBlob(
+    new Blob([buildCsv(records)], { type: "text/csv;charset=utf-8" }),
+    `gpu-monitor-${view.selectedHost}-${date}.csv`,
+  );
 }
 
 function groupedRecords(records) {
@@ -5781,12 +5106,16 @@ function groupedRecords(records) {
     groups.get(record.server.host).push(record);
   });
   return [...groups.entries()]
-    .map(([host, items]) => ({ host, server: items[0].server, records: sortedRecords(items) }))
+    .map(([host, items]) => {
+      const sorted = sortedRecords(items);
+      // The group's score is its best GPU; compute it once, not per comparison.
+      const score = view.sort === "host"
+        ? 0 : Math.max(...sorted.map((record) => gpuSortValue(record.gpu)));
+      return { host, server: items[0].server, records: sorted, score };
+    })
     .sort((a, b) => {
       if (view.sort === "host") return a.host.localeCompare(b.host);
-      const aScore = Math.max(...a.records.map((record) => gpuSortValue(record.gpu)));
-      const bScore = Math.max(...b.records.map((record) => gpuSortValue(record.gpu)));
-      return bScore - aScore || a.host.localeCompare(b.host);
+      return b.score - a.score || a.host.localeCompare(b.host);
     });
 }
 
@@ -5811,11 +5140,16 @@ function groupMetric(label, value) {
   return metric;
 }
 
+// A status filter or search query temporarily expands every matching group
+// without touching the operator's explicit expansion state.
+function groupsFocused() {
+  return view.filter !== "all" || view.query.trim() !== "";
+}
+
 function gpuGroup(group) {
   const { server, records } = group;
   const details = create("details", "gpu-server-group");
-  const focused = view.filter !== "all" || view.query.trim() !== "";
-  details.open = focused || view.expandedHosts.has(server.host);
+  details.open = groupsFocused() || view.expandedHosts.has(server.host);
   details.dataset.host = server.host;
   const summary = create("summary", "gpu-group-summary");
   const identity = create("span", "gpu-group-identity");
@@ -5854,12 +5188,10 @@ function gpuGroup(group) {
   );
   details.append(summary, gpuTable(records, true));
   details.addEventListener("toggle", () => {
-    if (focused) {
-      updateGroupToggle();
-      return;
+    if (!groupsFocused()) {
+      if (details.open) view.expandedHosts.add(server.host);
+      else view.expandedHosts.delete(server.host);
     }
-    if (details.open) view.expandedHosts.add(server.host);
-    else view.expandedHosts.delete(server.host);
     updateGroupToggle();
   });
   return details;
@@ -5871,7 +5203,6 @@ function tableSignature(server, records) {
     host: `${server.host}\u0000${server.displayName || ""}`,
     incidentVersion: view.incidentVersion,
     filter: view.filter,
-    query: view.query.trim(),
     sort: view.sort,
     status: server.status,
     stale: server.stale,
@@ -5934,7 +5265,7 @@ function updateGroupToggle() {
 }
 
 function renderTable() {
-  const focusedRow = document.activeElement?.closest?.("tr[data-gpu-id]");
+  const focusedRow = document.activeElement?.closest("tr[data-gpu-id]");
   const focusedGpu = focusedRow
     ? [focusedRow.dataset.host, focusedRow.dataset.gpuId]
     : null;
@@ -5964,7 +5295,14 @@ function renderTable() {
     [...view.groupCache.keys()].forEach((host) => {
       if (!activeHosts.has(host)) view.groupCache.delete(host);
     });
-    reconcileChildren(elements.gpuGroups, groups.map(cachedGpuGroup));
+    const nodes = groups.map(cachedGpuGroup);
+    reconcileChildren(elements.gpuGroups, nodes);
+    // Reused nodes keep their DOM; only the expansion state follows the query.
+    const focused = groupsFocused();
+    nodes.forEach((node) => {
+      const open = focused || view.expandedHosts.has(node.dataset.host);
+      if (node.open !== open) node.open = open;
+    });
   }
   if (focusedGpu && !document.activeElement?.isConnected) {
     [...elements.gpuGroups.querySelectorAll("tr[data-gpu-id]")]
@@ -5977,11 +5315,19 @@ function renderTable() {
   elements.emptyState.hidden = records.length !== 0;
 }
 
-// Stable scalar key for the selected host: the single-host resource panel
-// and node notice only need a rebuild when that host's data version moves,
-// not on every fleet snapshot (avoids JSON.stringify over the full record).
+// Stable scalar key for the resource panel and node notice. A host's
+// `system` record is replaced only by a successful probe, so lastSuccessAt
+// is its data version; the fleet view keys on the version of every online
+// focused host plus the thresholds that colour the tiles, and the
+// single-host view adds the reachability fields the node notice shows.
 function selectedHostPanelKey() {
-  if (view.selectedHost === "all") return "";
+  const thresholds = JSON.stringify(limits());
+  if (view.selectedHost === "all") {
+    const versions = focusedServers(view.snapshot.servers)
+      .filter((server) => server.status === "online" && server.system)
+      .map((server) => `${server.host}:${server.lastSuccessAt}`);
+    return ["all", view.serverFilter, thresholds, ...versions].join("\u0000");
+  }
   const server = view.snapshot.servers.find(
     (candidate) => candidate.host === view.selectedHost,
   );
@@ -5990,7 +5336,7 @@ function selectedHostPanelKey() {
     `${server.host}\u0000${server.displayName || ""}`, server.status, server.stale, server.polling,
     server.lastAttemptAt, server.lastSuccessAt, server.nextRetryAt,
     server.consecutiveFailures, server.message,
-    view.incidentVersion,
+    view.incidentVersion, thresholds,
   ].join("\u0000");
 }
 
@@ -6005,7 +5351,7 @@ function render() {
   renderIncidents();
   renderServers();
   const panelKey = selectedHostPanelKey();
-  if (!panelKey || panelKey !== view.selectedPanelKey) {
+  if (panelKey !== view.selectedPanelKey) {
     view.selectedPanelKey = panelKey;
     renderNodeNotice();
     renderResources();
@@ -6016,7 +5362,6 @@ function render() {
   renderTable();
   renderGpuDetail();
   renderIncidentDetail();
-  evaluateCapacityWatch();
   renderCapacityMatcher();
   renderCapacityWatchControls();
   renderCapacityWatchBanner();
@@ -6043,7 +5388,7 @@ async function fetchSnapshot() {
   if (view.snapshotFetchInFlight) return view.snapshotFetchInFlight;
   const request = (async () => {
     try {
-      const response = await fetch("/api/snapshot", { cache: "no-store" });
+      const response = await fetch("/api/snapshot");
       if (response.status === 403) {
         dashboardAuthentication.forget();
         requestDashboardAuthentication("访问令牌不正确或已失效，请重新输入");
@@ -6060,6 +5405,7 @@ async function fetchSnapshot() {
       if (!acceptSnapshot(snapshot)) return true;
       view.lastEventAt = Date.now();
       normalizeSelection();
+      settleCapacityWatch();
       render();
       syncHistory();
       syncIncidents();
@@ -6095,14 +5441,16 @@ async function syncIncidents() {
   const request = ++view.incidentRequest;
   let failed = false;
   try {
-    const response = await fetch("/api/incidents?limit=50", { cache: "no-store" });
+    const response = await fetch("/api/incidents?limit=50");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const incidents = await response.json();
     if (request !== view.incidentRequest) return;
-    view.incidents = incidents;
-    view.incidentVersion = numeric(incidents.version, 0);
+    acceptIncidents(incidents);
     view.incidentRetryDelayMs = 0;
     view.incidentSyncFailed = false;
+    // The watch waits for incidents that match the snapshot revision, so
+    // this is the moment a snapshot-triggered evaluation was deferred to.
+    settleCapacityWatch();
     renderIncidents();
     renderAttention();
     renderServers();
@@ -6110,6 +5458,7 @@ async function syncIncidents() {
     renderGpuDetail();
     renderIncidentDetail();
     renderCapacityMatcher();
+    renderCapacityWatchControls();
   } catch (_error) {
     // Current telemetry remains usable if the optional transition feed is unavailable.
     failed = request === view.incidentRequest;
@@ -6146,7 +5495,7 @@ async function syncIncidents() {
 function acceptStreamFrame(frame, markLive) {
   let eventName = "message";
   const data = [];
-  frame.replaceAll("\r", "").split("\n").forEach((line) => {
+  frame.split("\n").forEach((line) => {
     if (line.startsWith("event:")) eventName = line.slice(6).trim();
     else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
   });
@@ -6161,6 +5510,7 @@ function acceptStreamFrame(frame, markLive) {
     view.lastEventAt = Date.now();
     markLive();
     normalizeSelection();
+    settleCapacityWatch();
     scheduleRender();
     syncIncidents();
   } catch (_error) {
@@ -6218,65 +5568,19 @@ async function connectAuthenticatedStream() {
 function connect() {
   if (view.connectStarted) return;
   view.connectStarted = true;
-  if (dashboardAuthentication.token) {
-    connectAuthenticatedStream();
-    return;
-  }
-  const events = new EventSource("/api/events");
-  const markLive = () => {
-    if (view.connectionErrorTimer != null) {
-      clearTimeout(view.connectionErrorTimer);
-      view.connectionErrorTimer = null;
-    }
-    // Stream liveness resets the poll backoff the same way a poll success
-    // would, so a recovered stream does not keep a stale failure streak.
-    view.snapshotFailureStreak = 0;
-    setConnection("live", "实时连接");
-  };
-  events.addEventListener("open", markLive);
-  // Newer services send named heartbeats between snapshots. Counting them as
-  // liveness keeps the 15s staleness fallback from issuing redundant
-  // /api/snapshot polls while the stream is healthy but idle. Older services
-  // only send SSE comments, which never reach this listener — the polling
-  // fallback then behaves exactly as before.
-  events.addEventListener("heartbeat", () => {
-    view.lastEventAt = Date.now();
-    markLive();
-  });
-  events.addEventListener("snapshot", (event) => {
-    try {
-      if (!acceptSnapshot(JSON.parse(event.data))) return;
-      view.lastEventAt = Date.now();
-      markLive();
-      normalizeSelection();
-      scheduleRender();
-      syncIncidents();
-    } catch (_error) {
-      setConnection("offline", "数据异常");
-    }
-  });
-  events.addEventListener("error", () => {
-    if (view.connectionErrorTimer != null) return;
-    view.connectionErrorTimer = setTimeout(async () => {
-      view.connectionErrorTimer = null;
-      const reachable = await fetchSnapshot();
-      if (events.readyState === EventSource.OPEN) {
-        markLive();
-      } else if (reachable) {
-        setConnection("delayed", "轮询同步");
-      } else {
-        setConnection("offline", "服务不可达");
-      }
-    }, 1200);
-  });
+  connectAuthenticatedStream();
+  // Polling a reader route only starts once this document is authenticated,
+  // which the accepted snapshot that led here proves. Starting the pill here
+  // rather than in startDashboard also covers the recovery path, where the
+  // first snapshot only arrives through the polling fallback.
+  updatePill.start();
 }
 
 document.querySelectorAll(".filter").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelectorAll(".filter").forEach((item) => {
       const selected = item === button;
-      item.classList.toggle("active", selected);
-      item.setAttribute("aria-pressed", String(selected));
+      setPressed(item, selected);
     });
     view.filter = button.dataset.filter;
     render();
@@ -6314,8 +5618,15 @@ elements.search.addEventListener("input", () => {
   const query = elements.search.value.slice(0, MAX_SEARCH_QUERY_LENGTH);
   if (elements.search.value !== query) elements.search.value = query;
   view.query = query;
-  render();
+  renderSearchResults();
 });
+
+// Only the program-search panel and the GPU table depend on the query.
+function renderSearchResults() {
+  if (!view.snapshot) return;
+  renderProgramSearch();
+  renderTable();
+}
 
 document.addEventListener("keydown", (event) => {
   if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -6329,7 +5640,7 @@ document.addEventListener("keydown", (event) => {
   if (elements.search.value) {
     elements.search.value = "";
     view.query = "";
-    render();
+    renderSearchResults();
   } else {
     elements.search.blur();
   }
@@ -6344,51 +5655,31 @@ elements.gpuSort.addEventListener("change", () => {
 
 elements.settingsToggle.addEventListener("click", () => {
   syncPreferenceControls();
-  if (elements.topologyDialog.open) elements.topologyDialog.close();
-  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
-  if (elements.capacityDialog.open) elements.capacityDialog.close();
-  if (elements.ownersDialog.open) elements.ownersDialog.close();
-  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
-  elements.settingsDialog.showModal();
+  openExclusiveDialog(elements.settingsDialog);
   refreshInventory();
   fetchServiceCapability();
 });
 
 elements.topologyToggle.addEventListener("click", () => {
-  if (elements.settingsDialog.open) elements.settingsDialog.close();
-  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
-  if (elements.capacityDialog.open) elements.capacityDialog.close();
-  if (elements.ownersDialog.open) elements.ownersDialog.close();
-  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
-  elements.topologyDialog.showModal();
+  openExclusiveDialog(elements.topologyDialog);
   renderTopology();
   if (!view.topology && !view.topologyLoading) fetchTopology();
 });
 
 elements.capacityToggle.addEventListener("click", () => {
   if (!view.snapshot) return;
-  if (elements.settingsDialog.open) elements.settingsDialog.close();
-  if (elements.topologyDialog.open) elements.topologyDialog.close();
-  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
-  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
-  if (elements.ownersDialog.open) elements.ownersDialog.close();
   elements.capacityGpuCount.value = String(view.capacityRequest.gpuCount);
   elements.capacityVram.value = String(view.capacityRequest.minVramGiB);
   syncCapacityModels();
   elements.capacityModel.value = view.capacityRequest.model;
-  elements.capacityDialog.showModal();
+  openExclusiveDialog(elements.capacityDialog);
   renderCapacityMatcher();
   renderCapacityWatchControls();
 });
 
 elements.ownersToggle.addEventListener("click", () => {
   if (!view.snapshot) return;
-  if (elements.settingsDialog.open) elements.settingsDialog.close();
-  if (elements.topologyDialog.open) elements.topologyDialog.close();
-  if (elements.incidentDetailDialog.open) elements.incidentDetailDialog.close();
-  if (elements.gpuDetailDialog.open) elements.gpuDetailDialog.close();
-  if (elements.capacityDialog.open) elements.capacityDialog.close();
-  elements.ownersDialog.showModal();
+  openExclusiveDialog(elements.ownersDialog);
   renderOwners();
   fetchOwnersUsage();
 });
@@ -6496,12 +5787,8 @@ elements.gpuDetailDialog.addEventListener("close", () => {
   elements.gpuTaskFeedback.className = "gpu-task-feedback";
   // Nothing polls a closed dialog, and the cached rows / history DOM would
   // only keep stale nodes (and their per-second duration scans) alive.
-  clearGpuHistoryRetry();
-  view.gpuHistory = null;
-  view.gpuHistoryKey = "";
-  view.gpuHistoryFetchKey = null;
-  view.gpuHistoryError = false;
-  view.gpuHistoryRetryDelayMs = 0;
+  gpuHistoryLoader.reset();
+  view.gpuHistoryRenderKey = "";
   view.gpuTaskRowCache.clear();
   elements.gpuTaskList.replaceChildren();
   elements.gpuHistoryGrid.replaceChildren();
@@ -6532,8 +5819,7 @@ const gpuTaskSortButtons = [
 function syncGpuTaskSortButtons() {
   gpuTaskSortButtons.forEach((button) => {
     const active = button.dataset.taskSort === preferences.gpuTaskSort;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
+    setPressed(button, active);
   });
 }
 
@@ -6736,9 +6022,16 @@ elements.groupToggle.addEventListener("click", () => {
 
 setInterval(() => {
   if (!view.dashboardStarted) return;
-  if (view.snapshot) elements.lastSync.textContent = age(view.snapshot.lastPollCompletedAt);
-  refreshRelativeTimes();
-  renderConnectionStatus();
+  if (!document.hidden) {
+    // Relative-time text is cosmetic; a hidden document repaints nothing,
+    // but the staleness gate below must keep running to recover the stream.
+    if (view.snapshot) {
+      const lastSync = age(view.snapshot.lastPollCompletedAt);
+      if (elements.lastSync.textContent !== lastSync) elements.lastSync.textContent = lastSync;
+    }
+    refreshRelativeTimes();
+    renderConnectionStatus();
+  }
   const elapsed = Date.now() - view.lastEventAt;
   const fallbackAfter = Math.max(2000, numeric(view.snapshot?.pollIntervalSeconds, 5) * 1000);
   // Consecutive failures widen the poll gate up to 30s so an outage is not
@@ -6779,25 +6072,17 @@ async function startDashboard() {
     requestDashboardAuthentication("URL 中的访问令牌格式无效，请重新输入");
     return false;
   }
-  try {
-    const response = await fetch("/api/meta", { cache: "no-store" });
-    if (response.ok) {
-      const meta = await response.json();
-      if (meta.authenticationRequired === true && !dashboardAuthentication.token) {
-        requestDashboardAuthentication("请输入此 Mocop 实例的访问令牌");
-        return false;
-      }
-    }
-  } catch (_error) {
-    // Snapshot/SSE reconnect logic owns transient reachability handling.
+  // Every private route requires the capability, so a document without one
+  // prompts immediately instead of spending a round trip to confirm that.
+  if (!dashboardAuthentication.token) {
+    requestDashboardAuthentication("请输入此 Mocop 实例的访问令牌");
+    return false;
   }
   view.dashboardStarted = true;
   const snapshotLoaded = await fetchSnapshot();
   if (view.authenticationFailed || !snapshotLoaded) return false;
   fetchTopology();
   connect();
-  // Polling a reader route only starts once this document is authenticated.
-  updatePill.start();
   return true;
 }
 

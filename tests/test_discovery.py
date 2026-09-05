@@ -25,6 +25,9 @@ class _RouteResolver:
         self.calls.append(alias)
         return self.routes.get(alias)
 
+    def cancel(self) -> None:
+        return None
+
 
 class DiscoveryTests(unittest.TestCase):
     @staticmethod

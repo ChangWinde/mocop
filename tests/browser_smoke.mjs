@@ -1320,6 +1320,49 @@ try {
     "focus lands in the maintenance editor of the target host",
   );
 
+  // A reason the operator is typing must survive the snapshot renders that
+  // arrive every few seconds, and a condition that recovers while the dialog
+  // is open is shown as resolved instead of closing under the cursor.
+  const incidentEditing = await cdp.evaluate(`(() => {
+    const condition = view.incidents.active.find(
+      (item) => item.host === "atlas-03" && item.category === "connectivity",
+    );
+    openIncidentDetail(condition);
+    const dialog = document.querySelector("#incident-detail-dialog");
+    const reason = document.querySelector("#incident-action-reason");
+    const seeded = reason.value;
+    reason.value = "cooling fan replaced";
+    render();
+    renderIncidentDetail();
+    const afterRender = reason.value;
+    const withoutCondition = {
+      ...view.incidents,
+      active: view.incidents.active.filter((item) => item !== condition),
+    };
+    const previousIncidents = view.incidents;
+    acceptIncidents(withoutCondition);
+    render();
+    const result = {
+      seeded,
+      afterRender,
+      stillOpen: dialog.open,
+      status: document.querySelector("#incident-detail-status").textContent,
+      feedback: document.querySelector("#incident-action-feedback").textContent,
+      actionsDisabled: document.querySelector("#acknowledge-incident").disabled,
+      reasonKept: reason.value,
+    };
+    acceptIncidents(previousIncidents);
+    dialog.close();
+    render();
+    return result;
+  })()`);
+  assert.equal(incidentEditing.afterRender, "cooling fan replaced");
+  assert.equal(incidentEditing.stillOpen, true);
+  assert.match(incidentEditing.status, /已恢复/);
+  assert.match(incidentEditing.feedback, /已恢复/);
+  assert.equal(incidentEditing.actionsDisabled, true);
+  assert.equal(incidentEditing.reasonKept, "cooling fan replaced");
+
   const grouping = await cdp.evaluate(`(() => {
     const sort = document.querySelector("#server-sort");
     sort.value = "group";
@@ -1640,9 +1683,9 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     const compressedBackgroundStatus = document.querySelector("#background-image-status").textContent;
-    const compressedBackground = await readStoredBackground().catch(() => null);
+    const compressedBackground = await backgroundAssets.readStored().catch(() => null);
     const compressedBackgroundDimensions = compressedBackground
-      ? await decodeImageSize(compressedBackground)
+      ? await backgroundAssets.validate(compressedBackground)
       : { width: 0, height: 0 };
     const oversizedTransfer = new DataTransfer();
     oversizedTransfer.items.add(new File(
@@ -1831,14 +1874,21 @@ try {
       restartDisabled: document.querySelector("#restart-service").disabled,
       restartStatus: document.querySelector("#service-restart-status").textContent,
     };
+    // Swap in a copy rather than mutating the live GPU record: summaries are
+    // cached per object, so an in-place edit that a background render picked
+    // up would keep showing 101 processes after the restore.
     const selectedRecord = selectedGpuRecord();
-    const originalProcesses = selectedRecord.gpu.processes;
-    selectedRecord.gpu.processes = Array.from({ length: 101 }, (_, index) => ({
-      pid: 30000 + index,
-      name: "/workspace/process-" + index + ".py",
-      used_memory_mib: 101 - index,
-      workload: null,
-    }));
+    const originalGpu = selectedRecord.gpu;
+    const gpuSlot = selectedRecord.server.gpus.indexOf(originalGpu);
+    selectedRecord.server.gpus[gpuSlot] = {
+      ...originalGpu,
+      processes: Array.from({ length: 101 }, (_, index) => ({
+        pid: 30000 + index,
+        name: "/workspace/process-" + index + ".py",
+        used_memory_mib: 101 - index,
+        workload: null,
+      })),
+    };
     renderGpuDetail();
     result.boundedTaskCount = document.querySelector("#gpu-task-count").textContent;
     result.boundedTaskRows = document.querySelectorAll("#gpu-task-list .gpu-task").length;
@@ -1854,8 +1904,8 @@ try {
     )?.dataset.processKey || "";
     taskSearch.value = "";
     taskSearch.dispatchEvent(new Event("input", { bubbles: true }));
-    selectedRecord.gpu.processes = originalProcesses;
-    renderGpuDetail();
+    selectedRecord.server.gpus[gpuSlot] = originalGpu;
+    render();
     taskDialog.close();
     return result;
   })()`, true);
@@ -2251,17 +2301,17 @@ try {
     // Mark the real record as already loaded so the per-second snapshot
     // renders cannot start a competing fetch that would supersede the
     // failing request this test observes.
-    view.gpuHistoryKey = server.host + "|" + gpu.uuid + "|" + (server.lastSuccessAt || "");
+    gpuHistoryLoader.state.key = server.host + "|" + gpu.uuid + "|" + (server.lastSuccessAt || "");
     for (
       let attempt = 0;
-      attempt < 80 && (!view.gpuHistoryError || view.gpuHistoryLoading);
+      attempt < 80 && (!gpuHistoryLoader.state.error || gpuHistoryLoader.state.loading);
       attempt += 1
     ) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    const errorFlag = view.gpuHistoryError;
-    const retryScheduled = view.gpuHistoryRetryTimer != null;
-    const retryDelayMs = view.gpuHistoryRetryDelayMs;
+    const errorFlag = gpuHistoryLoader.state.error;
+    const retryScheduled = gpuHistoryLoader.state.retryTimer != null;
+    const retryDelayMs = gpuHistoryLoader.state.retryDelayMs;
     // Re-render synchronously so the DOM reads cannot race the per-second
     // snapshot renders that may refetch the real history.
     renderGpuHistory();
@@ -2270,7 +2320,7 @@ try {
     document.querySelector("#gpu-detail-dialog").close();
     // The dialog close event is dispatched from a queued task.
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const cleanedUp = view.gpuHistoryRetryTimer == null
+    const cleanedUp = gpuHistoryLoader.state.retryTimer == null
       && view.gpuTaskRowCache.size === 0
       && document.querySelector("#gpu-task-list").children.length === 0
       && document.querySelector("#gpu-history-grid").children.length === 0;
@@ -2293,10 +2343,23 @@ try {
     const panelReused = tile != null
       && tile === document.querySelector("#resource-grid .resource-tile");
     selectHost("all");
+    render();
+    const fleetTile = document.querySelector("#resource-grid .resource-tile");
+    render();
+    const fleetPanelReused = fleetTile != null
+      && fleetTile === document.querySelector("#resource-grid .resource-tile");
+    // A successful probe replaces a host's system record and stamps
+    // lastSuccessAt; the fleet aggregates must follow that version.
+    const sampled = view.snapshot.servers.find((server) => server.host === "atlas-01");
+    const previousSuccess = sampled.lastSuccessAt;
+    sampled.lastSuccessAt = new Date().toISOString();
+    render();
+    const fleetPanelRebuilt = fleetTile !== document.querySelector("#resource-grid .resource-tile");
+    sampled.lastSuccessAt = previousSuccess;
     return {
       failureText, timelineText, errorFlag, retryScheduled, retryDelayMs,
       cleanedUp, attentionError, attentionVisible, attentionErrorCleared,
-      panelReused,
+      panelReused, fleetPanelReused, fleetPanelRebuilt,
     };
   })()`, true);
   // "\u5386\u53f2\u8bfb\u53d6\u5931\u8d25\uff0c\u7a0d\u540e\u91cd\u8bd5"
@@ -2316,6 +2379,16 @@ try {
     resilience.panelReused,
     true,
     "selected-host resource panel skips rebuild without a data change",
+  );
+  assert.equal(
+    resilience.fleetPanelReused,
+    true,
+    "fleet resource panel skips rebuild without a new sample",
+  );
+  assert.equal(
+    resilience.fleetPanelRebuilt,
+    true,
+    "fleet resource panel rebuilds when a host publishes a new sample",
   );
 
   const reloaded = cdp.waitFor("Page.loadEventFired", 30_000);
@@ -2526,10 +2599,10 @@ try {
     removeDisabled: true,
     status: "背景已从当前浏览器移除",
   });
-  // Service metadata endpoint (new contract) plus the end-to-end viewer
-  // marker audit: every dashboard-initiated read of the level-triggered API
-  // paths must have carried X-Monitor-Request, or SSE-outage polling would
-  // drop the page back to the unattended sampling cadence.
+  // The public service manifest the dashboard booted from, then the
+  // end-to-end viewer marker audit: every dashboard-initiated read of the
+  // level-triggered API paths must have carried X-Monitor-Request, or
+  // SSE-outage polling would drop the page back to the unattended cadence.
   const meta = await (
     await fetch(`http://127.0.0.1:${monitorPort}/api/meta`)
   ).json();
@@ -2537,15 +2610,19 @@ try {
   assert.equal(typeof meta.appVersion, "string");
   assert.equal(typeof meta.schemaVersion, "number");
   assert.equal(meta.capabilities.restartSupported, false);
+  assert.equal(meta.capabilities.configurationWriteSupported, true);
   assert(Array.isArray(meta.endpoints)
     && meta.endpoints.some((endpoint) => endpoint.path === "/api/snapshot"));
+  const audit = await (
+    await fetch(`http://127.0.0.1:${monitorPort}/fixture/audit`)
+  ).json();
   assert.equal(
-    meta.fixture.unmarkedDashboardReads,
+    audit.unmarkedDashboardReads,
     0,
     "all dashboard reads carry the X-Monitor-Request marker",
   );
   assert.equal(
-    meta.fixture.unauthenticatedPrivateRequests,
+    audit.unauthenticatedPrivateRequests,
     1,
     "only the explicit wrong-token submission reaches a private route unauthenticated",
   );
@@ -2558,7 +2635,7 @@ try {
     capacity, owners, ownersUsage, ownersDrilldown,
     incidentMaintenance, grouping, emptyFleet,
     personalization, gpuTasks, resilience,
-    persistedAppearance, persistedTaskSort, mobile, removedBackground, meta,
+    persistedAppearance, persistedTaskSort, mobile, removedBackground, meta, audit,
   }));
 } catch (error) {
   console.error(error);

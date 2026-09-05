@@ -1,0 +1,585 @@
+{
+  "_comment": "Shared capacity-matching contract for static/capacity-match.js and mocop/capacity.py. Both implementations must produce exactly `expected` for each case; change all three together.",
+  "busyPct": 10,
+  "temperatureC": 80,
+  "servers": [
+    {
+      "host": "busy-host",
+      "status": "online",
+      "stale": false,
+      "maintenance": null,
+      "system": {
+        "cpu_usage_pct": 10
+      },
+      "gpus": [
+        {
+          "index": 0,
+          "uuid": "GPU-0",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 96,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-1",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 97,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        }
+      ]
+    },
+    {
+      "host": "ready-host",
+      "status": "online",
+      "stale": false,
+      "maintenance": null,
+      "system": {
+        "cpu_usage_pct": 10
+      },
+      "gpus": [
+        {
+          "index": 0,
+          "uuid": "GPU-0",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-1",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        },
+        {
+          "index": 2,
+          "uuid": "GPU-2",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 55,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        }
+      ]
+    },
+    {
+      "host": "roomier-host",
+      "status": "online",
+      "stale": false,
+      "maintenance": null,
+      "system": {
+        "cpu_usage_pct": 10
+      },
+      "gpus": [
+        {
+          "index": 0,
+          "uuid": "GPU-0",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 81000,
+          "temperature_c": 40
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-1",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 81000,
+          "temperature_c": 40
+        },
+        {
+          "index": 2,
+          "uuid": "GPU-2",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": null
+        }
+      ]
+    },
+    {
+      "host": "maintenance-host",
+      "status": "online",
+      "stale": false,
+      "maintenance": {
+        "reason": "window"
+      },
+      "system": {
+        "cpu_usage_pct": 10
+      },
+      "gpus": [
+        {
+          "index": 0,
+          "uuid": "GPU-0",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-1",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        }
+      ]
+    },
+    {
+      "host": "alerting-host",
+      "status": "online",
+      "stale": false,
+      "maintenance": null,
+      "system": {
+        "cpu_usage_pct": 10
+      },
+      "gpus": [
+        {
+          "index": 0,
+          "uuid": "GPU-0",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-1",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        }
+      ]
+    },
+    {
+      "host": "faulty-gpu-host",
+      "status": "online",
+      "stale": false,
+      "maintenance": null,
+      "system": {
+        "cpu_usage_pct": 10
+      },
+      "gpus": [
+        {
+          "index": 0,
+          "uuid": "GPU-0",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-BAD",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        }
+      ]
+    },
+    {
+      "host": "hot-gpu-host",
+      "status": "online",
+      "stale": false,
+      "maintenance": null,
+      "system": {
+        "cpu_usage_pct": 10
+      },
+      "gpus": [
+        {
+          "index": 0,
+          "uuid": "GPU-0",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 80
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-1",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": null,
+          "temperature_c": 40
+        }
+      ]
+    },
+    {
+      "host": "offline-host",
+      "status": "offline",
+      "stale": false,
+      "maintenance": null,
+      "system": {
+        "cpu_usage_pct": 10
+      },
+      "gpus": [
+        {
+          "index": 0,
+          "uuid": "GPU-0",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-1",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        }
+      ]
+    },
+    {
+      "host": "stale-host",
+      "status": "online",
+      "stale": true,
+      "maintenance": null,
+      "system": {
+        "cpu_usage_pct": 10
+      },
+      "gpus": [
+        {
+          "index": 0,
+          "uuid": "GPU-0",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-1",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        }
+      ]
+    },
+    {
+      "host": "mixed-host",
+      "status": "online",
+      "stale": false,
+      "maintenance": null,
+      "system": null,
+      "gpus": [
+        {
+          "index": 0,
+          "uuid": "GPU-0",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-1",
+          "name": "NVIDIA GeForce RTX 4090",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 20000,
+          "temperature_c": 40
+        },
+        {
+          "index": 2,
+          "uuid": "GPU-2",
+          "name": null,
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        }
+      ]
+    },
+    {
+      "host": "throttled-gpu-host",
+      "status": "online",
+      "stale": false,
+      "maintenance": null,
+      "system": {
+        "cpu_usage_pct": 10
+      },
+      "gpus": [
+        {
+          "index": 0,
+          "uuid": "GPU-0",
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        },
+        {
+          "index": 1,
+          "uuid": null,
+          "name": "NVIDIA H100 80GB HBM3",
+          "utilization_gpu_pct": 2,
+          "memory_free_mib": 80000,
+          "temperature_c": 40
+        }
+      ]
+    }
+  ],
+  "activeConditions": [
+    {
+      "host": "alerting-host",
+      "category": "connectivity",
+      "conditionKey": "connectivity",
+      "resource": "SSH"
+    },
+    {
+      "host": "faulty-gpu-host",
+      "category": "gpu_ecc",
+      "conditionKey": "gpu_ecc:GPU-BAD",
+      "resource": "GPU 1"
+    },
+    {
+      "host": "ready-host",
+      "category": "cpu",
+      "conditionKey": "cpu",
+      "resource": "CPU"
+    },
+    {
+      "host": "throttled-gpu-host",
+      "category": "gpu_slowdown",
+      "conditionKey": "gpu_slowdown",
+      "resource": "GPU 1 thermal"
+    }
+  ],
+  "cases": [
+    {
+      "name": "two-h100-24gib",
+      "request": {
+        "gpuCount": 2,
+        "minVramGiB": 24,
+        "model": "any"
+      },
+      "expected": {
+        "excludedMaintenance": 1,
+        "excludedHealth": 1,
+        "candidates": [
+          {
+            "host": "roomier-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 3,
+            "available": [
+              0,
+              1,
+              2
+            ],
+            "satisfies": true,
+            "deficit": 0,
+            "minimumFreeMiB": 80000.0,
+            "averageUtilization": 2.0
+          },
+          {
+            "host": "ready-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 3,
+            "available": [
+              0,
+              1
+            ],
+            "satisfies": true,
+            "deficit": 0,
+            "minimumFreeMiB": 80000.0,
+            "averageUtilization": 2.0
+          },
+          {
+            "host": "faulty-gpu-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 2,
+            "available": [
+              0
+            ],
+            "satisfies": false,
+            "deficit": 1,
+            "minimumFreeMiB": 80000.0,
+            "averageUtilization": 2.0
+          },
+          {
+            "host": "mixed-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 1,
+            "available": [
+              0
+            ],
+            "satisfies": false,
+            "deficit": 1,
+            "minimumFreeMiB": 80000.0,
+            "averageUtilization": 2.0
+          },
+          {
+            "host": "mixed-host",
+            "model": "Unknown NVIDIA GPU",
+            "total": 1,
+            "available": [
+              2
+            ],
+            "satisfies": false,
+            "deficit": 1,
+            "minimumFreeMiB": 80000.0,
+            "averageUtilization": 2.0
+          },
+          {
+            "host": "throttled-gpu-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 2,
+            "available": [
+              0
+            ],
+            "satisfies": false,
+            "deficit": 1,
+            "minimumFreeMiB": 80000.0,
+            "averageUtilization": 2.0
+          },
+          {
+            "host": "busy-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 2,
+            "available": [],
+            "satisfies": false,
+            "deficit": 2,
+            "minimumFreeMiB": 0,
+            "averageUtilization": 101.0
+          },
+          {
+            "host": "hot-gpu-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 2,
+            "available": [],
+            "satisfies": false,
+            "deficit": 2,
+            "minimumFreeMiB": 0,
+            "averageUtilization": 101.0
+          },
+          {
+            "host": "mixed-host",
+            "model": "NVIDIA GeForce RTX 4090",
+            "total": 1,
+            "available": [],
+            "satisfies": false,
+            "deficit": 2,
+            "minimumFreeMiB": 0,
+            "averageUtilization": 101.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "one-4090-1gib",
+      "request": {
+        "gpuCount": 1,
+        "minVramGiB": 1,
+        "model": "NVIDIA GeForce RTX 4090"
+      },
+      "expected": {
+        "excludedMaintenance": 1,
+        "excludedHealth": 1,
+        "candidates": [
+          {
+            "host": "mixed-host",
+            "model": "NVIDIA GeForce RTX 4090",
+            "total": 1,
+            "available": [
+              1
+            ],
+            "satisfies": true,
+            "deficit": 0,
+            "minimumFreeMiB": 20000.0,
+            "averageUtilization": 2.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "three-h100-80gib",
+      "request": {
+        "gpuCount": 3,
+        "minVramGiB": 80,
+        "model": "NVIDIA H100 80GB HBM3"
+      },
+      "expected": {
+        "excludedMaintenance": 1,
+        "excludedHealth": 1,
+        "candidates": [
+          {
+            "host": "busy-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 2,
+            "available": [],
+            "satisfies": false,
+            "deficit": 3,
+            "minimumFreeMiB": 0,
+            "averageUtilization": 101.0
+          },
+          {
+            "host": "faulty-gpu-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 2,
+            "available": [],
+            "satisfies": false,
+            "deficit": 3,
+            "minimumFreeMiB": 0,
+            "averageUtilization": 101.0
+          },
+          {
+            "host": "hot-gpu-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 2,
+            "available": [],
+            "satisfies": false,
+            "deficit": 3,
+            "minimumFreeMiB": 0,
+            "averageUtilization": 101.0
+          },
+          {
+            "host": "mixed-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 1,
+            "available": [],
+            "satisfies": false,
+            "deficit": 3,
+            "minimumFreeMiB": 0,
+            "averageUtilization": 101.0
+          },
+          {
+            "host": "ready-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 3,
+            "available": [],
+            "satisfies": false,
+            "deficit": 3,
+            "minimumFreeMiB": 0,
+            "averageUtilization": 101.0
+          },
+          {
+            "host": "roomier-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 3,
+            "available": [],
+            "satisfies": false,
+            "deficit": 3,
+            "minimumFreeMiB": 0,
+            "averageUtilization": 101.0
+          },
+          {
+            "host": "throttled-gpu-host",
+            "model": "NVIDIA H100 80GB HBM3",
+            "total": 2,
+            "available": [],
+            "satisfies": false,
+            "deficit": 3,
+            "minimumFreeMiB": 0,
+            "averageUtilization": 101.0
+          }
+        ]
+      }
+    }
+  ]
+}

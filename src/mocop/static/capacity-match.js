@@ -2,7 +2,9 @@
 // same-host, same-model GPU candidates. Extracted from capacity-watch.js
 // under the ADR-0021 leaf pattern so the stateless projection and the durable
 // watch state machine stay in separate cohesive files. No DOM, no storage,
-// no network.
+// no network. mocop/capacity.py is the server-side twin behind
+// GET /api/capacity; tests/fixtures/capacity_match.json pins both to one
+// ranking, so change the fixture and both implementations together.
 (() => {
   "use strict";
 
@@ -99,23 +101,20 @@
           });
         });
       });
+      // Code-point host order (not localeCompare) keeps the ranking identical
+      // to the server-side twin in mocop/capacity.py on every locale.
       candidates.sort((first, second) => (
         Number(second.satisfies) - Number(first.satisfies)
         || first.deficit - second.deficit
         || second.available.length - first.available.length
         || second.minimumFreeMiB - first.minimumFreeMiB
         || first.averageUtilization - second.averageUtilization
-        || first.host.localeCompare(second.host)
+        || (first.host < second.host ? -1 : first.host > second.host ? 1 : 0)
       ));
       return { candidates, excludedMaintenance, excludedHealth };
     }
 
-    return Object.freeze({
-      hostBlockerCategories: HOST_BLOCKERS,
-      gpuBlockerCategories: GPU_BLOCKERS,
-      gpuHasBlocker,
-      matches,
-    });
+    return Object.freeze({ matches });
   }
 
   globalThis.MocopCapacityMatch = Object.freeze({ create });

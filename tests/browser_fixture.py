@@ -5,7 +5,6 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from mocop import __version__
 from mocop.inventory import InventoryRequestError
 from mocop.models import (
     DiskMetrics,
@@ -31,10 +30,11 @@ _TRACKED_DASHBOARD_PATHS = frozenset(
         "/api/usage",
     }
 )
-_COLLECTOR_SETTINGS_KEYS = frozenset(
-    {"pollIntervalSeconds", "probeTimeoutSeconds", "maxWorkers"}
-)
 _BROWSER_ACCESS_TOKEN = "B" * 43
+# Fixture-only route the smoke test reads once the journey has finished; it
+# stays outside the API family so the real /api/meta contract is what the
+# dashboard sees.
+_AUDIT_PATH = "/fixture/audit"
 
 
 class DemoInventory:
@@ -66,6 +66,9 @@ class DemoInventory:
             "atlas-03": "Lab",
         }
         self.incident_actions = []
+
+    def writable(self) -> bool:
+        return True
 
     def topology(self) -> dict[str, object]:
         return {
@@ -101,6 +104,8 @@ class DemoInventory:
         }
 
     def snapshot(self) -> dict[str, object]:
+        # Same key set as ConfigInventory._snapshot: the dashboard contract
+        # rejects a payload that omits any of them.
         return {
             "configuredHosts": list(self.configured),
             "activeHosts": list(self.configured),
@@ -111,8 +116,11 @@ class DemoInventory:
             "excludedHostCount": 1,
             "collectorSettings": dict(self.collector_settings),
             "maintenanceWindows": dict(self.maintenance_windows),
-            "hostGroups": dict(self.host_groups),
             "incidentActions": list(self.incident_actions),
+            "hostGroups": dict(self.host_groups),
+            "sshDiscoveryMode": "topology",
+            "infrastructureHosts": ["atlas-gateway"],
+            "sshDiscoveryWarnings": [],
             "writable": True,
         }
 
@@ -248,9 +256,9 @@ class DemoNotificationSink:
 
 
 class DemoRequestHandler(MonitorRequestHandler):
-    """Simulates the in-progress backend contract on top of the current web
-    module: /api/meta, subset bodies on /api/settings/collector, and a
-    counter for dashboard-path reads that arrive without the viewer marker.
+    """The real request handler plus two audit counters the smoke test reads:
+    dashboard-path reads that arrived without the viewer marker, and private
+    requests that arrived without the Bearer token.
     """
 
     def _respond_to_read_request(self) -> None:
@@ -260,30 +268,15 @@ class DemoRequestHandler(MonitorRequestHandler):
             and self.headers.get("X-Monitor-Request") != "dashboard"
         ):
             self.monitor_server.unmarked_dashboard_reads += 1
-        if path == "/api/meta":
+        if path == _AUDIT_PATH:
             self._send_json(
                 {
-                    "apiVersion": "2",
-                    "appVersion": __version__,
-                    "schemaVersion": 1,
-                    "authenticationRequired": True,
-                    "capabilities": {
-                        "restartSupported": self.monitor_server.restart is not None,
-                    },
-                    "endpoints": [
-                        {"method": "GET", "path": path, "access": "listener"}
-                        for path in sorted(_TRACKED_DASHBOARD_PATHS)
-                    ],
-                    # Fixture-only diagnostics; extra keys are allowed by the
-                    # defensive client parser.
-                    "fixture": {
-                        "unmarkedDashboardReads": (
-                            self.monitor_server.unmarked_dashboard_reads
-                        ),
-                        "unauthenticatedPrivateRequests": (
-                            self.monitor_server.unauthenticated_private_requests
-                        ),
-                    },
+                    "unmarkedDashboardReads": (
+                        self.monitor_server.unmarked_dashboard_reads
+                    ),
+                    "unauthenticatedPrivateRequests": (
+                        self.monitor_server.unauthenticated_private_requests
+                    ),
                 }
             )
             return
@@ -297,20 +290,6 @@ class DemoRequestHandler(MonitorRequestHandler):
             if self.headers.get("Authorization") != expected:
                 self.monitor_server.unauthenticated_private_requests += 1
         return super()._require_authentication(path)
-
-    def _change_collector_settings(self, payload: object) -> None:
-        # New contract: a strict subset of the collector fields is accepted;
-        # missing fields keep their current values.
-        if (
-            isinstance(payload, dict)
-            and payload
-            and set(payload) < _COLLECTOR_SETTINGS_KEYS
-        ):
-            current = self.monitor_server.inventory.collector_settings
-            merged = {key: current[key] for key in _COLLECTOR_SETTINGS_KEYS}
-            merged.update(payload)
-            payload = merged
-        super()._change_collector_settings(payload)
 
 
 def gpu(

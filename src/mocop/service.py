@@ -8,12 +8,11 @@ import threading
 import time
 import traceback
 import zlib
-from bisect import bisect_left, bisect_right
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from heapq import nsmallest
 from struct import Struct
 from typing import Protocol
@@ -50,6 +49,7 @@ from .probe import (
     InventoryAwareResourceProbe,
     ResourceProbe,
 )
+from .usage import aggregate_usage
 
 _MAX_FAILURE_BACKOFF_SECONDS = 60.0
 _MAX_PROBE_WORKERS = 64
@@ -62,10 +62,6 @@ _MAX_RUNTIME_POLL_INTERVAL_SECONDS = 3600.0
 # identities (UUID churn) cannot grow per-identity telemetry without bound,
 # while briefly absent GPUs keep their displayable history.
 _MAX_GPU_IDENTITIES_PER_HOST = 256
-# Usage is intentionally conservative: a longer sample gap is not classified
-# as measured GPU activity.  This bound is independent of the *current* poll
-# setting so a later configuration change cannot rewrite historical rollups.
-_MAX_USAGE_SAMPLE_GAP_SECONDS = 60.0
 _HOST_HISTORY_VALUES = Struct("<12d")
 _GPU_HISTORY_VALUES = Struct("<i5d")
 _LOGGER = logging.getLogger(__name__)
@@ -322,38 +318,6 @@ def _optional_float(value: object) -> float | None:
     return float(value)
 
 
-def _epoch_seconds(value: object) -> float | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
-@dataclass(slots=True)
-class _UsageInterval:
-    """One process's clipped occupancy window on a single GPU."""
-
-    start: float
-    end: float
-    owner: str | None
-    kind: str
-    sampled_seconds: float = 0.0
-    idle_seconds: float = 0.0
-
-
-@dataclass(slots=True)
-class _OwnerUsage:
-    gpu_seconds: float = 0.0
-    sampled_seconds: float = 0.0
-    idle_seconds: float = 0.0
-    processes: int = 0
-    hosts: set[str] = field(default_factory=set)
-    gpus: set[tuple[str, str]] = field(default_factory=set)
-    kinds: dict[str, int] = field(default_factory=dict)
-
-
 def _packed_optional_float(value: float | None) -> float:
     return math.nan if value is None else value
 
@@ -423,7 +387,6 @@ class StateStore:
         self._collection_stale_after_seconds = (
             poll_interval_seconds * collection_stale_cycles
         )
-        self._schedule_changed = threading.Event()
         self._thresholds = thresholds or ThresholdConfig()
         self._history_points = history_points
         selected_policy = incident_policy or ThresholdIncidentPolicy(
@@ -540,11 +503,7 @@ class StateStore:
                     )
                 )
 
-        set_actionable_check = getattr(
-            self._notifications, "set_actionable_check", None
-        )
-        if set_actionable_check is not None:
-            set_actionable_check(_notification_event_actionable)
+        self._notifications.set_actionable_check(_notification_event_actionable)
         self._active_maintenance_signature = self._maintenance_signature_locked()
         self._active_action_signature = self._incident_action_signature_locked()
         self._incident_revision = self._incidents.version
@@ -620,8 +579,7 @@ class StateStore:
                     )
                     changed = True
             self._incidents.remove_hosts(desired)
-            if isinstance(self._incident_policy, ThresholdIncidentPolicy):
-                self._incident_policy.retain_hosts(desired)
+            self._incident_policy.retain_hosts(desired)
             self._sync_tracker_revision_locked()
             if changed:
                 self._publish_locked()
@@ -658,22 +616,14 @@ class StateStore:
             self._collection_stale_after_seconds = (
                 interval * self._collection_stale_cycles
             )
-            self._schedule_changed.set()
             self._publish_locked()
         return interval
-
-    def wait_for_poll_interval_change(self, timeout_seconds: float) -> bool:
-        return self.wait_for_schedule_change(timeout_seconds)
-
-    def notify_inventory_changed(self) -> None:
-        self._schedule_changed.set()
 
     def update_expected_gpu_counts(
         self, expected_gpu_counts: tuple[tuple[str, int], ...]
     ) -> None:
         with self._condition:
-            if isinstance(self._incident_policy, ThresholdIncidentPolicy):
-                self._incident_policy.update_expected_gpu_counts(expected_gpu_counts)
+            self._incident_policy.update_expected_gpu_counts(expected_gpu_counts)
 
     def set_maintenance_windows(
         self,
@@ -729,12 +679,11 @@ class StateStore:
             if updated == self._host_groups:
                 return
             self._host_groups = updated
-            if isinstance(self._incident_policy, ThresholdIncidentPolicy):
-                self._incident_policy.update_overrides(
-                    self._host_incident_overrides,
-                    self._group_incident_overrides,
-                    host_groups,
-                )
+            self._incident_policy.update_overrides(
+                self._host_incident_overrides,
+                self._group_incident_overrides,
+                host_groups,
+            )
             self._publish_locked()
 
     def set_incident_overrides(
@@ -751,10 +700,9 @@ class StateStore:
                 return
             self._host_incident_overrides = host_overrides
             self._group_incident_overrides = group_overrides
-            if isinstance(self._incident_policy, ThresholdIncidentPolicy):
-                self._incident_policy.update_overrides(
-                    host_overrides, group_overrides, host_groups
-                )
+            self._incident_policy.update_overrides(
+                host_overrides, group_overrides, host_groups
+            )
             self._incident_revision += 1
             self._publish_locked()
 
@@ -784,12 +732,6 @@ class StateStore:
             self.set_topology(config.topology)
             if hosts is not None:
                 self.set_hosts(hosts)
-
-    def wait_for_schedule_change(self, timeout_seconds: float) -> bool:
-        changed = self._schedule_changed.wait(max(0.0, timeout_seconds))
-        if changed:
-            self._schedule_changed.clear()
-        return changed
 
     def begin_poll(self, hosts: tuple[str, ...]) -> None:
         with self._condition:
@@ -985,14 +927,10 @@ class StateStore:
             }
 
     def usage(self, window_hours: int, owner_limit: int) -> dict[str, object]:
-        """Aggregate per-owner GPU occupancy over the requested window.
+        """Per-owner GPU occupancy over the window; see ``usage.aggregate_usage``.
 
-        Occupancy pairs the in-memory process start/stop timeline with the
-        live process table; idle seconds reclassify occupancy segments whose
-        sampled GPU utilization stayed below the busy threshold. Coverage is
-        bounded by the in-memory timeline (and the restored persistence
-        window), so `earliestDataAt` reports how far back the data really
-        goes.
+        Only the consistent copy of the timeline is taken under the lock; the
+        aggregation itself runs without it.
         """
         with self._condition:
             now = self._utc_clock()
@@ -1003,290 +941,28 @@ class StateStore:
                 key: dict(processes)
                 for key, processes in self._active_gpu_processes.items()
             }
-            history_by_gpu = {
-                key: list(points) for key, points in self._gpu_history.items()
+            utilization_by_gpu = {
+                key: [
+                    (
+                        point.observed_at,
+                        _unpacked_optional_float(
+                            _GPU_HISTORY_VALUES.unpack(point.values)[1]
+                        ),
+                    )
+                    for point in points
+                ]
+                for key, points in self._gpu_history.items()
             }
             busy_pct = self._thresholds.gpu_busy_pct
-
-        now_epoch = now.timestamp()
-        window_start = now_epoch - window_hours * 3600
-        dropped_records = 0
-        earliest_data: float | None = None
-        owners: dict[str | None, _OwnerUsage] = {}
-
-        for key in sorted(set(events_by_gpu) | set(active_by_gpu)):
-            intervals, dropped, earliest = self._usage_intervals(
-                events_by_gpu.get(key, ()),
-                active_by_gpu.get(key, {}),
-                window_start=window_start,
-                now_epoch=now_epoch,
-            )
-            dropped_records += dropped
-            if earliest is not None:
-                earliest_data = (
-                    earliest if earliest_data is None else min(earliest_data, earliest)
-                )
-            if not intervals:
-                continue
-            point_epochs: list[float] = []
-            point_idle: list[bool | None] = []
-            for point in history_by_gpu.get(key, ()):
-                epoch = _epoch_seconds(point.observed_at)
-                if epoch is None:
-                    continue
-                point_epochs.append(epoch)
-                utilization_value = _unpacked_optional_float(
-                    _GPU_HISTORY_VALUES.unpack(point.values)[1]
-                )
-                point_idle.append(
-                    None if utilization_value is None else utilization_value < busy_pct
-                )
-            if point_epochs and (
-                earliest_data is None or point_epochs[0] < earliest_data
-            ):
-                earliest_data = point_epochs[0]
-            host = key[0]
-            by_owner: dict[str | None, list[_UsageInterval]] = {}
-            for interval in intervals:
-                usage = owners.get(interval.owner)
-                if usage is None:
-                    usage = _OwnerUsage()
-                    owners[interval.owner] = usage
-                usage.processes += 1
-                usage.hosts.add(host)
-                usage.gpus.add(key)
-                usage.kinds[interval.kind] = usage.kinds.get(interval.kind, 0) + 1
-                by_owner.setdefault(interval.owner, []).append(interval)
-            # Concurrent processes owned by the same principal on one GPU are
-            # one device-occupancy interval, not multiple billable GPU-hours.
-            for owner, owner_intervals in by_owner.items():
-                merged = self._merge_usage_intervals(owner_intervals)
-                self._classify_usage_intervals(merged, point_epochs, point_idle)
-                usage = owners[owner]
-                usage.gpu_seconds += sum(item.end - item.start for item in merged)
-                usage.sampled_seconds += sum(item.sampled_seconds for item in merged)
-                usage.idle_seconds += sum(item.idle_seconds for item in merged)
-
-        ranked = sorted(
-            owners.items(),
-            key=lambda item: (-item[1].gpu_seconds, item[0] is None, item[0] or ""),
+        return aggregate_usage(
+            now=now,
+            window_hours=window_hours,
+            owner_limit=owner_limit,
+            busy_pct=busy_pct,
+            events_by_gpu=events_by_gpu,
+            active_by_gpu=active_by_gpu,
+            utilization_by_gpu=utilization_by_gpu,
         )
-        owner_entries = [
-            {
-                "owner": owner,
-                "gpuSeconds": round(usage.gpu_seconds, 1),
-                "sampledSeconds": round(usage.sampled_seconds, 1),
-                "idleSeconds": round(usage.idle_seconds, 1),
-                "idleShare": (
-                    round(usage.idle_seconds / usage.sampled_seconds, 4)
-                    if usage.sampled_seconds > 0
-                    else None
-                ),
-                "hosts": sorted(usage.hosts),
-                "gpus": len(usage.gpus),
-                "processes": usage.processes,
-                "kinds": dict(sorted(usage.kinds.items())),
-            }
-            for owner, usage in ranked[:owner_limit]
-        ]
-        return {
-            "generatedAt": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
-            "sinceAt": (now - timedelta(hours=window_hours))
-            .isoformat(timespec="seconds")
-            .replace("+00:00", "Z"),
-            "windowHours": window_hours,
-            "gpuBusyPct": busy_pct,
-            "owners": owner_entries,
-            "totalOwners": len(owners),
-            "totalGpuSeconds": round(
-                sum(usage.gpu_seconds for usage in owners.values()), 1
-            ),
-            "earliestDataAt": (
-                datetime.fromtimestamp(earliest_data, tz=timezone.utc)
-                .isoformat(timespec="seconds")
-                .replace("+00:00", "Z")
-                if earliest_data is not None
-                else None
-            ),
-            "droppedRecords": dropped_records,
-        }
-
-    @staticmethod
-    def _usage_intervals(
-        events: tuple[_GpuProcessTransition, ...] | list[_GpuProcessTransition],
-        active_processes: dict[tuple[int, str], GpuProcess],
-        *,
-        window_start: float,
-        now_epoch: float,
-    ) -> tuple[list[_UsageInterval], int, float | None]:
-        """Pair start/stop transitions into clipped occupancy intervals.
-
-        Returns the intervals, the count of dropped (unanchorable) records,
-        and the earliest event timestamp seen before clipping.
-        """
-
-        def attribution(workload: dict[str, object] | None) -> tuple[str | None, str]:
-            owner = workload.get("owner") if isinstance(workload, dict) else None
-            kind = workload.get("kind") if isinstance(workload, dict) else None
-            return (
-                owner if isinstance(owner, str) and owner else None,
-                kind if isinstance(kind, str) and kind else "process",
-            )
-
-        intervals: list[_UsageInterval] = []
-        dropped = 0
-        earliest: float | None = None
-        open_processes: dict[
-            tuple[int, str], tuple[float, dict[str, object] | None]
-        ] = {}
-
-        def close(start: float, end: float, workload: dict[str, object] | None) -> None:
-            clipped_start = max(start, window_start)
-            clipped_end = min(end, now_epoch)
-            if clipped_end <= clipped_start:
-                return
-            owner, kind = attribution(workload)
-            intervals.append(
-                _UsageInterval(
-                    start=clipped_start, end=clipped_end, owner=owner, kind=kind
-                )
-            )
-
-        for event in events:
-            observed = _epoch_seconds(event.observed_at)
-            if observed is None:
-                dropped += 1
-                continue
-            if earliest is None or observed < earliest:
-                earliest = observed
-            process_key = (event.pid, event.name)
-            if event.event == "started":
-                previous = open_processes.pop(process_key, None)
-                if previous is not None:
-                    # A missed stop: the replacement start bounds the old run.
-                    close(previous[0], observed, previous[1])
-                open_processes[process_key] = (observed, event.workload)
-                continue
-            opened = open_processes.pop(process_key, None)
-            if opened is not None:
-                close(opened[0], observed, opened[1] or event.workload)
-                continue
-            # Process start time is not a GPU-occupancy observation.  An
-            # unmatched stop therefore has no safe accounting anchor.
-            dropped += 1
-
-        for process_key, (started, workload) in open_processes.items():
-            # Only the live process table proves that an unmatched start is
-            # still occupying the GPU. Collection failures deliberately reset
-            # that table without synthesizing stop events; extending such an
-            # orphan to ``now`` would turn an observation gap into fabricated
-            # billable occupancy.
-            if process_key not in active_processes:
-                dropped += 1
-                continue
-            close(started, now_epoch, workload)
-
-        # Processes seeded from the first sample of a GPU never emitted a
-        # started transition, so the live process table fills that gap.
-        for process_key, process in active_processes.items():
-            if process_key in open_processes:
-                continue
-            workload_dict = process.workload.to_dict() if process.workload else None
-            anchored_start = _epoch_seconds(process.first_seen_at)
-            if anchored_start is None:
-                dropped += 1
-                continue
-            close(anchored_start, now_epoch, workload_dict)
-
-        return intervals, dropped, earliest
-
-    @staticmethod
-    def _merge_usage_intervals(
-        intervals: list[_UsageInterval],
-    ) -> list[_UsageInterval]:
-        """Return the wall-clock union of one owner's intervals on one GPU."""
-        if not intervals:
-            return []
-        ordered = sorted(intervals, key=lambda item: (item.start, item.end))
-        merged = [
-            _UsageInterval(
-                ordered[0].start,
-                ordered[0].end,
-                ordered[0].owner,
-                ordered[0].kind,
-            )
-        ]
-        for interval in ordered[1:]:
-            previous = merged[-1]
-            if interval.start <= previous.end:
-                previous.end = max(previous.end, interval.end)
-                continue
-            merged.append(
-                _UsageInterval(
-                    interval.start,
-                    interval.end,
-                    interval.owner,
-                    interval.kind,
-                )
-            )
-        return merged
-
-    @staticmethod
-    def _classify_usage_intervals(
-        intervals: list[_UsageInterval],
-        point_epochs: list[float],
-        point_idle: list[bool | None],
-    ) -> None:
-        """Split each interval into sampled idle/active seconds.
-
-        Each consecutive utilization sample pair classifies the segment it
-        spans. Gaps beyond one minute stay unclassified, independent of later
-        poll-setting changes. Prefix sums make each interval query logarithmic.
-        """
-        if len(point_epochs) < 2 or not intervals:
-            return
-        # Sorting also makes live behavior match SQLite restoration after an
-        # NTP wall-clock correction.  Duplicate timestamps carry no duration.
-        samples = sorted(zip(point_epochs, point_idle, strict=True))
-        segment_starts: list[float] = []
-        segment_ends: list[float] = []
-        segment_idle: list[bool] = []
-        for position in range(len(samples) - 1):
-            segment_start, classification = samples[position]
-            segment_end = samples[position + 1][0]
-            if (
-                classification is None
-                or segment_end <= segment_start
-                or segment_end - segment_start > _MAX_USAGE_SAMPLE_GAP_SECONDS
-            ):
-                continue
-            segment_starts.append(segment_start)
-            segment_ends.append(segment_end)
-            segment_idle.append(classification)
-        sampled_prefix = [0.0]
-        idle_prefix = [0.0]
-        for start, end, idle in zip(
-            segment_starts, segment_ends, segment_idle, strict=True
-        ):
-            duration = end - start
-            sampled_prefix.append(sampled_prefix[-1] + duration)
-            idle_prefix.append(idle_prefix[-1] + (duration if idle else 0.0))
-        for interval in intervals:
-            start = bisect_right(segment_ends, interval.start)
-            end = bisect_left(segment_starts, interval.end)
-            if start >= end:
-                continue
-            sampled = sampled_prefix[end] - sampled_prefix[start]
-            idle = idle_prefix[end] - idle_prefix[start]
-            left_trim = max(0.0, interval.start - segment_starts[start])
-            right_trim = max(0.0, segment_ends[end - 1] - interval.end)
-            sampled -= left_trim + right_trim
-            if segment_idle[start]:
-                idle -= left_trim
-            if segment_idle[end - 1]:
-                idle -= right_trim
-            interval.sampled_seconds = max(0.0, sampled)
-            interval.idle_seconds = max(0.0, idle)
 
     def incidents(self, limit: int) -> dict[str, object]:
         with self._condition:
@@ -1325,11 +1001,6 @@ class StateStore:
         # The projection is rebuilt per call, so only the copy must leave the
         # lock: result publication and SSE wakeups never wait on it.
         return copy.deepcopy(snapshot)
-
-    def has_active_incident(self, host: str, condition_key: str) -> bool:
-        """Return whether an action can bind to a currently active condition."""
-        with self._condition:
-            return self._incidents.has_active_condition(host, condition_key)
 
     def active_incident_started_at(self, host: str, condition_key: str) -> str | None:
         """Return the stable identity of the currently active condition."""
@@ -1555,7 +1226,7 @@ class StateStore:
             elif (
                 key in self._startup_action_candidates
                 and not self._incidents.has_pending_condition(*key)
-                and self._startup_action_condition_observed(result, key[1])
+                and self._incident_policy.condition_observed(result, key[1])
             ):
                 # The first authoritative live sample was healthy for this
                 # condition. Fail open: do not let an action from before the
@@ -1563,12 +1234,6 @@ class StateStore:
                 self._startup_action_candidates.discard(key)
             elif key in self._startup_action_bindings and started_at is None:
                 self._startup_action_bindings.pop(key, None)
-
-    def _startup_action_condition_observed(
-        self, result: ProbeResult, condition_key: str
-    ) -> bool:
-        observed = getattr(self._incident_policy, "condition_observed", None)
-        return bool(observed is not None and observed(result, condition_key))
 
     def _decorate_incident_locked(
         self,
@@ -2295,7 +1960,6 @@ class MonitorService:
                     self._apply_discovery_metadata(discovery)
                 self._config = config
                 self._config_generation += 1
-            self._state.notify_inventory_changed()
             self._scheduler_wakeup.set()
 
     def _config_snapshot(self) -> tuple[MonitorConfig, int]:

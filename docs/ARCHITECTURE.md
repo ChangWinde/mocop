@@ -22,7 +22,7 @@ local JSON configuration
         │ + bounded worker pool     │
         ▼                           │
  ResourceProbe Protocol             │
-   openssh-linux-v6                 │
+   OpenSshLinuxResourceProbe        │
         │ fixed argv and script     │
         ▼                           │
  local shell or OpenSSH → /proc + /sys + df + nvidia-smi
@@ -52,14 +52,20 @@ interfaces without a runtime plugin registry.
 | Module | Responsibility |
 |---|---|
 | `config.py` | configuration discovery, strict schema validation, safe defaults |
+| `privatefiles.py` | private lock and `0600` file primitives shared by the lifecycle and configuration controller |
+| `hostnames.py` | canonical Host/Origin hostname normalization and the trusted web policy |
 | `discovery_policy.py` | dependency-free SSH discovery policy parsing and bounds |
 | `discovery.py` | explicit inventory and optional OpenSSH alias discovery |
-| `ssh_topology.py` | bounded effective-route resolution, infrastructure classification, topology and grouping projection |
+| `ssh_topology.py` | the one bounded `ssh -G` option resolver (shared with the doctor), effective-route resolution, infrastructure classification, topology and grouping projection |
 | `inventory.py` | typed dashboard configuration projection and private atomic mutation |
 | `metrics.py` | deterministic OpenMetrics 1.0 snapshot exposition |
+| `capacity.py` | server-side twin of the browser capacity matcher behind `GET /api/capacity` |
 | `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
+| `remote_script.py` | the fixed `MONITOR_V8` collection script: protocol constants, template, rendering |
+| `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |
 | `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
+| `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage` |
 | `models.py` | immutable resource result types |
 | `incidents.py` | condition evaluation, bounded transition history, and raw/actionable counts |
 | `correlation.py` | possible shared-path grouping without changing incident truth |
@@ -67,10 +73,13 @@ interfaces without a runtime plugin registry.
 | `persistence.py` | optional bounded asynchronous SQLite history |
 | `notifications.py` | HTTPS webhook validation, deduplication, throttling, and delivery |
 | `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
+| `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query and body schemas, body caps, error catalog; `/api/meta` publishes it and every GET query and POST body is validated through it |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
+| `client.py` | the local read-only client behind `mocop api`: listener from the configuration, capability from the private file, public and authenticated GETs only |
+| `static_assets.py` | static asset route table, strong ETags, and conditional-delivery validators |
 | `lifecycle.py` | private config creation and user-level systemd management |
 | `migration.py` | non-destructive cross-machine config transformation and private target creation |
-| `static/` | dependency-free dashboard assets, including authentication and process-search leaves |
+| `static/` | dependency-free dashboard: `app.js` plus the browser leaves listed under [Maintainability boundary](#maintainability-boundary) |
 
 ## Boundaries and canonical formats
 
@@ -108,9 +117,13 @@ and record counts are bounded. [ADR-0003](adr/0003-gpu-reliability-and-authorita
 and [ADR-0011](adr/0011-bounded-operations-extensions.md) record the health and workload
 decisions. [ADR-0014](adr/0014-tiered-gpu-process-telemetry.md) records process pacing.
 
-The HTTP manifest assigns every route one of four explicit tiers: public API
-discovery/health (P), Bearer-authenticated automation reads (A), authenticated
-same-origin dashboard reads (R), or authenticated same-origin writes (W). The
+The HTTP manifest in `api_manifest.py` assigns every route one of four explicit
+tiers: public API discovery/health (P), Bearer-authenticated automation reads (A),
+authenticated same-origin dashboard reads (R), or authenticated same-origin writes
+(W). The same table declares each GET route's query parameters and each write's
+body schema and byte cap; the handlers validate against it and `/api/meta`
+serializes it, so an agent can discover exactly how to call a deployment
+without the prose reference. The
 per-install capability and browser delivery trade-off are recorded in
 [ADR-0017](adr/0017-per-install-dashboard-capability.md). `/api/snapshot` supports
 cold start and diagnostics. `/metrics` renders the same current snapshot as
@@ -119,9 +132,8 @@ stale host resources are omitted from current resource series. Host and GPU hist
 queries accept only discovered telemetry identities and at most 300 points. The
 redacted diagnostic projection requires a dashboard read marker and exposes neither
 raw connection errors nor process identity. Incident queries accept limits from 1 to
-200. The cadence shortcut accepts one finite JSON number from 2 to 60. The collector
-route accepts exactly cadence, complete-probe timeout, and integer worker concurrency
-within documented bounds. The inventory route accepts one exact add/remove action and
+200. The collector route accepts a non-empty subset of cadence, complete-probe
+timeout, and integer worker concurrency within documented bounds. The inventory route accepts one exact add/remove action and
 one validated alias. An add must match a fresh, eligible OpenSSH scan; a remove must
 match the current configuration. The host-group route accepts one explicit host and
 one bounded visible group or clear action. Maintenance and condition-action routes
@@ -191,7 +203,7 @@ after this overlay and may include the current correlation context.
 
 ## Dashboard rendering
 
-GPU count, busy devices, and cluster VRAM form the first summary layer. The capacity matcher ranks same-node, same-model groups from the current snapshot by requested device count, per-device free VRAM, health, utilization, and CPU context; it excludes stale and maintained nodes and never triggers collection. One optional capacity watch persists a saved demand in the browser and re-evaluates it on every accepted snapshot: the satisfaction edge raises an in-page banner, a title marker, and an opt-in browser notification under a bounded cooldown, then re-arms only after demand stops being satisfied. The watch is a browser-only projection and never adds an API call or SSH command. The fleet rail can render config-backed host sections without changing telemetry order or collection. The scheduling heatmap follows, then system resources and native per-host GPU groups. GPU groups are collapsed by default. Search and status filters temporarily expand matching groups without losing the user's explicit expansion state.
+GPU count, busy devices, and cluster VRAM form the first summary layer. The capacity matcher ranks same-node, same-model groups from the current snapshot by requested device count, per-device free VRAM, health, utilization, and CPU context; it excludes stale and maintained nodes and never triggers collection. One optional capacity watch persists a saved demand in the browser and re-evaluates it on every accepted snapshot: the satisfaction edge raises an in-page banner, a title marker, and an opt-in browser notification under a bounded cooldown, then re-arms only after demand stops being satisfied. The watch is a browser-only projection and never adds an API call or SSH command. Agents and scripts get the identical ranking from `GET /api/capacity`, served by `capacity.py` from the same in-memory snapshot and active conditions; `tests/fixtures/capacity_match.json` pins the browser leaf and the Python module to one result so neither can drift. The fleet rail can render config-backed host sections without changing telemetry order or collection. The scheduling heatmap follows, then system resources and native per-host GPU groups. GPU groups are collapsed by default. Search and status filters temporarily expand matching groups without losing the user's explicit expansion state.
 
 The unified inventory query also builds a bounded process result projection from
 the authenticated in-memory snapshot. Its scope follows the selected host, so
@@ -238,13 +250,10 @@ records the composition and rejected remote-script alternative.
 
 The user service is intentional because OpenSSH configuration, `known_hosts`, keys,
 and agent sockets belong to that identity. The unit invokes `systemctl --user` without
-a shell and applies enforceable, portable controls: `NoNewPrivileges=true`, restricted
-address families, `UMask=0077`, and `StateDirectory=mocop` with mode `0700` for
-optional SQLite. It deliberately does not advertise a user-manager mount-namespace
-filesystem sandbox, which is systemd-version-dependent and can deny required SSH
-agent or ControlMaster paths. Selected configuration files and directories instead
-rely on validated ownership and private Unix modes. An optional private `environment`
-file beside `config.json` supplies webhook URL and signing-secret variables.
+a shell and applies only enforceable, portable hardening directives; the exact unit
+contents, the reason it claims no mount-namespace sandbox, and the private
+`environment` file for webhook secrets are owned by
+[OPERATIONS.md](OPERATIONS.md#installed-state-and-ownership).
 
 The generated unit also marks the process as supervised. Only this mode exposes the
 bounded dashboard restart capability: the HTTP handler acknowledges an exact
@@ -280,9 +289,9 @@ rejected notification-only and bootstrap-script alternatives.
 - Maintenance windows never change scheduling; their UTC expiry automatically restores active conditions to the actionable view.
 - Raw SSH stderr is classified locally and never crosses the browser boundary.
 - Failed hosts keep their last successful data, marked stale and excluded from current totals.
-- SSE sends a named heartbeat every 15 seconds. With a capability, the dashboard uses
-  fetch streaming so it can attach Bearer authentication; native `EventSource` is only
-  the no-token compatibility path.
+- SSE sends a named heartbeat every 15 seconds. The dashboard consumes it through
+  fetch streaming because native `EventSource` cannot attach the Bearer capability;
+  the server has no unauthenticated mode.
 - `/healthz` reports process liveness; `/readyz` requires a discovered target and one successful sample.
 - The default listener is loopback. Remote access requires external TLS and authenticated authorization.
 - A fatal collector scheduler failure exits the process non-zero so the user service restarts it.
@@ -293,7 +302,7 @@ workload, and notification boundaries.
 
 ## Performance decision
 
-SSH connection and network wait dominate current collection cost. Existing evidence does not justify a Rust rewrite because it would not remove those round trips. Re-evaluate the language or agent architecture only after profiling a fixed workload that exceeds 200 hosts, requires a sustained interval below 2 seconds, saturates one CPU core, or exceeds 512 MiB resident memory.
+SSH connection and network wait dominate current collection cost. Existing evidence does not justify a Rust rewrite because it would not remove those round trips. Re-evaluate the language or agent architecture only when one of the [architecture thresholds](PERFORMANCE.md#architecture-thresholds) that PERFORMANCE.md owns becomes real.
 
 The reproducible measurement contract lives in [PERFORMANCE.md](PERFORMANCE.md).
 Security boundaries live in [SECURITY.md](SECURITY.md); deployment, upgrade, and
@@ -312,8 +321,11 @@ tests/     unit, contract, fixture, and browser coverage
 The package lives under `src/` so the checkout can never shadow an installed
 release and packaging stays isolated. `tests/__init__.py` prepends `src` to
 `sys.path`, which preserves direct, dependency-free test execution from a
-source checkout. Standard build and project entry files stay at the root; local
-agent configuration, caches, build output, and dependency-solver state are not
+source checkout. Standard build and project entry files stay at the root:
+`README.md` is the human entry point and `AGENTS.md` the entry point AI coding
+agents read by convention, pointing at the governed documents rather than
+repeating them. Local agent configuration, caches, build output, and
+dependency-solver state are not
 repository structure. [The documentation portal](README.md) owns the audience
 map and update triggers. [ADR-0025](adr/0025-src-package-layout.md) records the
 `src/` migration; [ADR-0019](adr/0019-repository-and-documentation-governance.md)
@@ -327,13 +339,28 @@ ratchet, not a target. A change that would cross one extracts a coherent leaf an
 lowers the ceiling instead of increasing it. Browser leaves remain dependency-free
 classic scripts loaded before `app.js`, expose one frozen namespace/factory, and
 consume the authenticated snapshot rather than creating a second API or state
-store. `dashboard-auth.js` owns capability ingestion, fragment scrubbing,
-tab-scoped retention, and the explicit token prompt; `format.js` owns pure
-numeric/time formatting; `capacity-watch.js` owns capacity matching and the
-armed/notified watch state machine with its notification cooldown, while
-`app.js` still owns request transport, notification delivery, and dashboard
-lifecycle. Python extraction must keep each lock-owned invariant inside one
-module.
+store. `app.js` keeps request transport, notification delivery, DOM rendering,
+and dashboard lifecycle; each leaf owns one concern and is unit-tested in Node
+by `tests/<leaf>_test.mjs`:
+
+| Leaf | Owns |
+|---|---|
+| `dashboard-auth.js` | capability ingestion, fragment scrubbing, tab-scoped retention, the token prompt |
+| `format.js` | pure numeric, memory, rate, and relative-time formatting; SSE chunk normalization |
+| `keyed-loader.js` | bounded-backoff loading of one keyed resource: single flight, success-confirmed keys, one 4–30 s retry timer, stale-response rejection |
+| `api-contracts.js` | payload contracts: bounded normalizers for snapshot, incidents, inventory, collector, maintenance, group, and topology responses that throw on anything malformed |
+| `process-search.js` | NFKC term normalization, bounded process/GPU matching, ranking and memory ordering |
+| `gpu-tasks.js` | entry point, environment, footprint, and per-card summary projections of a GPU process |
+| `capacity-match.js` | ranking same-host, same-model GPU candidates against a demand |
+| `capacity-watch.js` | the durable watch, its armed/notified edge, cooldown, and presented text |
+| `csv-export.js` | CSV cell escaping (including formula-injection defense) and row building |
+| `update-pill.js` | release-currency polling cadence, pill state, and the fixed apply action |
+| `background-asset.js` | the custom background: IndexedDB storage of one asset, container sniffing that refuses animated or mislabelled files, size and dimension caps, and the WebP quality bisection and shrink loop, over injected browser primitives |
+
+A repository test compares the leaf directory with the static route table, the
+`index.html` script order, and `tests/<leaf>_test.mjs`, so a new leaf cannot be
+half-registered. Python extraction must keep each lock-owned invariant inside
+one module.
 
 [ADR-0021](adr/0021-incremental-module-boundaries.md) compares immediate splitting,
 incremental leaf extraction, and adding a build/registry layer. It selects the

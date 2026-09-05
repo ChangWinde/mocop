@@ -22,6 +22,7 @@ detailed contracts and operating procedures.
 | Release maintainer | [Release procedure](../.github/RELEASING.md) | Version alignment, immutable tags, artifacts, and post-release verification |
 | Decision reviewer | [Architecture decision index](adr/README.md) | Accepted, superseded, and proposed structural decisions |
 | Contributor | [Contributing guide](../.github/CONTRIBUTING.md) | Development gates, writing rules, commit policy, and change requirements |
+| AI coding agent | [Agent entry point](../AGENTS.md) | Reading order, the drift tests that enforce each contract, the boundaries that must hold, and how to operate a deployment |
 | Community member | [Code of conduct](../.github/CODE_OF_CONDUCT.md) | Participation and enforcement expectations |
 | Vulnerability reporter | [Security policy](../.github/SECURITY.md) | Supported versions and private reporting process |
 
@@ -87,32 +88,10 @@ project structure.
 
 ## Quality gates
 
-Run these before merging a documentation or structure change:
-
-```bash
-python3 -m unittest tests.test_docs -v
-python3 -m unittest discover -s tests -t . -v
-uvx --from coverage==7.15.4 coverage run --branch --source=src/mocop -m unittest discover -s tests -t . -p 'test_*.py' -q
-uvx --from coverage==7.15.4 coverage report --fail-under=85
-python3 -m compileall -q src/mocop tests
-uvx --from ruff==0.12.11 ruff check .
-uvx --from ruff==0.12.11 ruff format --check .
-node --check src/mocop/static/app.js
-node --check src/mocop/static/capacity-match.js
-node --check src/mocop/static/capacity-watch.js
-node --check src/mocop/static/csv-export.js
-node --check src/mocop/static/dashboard-auth.js
-node --check src/mocop/static/format.js
-node --check src/mocop/static/process-search.js
-node --check src/mocop/static/update-pill.js
-node tests/capacity_match_test.mjs
-node tests/capacity_watch_test.mjs
-node tests/csv_export_test.mjs
-node tests/dashboard_auth_test.mjs
-node tests/process_search_test.mjs
-node tests/update_pill_test.mjs
-node --experimental-websocket tests/browser_smoke.mjs
-```
+`python3 -m unittest tests.test_docs -v` checks the documentation contracts
+below. Before merging a documentation or structure change, also run the
+complete quality-gate list that [CONTRIBUTING.md](../.github/CONTRIBUTING.md)
+owns.
 
 `tests.test_docs` verifies local links, the canonical-document portal, the ADR
 inventory, live API routes/access/errors, configuration fields, authentication,

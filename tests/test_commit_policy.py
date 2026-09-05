@@ -126,6 +126,28 @@ class CommitPolicyTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("generated Merge/Revert subjects require", result.stderr)
 
+    def test_historical_exemptions_are_exact_and_explained(self) -> None:
+        # The whole-history gate tolerates only the listed pre-enforcement
+        # commits; each entry is a full SHA with a reason, and the same subject
+        # on any other commit is still rejected.
+        namespace: dict[str, object] = {}
+        exec(  # noqa: S102 - loading the script's constants, not user input
+            compile(CHECKER.read_text(encoding="utf-8"), str(CHECKER), "exec"),
+            namespace,
+        )
+        exemptions = namespace["HISTORICAL_EXEMPTIONS"]
+        assert isinstance(exemptions, dict)
+        self.assertEqual(set(exemptions), {"b76e6507748715d2f9e009423b88d290a20e85eb"})
+        for sha, reason in exemptions.items():
+            self.assertRegex(sha, r"^[0-9a-f]{40}$")
+            self.assertGreater(len(reason), 20)
+        rejected = check(
+            "--subject", "[dashboard/feat]: lead GPU task rows with entry point"
+        )
+        self.assertEqual(rejected.returncode, 1)
+        if (ROOT / ".git").exists():
+            self.assertEqual(check("--range", "HEAD").returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

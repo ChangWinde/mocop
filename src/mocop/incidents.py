@@ -76,7 +76,26 @@ class IncidentEvent:
 
 
 class IncidentPolicy(Protocol):
+    """Everything ``IncidentTracker`` and ``StateStore`` require of a policy."""
+
     def conditions(self, result: ProbeResult) -> dict[str, IncidentCondition]: ...
+
+    def observed_domains(self, result: ProbeResult) -> frozenset[str]: ...
+
+    def condition_observed(self, result: ProbeResult, key: str) -> bool: ...
+
+    def update_expected_gpu_counts(
+        self, expected_gpu_counts: tuple[tuple[str, int], ...]
+    ) -> None: ...
+
+    def update_overrides(
+        self,
+        host_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...],
+        group_overrides: tuple[tuple[str, IncidentScopeOverrideConfig], ...],
+        host_groups: tuple[tuple[str, str], ...],
+    ) -> None: ...
+
+    def retain_hosts(self, hosts: set[str]) -> None: ...
 
 
 class ThresholdIncidentPolicy:
@@ -570,11 +589,9 @@ _PER_IDENTITY_GPU_DOMAINS = frozenset(
 def _telemetry_unknown(
     condition: IncidentCondition,
     key: str,
-    observed_domains: frozenset[str] | None,
+    observed_domains: frozenset[str],
 ) -> bool:
     """True when the sample carried no fresh telemetry for this condition."""
-    if observed_domains is None:
-        return False
     missing = [
         domain
         for domain in _condition_domains(condition, key)
@@ -692,7 +709,7 @@ class IncidentTracker:
         opened_at = self._opened_at[result.host]
         last_observed_at = self._last_observed_at[result.host]
         current = dict(previous)
-        observed_domains = self._observed_domains(result)
+        observed_domains = self._policy.observed_domains(result)
         # Opening a condition requires consecutively confirmable samples: an
         # unreachable probe or a telemetry blind spot breaks the confirmation
         # chain and discards the candidate, so two isolated spikes separated
@@ -776,13 +793,6 @@ class IncidentTracker:
         self._active[result.host] = current
         return tuple(created)
 
-    def _observed_domains(self, result: ProbeResult) -> frozenset[str] | None:
-        """None means the policy predates domain reporting: treat as observed."""
-        observed_domains = getattr(self._policy, "observed_domains", None)
-        if observed_domains is None:
-            return None
-        return frozenset(observed_domains(result))
-
     def snapshot(self, limit: int) -> dict[str, object]:
         active = []
         for host in sorted(self._active):
@@ -808,38 +818,6 @@ class IncidentTracker:
             "active": active,
             "events": [event.to_dict() for event in reversed(events[-limit:])],
         }
-
-    def counts(
-        self, excluded_hosts: frozenset[str] = frozenset()
-    ) -> tuple[int, int, frozenset[str]]:
-        conditions = [
-            condition
-            for host, active in self._active.items()
-            if host not in excluded_hosts
-            for condition in active.values()
-        ]
-        return (
-            len(conditions),
-            sum(condition.severity == "critical" for condition in conditions),
-            frozenset(
-                host
-                for host, active in self._active.items()
-                if active and host not in excluded_hosts
-            ),
-        )
-
-    def counts_by_host(self) -> dict[str, tuple[int, int]]:
-        return {
-            host: (
-                len(active),
-                sum(condition.severity == "critical" for condition in active.values()),
-            )
-            for host, active in self._active.items()
-            if active
-        }
-
-    def has_active(self, host: str) -> bool:
-        return bool(self._active.get(host))
 
     def has_active_condition(self, host: str, condition_key: str) -> bool:
         """Return whether one exact condition is active for the host instance."""

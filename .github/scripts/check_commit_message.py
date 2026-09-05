@@ -26,6 +26,16 @@ SCOPE_SEGMENT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 AUTOSQUASH_PREFIXES = ("fixup! ", "squash! ")
 GENERATED_PREFIXES = ("Merge ", "Revert ")
 MAX_SUBJECT_LENGTH = 72
+# Commits already on the protected default branch that predate their own
+# enforcement. Release tags are immutable, so they cannot be reworded; keep the
+# whole-history gate honest by listing each one with its reason instead of
+# weakening the rule. New entries need a pull-request review.
+HISTORICAL_EXEMPTIONS = {
+    "b76e6507748715d2f9e009423b88d290a20e85eb": (
+        "pushed directly to master on 2026-08-26 with the unlisted 'feat' "
+        "operation before the branch ruleset required pull requests"
+    ),
+}
 
 
 def normalize_subject(subject: str) -> str:
@@ -98,13 +108,18 @@ def git_state_allows_generated_subject(subject: str) -> bool:
 
 def commit_allows_generated_subject(commit: str, subject: str) -> bool:
     if subject.startswith("Merge "):
+        # Read the raw object: in a shallow checkout (the default for
+        # pull-request test jobs) the graft hides parents from `git log %P`
+        # while the commit itself still records them.
         completed = subprocess.run(
-            ["git", "log", "-1", "--format=%P", commit],
+            ["git", "cat-file", "-p", commit],
             check=True,
             capture_output=True,
             text=True,
         )
-        return len(completed.stdout.split()) >= 2
+        header = completed.stdout.split("\n\n", 1)[0]
+        parents = [line for line in header.splitlines() if line.startswith("parent ")]
+        return len(parents) >= 2
     if subject.startswith("Revert "):
         completed = subprocess.run(
             ["git", "log", "-1", "--format=%B", commit],
@@ -156,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             subjects = subjects_from_revision(arguments.revision)
             for commit, subject in subjects:
+                if commit in HISTORICAL_EXEMPTIONS:
+                    continue
                 error = validate_subject(
                     subject,
                     allow_git_generated=commit_allows_generated_subject(

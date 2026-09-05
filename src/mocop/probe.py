@@ -150,6 +150,13 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
             process.kill()
 
 
+def ssh_environment() -> dict[str, str]:
+    """The inherited environment with OpenSSH output pinned to the C locale."""
+    environment = os.environ.copy()
+    environment["LC_ALL"] = "C"
+    return environment
+
+
 def _run_bounded_process(
     command: list[str],
     *,
@@ -960,13 +967,6 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
     )
 
 
-def parse_linux_resource_payload(
-    payload: str,
-) -> tuple[_RawSystemSample, tuple[GpuMetrics, ...], str | None]:
-    parsed = _parse_resource_payload(payload)
-    return parsed.system, parsed.gpus, parsed.gpu_message
-
-
 @dataclass(frozen=True, slots=True)
 class _Baseline:
     observed_monotonic: float
@@ -1102,8 +1102,7 @@ class OpenSshLinuxResourceProbe:
         self._process_retry_forced: set[str] = set()
         self._attended = True
         self._processes = _ActiveProcessRegistry()
-        self._environment = os.environ.copy()
-        self._environment["LC_ALL"] = "C"
+        self._environment = ssh_environment()
 
     def cancel(self) -> None:
         """Stop active child processes when the owning service is shutting down."""
@@ -1403,6 +1402,19 @@ class OpenSshLinuxResourceProbe:
         deadline = started + timeout_seconds
         script = _remote_script(config.workloads.mode, process_sampled)
         transport_retries = 0
+
+        def failure(
+            status: str, message: str, *, at: float | None = None
+        ) -> ProbeResult:
+            ended = time.monotonic() if at is None else at
+            return ProbeResult(
+                host=host,
+                status=status,
+                latency_ms=round((ended - started) * 1000),
+                message=message,
+                transport_retries=transport_retries,
+            )
+
         try:
             completed = _run_bounded_process(
                 command,
@@ -1431,96 +1443,63 @@ class OpenSshLinuxResourceProbe:
                         process_registry=self._processes,
                     )
         except _ProcessCancelled:
-            return ProbeResult(
-                host=host,
-                status="error",
-                latency_ms=round((time.monotonic() - started) * 1000),
-                message="Resource collection cancelled",
-                transport_retries=transport_retries,
-            )
+            return failure("error", "Resource collection cancelled")
         except subprocess.TimeoutExpired as exc:
             # Only a silent connection or transport timeout is "unreachable".
             # Partial output proves the transport reached the host and the
             # remote command started, so a stall there is a remote "error"
             # that must not masquerade as a connectivity incident.
             if local:
-                status = "error"
-                message = "Local resource collection timed out"
-            elif exc.output or exc.stderr:
-                status = "error"
-                message = "Remote collection stalled after partial output"
-            else:
-                status = "unreachable"
-                message = "SSH produced no output before the collection timeout"
-            return ProbeResult(
-                host=host,
-                status=status,
-                latency_ms=round((time.monotonic() - started) * 1000),
-                message=message,
-                transport_retries=transport_retries,
+                return failure("error", "Local resource collection timed out")
+            if exc.output or exc.stderr:
+                return failure(
+                    "error", "Remote collection stalled after partial output"
+                )
+            return failure(
+                "unreachable", "SSH produced no output before the collection timeout"
             )
         except _ProcessOutputLimitExceeded:
-            return ProbeResult(
-                host=host,
-                status="error",
-                latency_ms=round((time.monotonic() - started) * 1000),
-                message=(
-                    "Local resource output exceeded the configured limit"
-                    if local
-                    else "Remote resource output exceeded the configured limit"
-                ),
-                transport_retries=transport_retries,
+            return failure(
+                "error",
+                "Local resource output exceeded the configured limit"
+                if local
+                else "Remote resource output exceeded the configured limit",
             )
         except OSError:
-            return ProbeResult(
-                host=host,
-                status="error",
-                latency_ms=round((time.monotonic() - started) * 1000),
-                message=(
-                    "Local resource probe could not be started"
-                    if local
-                    else "Local SSH client could not be started"
-                ),
-                transport_retries=transport_retries,
+            return failure(
+                "error",
+                "Local resource probe could not be started"
+                if local
+                else "Local SSH client could not be started",
             )
 
         observed_monotonic = time.monotonic()
-        latency_ms = round((observed_monotonic - started) * 1000)
         if not local and completed.returncode == 255:
-            return ProbeResult(
-                host=host,
-                status="unreachable",
-                latency_ms=latency_ms,
-                message=_safe_ssh_failure(completed.stderr),
-                transport_retries=transport_retries,
+            return failure(
+                "unreachable",
+                _safe_ssh_failure(completed.stderr),
+                at=observed_monotonic,
             )
         if completed.returncode != 0:
-            return ProbeResult(
-                host=host,
-                status="error",
-                latency_ms=latency_ms,
-                message=(
-                    f"Local resource query failed (exit {completed.returncode})"
-                    if local
-                    else f"Remote resource query failed (exit {completed.returncode})"
-                ),
-                transport_retries=transport_retries,
+            return failure(
+                "error",
+                f"Local resource query failed (exit {completed.returncode})"
+                if local
+                else f"Remote resource query failed (exit {completed.returncode})",
+                at=observed_monotonic,
             )
         try:
             parsed = _parse_resource_payload(completed.stdout)
             system = self._system_metrics(host, parsed.system, observed_monotonic)
         except ValueError:
-            return ProbeResult(
-                host=host,
-                status="error",
-                latency_ms=latency_ms,
-                message=(
-                    "Local resource output was not recognized"
-                    if local
-                    else "Remote resource output was not recognized"
-                ),
-                transport_retries=transport_retries,
+            return failure(
+                "error",
+                "Local resource output was not recognized"
+                if local
+                else "Remote resource output was not recognized",
+                at=observed_monotonic,
             )
+        latency_ms = round((observed_monotonic - started) * 1000)
         gpus = parsed.gpus
         gpu_message = parsed.gpu_message
         observed_at = utc_now()

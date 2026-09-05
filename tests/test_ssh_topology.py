@@ -59,7 +59,7 @@ class OpenSshRouteResolverTests(unittest.TestCase):
         self.assertEqual(jump, SshRoute("proxyjump", ("bastion",)))
         self.assertEqual(command, SshRoute("proxycommand", ("bastion",)))
 
-    @patch("mocop.ssh_topology._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_resolves_proxyjump_chain_to_known_aliases(self, run) -> None:
         run.return_value = _BoundedProcessResult(
             0,
@@ -75,7 +75,7 @@ class OpenSshRouteResolverTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[-2:], ["--", "gpu-01"])
 
-    @patch("mocop.ssh_topology._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_extracts_known_alias_from_common_proxycommand(self, run) -> None:
         run.return_value = _BoundedProcessResult(
             0,
@@ -89,7 +89,7 @@ class OpenSshRouteResolverTests(unittest.TestCase):
 
         self.assertEqual(route, SshRoute("proxycommand", ("bastion",)))
 
-    @patch("mocop.ssh_topology._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_opaque_proxycommand_never_exposes_command_or_address(self, run) -> None:
         run.return_value = _BoundedProcessResult(
             0,

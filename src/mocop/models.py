@@ -22,6 +22,16 @@ def utc_after(seconds: float) -> str:
     )
 
 
+def epoch_seconds(value: object) -> float | None:
+    """Parse one of the ``Z``-suffixed timestamps above; ``None`` if malformed."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class WorkloadMetadata:
     kind: WorkloadKind

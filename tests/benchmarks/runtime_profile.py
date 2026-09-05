@@ -224,7 +224,7 @@ def main() -> None:
     gzip_profile, compressed = _measure(
         lambda: gzip.compress(payload, compresslevel=5), args.runs
     )
-    server = MonitorHttpServer(("127.0.0.1", 0), store)
+    server = MonitorHttpServer(("127.0.0.1", 0), store, access_token="B" * 43)
     server.snapshot_payload(snapshot)
     server.metrics_payload(snapshot)
     snapshot_view_profile, _ = _measure(store.snapshot_view, args.runs)

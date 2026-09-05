@@ -1297,15 +1297,18 @@ class StateStoreTests(unittest.TestCase):
 
         self.assertEqual(store.snapshot()["collectionStaleAfterSeconds"], 20)
 
-    def test_runtime_poll_interval_updates_snapshot_and_wakes_scheduler(self) -> None:
+    def test_runtime_poll_interval_updates_snapshot_and_stale_window(self) -> None:
         store = StateStore(5, collection_stale_cycles=4)
+        before = store.snapshot()["version"]
 
         self.assertEqual(store.set_poll_interval_seconds(10), 10)
         snapshot = store.snapshot()
         self.assertEqual(snapshot["pollIntervalSeconds"], 10)
         self.assertEqual(snapshot["collectionStaleAfterSeconds"], 40)
-        self.assertTrue(store.wait_for_poll_interval_change(0))
-        self.assertFalse(store.wait_for_poll_interval_change(0))
+        self.assertGreater(snapshot["version"], before)
+        # An unchanged value publishes nothing.
+        self.assertEqual(store.set_poll_interval_seconds(10), 10)
+        self.assertEqual(store.snapshot()["version"], snapshot["version"])
 
         for invalid in (0, 3601, True, "5"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
@@ -2544,7 +2547,8 @@ class MonitorServiceTests(unittest.TestCase):
 
         service.poll_once()
         service.update_config(replace(config, hosts=("gpu-02",)))
-        self.assertTrue(state.wait_for_schedule_change(0))
+        # The scheduler's own wakeup event is what the run loop waits on.
+        self.assertTrue(service._scheduler_wakeup.is_set())
         service.poll_once()
 
         self.assertEqual([item[0] for item in probe.calls], ["gpu-01", "gpu-02"])

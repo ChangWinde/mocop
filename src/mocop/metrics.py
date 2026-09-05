@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import datetime
+
+from .models import epoch_seconds
 
 OPENMETRICS_CONTENT_TYPE = "application/openmetrics-text; version=1.0.0; charset=utf-8"
 OPENMETRICS_MAX_SERIES = 100_000
@@ -97,15 +98,6 @@ def _seconds_from_milliseconds(value: object) -> float | None:
     return number / 1000 if number is not None else None
 
 
-def _timestamp(value: object) -> float | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
 def _append_optional(samples: list[Sample], labels: Labels, value: object) -> None:
     number = _metric(value)
     if number is not None:
@@ -191,7 +183,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         "mocop_collection_last_completed_timestamp_seconds",
         "Unix timestamp of the most recently completed scheduler submission batch.",
         [((), value)]
-        if (value := _timestamp(snapshot.get("lastPollCompletedAt"))) is not None
+        if (value := epoch_seconds(snapshot.get("lastPollCompletedAt"))) is not None
         else [],
         unit="seconds",
     )
@@ -200,7 +192,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
         "mocop_snapshot_generated_timestamp_seconds",
         "Unix timestamp when this Mocop snapshot was generated.",
         [((), value)]
-        if (value := _timestamp(snapshot.get("generatedAt"))) is not None
+        if (value := epoch_seconds(snapshot.get("generatedAt"))) is not None
         else [],
         unit="seconds",
     )
@@ -546,7 +538,7 @@ def render_openmetrics(snapshot: Mapping[str, object]) -> bytes:
                 (labels, int(gpu.get("processes_sampled") is True))
             )
             if (
-                process_timestamp := _timestamp(gpu.get("processes_observed_at"))
+                process_timestamp := epoch_seconds(gpu.get("processes_observed_at"))
             ) is not None:
                 gpu_samples["processes_observed_at"].append((labels, process_timestamp))
             _append_optional(

@@ -64,6 +64,8 @@ class WebhookSender(Protocol):
         headers: dict[str, str],
     ) -> DeliveryResult: ...
 
+    def close(self, timeout_seconds: float = 0.0) -> None: ...
+
 
 ActionableCheck = Callable[[IncidentEvent], bool]
 
@@ -74,6 +76,8 @@ class IncidentNotificationSink(Protocol):
         events: tuple[IncidentEvent, ...],
         correlations: Sequence[dict[str, object]],
     ) -> None: ...
+
+    def set_actionable_check(self, check: ActionableCheck | None) -> None: ...
 
     def status(self) -> dict[str, object]: ...
 
@@ -669,9 +673,7 @@ class WebhookNotificationSink:
         except Exception:
             for worker in reversed(workers):
                 worker.close(1.0)
-            close_sender = getattr(selected_sender, "close", None)
-            if callable(close_sender):
-                close_sender()
+            selected_sender.close()
             raise
         self._workers = tuple(workers)
 
@@ -757,14 +759,7 @@ class WebhookNotificationSink:
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         for worker in self._workers:
             worker.close(max(0.0, deadline - time.monotonic()))
-        close_sender = getattr(self._sender, "close", None)
-        if callable(close_sender):
-            try:
-                close_sender(max(0.0, deadline - time.monotonic()))
-            except TypeError:
-                # Third-party test adapters may implement the older no-arg
-                # close hook; production's sender accepts the shared budget.
-                close_sender()
+        self._sender.close(max(0.0, deadline - time.monotonic()))
 
 
 def _resolve_endpoints(
