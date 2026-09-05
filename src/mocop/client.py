@@ -43,14 +43,12 @@ class ApiClientError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class ApiResponse:
+    """One answer: ``body`` for a complete response, ``lines`` for a stream."""
+
     status: int
     content_type: str
     body: bytes = b""
     lines: Iterator[bytes] | None = None
-
-    @property
-    def streaming(self) -> bool:
-        return self.lines is not None
 
 
 def service_url(config: MonitorConfig) -> str:

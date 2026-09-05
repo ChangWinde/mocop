@@ -144,7 +144,7 @@ class ApiClientTests(unittest.TestCase):
         response = client.request(
             "/api/events", config_path=self.config_path, timeout=5
         )
-        self.assertTrue(response.streaming)
+        self.assertEqual(response.body, b"")
         assert response.lines is not None
         first = next(response.lines)
         self.assertEqual(first, b"event: snapshot\n")
