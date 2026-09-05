@@ -261,15 +261,23 @@ not put the value in logs, shell history, or source control.
 MOCOP_TOKEN="$(<"${XDG_CONFIG_HOME:-$HOME/.config}/mocop/access-token")"
 ```
 
-1. Public liveness — no capability required at the P tier:
+1. Discover, then check liveness — both public at the P tier. The manifest
+   tells an agent every route, its tier, its query parameters, and where this
+   document lives for the running release:
 
 ```bash
+curl -s http://127.0.0.1:8787/api/meta | jq '.documentation, .endpoints[] | select(.path == "/api/capacity")'
 curl -s http://127.0.0.1:8787/healthz | jq '.status'
 ```
 
-2. A-tier automation read — authenticate, but do not send the viewer marker:
+2. A-tier automation reads — authenticate, but do not send the viewer marker.
+   The placement question is one bounded call; the full snapshot is for
+   everything else:
 
 ```bash
+curl -s -H "Authorization: Bearer ${MOCOP_TOKEN}" \
+  'http://127.0.0.1:8787/api/capacity?gpus=4&min_vram_gib=40' \
+  | jq '.candidates[] | select(.satisfies) | {host, model, free: .minimumFreeMiB}'
 curl -s -H "Authorization: Bearer ${MOCOP_TOKEN}" \
   http://127.0.0.1:8787/api/snapshot | jq '.stats.onlineServers'
 ```

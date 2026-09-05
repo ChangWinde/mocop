@@ -71,9 +71,10 @@ All notable changes are documented here. This project follows Semantic Versionin
 - The dashboard search box re-renders only the program-search panel and GPU
   table, and GPU groups are keyed on the rows they show rather than on the
   query text, so typing no longer rebuilds every visible group. Active
-  incidents are indexed by host on acceptance, the GPU history dialog is
-  render-keyed like the trend panel, and the per-second tick compares before
-  it writes and skips cosmetic updates while the tab is hidden.
+  incidents are indexed by host on acceptance; the GPU history, capacity
+  candidate, owner, and webhook endpoint views rebuild their DOM only when
+  the data they show changes; and the per-second tick compares before it
+  writes and skips cosmetic updates while the tab is hidden.
 - Documentation gives each fact one owner: CONTRIBUTING.md owns the quality
   gate list, OPERATIONS.md the systemd unit and pinned install command,
   PERFORMANCE.md the architecture thresholds, API.md the capability rules.

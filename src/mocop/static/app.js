@@ -265,6 +265,9 @@ const view = {
   // the two differ, and then snapshots stop overwriting the field.
   incidentReasonSeed: "",
   incidentActionPending: false,
+  notificationEndpointsKey: "",
+  capacityResultsKey: "",
+  ownersResultsKey: "",
   manualProbePending: false,
   notificationTestPending: false,
   capacityRequest: { gpuCount: 1, minVramGiB: 24, model: "any" },
@@ -2459,6 +2462,7 @@ function renderOwners() {
   const hostLabels = new Map();
   let excludedOfflineHosts = 0;
   let oldestObservedAt = "";
+  let oldestObservedMs = Infinity;
   for (const server of view.snapshot.servers) {
     hostLabels.set(server.host, server.displayName || server.host);
     if (server.status !== "online") {
@@ -2471,15 +2475,10 @@ function renderOwners() {
     }
     for (const gpu of server.gpus) {
       const processes = gpu.processes || [];
-      if (
-        processes.length
-        && gpu.processes_observed_at
-        && Number.isFinite(Date.parse(gpu.processes_observed_at))
-        && (
-          !oldestObservedAt
-          || Date.parse(gpu.processes_observed_at) < Date.parse(oldestObservedAt)
-        )
-      ) {
+      const observedMs = processes.length && gpu.processes_observed_at
+        ? Date.parse(gpu.processes_observed_at) : NaN;
+      if (observedMs < oldestObservedMs) {
+        oldestObservedMs = observedMs;
         oldestObservedAt = gpu.processes_observed_at;
       }
       for (const process of processes) {
@@ -2529,10 +2528,10 @@ function renderOwners() {
   if (offlineNote) {
     offlineNote.title = "离线节点仅保留最后一次成功采集的进程，不代表当前占用";
   }
-  elements.ownersResults.replaceChildren();
   if (!ranked.length) {
     elements.ownersSummary.textContent = "当前快照没有 GPU 进程";
-    if (offlineNote) elements.ownersResults.append(offlineNote);
+    elements.ownersResults.replaceChildren(...(offlineNote ? [offlineNote] : []));
+    view.ownersResultsKey = "";
     return;
   }
   const visible = ranked.slice(0, 50);
@@ -2545,6 +2544,16 @@ function renderOwners() {
     + (hasUnknownVram ? " · 部分进程显存未知" : "")
     + (ranked.length > visible.length ? ` · 仅展示前 ${visible.length} 项` : "")
     + (oldestObservedAt ? ` · 数据截至 ${age(oldestObservedAt)}` : "");
+  // The summary above is cheap text; the cards are rebuilt only when what
+  // they show changes, so an open dialog does not churn on every snapshot.
+  const key = JSON.stringify([excludedOfflineHosts, visible.map((entry) => [
+    entry.label, entry.attributed, entry.vramMiB, entry.unknownVramKeys.size,
+    entry.gpus.size, entry.hosts.size, entry.processKeys.size, [...entry.kinds].sort(),
+    [...entry.hosts].sort().slice(0, 8).map((host) => hostLabels.get(host) || host),
+  ])]);
+  if (key === view.ownersResultsKey) return;
+  view.ownersResultsKey = key;
+  elements.ownersResults.replaceChildren();
   for (const entry of visible) {
     const card = create(
       "article",
@@ -2708,6 +2717,7 @@ function renderCapacityMatcher() {
     elements.capacityResults.replaceChildren(
       create("div", "capacity-empty", "等待 GPU 告警数据同步后自动更新匹配结果"),
     );
+    view.capacityResultsKey = "";
     return;
   }
   const result = capacityMatches(view.capacityRequest);
@@ -2727,8 +2737,19 @@ function renderCapacityMatcher() {
     elements.capacityResults.replaceChildren(
       create("div", "capacity-empty", detail || "当前没有可用于匹配的在线 GPU 节点"),
     );
+    view.capacityResultsKey = "";
     return;
   }
+  // Cards only carry these fields; an unchanged projection keeps its DOM and
+  // the operator's focus, so the focus restoration below is the rare path.
+  const key = JSON.stringify(visible.map((candidate) => [
+    candidate.host, displayHost(candidate.host), candidate.model, candidate.total, candidate.satisfies,
+    candidate.deficit, candidate.minimumFreeMiB, candidate.averageUtilization,
+    candidate.cpuUsage,
+    candidate.available.map((gpu) => [gpu.index, gpu.memory_free_mib]),
+  ]));
+  if (key === view.capacityResultsKey) return;
+  view.capacityResultsKey = key;
   const activeElement = document.activeElement;
   const focusedKey = elements.capacityResults.contains(activeElement)
     ? activeElement.closest(".capacity-candidate")?.dataset.candidateKey || null
@@ -3792,13 +3813,18 @@ function notificationEndpointRow(endpoint) {
   const label = create("strong", "", name);
   label.title = name;
   identity.append(label);
-  const metaParts = [`待发 ${format(queued)}`, `累计失败 ${format(dropped)}`];
-  if (endpoint.lastSuccessAt) metaParts.push(`最近成功 ${age(endpoint.lastSuccessAt)}`);
+  const meta = create("small", "", `待发 ${format(queued)} · 累计失败 ${format(dropped)}`);
+  if (endpoint.lastSuccessAt) {
+    // A live relative time that the per-second tick refreshes in place.
+    const since = create("span", "age-relative", age(endpoint.lastSuccessAt));
+    since.dataset.ageAt = endpoint.lastSuccessAt;
+    meta.append(" · 最近成功 ", since);
+  }
   const state = create("em", healthy ? "success" : "error");
   const lastError = typeof endpoint.lastError === "string" ? endpoint.lastError : "";
   state.textContent = healthy ? "正常" : lastError || "投递异常";
   if (!healthy && lastError) state.title = lastError;
-  row.append(identity, create("small", "", metaParts.join(" · ")), state);
+  row.append(identity, meta, state);
   return row;
 }
 
@@ -3810,15 +3836,13 @@ function renderNotificationEndpoints(notifications) {
       (endpoint) => endpoint && typeof endpoint === "object" && !Array.isArray(endpoint),
     )
     : [];
-  if (!endpoints.length) {
-    elements.notificationEndpoints.hidden = true;
-    elements.notificationEndpoints.replaceChildren();
-    return;
-  }
-  elements.notificationEndpoints.replaceChildren(
-    ...endpoints.slice(0, 12).map(notificationEndpointRow),
-  );
-  elements.notificationEndpoints.hidden = false;
+  const visible = endpoints.slice(0, 12);
+  // Rebuild only when the delivery state itself changed, not on every snapshot.
+  const key = JSON.stringify(visible);
+  if (key === view.notificationEndpointsKey) return;
+  view.notificationEndpointsKey = key;
+  elements.notificationEndpoints.hidden = !visible.length;
+  elements.notificationEndpoints.replaceChildren(...visible.map(notificationEndpointRow));
 }
 
 function downloadBlob(blob, filename) {
