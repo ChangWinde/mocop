@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from mocop.config import MaintenanceWindowConfig
+from mocop.maintenance import MaintenanceWindowConfig
 from mocop.metrics import OpenMetricsLimitError, render_openmetrics
 from mocop.models import GpuHealthMetrics, GpuMetrics, ProbeResult, SystemMetrics
 from mocop.service import StateStore

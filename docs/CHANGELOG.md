@@ -55,7 +55,8 @@ All notable changes are documented here. This project follows Semantic Versionin
   `persistence.py` into `persistence_schema.py`; the duration floor then
   pushed two more over, so the incident vocabulary (`incident_types.py`) left
   `incidents.py` and the integration section parsers
-  (`config_integrations.py`) left `config_loader.py`. Every ceiling ratchets
+  (`config_integrations.py`) left `config_loader.py`, and the maintenance
+  window type (`maintenance.py`) left `config.py`. Every ceiling ratchets
   down.
 - A connectivity incident's `diagnosis.nextSteps` (and the dashboard's
   incident dialog) now open with the step that follows from the failure

@@ -54,6 +54,7 @@ interfaces without a runtime plugin registry.
 | `config.py` | the configuration schema: limits, typed sections, and the alias/text validators the HTTP layer and configuration controller reuse |
 | `config_loader.py` | path resolution, bounded and private file reads, strict JSON decoding, and one parser per configuration section, run in a fixed order |
 | `config_integrations.py` | section parsers for topology links, SQLite history, workload identity, and webhook endpoints |
+| `maintenance.py` | time-bounded maintenance windows: the one-shot and weekly recurring window type and its UTC recurrence arithmetic |
 | `privatefiles.py` | private lock and `0600` file primitives shared by the lifecycle and configuration controller |
 | `hostnames.py` | canonical Host/Origin hostname normalization, the trusted web policy, and the Host/marker/Origin/Fetch-Metadata guards for dashboard reads and writes |
 | `discovery_policy.py` | dependency-free SSH discovery policy parsing and bounds |

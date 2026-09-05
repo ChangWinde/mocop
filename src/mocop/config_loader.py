@@ -39,7 +39,6 @@ from .config import (
     IncidentActionConfig,
     IncidentConfig,
     IncidentScopeOverrideConfig,
-    MaintenanceWindowConfig,
     MonitorConfig,
     ThresholdConfig,
     _has_disallowed_text_characters,
@@ -61,6 +60,7 @@ from .discovery_policy import (
     parse_ssh_discovery_config,
 )
 from .hostnames import normalize_web_hostname
+from .maintenance import MaintenanceWindowConfig
 from .updates import UpdatesConfig, UpdatesPolicyError, parse_updates_config
 
 _REQUIRED_KEYS = {

@@ -14,12 +14,12 @@ from mocop.config import (
     ConnectionTopologyConfig,
     HostOverrideConfig,
     IncidentActionConfig,
-    MaintenanceWindowConfig,
     MonitorConfig,
     PersistenceConfig,
     TopologyLinkConfig,
 )
 from mocop.discovery import HostDiscoverySnapshot
+from mocop.maintenance import MaintenanceWindowConfig
 from mocop.models import (
     DiskMetrics,
     GpuMetrics,

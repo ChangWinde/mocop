@@ -22,7 +22,6 @@ from .config import (
     IncidentActionConfig,
     IncidentConfig,
     IncidentScopeOverrideConfig,
-    MaintenanceWindowConfig,
     MonitorConfig,
     ThresholdConfig,
 )
@@ -36,6 +35,7 @@ from .discovery import (
 )
 from .incident_types import IncidentPolicy
 from .incidents import IncidentTracker, ThresholdIncidentPolicy
+from .maintenance import MaintenanceWindowConfig
 from .models import GpuProcess, ProbeResult, ServerState, utc_after, utc_now
 from .notifications import DisabledNotificationSink, IncidentNotificationSink
 from .persistence import (
