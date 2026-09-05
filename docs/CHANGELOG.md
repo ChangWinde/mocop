@@ -150,6 +150,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Restoring history at startup no longer scans the whole SQLite database: the
+  newest points of each host and GPU are read through the tables' primary
+  keys instead of a window function that SQLite executed as a full scan plus
+  temporary sort. Against a copy of a 476 MB live history (2 million GPU
+  points) the restore fell from 2.85 s to 0.4 s with identical results, and
+  from 9–18 s on the live host where the writer thread contended for the
+  lock; no schema change is involved.
 - `mocop service install` could not verify a service publishing the complete
   `/api/meta` manifest: the installer's liveness probe rejected any manifest
   longer than 4 KiB, so every install of this release rolled back with

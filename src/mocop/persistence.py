@@ -212,6 +212,53 @@ _CREATE_SCHEMA_STATEMENTS = (
 ) + _GPU_TABLE_STATEMENTS
 
 
+def _partition_keys(
+    connection: sqlite3.Connection, table: str, columns: tuple[str, ...]
+) -> list[tuple[str, ...]]:
+    """Distinct text values of a primary-key prefix, one seek per key.
+
+    SQLite orders NULL and numbers before text and blobs after it, so
+    starting each walk at ``''`` skips non-text keys and the first blob ends
+    it; the row filters would drop those rows anyway.
+    """
+    prefixes: list[tuple[str, ...]] = [()]
+    for depth, column in enumerate(columns):
+        fixed = "".join(f"{name} = ? AND " for name in columns[:depth])
+        query = (
+            f"SELECT {column} FROM {table} WHERE {fixed}{column} > ? "
+            f"ORDER BY {column} LIMIT 1"
+        )
+        expanded: list[tuple[str, ...]] = []
+        for prefix in prefixes:
+            last = ""
+            while row := connection.execute(query, (*prefix, last)).fetchone():
+                if not isinstance(row[0], str):
+                    break
+                last = row[0]
+                expanded.append((*prefix, last))
+        prefixes = expanded
+    return prefixes
+
+
+def _newest_per_partition(
+    connection: sqlite3.Connection,
+    table: str,
+    columns: tuple[str, ...],
+    query: str,
+    limit: int,
+) -> list[tuple[object, ...]]:
+    """Run a ``… ORDER BY … DESC LIMIT ?`` query per partition key.
+
+    Rows come back oldest first within each key, keys in primary-key order,
+    which is the order the in-memory rings are rebuilt in.
+    """
+    rows: list[tuple[object, ...]] = []
+    for key in _partition_keys(connection, table, columns):
+        newest = connection.execute(query, (*key, limit)).fetchall()
+        rows.extend(reversed(newest))
+    return rows
+
+
 def _is_optional_finite_number(value: object) -> bool:
     return value is None or (
         not isinstance(value, bool)
@@ -364,27 +411,34 @@ class SqliteTelemetryPersistence:
         return True
 
     def load(self, history_points: int, incident_points: int) -> LoadedTelemetry:
+        """Restore the newest retained points of every host and GPU.
+
+        Every partitioned table is keyed ``(host[, gpu_id], observed_at, …)``
+        without a rowid, so its primary key is the clustered index. The keys
+        are enumerated by seeking past the last one and each partition's tail
+        is read through that same key, which keeps a restore proportional to
+        the retained window rather than to the whole database: a window
+        function over a 2-million-row GPU table took seconds of full scan and
+        temp sort where these seeks take tens of milliseconds.
+        """
         try:
             with closing(self._connect()) as connection:
-                history_rows = connection.execute(
+                history_rows = _newest_per_partition(
+                    connection,
+                    "history",
+                    ("host",),
                     f"""
                     SELECT host, observed_at, cpu_usage_pct, memory_usage_pct,
                            swap_usage_pct, disk_usage_pct, network_rx_bps,
                            network_tx_bps, disk_read_bps, disk_write_bps,
                            gpu_usage_pct, gpu_memory_usage_pct, gpu_temperature_c,
                            transport_retried
-                    FROM (
-                        SELECT *, ROW_NUMBER() OVER (
-                            PARTITION BY host ORDER BY observed_at DESC
-                        ) AS position
-                        FROM history
-                        WHERE {_HISTORY_ROW_FILTER}
-                    )
-                    WHERE position <= ?
-                    ORDER BY host, observed_at
+                    FROM history
+                    WHERE host = ? AND {_HISTORY_ROW_FILTER}
+                    ORDER BY observed_at DESC LIMIT ?
                     """,
-                    (history_points,),
-                ).fetchall()
+                    history_points,
+                )
                 event_rows = connection.execute(
                     f"""
                     SELECT event_id, host, condition_key, category, resource,
@@ -399,41 +453,37 @@ class SqliteTelemetryPersistence:
                     """,
                     (incident_points,),
                 ).fetchall()
-                gpu_rows = connection.execute(
+                gpu_rows = _newest_per_partition(
+                    connection,
+                    "gpu_history",
+                    ("host", "gpu_id"),
                     f"""
                     SELECT host, gpu_id, gpu_index, observed_at,
                            utilization_gpu_pct, memory_used_mib,
                            memory_total_mib, temperature_c, power_draw_w
-                    FROM (
-                        SELECT *, ROW_NUMBER() OVER (
-                            PARTITION BY host, gpu_id ORDER BY observed_at DESC
-                        ) AS position
-                        FROM gpu_history
-                        WHERE {_GPU_ROW_FILTER}
-                    )
-                    WHERE position <= ?
-                    ORDER BY host, gpu_id, observed_at
+                    FROM gpu_history
+                    WHERE host = ? AND gpu_id = ? AND {_GPU_ROW_FILTER}
+                    ORDER BY observed_at DESC LIMIT ?
                     """,
-                    (history_points,),
-                ).fetchall()
-                process_rows = connection.execute(
+                    history_points,
+                )
+                # Same-timestamp transitions restore with ``stopped`` before
+                # ``started``; the selection order is the exact reverse.
+                process_rows = _newest_per_partition(
+                    connection,
+                    "process_events",
+                    ("host", "gpu_id"),
                     f"""
                     SELECT host, gpu_id, gpu_index, observed_at, event_type,
                            pid, name, used_memory_mib, workload_json
-                    FROM (
-                        SELECT p.*, ROW_NUMBER() OVER (
-                            PARTITION BY p.host, p.gpu_id
-                            ORDER BY p.observed_at DESC, p.event_type ASC,
-                                     p.pid DESC, p.name DESC
-                        ) AS position
-                        FROM process_events AS p
-                        WHERE {_PROCESS_ROW_FILTER}
-                    )
-                    WHERE position <= ?
-                    ORDER BY host, gpu_id, observed_at, event_type DESC, pid, name
+                    FROM process_events AS p
+                    WHERE p.host = ? AND p.gpu_id = ? AND {_PROCESS_ROW_FILTER}
+                    ORDER BY p.observed_at DESC, p.event_type ASC,
+                             p.pid DESC, p.name DESC
+                    LIMIT ?
                     """,
-                    (incident_points,),
-                ).fetchall()
+                    incident_points,
+                )
         except sqlite3.Error as exc:
             raise PersistenceError("cannot read the SQLite history database") from exc
 

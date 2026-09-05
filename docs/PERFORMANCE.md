@@ -364,6 +364,19 @@ worker limit, and online inventory, three post-restart samples each used 0.45% C
 no collector error. The measurement isolates duplicate server-side snapshot work; it
 does not predict CPU use for a different fleet or collection cadence.
 
+Startup restore was measured on 2026-09-05 against a copy of a live 476 MB history
+database (Python 3.14.6, SQLite 3.53.1; 519,167 host points, 1,993,362 GPU points,
+14,598 process transitions, 15 hosts, 82 GPU identities). The previous restore
+selected the newest points with a window function over each table, which SQLite
+executed as a full scan plus a temporary sort: 2.85 s on the idle copy and 9–18 s on
+the live host while the writer thread held the lock. Enumerating the partition keys
+by seeking past the last one through the `WITHOUT ROWID` primary keys (about 1 ms for
+all 97 keys) and reading each partition's tail with `ORDER BY observed_at DESC LIMIT`
+produced identical restored data in 0.38–0.42 s over three runs; the SQL itself takes
+about 60 ms and Python row validation the rest. No schema change was needed. The
+service still restores before it binds its listener, so this is also the time the
+installer's health probe waits on such a deployment.
+
 Measure one complete collection in an authorized environment with:
 
 ```bash
