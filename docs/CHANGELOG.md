@@ -54,6 +54,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   and `correlation` shapes, the test delivery marker, and the retry, throttle,
   and suppression rules — and a repository test keeps the documented example
   body's keys equal to what the delivery code sends.
+- The self-update worker's `uv` install path — the one a `uv tool install`
+  deployment takes, since those environments have no `pip` — and every
+  refusal of the update state machine are under test (`updates.py` coverage
+  76% → 90%), and a governance test proves every routed dashboard asset is
+  shipped by the wheel's package-data globs.
 
 ## [0.12.0] - 2026-09-06
 
