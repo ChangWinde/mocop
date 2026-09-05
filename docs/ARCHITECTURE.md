@@ -355,8 +355,12 @@ by `tests/<leaf>_test.mjs`:
 | `capacity-watch.js` | the durable watch, its armed/notified edge, cooldown, and presented text |
 | `csv-export.js` | CSV cell escaping (including formula-injection defense) and row building |
 | `update-pill.js` | release-currency polling cadence, pill state, and the fixed apply action |
+| `background-asset.js` | the custom background: IndexedDB storage of one asset, container sniffing that refuses animated or mislabelled files, size and dimension caps, and the WebP quality bisection and shrink loop, over injected browser primitives |
 
-Python extraction must keep each lock-owned invariant inside one module.
+A repository test compares the leaf directory with the static route table, the
+`index.html` script order, and `tests/<leaf>_test.mjs`, so a new leaf cannot be
+half-registered. Python extraction must keep each lock-owned invariant inside
+one module.
 
 [ADR-0021](adr/0021-incremental-module-boundaries.md) compares immediate splitting,
 incremental leaf extraction, and adding a build/registry layer. It selects the

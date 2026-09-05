@@ -16,22 +16,12 @@ const {
 } = globalThis.MocopApiContracts.create();
 
 const PREFERENCE_STORAGE_KEY = "mocop.preferences.v1";
-const VISUAL_ASSET_DATABASE = "mocop.visual-assets.v1";
-const VISUAL_ASSET_STORE = "assets";
-const BACKGROUND_ASSET_KEY = "background";
-const MAX_BACKGROUND_BYTES = 8 * 1024 * 1024;
-const MAX_BACKGROUND_SOURCE_BYTES = 32 * 1024 * 1024;
-const MAX_BACKGROUND_DIMENSION = 8192;
-const MAX_BACKGROUND_PIXELS = 32_000_000;
-const MAX_COMPRESSED_BACKGROUND_DIMENSION = 4096;
-const MAX_COMPRESSED_BACKGROUND_PIXELS = 12_000_000;
 const MAX_GPU_DETAIL_PROCESSES = 100;
 const MAX_PROGRAM_SEARCH_RESULTS = 200;
 const MAX_SEARCH_QUERY_LENGTH = 120;
 const MAX_HEATMAP_COLUMNS = 8;
 const GPU_PROCESS_FRESHNESS_WARNING_MS = 90_000;
 const gpuProcessSummaryCache = new WeakMap();
-const BACKGROUND_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
 const DEFAULT_PREFERENCES = Object.freeze({
   serverSort: "custom",
   serverOrder: [],
@@ -516,317 +506,13 @@ function create(tag, className, text) {
   return element;
 }
 
-// Binary presentation assets stay out of both synchronous preferences and the service.
-function openVisualAssetDatabase() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(VISUAL_ASSET_DATABASE, 1);
-    let settled = false;
-    const finish = (callback, value) => {
-      if (settled) {
-        if (value && typeof value.close === "function") value.close();
-        return;
-      }
-      settled = true;
-      callback(value);
-    };
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(VISUAL_ASSET_STORE)) {
-        request.result.createObjectStore(VISUAL_ASSET_STORE);
-      }
-    };
-    request.onsuccess = () => finish(resolve, request.result);
-    request.onerror = () => finish(
-      reject,
-      request.error || new Error("Unable to open browser storage"),
-    );
-    request.onblocked = () => finish(reject, new Error("Browser storage is blocked"));
-  });
-}
-
-async function transactVisualAsset(mode, operation) {
-  const database = await openVisualAssetDatabase();
-  return new Promise((resolve, reject) => {
-    let result;
-    let settled = false;
-    const finish = (callback, value) => {
-      if (settled) return;
-      settled = true;
-      database.close();
-      callback(value);
-    };
-    let transaction;
-    let request;
-    try {
-      transaction = database.transaction(VISUAL_ASSET_STORE, mode);
-      request = operation(transaction.objectStore(VISUAL_ASSET_STORE));
-    } catch (error) {
-      finish(reject, error);
-      return;
-    }
-    request.onsuccess = () => { result = request.result; };
-    transaction.oncomplete = () => finish(resolve, result);
-    transaction.onerror = () => finish(
-      reject,
-      transaction.error || request.error || new Error("Browser storage transaction failed"),
-    );
-    transaction.onabort = transaction.onerror;
-  });
-}
-
-function readStoredBackground() {
-  return transactVisualAsset("readonly", (store) => store.get(BACKGROUND_ASSET_KEY));
-}
-
-function writeStoredBackground(blob) {
-  return transactVisualAsset("readwrite", (store) => store.put(blob, BACKGROUND_ASSET_KEY));
-}
-
-function deleteStoredBackground() {
-  return transactVisualAsset("readwrite", (store) => store.delete(BACKGROUND_ASSET_KEY));
-}
-
-async function decodeImage(blob) {
-  const bitmap = await createImageBitmap(blob);
-  return {
-    source: bitmap,
-    width: bitmap.width,
-    height: bitmap.height,
-    release: () => bitmap.close(),
-  };
-}
-
-async function decodeImageSize(blob) {
-  const decoded = await decodeImage(blob);
-  try {
-    return { width: decoded.width, height: decoded.height };
-  } finally {
-    decoded.release();
-  }
-}
-
-function asciiAt(bytes, offset, value) {
-  if (offset < 0 || offset + value.length > bytes.length) return false;
-  for (let index = 0; index < value.length; index += 1) {
-    if (bytes[offset + index] !== value.charCodeAt(index)) return false;
-  }
-  return true;
-}
-
-function uint32BigEndian(bytes, offset) {
-  if (offset + 4 > bytes.length) return null;
-  return (
-    bytes[offset] * 0x1000000
-    + bytes[offset + 1] * 0x10000
-    + bytes[offset + 2] * 0x100
-    + bytes[offset + 3]
-  );
-}
-
-function uint32LittleEndian(bytes, offset) {
-  if (offset + 4 > bytes.length) return null;
-  return (
-    bytes[offset]
-    + bytes[offset + 1] * 0x100
-    + bytes[offset + 2] * 0x10000
-    + bytes[offset + 3] * 0x1000000
-  );
-}
-
-async function isAnimatedImage(blob) {
-  // Container markers are checked before decode so a selected background cannot animate.
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  if (blob.type === "image/jpeg") {
-    if (bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) {
-      throw new Error("图片内容与文件格式不匹配");
-    }
-    return false;
-  }
-  if (blob.type === "image/png") {
-    if (
-      bytes[0] !== 0x89
-      || !asciiAt(bytes, 1, "PNG")
-      || bytes[4] !== 0x0d
-      || bytes[5] !== 0x0a
-      || bytes[6] !== 0x1a
-      || bytes[7] !== 0x0a
-    ) {
-      throw new Error("图片内容与文件格式不匹配");
-    }
-    for (let offset = 8; offset + 12 <= bytes.length;) {
-      const length = uint32BigEndian(bytes, offset);
-      if (length == null || length > bytes.length - offset - 12) return false;
-      if (asciiAt(bytes, offset + 4, "acTL")) return true;
-      if (asciiAt(bytes, offset + 4, "IEND")) return false;
-      offset += length + 12;
-    }
-    return false;
-  }
-  if (blob.type === "image/webp") {
-    if (!asciiAt(bytes, 0, "RIFF") || !asciiAt(bytes, 8, "WEBP")) {
-      throw new Error("图片内容与文件格式不匹配");
-    }
-    for (let offset = 12; offset + 8 <= bytes.length;) {
-      const length = uint32LittleEndian(bytes, offset + 4);
-      if (length == null || length > bytes.length - offset - 8) return false;
-      if (asciiAt(bytes, offset, "ANIM") || asciiAt(bytes, offset, "ANMF")) return true;
-      offset += 8 + length + (length % 2);
-    }
-    return false;
-  }
-  if (blob.type === "image/avif") {
-    const boxLength = uint32BigEndian(bytes, 0);
-    if (
-      boxLength == null
-      || (boxLength > 1 && boxLength > bytes.length)
-      || !asciiAt(bytes, 4, "ftyp")
-    ) {
-      throw new Error("图片内容与文件格式不匹配");
-    }
-    const headerLimit = Math.min(
-      bytes.length,
-      boxLength === 0 ? bytes.length : boxLength === 1 ? 256 : boxLength,
-    );
-    let hasAvifBrand = false;
-    let animated = false;
-    for (let offset = 8; offset + 4 <= headerLimit; offset += 1) {
-      hasAvifBrand ||= asciiAt(bytes, offset, "avif") || asciiAt(bytes, offset, "avis");
-      animated ||= asciiAt(bytes, offset, "avis");
-    }
-    if (!hasAvifBrand) throw new Error("图片内容与文件格式不匹配");
-    return animated;
-  }
-  return false;
-}
-
-async function validateBackgroundBlob(blob, maxBytes = MAX_BACKGROUND_BYTES) {
-  if (!(blob instanceof Blob) || !BACKGROUND_TYPES.has(blob.type)) {
-    throw new Error("仅支持 PNG、JPEG、WebP 或 AVIF 图片");
-  }
-  if (blob.size <= 0) {
-    throw new Error("图片内容不能为空");
-  }
-  if (blob.size > maxBytes) {
-    const limit = maxBytes === MAX_BACKGROUND_BYTES ? 8 : 32;
-    throw new Error(`图片大小不能超过 ${limit} MiB`);
-  }
-  if (await isAnimatedImage(blob)) {
-    throw new Error("不支持动态图片，请选择静态背景");
-  }
-  let dimensions;
-  try {
-    dimensions = await decodeImageSize(blob);
-  } catch (_error) {
-    throw new Error("图片已损坏或当前浏览器不支持该格式");
-  }
-  if (
-    dimensions.width <= 0
-    || dimensions.height <= 0
-    || dimensions.width > MAX_BACKGROUND_DIMENSION
-    || dimensions.height > MAX_BACKGROUND_DIMENSION
-    || dimensions.width * dimensions.height > MAX_BACKGROUND_PIXELS
-  ) {
-    throw new Error("图片尺寸不能超过 8192 像素或 32 百万像素");
-  }
-  return dimensions;
-}
-
-function canvasToWebp(canvas, quality) {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (!(blob instanceof Blob) || blob.size <= 0 || blob.type !== "image/webp") {
-        reject(new Error("当前浏览器不支持 WebP 图片压缩"));
-        return;
-      }
-      resolve(blob);
-    }, "image/webp", quality);
-  });
-}
-
-async function encodeCanvasWithinLimit(canvas) {
-  const highQuality = await canvasToWebp(canvas, 0.9);
-  if (highQuality.size <= MAX_BACKGROUND_BYTES) {
-    return { blob: highQuality, smallestSize: highQuality.size };
-  }
-
-  const lowQuality = await canvasToWebp(canvas, 0.5);
-  if (lowQuality.size > MAX_BACKGROUND_BYTES) {
-    return { blob: null, smallestSize: lowQuality.size };
-  }
-
-  let best = lowQuality;
-  let lowerQuality = 0.5;
-  let upperQuality = 0.9;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const quality = (lowerQuality + upperQuality) / 2;
-    const candidate = await canvasToWebp(canvas, quality);
-    if (candidate.size <= MAX_BACKGROUND_BYTES) {
-      best = candidate;
-      lowerQuality = quality;
-    } else {
-      upperQuality = quality;
-    }
-  }
-  return { blob: best, smallestSize: best.size };
-}
-
-async function compressBackgroundBlob(blob, dimensions) {
-  const decoded = await decodeImage(blob);
-  const canvas = document.createElement("canvas");
-  const initialScale = Math.min(
-    1,
-    MAX_COMPRESSED_BACKGROUND_DIMENSION / dimensions.width,
-    MAX_COMPRESSED_BACKGROUND_DIMENSION / dimensions.height,
-    Math.sqrt(MAX_COMPRESSED_BACKGROUND_PIXELS / (dimensions.width * dimensions.height)),
-  );
-  let width = Math.max(1, Math.floor(dimensions.width * initialScale));
-  let height = Math.max(1, Math.floor(dimensions.height * initialScale));
-
-  try {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      canvas.width = width;
-      canvas.height = height;
-      const context = canvas.getContext("2d");
-      if (!context) throw new Error("当前浏览器无法处理这张图片");
-      context.imageSmoothingEnabled = true;
-      context.imageSmoothingQuality = "high";
-      context.drawImage(decoded.source, 0, 0, width, height);
-
-      const encoded = await encodeCanvasWithinLimit(canvas);
-      if (encoded.blob) {
-        return encoded.blob;
-      }
-
-      const shrink = Math.min(
-        0.82,
-        Math.sqrt(MAX_BACKGROUND_BYTES / encoded.smallestSize) * 0.92,
-      );
-      const nextWidth = Math.max(1, Math.floor(width * shrink));
-      const nextHeight = Math.max(1, Math.floor(height * shrink));
-      if (nextWidth === width && nextHeight === height) break;
-      width = nextWidth;
-      height = nextHeight;
-    }
-  } finally {
-    decoded.release();
-    canvas.width = 1;
-    canvas.height = 1;
-  }
-  throw new Error("无法在安全限制内压缩这张图片");
-}
-
-async function prepareBackgroundBlob(blob) {
-  const dimensions = await validateBackgroundBlob(blob, MAX_BACKGROUND_SOURCE_BYTES);
-  if (blob.size <= MAX_BACKGROUND_BYTES) {
-    return { blob, dimensions, compressed: false };
-  }
-  const compressed = await compressBackgroundBlob(blob, dimensions);
-  const validatedDimensions = await validateBackgroundBlob(compressed);
-  return {
-    blob: compressed,
-    dimensions: validatedDimensions,
-    compressed: true,
-  };
-}
+// Binary presentation assets stay out of both synchronous preferences and the
+// service; the leaf owns storage, validation, and re-encoding.
+const backgroundAssets = globalThis.MocopBackgroundAsset.create({
+  indexedDB: globalThis.indexedDB,
+  createImageBitmap: (blob) => createImageBitmap(blob),
+  createCanvas: () => document.createElement("canvas"),
+});
 
 function backgroundSize(blob) {
   if (blob.size < 0.1 * 1024 * 1024) {
@@ -861,9 +547,9 @@ function renderBackground(blob) {
 
 async function loadStoredBackground() {
   try {
-    const blob = await readStoredBackground();
+    const blob = await backgroundAssets.readStored();
     if (!(blob instanceof Blob)) return;
-    await validateBackgroundBlob(blob);
+    await backgroundAssets.validate(blob);
     renderBackground(blob);
     setBackgroundStatus("已恢复当前浏览器保存的背景", "success");
   } catch (_error) {
@@ -880,13 +566,13 @@ async function selectBackgroundImage() {
   elements.backgroundImageInput.disabled = true;
   elements.removeBackgroundImage.disabled = true;
   setBackgroundStatus(
-    file.size > MAX_BACKGROUND_BYTES ? "正在浏览器本地优化图片…" : "正在安全读取图片…",
+    file.size > backgroundAssets.MAX_BYTES ? "正在浏览器本地优化图片…" : "正在安全读取图片…",
   );
   try {
-    const prepared = await prepareBackgroundBlob(file);
+    const prepared = await backgroundAssets.prepare(file);
     if (requestId !== view.backgroundRequestId) return;
     try {
-      await runBackgroundStorage(() => writeStoredBackground(prepared.blob));
+      await runBackgroundStorage(() => backgroundAssets.writeStored(prepared.blob));
       if (requestId !== view.backgroundRequestId) return;
       renderBackground(prepared.blob);
       const prefix = prepared.compressed
@@ -922,7 +608,7 @@ async function removeBackgroundImage() {
   elements.removeBackgroundImage.disabled = true;
   setBackgroundStatus("正在移除背景…");
   try {
-    await runBackgroundStorage(deleteStoredBackground);
+    await runBackgroundStorage(backgroundAssets.deleteStored);
     if (requestId !== view.backgroundRequestId) return;
     clearRenderedBackground();
     setBackgroundStatus("背景已从当前浏览器移除", "success");

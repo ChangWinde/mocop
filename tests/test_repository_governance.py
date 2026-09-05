@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 import mocop
+from mocop.static_assets import STATIC_ROUTES
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,7 +29,8 @@ TRACKED_ROOT_ENTRIES = {
 # These ceilings are a ratchet over the reviewed tree, not a general style
 # rule. Extract a coherent leaf and lower the budget instead of raising it.
 CORE_MODULE_LINE_BUDGETS = {
-    "src/mocop/static/app.js": 6_450,
+    "src/mocop/static/app.js": 6_100,
+    "src/mocop/static/background-asset.js": 350,
     "src/mocop/static/api-contracts.js": 300,
     "src/mocop/static/keyed-loader.js": 125,
     "src/mocop/static/capacity-match.js": 150,
@@ -61,6 +63,32 @@ class RepositoryGovernanceTests(unittest.TestCase):
         )
         entries = {line.split("/", 1)[0] for line in completed.stdout.splitlines()}
         self.assertEqual(entries, TRACKED_ROOT_ENTRIES)
+
+    def test_every_browser_leaf_is_routed_loaded_and_tested(self) -> None:
+        # A leaf that is not routed or not loaded before app.js breaks the
+        # dashboard at runtime; a leaf without a Node contract test breaks the
+        # ADR-0021 boundary. The route table, the HTML, and the test directory
+        # are compared with the directory listing, so none of them can drift.
+        static = ROOT / "src" / "mocop" / "static"
+        leaves = sorted(path.name for path in static.glob("*.js"))
+        routed = {filename for filename, _type in STATIC_ROUTES.values()}
+        html = (static / "index.html").read_text(encoding="utf-8")
+        loaded = re.findall(r'<script src="/([^"]+\.js)" defer></script>', html)
+        self.assertEqual(sorted(loaded), leaves)
+        self.assertEqual(
+            loaded[-1], "app.js", "app.js consumes every leaf, so it loads last"
+        )
+        for leaf in leaves:
+            with self.subTest(leaf=leaf):
+                self.assertIn(leaf, routed)
+                if leaf == "app.js":
+                    continue
+                contract = (
+                    ROOT
+                    / "tests"
+                    / f"{leaf.removesuffix('.js').replace('-', '_')}_test.mjs"
+                )
+                self.assertTrue(contract.is_file(), f"{leaf} has no Node contract test")
 
     def test_core_module_line_budgets_do_not_regress(self) -> None:
         for relative, budget in CORE_MODULE_LINE_BUDGETS.items():

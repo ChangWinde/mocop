@@ -93,7 +93,13 @@ All notable changes are documented here. This project follows Semantic Versionin
   bounded-backoff state machine spread over sixteen `view` fields, now share
   the `keyed-loader.js` leaf, whose retry, single-flight, and stale-response
   rules are tested with fake timers; selecting another host now also drops a
-  pending history retry. The `app.js` ceiling ratcheted down to 6,450 lines.
+  pending history retry. The custom-background code (IndexedDB storage,
+  container sniffing, size caps, WebP re-encoding) moved into the
+  `background-asset.js` leaf over injected browser primitives, so its quality
+  bisection and shrink loop are tested in Node for the first time; `format.js`
+  gained the contract test the leaf pattern always required, and a repository
+  test now checks that every leaf is routed, loaded before `app.js`, and
+  tested. The `app.js` ceiling ratcheted down to 6,100 lines.
 - Every HTTP server instance now requires the Bearer capability: the
   unauthenticated server mode that only tests used is gone, `GET /api/meta`
   no longer reports the constant `authenticationRequired` flag, and the

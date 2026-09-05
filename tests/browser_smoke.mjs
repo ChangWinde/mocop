@@ -1683,9 +1683,9 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     const compressedBackgroundStatus = document.querySelector("#background-image-status").textContent;
-    const compressedBackground = await readStoredBackground().catch(() => null);
+    const compressedBackground = await backgroundAssets.readStored().catch(() => null);
     const compressedBackgroundDimensions = compressedBackground
-      ? await decodeImageSize(compressedBackground)
+      ? await backgroundAssets.validate(compressedBackground)
       : { width: 0, height: 0 };
     const oversizedTransfer = new DataTransfer();
     oversizedTransfer.items.add(new File(
