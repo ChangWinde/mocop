@@ -156,11 +156,13 @@
         configuredHosts,
       );
       const hostGroups = normalizeHostGroups(payload.hostGroups, configuredHosts);
-      const infrastructureHosts = safeStoredHosts(payload.infrastructureHosts || []);
+      const infrastructureHosts = Array.isArray(payload.infrastructureHosts)
+        ? safeStoredHosts(payload.infrastructureHosts)
+        : null;
       const sshDiscoveryWarnings = Array.isArray(payload.sshDiscoveryWarnings)
         ? payload.sshDiscoveryWarnings.filter((item) => typeof item === "string").slice(0, 1024)
         : [];
-      const sshDiscoveryMode = payload.sshDiscoveryMode || "aliases";
+      const sshDiscoveryMode = payload.sshDiscoveryMode;
       if (
         configuredHosts.length !== payload.configuredHosts?.length
         || activeHosts.length !== payload.activeHosts?.length
@@ -171,7 +173,8 @@
         || !Number.isSafeInteger(payload.ignoredCodeHostCount)
         || !Number.isSafeInteger(payload.excludedHostCount)
         || !["aliases", "topology"].includes(sshDiscoveryMode)
-        || infrastructureHosts.length !== (payload.infrastructureHosts || []).length
+        || infrastructureHosts == null
+        || infrastructureHosts.length !== payload.infrastructureHosts.length
       ) {
         throw new TypeError("Invalid inventory response");
       }

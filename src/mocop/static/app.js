@@ -13,8 +13,6 @@ const {
   normalizeCollectorSettings,
   normalizeInventory,
   normalizeTopology,
-  normalizeHostGroups,
-  normalizeMaintenanceWindows,
 } = globalThis.MocopApiContracts.create();
 
 const PREFERENCE_STORAGE_KEY = "mocop.preferences.v1";
@@ -1158,8 +1156,7 @@ async function updatePollInterval() {
   elements.refreshInterval.disabled = true;
   showRefreshFeedback("pending", `正在调整为 ${format(requested)} 秒`);
   try {
-    // The collector endpoint accepts a field subset; the poll-interval
-    // endpoint is deprecated and only kept server-side for older pages.
+    // One-field subset of POST /api/settings/collector.
     const response = await postJson("/api/settings/collector", { pollIntervalSeconds: requested });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
@@ -5633,7 +5630,29 @@ function renderTable() {
 // and node notice only need a rebuild when that host's data version moves,
 // not on every fleet snapshot (avoids JSON.stringify over the full record).
 function selectedHostPanelKey() {
-  if (view.selectedHost === "all") return "";
+  if (view.selectedHost === "all") {
+    const servers = focusedServers(view.snapshot.servers).filter(
+      (server) => server.status === "online" && server.system,
+    );
+    return [
+      "all",
+      view.serverFilter,
+      view.incidentVersion,
+      servers.length,
+      ...servers.map((server) => {
+        const system = server.system;
+        return [
+          server.host,
+          system.cpu_usage_pct,
+          system.memory_used_mib,
+          system.disk_used_mib,
+          system.network_rx_bps,
+          system.disk_read_bps,
+          system.pressure?.memory?.some_avg10,
+        ].join(":");
+      }),
+    ].join("\u0000");
+  }
   const server = view.snapshot.servers.find(
     (candidate) => candidate.host === view.selectedHost,
   );
@@ -5657,7 +5676,7 @@ function render() {
   renderIncidents();
   renderServers();
   const panelKey = selectedHostPanelKey();
-  if (!panelKey || panelKey !== view.selectedPanelKey) {
+  if (panelKey !== view.selectedPanelKey) {
     view.selectedPanelKey = panelKey;
     renderNodeNotice();
     renderResources();

@@ -131,6 +131,8 @@ const inventory = {
   collectorSettings: collector,
   maintenanceWindows: {},
   hostGroups: { "gpu-1": "Training" },
+  infrastructureHosts: [],
+  sshDiscoveryMode: "aliases",
 };
 const normalized = contracts.normalizeInventory(inventory);
 assert.deepEqual(normalized.configuredHosts, ["gpu-1", "gpu-2"]);
@@ -145,6 +147,8 @@ for (const [label, patch] of [
   ["writable missing", { writable: undefined }],
   ["negative-count type", { excludedHostCount: "1" }],
   ["unknown discovery mode", { sshDiscoveryMode: "magic" }],
+  ["missing discovery mode", { sshDiscoveryMode: undefined }],
+  ["missing infrastructure hosts", { infrastructureHosts: undefined }],
   ["unsafe infrastructure host", { infrastructureHosts: ["jump host"] }],
   ["group for unconfigured host", { hostGroups: { "gpu-9": "x" } }],
 ]) {

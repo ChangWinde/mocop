@@ -93,7 +93,7 @@
       }
     }
 
-    return Object.freeze({ state, request, reset, clearRetry });
+    return Object.freeze({ state, request, reset });
   }
 
   globalThis.MocopKeyedLoader = Object.freeze({ create });
