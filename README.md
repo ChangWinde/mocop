@@ -173,12 +173,11 @@ disabled by default. After a manual edit, run `mocop config check` and follow th
 ## HTTP API
 
 Everything the dashboard shows is also a small JSON API with stable error codes
-and P/A/R/W access tiers. The public `GET /api/meta` manifest names every
-route's tier, query parameters and bounds, body cap, response type, and the
-documentation URL for the running release, and a `403` says where the
-capability lives, so an agent needs no out-of-band knowledge. Only discovery
-and health are public; see the [API reference](docs/API.md) for curl examples
-and why non-viewer automation must not send `X-Monitor-Request: dashboard`.
+and P/A/R/W access tiers. `GET /api/meta` names every route's tier, query
+bounds, POST body fields, error-code catalog, and the documentation URL; a
+`403` says where the capability lives. Only discovery and health are public;
+see the [API reference](docs/API.md) for curl examples and why non-viewer
+automation must not send `X-Monitor-Request: dashboard`.
 
 ## Metrics and troubleshooting
 

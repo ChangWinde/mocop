@@ -239,22 +239,24 @@ may be irreversible.
 
 ## Command reference and exit codes
 
-Every command accepts `--config PATH`; without it Mocop uses `MOCOP_CONFIG`, then
+Most commands accept `--config PATH`; without it Mocop uses `MOCOP_CONFIG`, then
 `~/.config/mocop/config.json`, then a development-only `./config/mocop.json`, then
-the bundled empty configuration. `mocop --help` and `mocop <command> --help`
-describe every flag.
+the bundled empty configuration. `service status` and `service uninstall` operate
+on the generated unit and reject `--config`. `mocop --help` and
+`mocop <command> --help` describe every flag. `--once` and `--strict` apply only
+to the default monitor command.
 
 | Command | Purpose | Notable flags |
 |---|---|---|
-| `mocop` | Foreground monitor with an ephemeral capability printed once | `--once` (print one JSON snapshot and exit), `--strict` (with `--once`, fail unless every host is online) |
-| `mocop deploy` | Create a private config and install the verified user service on a fresh host | `--host ALIAS` (repeatable), `--local-host ALIAS` / `--no-local`, `--display-name`, `--ssh-config`, `--auto-discover` / `--no-auto-discover` |
-| `mocop init` | Create a private config only, never overwriting one | `--host ALIAS` (repeatable) |
-| `mocop migrate` | Generate a new private config from another installation's config | `--from-config PATH` (required), the same identity flags as `deploy`, `--drop-local-host` |
+| `mocop` | Foreground monitor with an ephemeral capability printed once | `--once` (print one JSON snapshot and exit), `--strict` (with `--once`, fail unless every host is online), `--version` |
+| `mocop deploy` | Create a private config and install the verified user service on a fresh host | `--host ALIAS` (repeatable), `--local-host ALIAS` / `--no-local`, `--display-name`, `--ssh-config`, `--auto-discover` / `--no-auto-discover`, `--json` |
+| `mocop init` | Create a private config only, never overwriting one | `--host ALIAS` (repeatable), `--json` |
+| `mocop migrate` | Generate a new private config from another installation's config | `--from-config PATH` (required), the same identity flags as `deploy`, `--drop-local-host`, `--json` |
 | `mocop config check` | Validate the configuration without a web server or SSH | `--json` (one JSON document on stdout, also for a rejected configuration) |
 | `mocop doctor` | Read-only SSH reachability and connection-reuse diagnosis | `--host ALIAS` (repeatable filter), `--no-connect`, `--probe` (one production collection per alias), `--profile` (latency breakdown), `--json` |
-| `mocop service install` | Generate, enable, start, and verify the unit; print the capability URL | — |
-| `mocop service status` | `systemctl --user status` for the generated unit | — |
-| `mocop service uninstall` | Stop and remove only the generated unit | — |
+| `mocop service install` | Generate, enable, start, and verify the unit; print the capability URL | `--json` |
+| `mocop service status` | `systemctl --user status` for the generated unit | `--json` (`{ok, active, unitPath}`; journal text stays on the text path) |
+| `mocop service uninstall` | Stop and remove only the generated unit | `--json` |
 
 Exit codes are stable for automation:
 
@@ -265,8 +267,11 @@ Exit codes are stable for automation:
 | `2` | Configuration or usage error: invalid or unreadable configuration, a `doctor` flag conflict or unknown `--host`, a lifecycle refusal (existing files, invalid alias), or a managed unit missing its generated arguments |
 | `75` | Supervised restart requested from the dashboard or self-update; systemd's restart policy starts the replacement |
 
-`config check --json`, `doctor --json`, and `mocop --once` write machine-readable
-reports to stdout; text-mode diagnostics and refusals go to stderr.
+Every `--json` command writes one `{ok, ...}` document to stdout, including
+refusals (`ok: false` plus a stable `code`). `config check`, `doctor`, `init`,
+`deploy`, `migrate`, and the three `service` actions all accept `--json`.
+`mocop --once` writes a snapshot document. Text-mode diagnostics stay on
+stderr.
 
 ## Related references
 

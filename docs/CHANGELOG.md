@@ -28,11 +28,18 @@ All notable changes are documented here. This project follows Semantic Versionin
   flag, and exit-code reference (`0`, `1`, `2`, `75`).
 - `GET /api/meta` is now a complete machine-readable contract: every GET
   route lists its accepted `query` parameters with type, bounds, and default,
-  every write lists its `bodyLimitBytes`, every route names its
-  `responseType`, and a `documentation` URL points at this reference for the
-  running release. The manifest is generated from the same declarative table
-  (`api_manifest.py`) the handlers validate against, replacing five
+  every write lists its `body` field schema and `bodyLimitBytes`, every route
+  names its `responseType`, and the document also publishes `conventions`,
+  writer requirements, the error-code catalog, and a `documentation` URL for
+  the running release. The manifest is generated from the same declarative
+  table (`api_manifest.py`) the handlers validate against, replacing five
   hand-written query parsers.
+- `mocop --version` prints the package version. `init`, `deploy`, `migrate`,
+  and every `service` action accept `--json` and write one `{ok, code?, ...}`
+  document, matching `config check --json` and `doctor --json`. Refusals stay
+  on that envelope so an agent never has to parse English from stderr.
+- `GET /api/meta` capabilities now include `updateSupported`. Excess
+  connections answer `503 CONNECTION_LIMIT` as JSON instead of an empty body.
 - `403 AUTHENTICATION_REQUIRED` responses carry a `hint` naming the header to
   send and where the capability file lives, plus the `documentation` URL, so
   an agent can recover from a cold start without out-of-band knowledge.
@@ -50,6 +57,12 @@ All notable changes are documented here. This project follows Semantic Versionin
   leaf and contract test instead of maintaining a list that had drifted.
 
 ### Changed
+
+- `doctor --json` now includes the local host in `hosts[]` (with
+  `local: true`) and adds `ok` alongside the existing `status` field.
+  `--once` / `--strict` with a subcommand are rejected as usage errors.
+  Inventory payloads must publish `infrastructureHosts` and
+  `sshDiscoveryMode`; the dashboard no longer defaults those fields.
 
 - Workload record parsing moved from `probe.py` into a new `workloads.py`
   module, and the GPU task projections moved from `app.js` into the
@@ -86,9 +99,9 @@ All notable changes are documented here. This project follows Semantic Versionin
   table, and GPU groups are keyed on the rows they show rather than on the
   query text, so typing no longer rebuilds every visible group. Active
   incidents are indexed by host on acceptance; the GPU history, capacity
-  candidate, owner, and webhook endpoint views rebuild their DOM only when
-  the data they show changes; and the per-second tick compares before it
-  writes and skips cosmetic updates while the tab is hidden.
+  candidate, owner, webhook endpoint, and All-servers resource views rebuild
+  their DOM only when the data they show changes; and the per-second tick
+  compares before it writes and skips cosmetic updates while the tab is hidden.
 - Documentation gives each fact one owner: CONTRIBUTING.md owns the quality
   gate list, OPERATIONS.md the systemd unit and pinned install command,
   PERFORMANCE.md the architecture thresholds, API.md the capability rules.

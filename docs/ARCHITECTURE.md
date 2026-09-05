@@ -119,8 +119,9 @@ The HTTP manifest in `api_manifest.py` assigns every route one of four explicit
 tiers: public API discovery/health (P), Bearer-authenticated automation reads (A),
 authenticated same-origin dashboard reads (R), or authenticated same-origin writes
 (W). The same table declares each GET route's query parameters and each write's
-body cap; the handlers validate against it and `/api/meta` serializes it, so an
-agent can discover exactly how to call a deployment without the prose reference. The
+body schema and byte cap; the handlers validate against it and `/api/meta`
+serializes it, so an agent can discover exactly how to call a deployment
+without the prose reference. The
 per-install capability and browser delivery trade-off are recorded in
 [ADR-0017](adr/0017-per-install-dashboard-capability.md). `/api/snapshot` supports
 cold start and diagnostics. `/metrics` renders the same current snapshot as
@@ -129,9 +130,8 @@ stale host resources are omitted from current resource series. Host and GPU hist
 queries accept only discovered telemetry identities and at most 300 points. The
 redacted diagnostic projection requires a dashboard read marker and exposes neither
 raw connection errors nor process identity. Incident queries accept limits from 1 to
-200. The cadence shortcut accepts one finite JSON number from 2 to 60. The collector
-route accepts exactly cadence, complete-probe timeout, and integer worker concurrency
-within documented bounds. The inventory route accepts one exact add/remove action and
+200. The collector route accepts a non-empty subset of cadence, complete-probe
+timeout, and integer worker concurrency within documented bounds. The inventory route accepts one exact add/remove action and
 one validated alias. An add must match a fresh, eligible OpenSSH scan; a remove must
 match the current configuration. The host-group route accepts one explicit host and
 one bounded visible group or clear action. Maintenance and condition-action routes
