@@ -2,6 +2,23 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Two SSH failures that a fleet behind a bastion sees often now have their own
+  sanitized classification instead of the generic `SSH connection failed`:
+  `SSH jump host could not reach the target` (the `ProxyJump`/`ProxyCommand`
+  host refused or could not open the forward) and `SSH connection closed
+  during key exchange` (the peer closed or reset the connection before the
+  banner or key exchange completed). A live deployment had shown the generic
+  message for three hosts across 180 consecutive probes; the root cause was
+  the jump host every time.
+- The API reference lists every `servers[].message` string with its meaning
+  as a stable, branchable vocabulary, and the repository test that already
+  kept the probe and the dashboard translations aligned now holds the
+  reference table to the same set.
+
 ## [0.12.0] - 2026-09-06
 
 ### Added

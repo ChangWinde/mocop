@@ -117,6 +117,32 @@ class DashboardFailureVocabularyTests(unittest.TestCase):
         for prefix in prefixes:
             self.assertTrue(any(head.startswith(prefix) for head in prefixed), prefix)
 
+    def test_the_api_reference_lists_every_failure_message(self) -> None:
+        # Automation branches on servers[].message, so the reference table is
+        # the third party to the probe/dashboard vocabulary: every message the
+        # backend emits appears in it, and it lists nothing the backend no
+        # longer emits.
+        reference = (ROOT / "docs" / "API.md").read_text(encoding="utf-8")
+        start = reference.index("#### Failure messages")
+        table = reference[start : reference.index("\n`servers[].system`", start)]
+        documented: set[str] = set()
+        body_rows = re.findall(r"^\| ([^|]+) \|", table, re.MULTILINE)[
+            1:
+        ]  # skip header
+        for cell in body_rows:
+            documented.update(re.findall(r"`([^`]+)`", cell))
+        exact, prefixed = _probe_failure_messages()
+        exact |= _collector_failure_messages()
+        self.assertEqual(exact - documented, set())
+        for head in prefixed:
+            self.assertTrue(any(doc.startswith(head) for doc in documented), head)
+        stale = {
+            doc
+            for doc in documented
+            if doc not in exact and not any(doc.startswith(head) for head in prefixed)
+        }
+        self.assertEqual(stale, set())
+
 
 if __name__ == "__main__":
     unittest.main()

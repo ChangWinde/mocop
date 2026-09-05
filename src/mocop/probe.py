@@ -1019,6 +1019,8 @@ def _gpu_activity(gpus: tuple[GpuMetrics, ...], thresholds: ThresholdConfig) -> 
 def _safe_ssh_failure(stderr: str) -> str:
     """Classify SSH failures without exposing remote addresses, users or paths."""
     normalized = stderr.lower()
+    # Ordered by root cause: a jump host that cannot open the forward also
+    # makes the target's key exchange fail, so the forwarding text wins.
     categories = (
         (("remote host identification has changed",), "SSH host key changed"),
         (("host key verification failed",), "SSH host key is not trusted"),
@@ -1027,9 +1029,27 @@ def _safe_ssh_failure(stderr: str) -> str:
             ("could not resolve hostname", "name or service not known"),
             "SSH name resolution failed",
         ),
+        (
+            (
+                "stdio forwarding request failed",
+                "channel 0: open failed",
+                "open failed: administratively prohibited",
+                "open failed: connect failed",
+            ),
+            "SSH jump host could not reach the target",
+        ),
         (("connection refused",), "SSH connection was refused"),
         (("connection timed out", "operation timed out"), "SSH connection timed out"),
         (("no route to host", "network is unreachable"), "SSH network is unreachable"),
+        (
+            (
+                "kex_exchange_identification",
+                "banner exchange",
+                "connection reset by peer",
+                "connection closed by remote host",
+            ),
+            "SSH connection closed during key exchange",
+        ),
         (
             ("timeout, server", "server not responding"),
             "SSH transport stopped responding",

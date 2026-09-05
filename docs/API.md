@@ -454,7 +454,7 @@ Timestamp disambiguation (frequently confused):
 | `status` | string | `pending`, `online`, `unreachable`, `no_nvidia_smi`, or `error`. |
 | `polling` | bool | A probe is currently in flight for this host. |
 | `latencyMs` | int \| null | Duration of the most recent probe attempt. |
-| `message` | string \| null | Redacted failure classification or GPU-query warning. |
+| `message` | string \| null | Redacted failure classification or GPU-query warning; one of the stable strings under *Failure messages* below. |
 | `lastAttemptAt` | timestamp \| null | Most recent probe attempt. |
 | `lastSuccessAt` | timestamp \| null | Most recent successful probe. |
 | `nextRetryAt` | timestamp \| null | Backoff deadline while failing. |
@@ -467,6 +467,40 @@ Timestamp disambiguation (frequently confused):
 | `group` | string \| null | Configured host group. |
 | `displayName` | string \| null | Optional human-readable label; `host` remains the identity. |
 | `incidents` | object | `{active, critical, actionable, actionableCritical}` counts for this host. |
+
+#### Failure messages
+
+`servers[].message` never carries SSH output, addresses, users, or paths. It
+is one of these stable strings, so automation may branch on it; the dashboard
+translates exactly this set, and a repository test keeps the probe, the
+dashboard, and this table aligned.
+
+| `message` | Meaning |
+|---|---|
+| `SSH host key changed` | The remote host key differs from `known_hosts`. |
+| `SSH host key is not trusted` | No `known_hosts` entry; the probe never accepts new keys. |
+| `SSH authentication failed` | Permission denied or authentication failure. |
+| `SSH name resolution failed` | The alias's hostname does not resolve. |
+| `SSH jump host could not reach the target` | The `ProxyJump`/`ProxyCommand` host refused or could not open the forward to the target. |
+| `SSH connection was refused` | TCP connection refused. |
+| `SSH connection timed out` | TCP connection timed out. |
+| `SSH network is unreachable` | No route to host or network unreachable. |
+| `SSH connection closed during key exchange` | The peer closed or reset the connection before the banner or key exchange completed (overloaded `sshd`, `MaxStartups`, a ban, or a proxy). |
+| `SSH transport stopped responding` | Keepalives went unanswered. |
+| `SSH connection failed` | Any other SSH client failure. |
+| `SSH produced no output before the collection timeout` | The session opened but the remote never wrote a byte. |
+| `Local SSH client could not be started` | The `ssh` binary could not be executed. |
+| `Local resource collection timed out` | The local (`local_host`) collection exceeded its timeout. |
+| `Local resource probe could not be started` | The local collection shell could not be started. |
+| `Local resource output was not recognized` / `Remote resource output was not recognized` | The fixed script's output did not parse. |
+| `Local resource output exceeded the configured limit` / `Remote resource output exceeded the configured limit` | Output exceeded `max_output_bytes`. |
+| `Local resource query failed (exit N)` / `Remote resource query failed (exit N)` | The fixed script exited non-zero; `N` is its exit status. |
+| `Remote collection stalled after partial output` | Output started and then stopped before the timeout. |
+| `Resource collection cancelled` | The probe was cancelled by a shutdown or configuration change. |
+| `Unexpected collector error` | An internal collector failure; details are in the service journal. |
+| `nvidia-smi is unavailable` | The host is online (`no_nvidia_smi`) but has no `nvidia-smi`. |
+| `nvidia-smi query failed` | `nvidia-smi` exited non-zero; system metrics remain valid. |
+| `nvidia-smi output was malformed` | `nvidia-smi` output did not parse; system metrics remain valid. |
 
 `servers[].system` (snake_case): `hostname`, `uptime_seconds`, `load_1m`,
 `load_5m`, `load_15m`, `cpu_cores`, `cpu_usage_pct` (null on first sample),

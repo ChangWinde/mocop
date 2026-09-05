@@ -26,6 +26,7 @@ from mocop.probe import (
     _RawSystemSample,
     _remote_script,
     _run_bounded_process,
+    _safe_ssh_failure,
     parse_nvidia_combined_csv,
     parse_nvidia_health_csv,
     parse_nvidia_processes_csv,
@@ -783,6 +784,78 @@ class ProbeTests(unittest.TestCase):
         result = OpenSshLinuxResourceProbe().probe("gpu-1", config())
         self.assertEqual(result.message, "SSH authentication failed")
         self.assertNotIn("192.0.2.4", result.message or "")
+
+    def test_classifies_every_openssh_failure_text_by_root_cause(self) -> None:
+        # Representative OpenSSH client output for each category. A jump host
+        # that cannot open the forward also makes the target's key exchange
+        # fail, so the forwarding text must win over the kex text that
+        # follows it; nothing outside the table falls back to the generic
+        # message, which stays free of the address and user in the input.
+        cases = (
+            (
+                "Stdio forwarding request failed: Session open refused by peer\n"
+                "kex_exchange_identification: Connection closed by remote host\n"
+                "Connection closed by UNKNOWN port 65535",
+                "SSH jump host could not reach the target",
+            ),
+            (
+                "channel 0: open failed: connect failed: Connection refused\n"
+                "stdio forwarding failed",
+                "SSH jump host could not reach the target",
+            ),
+            (
+                "channel 0: open failed: administratively prohibited: open failed",
+                "SSH jump host could not reach the target",
+            ),
+            (
+                "kex_exchange_identification: read: Connection reset by peer\n"
+                "Connection reset by 192.0.2.9 port 22",
+                "SSH connection closed during key exchange",
+            ),
+            (
+                "banner exchange: Connection to 192.0.2.9 port 22: Connection closed",
+                "SSH connection closed during key exchange",
+            ),
+            (
+                "ssh: connect to host 192.0.2.9 port 22: Connection refused",
+                "SSH connection was refused",
+            ),
+            (
+                "ssh: connect to host 192.0.2.9 port 22: Connection timed out",
+                "SSH connection timed out",
+            ),
+            (
+                "ssh: connect to host 192.0.2.9 port 22: No route to host",
+                "SSH network is unreachable",
+            ),
+            (
+                "ssh: Could not resolve hostname gpu-9: Name or service not known",
+                "SSH name resolution failed",
+            ),
+            (
+                "Timeout, server gpu-9 not responding.",
+                "SSH transport stopped responding",
+            ),
+            (
+                "Host key verification failed.",
+                "SSH host key is not trusted",
+            ),
+            (
+                "@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @",
+                "SSH host key changed",
+            ),
+            (
+                "user@192.0.2.9: Permission denied (publickey).",
+                "SSH authentication failed",
+            ),
+            ("something the client has never said before", "SSH connection failed"),
+        )
+        for stderr, expected in cases:
+            with self.subTest(stderr=stderr.splitlines()[0]):
+                message = _safe_ssh_failure(stderr)
+                self.assertEqual(message, expected)
+                self.assertNotIn("192.0.2.9", message)
+                self.assertNotIn("user@", message)
 
     @patch("mocop.probe.time.monotonic", side_effect=(0.0, 1.0, 2.0))
     @patch("mocop.probe._run_bounded_process")
