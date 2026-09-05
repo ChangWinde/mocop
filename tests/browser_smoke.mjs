@@ -2294,17 +2294,17 @@ try {
     // Mark the real record as already loaded so the per-second snapshot
     // renders cannot start a competing fetch that would supersede the
     // failing request this test observes.
-    view.gpuHistoryKey = server.host + "|" + gpu.uuid + "|" + (server.lastSuccessAt || "");
+    gpuHistoryLoader.state.key = server.host + "|" + gpu.uuid + "|" + (server.lastSuccessAt || "");
     for (
       let attempt = 0;
-      attempt < 80 && (!view.gpuHistoryError || view.gpuHistoryLoading);
+      attempt < 80 && (!gpuHistoryLoader.state.error || gpuHistoryLoader.state.loading);
       attempt += 1
     ) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    const errorFlag = view.gpuHistoryError;
-    const retryScheduled = view.gpuHistoryRetryTimer != null;
-    const retryDelayMs = view.gpuHistoryRetryDelayMs;
+    const errorFlag = gpuHistoryLoader.state.error;
+    const retryScheduled = gpuHistoryLoader.state.retryTimer != null;
+    const retryDelayMs = gpuHistoryLoader.state.retryDelayMs;
     // Re-render synchronously so the DOM reads cannot race the per-second
     // snapshot renders that may refetch the real history.
     renderGpuHistory();
@@ -2313,7 +2313,7 @@ try {
     document.querySelector("#gpu-detail-dialog").close();
     // The dialog close event is dispatched from a queued task.
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const cleanedUp = view.gpuHistoryRetryTimer == null
+    const cleanedUp = gpuHistoryLoader.state.retryTimer == null
       && view.gpuTaskRowCache.size === 0
       && document.querySelector("#gpu-task-list").children.length === 0
       && document.querySelector("#gpu-history-grid").children.length === 0;

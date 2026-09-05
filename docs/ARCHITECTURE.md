@@ -342,6 +342,7 @@ by `tests/<leaf>_test.mjs`:
 |---|---|
 | `dashboard-auth.js` | capability ingestion, fragment scrubbing, tab-scoped retention, the token prompt |
 | `format.js` | pure numeric, memory, rate, and relative-time formatting; SSE chunk normalization |
+| `keyed-loader.js` | bounded-backoff loading of one keyed resource: single flight, success-confirmed keys, one 4–30 s retry timer, stale-response rejection |
 | `api-contracts.js` | payload contracts: bounded normalizers for snapshot, incidents, inventory, collector, maintenance, group, and topology responses that throw on anything malformed |
 | `process-search.js` | NFKC term normalization, bounded process/GPU matching, ranking and memory ordering |
 | `gpu-tasks.js` | entry point, environment, footprint, and per-card summary projections of a GPU process |

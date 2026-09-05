@@ -200,15 +200,6 @@ const view = {
   serverOrder: preferences.serverOrder,
   query: "",
   lastEventAt: 0,
-  history: null,
-  historyKey: "",
-  historyRequest: 0,
-  historyLoading: false,
-  historyError: false,
-  historyFetchKey: null,
-  historyRetryTimer: null,
-  historyRetryKey: "",
-  historyRetryDelayMs: 0,
   trendRenderKey: "",
   renderFrame: null,
   expandedHosts: new Set(),
@@ -241,16 +232,7 @@ const view = {
   draggedHost: null,
   suppressServerClick: false,
   selectedGpu: null,
-  gpuHistory: null,
-  gpuHistoryKey: "",
   gpuHistoryRenderKey: "",
-  gpuHistoryFetchKey: null,
-  gpuHistoryRequest: 0,
-  gpuHistoryLoading: false,
-  gpuHistoryError: false,
-  gpuHistoryRetryTimer: null,
-  gpuHistoryRetryKey: "",
-  gpuHistoryRetryDelayMs: 0,
   gpuTaskQuery: "",
   gpuTaskIdentityFilter: "all",
   gpuTaskFeedbackTimer: null,
@@ -2033,11 +2015,7 @@ function selectHost(host) {
   view.selectedHost = host;
   const fragment = host === "all" ? window.location.pathname : `#${encodeURIComponent(host)}`;
   window.history.replaceState(null, "", fragment);
-  view.history = null;
-  view.historyKey = "";
-  view.historyRequest += 1;
-  view.historyLoading = host !== "all";
-  view.historyError = false;
+  historyLoader.reset({ loading: host !== "all" });
   view.trendRenderKey = "";
   render();
   syncHistory();
@@ -3130,8 +3108,7 @@ function normalizeSelection() {
   if (view.selectedHost === "all" || !view.snapshot) return;
   if (view.snapshot.servers.some((server) => server.host === view.selectedHost)) return;
   view.selectedHost = "all";
-  view.history = null;
-  view.historyKey = "";
+  historyLoader.reset();
   window.history.replaceState(null, "", window.location.pathname);
 }
 
@@ -4374,12 +4351,12 @@ function renderTrends() {
     return;
   }
   elements.trendPanel.hidden = false;
-  const points = view.history?.points || [];
+  const points = historyLoader.state.value?.points || [];
   const latestPoint = points.at(-1)?.observedAt || "none";
-  const renderKey = `${view.selectedHost}:${view.historyLoading}:${view.historyError}:${points.length}:${latestPoint}`;
+  const renderKey = `${view.selectedHost}:${historyLoader.state.loading}:${historyLoader.state.error}:${points.length}:${latestPoint}`;
   if (renderKey === view.trendRenderKey) return;
   view.trendRenderKey = renderKey;
-  if (view.historyLoading && !view.history) {
+  if (historyLoader.state.loading && !historyLoader.state.value) {
     elements.trendRange.textContent = "正在读取历史";
     elements.trendGrid.replaceChildren(create("div", "trend-empty", "正在收集和加载趋势样本…"));
     return;
@@ -4389,7 +4366,7 @@ function renderTrends() {
     elements.trendGrid.replaceChildren(create(
       "div",
       "trend-empty",
-      view.historyError ? "历史读取失败，稍后自动重试" : "首次成功采集后将显示趋势",
+      historyLoader.state.error ? "历史读取失败，稍后自动重试" : "首次成功采集后将显示趋势",
     ));
     return;
   }
@@ -4406,55 +4383,26 @@ function renderTrends() {
   elements.trendGrid.replaceChildren(...cards);
 }
 
-async function syncHistory() {
+// Host trend history for the selected server, keyed on lastSuccessAt: only a
+// successful sample can add points, so failed probes never trigger refetches.
+const historyLoader = globalThis.MocopKeyedLoader.create({
+  load: async (key) => {
+    const host = key.split(":")[0];
+    const response = await fetch(`/api/history?host=${encodeURIComponent(host)}&limit=120`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const history = await response.json();
+    // The selection moved while this was in flight: keep whatever is shown.
+    return view.selectedHost === history.host ? history : undefined;
+  },
+  retry: () => syncHistory(),
+  onSettled: () => renderTrends(),
+});
+
+function syncHistory() {
   if (!view.snapshot || view.selectedHost === "all") return;
   const server = view.snapshot.servers.find((item) => item.host === view.selectedHost);
   if (!server) return;
-  const key = `${server.host}:${server.lastSuccessAt || "pending"}`;
-  // The key is confirmed only after a successful load, so a failed request
-  // stays retryable; the single backoff timer owns retries for a failed key
-  // even when lastSuccessAt never advances (offline node).
-  if (key === view.historyKey || key === view.historyFetchKey) return;
-  if (view.historyRetryTimer != null) {
-    if (key === view.historyRetryKey) return;
-    clearTimeout(view.historyRetryTimer);
-    view.historyRetryTimer = null;
-    view.historyRetryKey = "";
-  }
-  view.historyFetchKey = key;
-  view.historyLoading = true;
-  renderTrends();
-  const request = ++view.historyRequest;
-  try {
-    const response = await fetch(`/api/history?host=${encodeURIComponent(server.host)}&limit=120`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const history = await response.json();
-    if (request !== view.historyRequest || view.selectedHost !== history.host) return;
-    view.history = history;
-    view.historyKey = key;
-    view.historyError = false;
-    view.historyRetryDelayMs = 0;
-  } catch (_error) {
-    if (request !== view.historyRequest) return;
-    // Existing trend samples stay on screen through transient fetch failures.
-    view.historyError = true;
-    view.historyRetryDelayMs = Math.min(
-      30_000,
-      Math.max(4_000, view.historyRetryDelayMs * 2),
-    );
-    view.historyRetryKey = key;
-    view.historyRetryTimer = setTimeout(() => {
-      view.historyRetryTimer = null;
-      view.historyRetryKey = "";
-      syncHistory();
-    }, view.historyRetryDelayMs);
-  } finally {
-    if (view.historyFetchKey === key) view.historyFetchKey = null;
-    if (request === view.historyRequest) {
-      view.historyLoading = false;
-      renderTrends();
-    }
-  }
+  historyLoader.request(`${server.host}:${server.lastSuccessAt || "pending"}`);
 }
 
 function renderDisks(system) {
@@ -4958,17 +4906,17 @@ function selectedGpuRecord() {
 }
 
 function renderGpuHistory() {
-  const points = view.gpuHistory?.points || [];
+  const points = gpuHistoryLoader.state.value?.points || [];
   // Mirror renderTrends: the cards and timeline only change when the fetched
   // history does, not on every snapshot that arrives while the dialog is open.
-  const eventCount = view.gpuHistory?.processEvents?.length ?? 0;
+  const eventCount = gpuHistoryLoader.state.value?.processEvents?.length ?? 0;
   const renderKey = [
-    view.gpuHistoryKey, view.gpuHistoryLoading, view.gpuHistoryError,
+    gpuHistoryLoader.state.key, gpuHistoryLoader.state.loading, gpuHistoryLoader.state.error,
     points.length, points.at(-1)?.observedAt || "none", eventCount,
   ].join(":");
   if (renderKey === view.gpuHistoryRenderKey) return;
   view.gpuHistoryRenderKey = renderKey;
-  if (view.gpuHistoryLoading && !view.gpuHistory) {
+  if (gpuHistoryLoader.state.loading && !gpuHistoryLoader.state.value) {
     elements.gpuHistoryRange.textContent = "正在读取";
     elements.gpuHistoryGrid.replaceChildren(
       create("div", "gpu-history-empty", "正在加载单卡历史…"),
@@ -4976,7 +4924,7 @@ function renderGpuHistory() {
     elements.gpuProcessTimeline.replaceChildren();
     return;
   }
-  elements.gpuHistoryRange.textContent = view.gpuHistoryError && !points.length
+  elements.gpuHistoryRange.textContent = gpuHistoryLoader.state.error && !points.length
     ? "读取失败" : historyDuration(points);
   if (!points.length) {
     // A failed request must read as a failure, not as "no samples yet";
@@ -4985,7 +4933,7 @@ function renderGpuHistory() {
       create(
         "div",
         "gpu-history-empty",
-        view.gpuHistoryError ? "历史读取失败，稍后重试" : "完成两次成功采集后显示趋势",
+        gpuHistoryLoader.state.error ? "历史读取失败，稍后重试" : "完成两次成功采集后显示趋势",
       ),
     );
   } else {
@@ -5000,14 +4948,14 @@ function renderGpuHistory() {
       trendCard("功耗", points, (point) => optionalMetric(point, "powerDrawW"), (value) => `${format(value, 1)} W`, "#5de0a0"),
     );
   }
-  const events = Array.isArray(view.gpuHistory?.processEvents)
-    ? view.gpuHistory.processEvents.slice().reverse() : [];
+  const events = Array.isArray(gpuHistoryLoader.state.value?.processEvents)
+    ? gpuHistoryLoader.state.value.processEvents.slice().reverse() : [];
   if (!events.length) {
     elements.gpuProcessTimeline.replaceChildren(
       create(
         "div",
         "gpu-history-empty",
-        view.gpuHistoryError && !view.gpuHistory
+        gpuHistoryLoader.state.error && !gpuHistoryLoader.state.value
           ? "历史读取失败，稍后重试" : "暂未记录到进程进入或退出",
       ),
     );
@@ -5027,62 +4975,27 @@ function renderGpuHistory() {
   }));
 }
 
-function clearGpuHistoryRetry() {
-  if (view.gpuHistoryRetryTimer != null) clearTimeout(view.gpuHistoryRetryTimer);
-  view.gpuHistoryRetryTimer = null;
-  view.gpuHistoryRetryKey = "";
-}
 
-async function syncGpuHistory(record) {
-  if (!record || !elements.gpuDetailDialog.open) return;
-  const gpuId = String(record.gpu.uuid || `index:${record.gpu.index}`);
-  // Keyed on lastSuccessAt: only a successful sample can add history points,
-  // so failed probe attempts no longer trigger refetches. The key is
-  // confirmed only after a successful load, keeping failures retryable
-  // through the single backoff timer (mirrors syncHistory).
-  const key = `${record.server.host}|${gpuId}|${record.server.lastSuccessAt || ""}`;
-  if (key === view.gpuHistoryKey || key === view.gpuHistoryFetchKey) return;
-  if (view.gpuHistoryRetryTimer != null) {
-    if (key === view.gpuHistoryRetryKey) return;
-    clearGpuHistoryRetry();
-  }
-  view.gpuHistoryFetchKey = key;
-  view.gpuHistoryLoading = true;
-  const request = ++view.gpuHistoryRequest;
-  renderGpuHistory();
-  try {
+// Per-GPU history and process timeline for the open detail dialog, keyed on
+// the host's lastSuccessAt exactly like the host trend loader.
+const gpuHistoryLoader = globalThis.MocopKeyedLoader.create({
+  load: async (key) => {
+    const [host, gpuId] = key.split("|");
     const response = await fetch(
-      `/api/gpu-history?host=${encodeURIComponent(record.server.host)}&gpu=${encodeURIComponent(gpuId)}&limit=120`,
+      `/api/gpu-history?host=${encodeURIComponent(host)}&gpu=${encodeURIComponent(gpuId)}&limit=120`,
     );
     const history = await response.json();
     if (!response.ok) throw new Error(history.error || "GPU history unavailable");
-    if (request !== view.gpuHistoryRequest) return;
-    view.gpuHistory = history;
-    view.gpuHistoryKey = key;
-    view.gpuHistoryError = false;
-    view.gpuHistoryRetryDelayMs = 0;
-  } catch (_error) {
-    if (request !== view.gpuHistoryRequest) return;
-    // Existing samples stay on screen; the bounded backoff owns retries for
-    // this same dialog and key.
-    view.gpuHistoryError = true;
-    view.gpuHistoryRetryDelayMs = Math.min(
-      30_000,
-      Math.max(4_000, view.gpuHistoryRetryDelayMs * 2),
-    );
-    view.gpuHistoryRetryKey = key;
-    view.gpuHistoryRetryTimer = setTimeout(() => {
-      view.gpuHistoryRetryTimer = null;
-      view.gpuHistoryRetryKey = "";
-      syncGpuHistory(selectedGpuRecord());
-    }, view.gpuHistoryRetryDelayMs);
-  } finally {
-    if (view.gpuHistoryFetchKey === key) view.gpuHistoryFetchKey = null;
-    if (request === view.gpuHistoryRequest) {
-      view.gpuHistoryLoading = false;
-      renderGpuHistory();
-    }
-  }
+    return history;
+  },
+  retry: () => syncGpuHistory(selectedGpuRecord()),
+  onSettled: () => renderGpuHistory(),
+});
+
+function syncGpuHistory(record) {
+  if (!record || !elements.gpuDetailDialog.open) return;
+  const gpuId = String(record.gpu.uuid || `index:${record.gpu.index}`);
+  gpuHistoryLoader.request(`${record.server.host}|${gpuId}|${record.server.lastSuccessAt || ""}`);
 }
 
 function syncGpuTaskIdentityFilters(processes) {
@@ -5317,14 +5230,8 @@ function openGpuDetail(server, gpu, { processQuery = "", processKey = "" } = {})
   view.gpuTaskIdentityFilter = "all";
   view.selectedProcessKey = String(processKey);
   elements.gpuTaskSearch.value = view.gpuTaskQuery;
-  view.gpuHistory = null;
-  view.gpuHistoryKey = "";
+  gpuHistoryLoader.reset();
   view.gpuHistoryRenderKey = "";
-  view.gpuHistoryFetchKey = null;
-  view.gpuHistoryError = false;
-  view.gpuHistoryRetryDelayMs = 0;
-  clearGpuHistoryRetry();
-  view.gpuHistoryRequest += 1;
   openExclusiveDialog(elements.gpuDetailDialog);
   renderGpuDetail();
   const target = view.selectedProcessKey
@@ -6181,13 +6088,8 @@ elements.gpuDetailDialog.addEventListener("close", () => {
   elements.gpuTaskFeedback.className = "gpu-task-feedback";
   // Nothing polls a closed dialog, and the cached rows / history DOM would
   // only keep stale nodes (and their per-second duration scans) alive.
-  clearGpuHistoryRetry();
-  view.gpuHistory = null;
-  view.gpuHistoryKey = "";
+  gpuHistoryLoader.reset();
   view.gpuHistoryRenderKey = "";
-  view.gpuHistoryFetchKey = null;
-  view.gpuHistoryError = false;
-  view.gpuHistoryRetryDelayMs = 0;
   view.gpuTaskRowCache.clear();
   elements.gpuTaskList.replaceChildren();
   elements.gpuHistoryGrid.replaceChildren();

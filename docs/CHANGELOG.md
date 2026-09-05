@@ -58,8 +58,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 - The dashboard's payload normalizers (snapshot and incidents envelopes,
   inventory, collector settings, maintenance windows, host groups, topology)
   moved from `app.js` into the `api-contracts.js` leaf, which now has its own
-  Node contract test covering every accepted shape and rejection; the
-  `app.js` ceiling ratcheted down to 6,525 lines.
+  Node contract test covering every accepted shape and rejection. The host
+  trend and per-GPU history loaders, previously two copies of the same
+  bounded-backoff state machine spread over sixteen `view` fields, now share
+  the `keyed-loader.js` leaf, whose retry, single-flight, and stale-response
+  rules are tested with fake timers; selecting another host now also drops a
+  pending history retry. The `app.js` ceiling ratcheted down to 6,450 lines.
 - Every HTTP server instance now requires the Bearer capability: the
   unauthenticated server mode that only tests used is gone, `GET /api/meta`
   no longer reports the constant `authenticationRequired` flag, and the

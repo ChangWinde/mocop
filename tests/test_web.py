@@ -654,6 +654,7 @@ class WebTests(unittest.TestCase):
         self.assertIn('src="/capacity-match.js"', body)
         self.assertIn('src="/format.js"', body)
         self.assertIn('src="/api-contracts.js"', body)
+        self.assertIn('src="/keyed-loader.js"', body)
         self.assertIn('src="/csv-export.js"', body)
         self.assertIn('src="/update-pill.js"', body)
         self.assertIn('id="update-pill"', body)
