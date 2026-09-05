@@ -53,6 +53,11 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/ssh_failures.py": 125,
     "src/mocop/config.py": 350,
     "src/mocop/config_loader.py": 1_300,
+    "src/mocop/persistence.py": 1_325,
+    "src/mocop/doctor.py": 985,
+    "src/mocop/__main__.py": 950,
+    "src/mocop/incidents.py": 875,
+    "src/mocop/notifications.py": 860,
 }
 
 

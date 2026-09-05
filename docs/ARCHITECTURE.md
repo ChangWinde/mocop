@@ -337,8 +337,8 @@ in [ADR-0001](adr/0001-repository-layout.md).
 
 ## Maintainability boundary
 
-Large orchestration modules have executable line ceilings; the ceilings are a
-ratchet, not a target. A change that would cross one extracts a coherent leaf and
+Every module above roughly 800 lines has an executable line ceiling; the
+ceilings are a ratchet, not a target. A change that would cross one extracts a coherent leaf and
 lowers the ceiling instead of increasing it. Browser leaves remain dependency-free
 classic scripts loaded before `app.js`, expose one frozen namespace/factory, and
 consume the authenticated snapshot rather than creating a second API or state

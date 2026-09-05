@@ -26,6 +26,10 @@ All notable changes are documented here. This project follows Semantic Versionin
   generic batch-mode check; unclassified failures keep the generic guidance.
   The dashboard's dialog guidance moved from `incident-text.js` into its own
   leaf, `diagnosis-text.js`.
+- Every module above roughly 800 lines now sits under the line-budget
+  ratchet (`persistence.py`, `doctor.py`, `__main__.py`, `incidents.py`, and
+  `notifications.py` join it), so growth anywhere in the core has to come
+  with an extraction.
 
 ### Added
 
