@@ -150,6 +150,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- `mocop service install` could not verify a service publishing the complete
+  `/api/meta` manifest: the installer's liveness probe rejected any manifest
+  longer than 4 KiB, so every install of this release rolled back with
+  `SERVICE_UNHEALTHY`. The cap is now 64 KiB and a test pins the real manifest
+  under it with headroom. The verification window also grew from 8 to 60
+  seconds, because the service restores its retained history before binding
+  and a 476 MB history measured 9–18 s on a loaded host.
 - The capacity-watch notification and title marker now fire while the tab is
   in the background. They were evaluated inside the `requestAnimationFrame`
   render, which browsers pause for hidden documents, so the alert the feature

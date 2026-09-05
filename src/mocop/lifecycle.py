@@ -31,6 +31,13 @@ SERVICE_NAME = "mocop.service"
 ACCESS_TOKEN_NAME = "access-token"
 CommandRunner = Callable[[tuple[str, ...]], int]
 _MAX_UNIT_BYTES = 1_048_576
+# The installer's liveness probe reads the public manifest; the complete
+# document is a few KiB, so anything near this cap is not a Mocop listener.
+META_MAX_BYTES = 65_536
+# Restoring a history at the 512 MiB persistence cap measured 9–18 s on a
+# loaded host before the listener bound; a crash loop is still reported once
+# this window closes.
+HEALTH_WAIT_SECONDS = 60.0
 _UnitBackup = tuple[str, bytes | str | None, int]
 
 
@@ -561,7 +568,7 @@ class UserServiceManager:
         host: str,
         port: int,
         *,
-        timeout_seconds: float = 8.0,
+        timeout_seconds: float = HEALTH_WAIT_SECONDS,
         poll_interval_seconds: float = 0.2,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -578,6 +585,10 @@ class UserServiceManager:
         unauthenticated request that must be rejected proves the listener is a
         Mocop instance enforcing authentication and also catches a service
         that started without a readable token (which would answer 200).
+
+        The service restores its retained history before it binds, so the
+        listener may appear well after the unit is active; the default window
+        covers a history at the persistence size cap on a loaded host.
         """
         connect_host = (
             "127.0.0.1" if host == "0.0.0.0" else "::1" if host == "::" else host
@@ -596,8 +607,8 @@ class UserServiceManager:
                     "/api/meta",
                 )
                 response = connection.getresponse()
-                payload = response.read(4097)
-                if response.status == 200 and len(payload) <= 4096:
+                payload = response.read(META_MAX_BYTES + 1)
+                if response.status == 200 and len(payload) <= META_MAX_BYTES:
                     meta = json.loads(payload)
                     if isinstance(meta, dict) and meta.get("apiVersion") == "2":
                         connection.request("GET", "/api/snapshot")

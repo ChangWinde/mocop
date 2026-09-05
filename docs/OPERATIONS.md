@@ -107,7 +107,9 @@ against the only copy of production state.
 3. Run `mocop service install`. Installation captures the prior unit and enabled/
    active state, regenerates the unit for the active interpreter and config,
    restarts it, and rolls that service state back if installation fails before
-   verification.
+   verification. Verification waits up to 60 seconds for the listener: the
+   service restores its retained history before it binds, and a history at the
+   512 MiB persistence cap takes on the order of ten seconds on a loaded host.
 4. Verify `service status`, public health/readiness, one authenticated snapshot,
    and the journal. Confirm `startedAt` changed and the expected host count is
    present. If persistence is enabled, open a history view and check the snapshot's
