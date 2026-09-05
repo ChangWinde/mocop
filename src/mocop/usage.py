@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
-from .models import GpuProcess
+from .models import GpuProcess, epoch_seconds
 
 # Usage is intentionally conservative: a longer sample gap is not classified
 # as measured GPU activity.  This bound is independent of the *current* poll
@@ -69,15 +69,6 @@ class _OwnerUsage:
     kinds: dict[str, int] = field(default_factory=dict)
 
 
-def _epoch_seconds(value: object) -> float | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
 def _iso(moment: datetime) -> str:
     return moment.isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -117,7 +108,7 @@ def _intervals(
         intervals.append(_Interval(clipped_start, clipped_end, owner, kind))
 
     for event in events:
-        observed = _epoch_seconds(event.observed_at)
+        observed = epoch_seconds(event.observed_at)
         if observed is None:
             dropped += 1
             continue
@@ -156,7 +147,7 @@ def _intervals(
         if process_key in open_processes:
             continue
         workload_dict = process.workload.to_dict() if process.workload else None
-        anchored_start = _epoch_seconds(process.first_seen_at)
+        anchored_start = epoch_seconds(process.first_seen_at)
         if anchored_start is None:
             dropped += 1
             continue
@@ -277,7 +268,7 @@ def aggregate_usage(
         point_epochs: list[float] = []
         point_idle: list[bool | None] = []
         for observed_at, utilization in utilization_by_gpu.get(key, ()):
-            epoch = _epoch_seconds(observed_at)
+            epoch = epoch_seconds(observed_at)
             if epoch is None:
                 continue
             point_epochs.append(epoch)
