@@ -1180,10 +1180,14 @@ authentication and without the marker header.
    failure, empty inventory, and "no successful sample yet".
 3. `GET /api/snapshot` — check `collectorError`, then per host: `status`,
    `stale`, `consecutiveFailures`, `nextRetryAt`, `transportRetried`,
-   `message`.
+   `message`. Branch on `message` by exact string — it is one of the
+   *Failure messages* (also published as `serverMessages` in
+   `GET /api/meta`), and several hosts sharing `SSH jump host could not
+   reach the target` point at the bastion, not the nodes.
 4. `GET /api/incidents` — work through `active` in order (it is sorted
    actionable-first, critical-first); each item ships a `diagnosis` with
-   evidence and next steps.
+   evidence and next steps, and a connectivity item's first step follows
+   from its classified `detail`.
 5. Remember `stale: true` means "not online now, showing last-known data" —
    don't read `system`/`gpus` of a stale host as current.
 

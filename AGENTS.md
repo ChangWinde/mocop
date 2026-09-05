@@ -58,7 +58,11 @@ enforce it. Record every user-visible change under `[Unreleased]` in
 ## Operating a deployment
 
 - `GET /api/meta` (public) describes every route, tier, query and body
-  schema, and error code; a `403` tells you where the capability lives.
+  schema, error code, and the `servers[].message` vocabulary; a `403` tells
+  you where the capability lives.
+- Webhook receivers implement the contract under
+  [Webhook deliveries](docs/API.md#webhook-deliveries): signed JSON per
+  actionable incident transition, `eventId` as the idempotency key.
 - On the monitor host, `mocop api PATH` performs any public or authenticated
   GET with the listener and capability taken from the configuration.
 - `mocop config check --json`, `mocop doctor --json`, and every lifecycle
