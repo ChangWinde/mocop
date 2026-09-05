@@ -2779,6 +2779,32 @@ class UsageRollupTests(unittest.TestCase):
         self.assertEqual(owner["owner"], "dora")
         self.assertEqual(owner["gpuSeconds"], 60.0)
 
+    def test_usage_keeps_occupancy_of_a_gpu_that_fell_off_the_bus(self) -> None:
+        # A device that vanishes from an online host (XID fault, bus drop)
+        # takes its process table with it. The occupancy observed up to the
+        # last process sample is confirmed data and must be closed there, the
+        # same way a failed process query closes it, instead of becoming an
+        # unanchorable start that the rollup has to drop.
+        store = self._store()
+        process = GpuProcess(
+            13, "train.py", 300, WorkloadMetadata(kind="process", owner="erin")
+        )
+        self._apply(store, "2026-08-14T01:00:00Z", ())
+        self._apply(store, "2026-08-14T01:00:30Z", (process,))
+        self._apply(store, "2026-08-14T01:01:00Z", (process,))
+        store.apply(
+            ProbeResult("gpu-1", "online", 1, (), observed_at="2026-08-14T01:01:30Z")
+        )
+
+        usage = store.usage(1, 50)
+        self.assertEqual(usage["droppedRecords"], 0)
+        (owner,) = usage["owners"]
+        self.assertEqual(owner["owner"], "erin")
+        self.assertEqual(owner["gpuSeconds"], 30.0)
+        # The closing transition is bookkeeping, not an observed stop.
+        events = store.gpu_history("gpu-1", "GPU-1", 10)["processEvents"]
+        self.assertEqual([e["event"] for e in events], ["started"])
+
     def test_usage_drops_unmatched_stops_instead_of_using_process_start(self) -> None:
         record = {
             "observedAt": "2026-08-14T01:30:00Z",

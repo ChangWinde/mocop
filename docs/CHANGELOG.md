@@ -2,6 +2,64 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- The startup `VACUUM` that returns expired pages is best-effort: when it
+  cannot run (typically a full disk, since it needs temporary space up to the
+  file's size) the service starts anyway, reclaims what the bounded online
+  path can, and leaves the condition to the persistence status it already
+  reports, instead of refusing to start over it.
+- A GPU that vanishes from an online host (an XID fault or a bus drop takes
+  the device out of `nvidia-smi`) now closes its confirmed process occupancy
+  at the last process sample, the way a failed process query already did.
+  The rollup previously had to drop that occupancy as an unanchorable start,
+  undercounting the owner and raising `droppedRecords`.
+
+### Changed
+
+- A connectivity incident's `diagnosis.nextSteps` (and the dashboard's
+  incident dialog) now open with the step that follows from the failure
+  classification — check the jump host's forwarding, the node's `sshd`
+  load or a ban, `known_hosts`, `authorized_keys`, DNS, routing — ahead of the
+  generic batch-mode check; unclassified failures keep the generic guidance.
+  The dashboard's dialog guidance moved from `incident-text.js` into its own
+  leaf, `diagnosis-text.js`.
+- Every module above roughly 800 lines now sits under the line-budget
+  ratchet (`persistence.py`, `doctor.py`, `__main__.py`, `incidents.py`, and
+  `notifications.py` join it), so growth anywhere in the core has to come
+  with an extraction.
+
+### Added
+
+- Two SSH failures that a fleet behind a bastion sees often now have their own
+  sanitized classification instead of the generic `SSH connection failed`:
+  `SSH jump host could not reach the target` (the `ProxyJump`/`ProxyCommand`
+  host refused or could not open the forward) and `SSH connection closed
+  during key exchange` (the peer closed or reset the connection before the
+  banner or key exchange completed). A live deployment had shown the generic
+  message for three hosts across 180 consecutive probes; the root cause was
+  the jump host every time.
+- `servers[].message` is a published vocabulary: `GET /api/meta` lists every
+  string it can hold as `serverMessages` (exact strings plus the two prefixes
+  that end in an exit status), the API reference tabulates each with its
+  meaning, and the repository test that already kept the probe and the
+  dashboard translations aligned now holds the manifest and the reference
+  table to the same set. The SSH failure classification and the stale-multiplex
+  retry rules moved from `probe.py` into `ssh_failures.py`, the module that
+  owns that vocabulary's emit sites.
+- The API reference specifies the webhook receiver contract — request headers,
+  the HMAC-SHA256 signature over the raw body, the JSON body with its `event`
+  and `correlation` shapes, the test delivery marker, and the retry, throttle,
+  and suppression rules — and a repository test keeps the documented example
+  body's keys equal to what the delivery code sends.
+- The self-update worker's `uv` install path — the one a `uv tool install`
+  deployment takes, since those environments have no `pip` — and every
+  refusal of the update state machine are under test (`updates.py` coverage
+  76% → 90%), and a governance test proves every routed dashboard asset is
+  shipped by the wheel's package-data globs.
+
 ## [0.12.0] - 2026-09-06
 
 ### Added

@@ -19,6 +19,7 @@ from .config import (
     MAINTENANCE_REASON_MAX_LENGTH,
 )
 from .metrics import OPENMETRICS_CONTENT_TYPE
+from .models import SERVER_MESSAGE_PREFIXES, SERVER_MESSAGES
 
 API_VERSION = "2"
 API_SCHEMA_VERSION = 1
@@ -271,6 +272,11 @@ WRITE_REQUIREMENTS = {
 
 def describe_error_codes() -> list[dict[str, object]]:
     return [{"code": code, "status": status} for code, status in ERROR_CODES]
+
+
+def describe_server_messages() -> dict[str, list[str]]:
+    """The stable ``servers[].message`` vocabulary agents may branch on."""
+    return {"exact": list(SERVER_MESSAGES), "prefixes": list(SERVER_MESSAGE_PREFIXES)}
 
 
 def describe_endpoints() -> list[dict[str, object]]:

@@ -61,6 +61,7 @@ interfaces without a runtime plugin registry.
 | `inventory.py` | typed dashboard configuration projection and private atomic mutation |
 | `metrics.py` | deterministic OpenMetrics 1.0 snapshot exposition |
 | `capacity.py` | server-side twin of the browser capacity matcher behind `GET /api/capacity` |
+| `ssh_failures.py` | sanitized classification of OpenSSH client failures into the published `servers[].message` vocabulary, and the stale-multiplex retry decision |
 | `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
 | `remote_script.py` | the fixed `MONITOR_V8` collection script: protocol constants, template, rendering |
 | `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |
@@ -336,8 +337,8 @@ in [ADR-0001](adr/0001-repository-layout.md).
 
 ## Maintainability boundary
 
-Large orchestration modules have executable line ceilings; the ceilings are a
-ratchet, not a target. A change that would cross one extracts a coherent leaf and
+Every module above roughly 800 lines has an executable line ceiling; the
+ceilings are a ratchet, not a target. A change that would cross one extracts a coherent leaf and
 lowers the ceiling instead of increasing it. Browser leaves remain dependency-free
 classic scripts loaded before `app.js`, expose one frozen namespace/factory, and
 consume the authenticated snapshot rather than creating a second API or state
@@ -349,7 +350,8 @@ by `tests/<leaf>_test.mjs`:
 |---|---|
 | `dashboard-auth.js` | capability ingestion, fragment scrubbing, tab-scoped retention, the token prompt |
 | `format.js` | pure numeric, memory, rate, and relative-time formatting; SSE chunk normalization |
-| `incident-text.js` | the operator-facing wording for collector failures (the exact probe vocabulary, kept aligned by a repository test), incident conditions, state labels, evidence, and diagnosis guidance |
+| `incident-text.js` | the operator-facing wording for collector failures (the exact probe vocabulary, kept aligned by a repository test), incident conditions, state labels, and evidence |
+| `diagnosis-text.js` | the incident dialog's guidance: fixed title, summary, and next steps per condition category, with the first connectivity step chosen by the failure classification |
 | `keyed-loader.js` | bounded-backoff loading of one keyed resource: single flight, success-confirmed keys, one 4–30 s retry timer, stale-response rejection |
 | `api-contracts.js` | payload contracts: bounded normalizers for snapshot, incidents, inventory, collector, maintenance, group, and topology responses that throw on anything malformed |
 | `process-search.js` | NFKC term normalization, bounded process/GPU matching, ranking and memory ordering |

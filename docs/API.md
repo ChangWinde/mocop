@@ -454,7 +454,7 @@ Timestamp disambiguation (frequently confused):
 | `status` | string | `pending`, `online`, `unreachable`, `no_nvidia_smi`, or `error`. |
 | `polling` | bool | A probe is currently in flight for this host. |
 | `latencyMs` | int \| null | Duration of the most recent probe attempt. |
-| `message` | string \| null | Redacted failure classification or GPU-query warning. |
+| `message` | string \| null | Redacted failure classification or GPU-query warning; one of the stable strings under *Failure messages* below. |
 | `lastAttemptAt` | timestamp \| null | Most recent probe attempt. |
 | `lastSuccessAt` | timestamp \| null | Most recent successful probe. |
 | `nextRetryAt` | timestamp \| null | Backoff deadline while failing. |
@@ -467,6 +467,42 @@ Timestamp disambiguation (frequently confused):
 | `group` | string \| null | Configured host group. |
 | `displayName` | string \| null | Optional human-readable label; `host` remains the identity. |
 | `incidents` | object | `{active, critical, actionable, actionableCritical}` counts for this host. |
+
+#### Failure messages
+
+`servers[].message` never carries SSH output, addresses, users, or paths. It
+is one of these stable strings, so automation may branch on it. `GET /api/meta`
+publishes the same list as `serverMessages` (`exact` strings and the two
+`prefixes` that end in an exit status), the dashboard translates exactly this
+set, and a repository test keeps the probe, the manifest, the dashboard, and
+this table aligned.
+
+| `message` | Meaning |
+|---|---|
+| `SSH host key changed` | The remote host key differs from `known_hosts`. |
+| `SSH host key is not trusted` | No `known_hosts` entry; the probe never accepts new keys. |
+| `SSH authentication failed` | Permission denied or authentication failure. |
+| `SSH name resolution failed` | The alias's hostname does not resolve. |
+| `SSH jump host could not reach the target` | The `ProxyJump`/`ProxyCommand` host refused or could not open the forward to the target. |
+| `SSH connection was refused` | TCP connection refused. |
+| `SSH connection timed out` | TCP connection timed out. |
+| `SSH network is unreachable` | No route to host or network unreachable. |
+| `SSH connection closed during key exchange` | The peer closed or reset the connection before the banner or key exchange completed (overloaded `sshd`, `MaxStartups`, a ban, or a proxy). |
+| `SSH transport stopped responding` | Keepalives went unanswered. |
+| `SSH connection failed` | Any other SSH client failure. |
+| `SSH produced no output before the collection timeout` | The session opened but the remote never wrote a byte. |
+| `Local SSH client could not be started` | The `ssh` binary could not be executed. |
+| `Local resource collection timed out` | The local (`local_host`) collection exceeded its timeout. |
+| `Local resource probe could not be started` | The local collection shell could not be started. |
+| `Local resource output was not recognized` / `Remote resource output was not recognized` | The fixed script's output did not parse. |
+| `Local resource output exceeded the configured limit` / `Remote resource output exceeded the configured limit` | Output exceeded `max_output_bytes`. |
+| `Local resource query failed (exit N)` / `Remote resource query failed (exit N)` | The fixed script exited non-zero; `N` is its exit status. |
+| `Remote collection stalled after partial output` | Output started and then stopped before the timeout. |
+| `Resource collection cancelled` | The probe was cancelled by a shutdown or configuration change. |
+| `Unexpected collector error` | An internal collector failure; details are in the service journal. |
+| `nvidia-smi is unavailable` | The host is online (`no_nvidia_smi`) but has no `nvidia-smi`. |
+| `nvidia-smi query failed` | `nvidia-smi` exited non-zero; system metrics remain valid. |
+| `nvidia-smi output was malformed` | `nvidia-smi` output did not parse; system metrics remain valid. |
 
 `servers[].system` (snake_case): `hostname`, `uptime_seconds`, `load_1m`,
 `load_5m`, `load_15m`, `cpu_cores`, `cpu_usage_pct` (null on first sample),
@@ -748,6 +784,8 @@ document lives for the running release.
     "dashboardMarker": "X-Monitor-Request: dashboard"
   },
   "errorCodes": [{"code": "INVALID_SCHEMA", "status": 400}],
+  "serverMessages": {"exact": ["SSH connection timed out"],
+                     "prefixes": ["Remote resource query failed"]},
   "endpoints": [
     {"method": "GET", "path": "/api/history", "access": "authenticated",
      "query": {"host": {"type": "alias", "required": true},
@@ -787,9 +825,10 @@ configuration file is dashboard-writable (file metadata only, no SSH);
 `updateSupported` is true when a self-update manager is wired. `write` names
 the Bearer header, `application/json` content type, same-origin Host/Origin
 rule, and the `X-Monitor-Request: dashboard` marker. `errorCodes` lists every
-stable `code` with its HTTP status. The manifest is generated from the same
-table the request handlers validate against, so it cannot describe a
-parameter the server does not accept.
+stable `code` with its HTTP status, and `serverMessages` every string a
+`servers[].message` can hold (see *Failure messages* under the snapshot). The
+manifest is generated from the same tables the request handlers validate
+against, so it cannot describe a parameter the server does not accept.
 
 ### GET /healthz
 
@@ -1045,6 +1084,88 @@ enabled, the service is not supervised, no newer release exists, or an
 update is already running. A failed attempt reports `state: "failed"`
 without restarting, and the running version keeps serving.
 
+## Webhook deliveries
+
+Mocop is also an HTTP client: every configured webhook (see the
+[configuration reference](CONFIGURATION.md#webhooks-and-secrets)) receives one
+`POST` per actionable incident transition whose `state` is in the endpoint's
+`events`. This is the contract a receiver implements.
+
+**Request.** `POST <url>` over HTTPS to the URL named by `url_env`, with
+`Content-Type: application/json; charset=utf-8`, `User-Agent: mocop/<release>`,
+`X-Mocop-Event-ID: <eventId>`, and — when `secret_env` is configured —
+`X-Mocop-Signature: sha256=<hex>`, the HMAC-SHA256 of the exact request body
+bytes keyed with the secret. Verify the signature over the raw bytes before
+parsing; the body is compact JSON with sorted keys, so re-serializing a parsed
+object does not reproduce it.
+
+**Body.**
+
+```json
+{
+  "schemaVersion": 1,
+  "source": "mocop",
+  "sourceVersion": "<release>",
+  "event": {
+    "eventId": 4821,
+    "host": "gpu-node-01",
+    "conditionKey": "connectivity",
+    "category": "connectivity",
+    "resource": "SSH",
+    "severity": "critical",
+    "value": null,
+    "threshold": null,
+    "observedAt": "2026-09-05T10:00:05Z",
+    "detail": "SSH connection timed out",
+    "groupKey": null,
+    "state": "opened"
+  },
+  "correlation": {
+    "correlationKey": "configured-path:bastion",
+    "kind": "configured_shared_path",
+    "anchor": "bastion",
+    "hosts": ["gpu-node-01", "gpu-node-02"],
+    "severity": "critical",
+    "confidence": "possible",
+    "detail": "2 unreachable nodes share the configured path through bastion"
+  }
+}
+```
+
+`event` is the same object `GET /api/incidents` lists under `events[]`:
+`state` is `opened`, `resolved`, `escalated`, or `deescalated`; `observedAt` is
+the transition time; `detail` for connectivity and GPU-availability conditions
+is one of the *Failure messages* strings; `value`/`threshold` are numbers or
+`null`; `groupKey` names a shared device group when the condition has one.
+`correlation` is present only when the transition belongs to a possible
+shared-path group (`GET /api/incidents` `correlations[]`). `POST
+/api/notifications/test` sends the same body with `"test": true` and
+`eventId` `0`, which receivers should acknowledge and discard.
+
+**Delivery rules.**
+
+- Success is any `2xx`. `408`, `425`, `429`, and every `5xx`, plus DNS, TLS,
+  and connection failures, are retried up to `max_attempts` with exponential
+  backoff from `retry_base_seconds` (about ±15 % jitter); any other status
+  ends the attempt as a permanent failure. Consecutive deliveries to one
+  endpoint are at least `min_interval_seconds` apart.
+- `eventId` is the idempotency key: a retry resends the identical body and
+  signature, so a receiver that recorded the id can drop the duplicate.
+- Only actionable transitions are sent (`actionable` under
+  `GET /api/incidents`); an event that is silenced or acknowledged while it
+  waits is withdrawn, counted as suppressed, not as dropped. When an endpoint
+  subscribes to both `opened` and `resolved`, a `resolved` for a condition
+  whose `opened` it never received (for example one that began inside a
+  maintenance window) is suppressed for the same reason.
+- Redirects are never followed (a `3xx` is a permanent failure), the resolved
+  address must be globally routable unless `allow_private_networks` is set
+  (loopback, link-local, private, and reserved ranges are refused), and the
+  secret appears nowhere but in the signature.
+
+`GET /api/snapshot` reports each endpoint's `healthy`, `queuedDeliveries`,
+`deliveredEvents`, `droppedDeliveries`, `suppressedDeliveries`, `lastError`,
+`lastAttemptAt`, and `lastSuccessAt` under `notifications.endpoints[]`.
+
 ## Agent playbooks
 
 Recommended request sequences for common automation tasks. All of them
@@ -1059,10 +1180,14 @@ authentication and without the marker header.
    failure, empty inventory, and "no successful sample yet".
 3. `GET /api/snapshot` — check `collectorError`, then per host: `status`,
    `stale`, `consecutiveFailures`, `nextRetryAt`, `transportRetried`,
-   `message`.
+   `message`. Branch on `message` by exact string — it is one of the
+   *Failure messages* (also published as `serverMessages` in
+   `GET /api/meta`), and several hosts sharing `SSH jump host could not
+   reach the target` point at the bastion, not the nodes.
 4. `GET /api/incidents` — work through `active` in order (it is sorted
    actionable-first, critical-first); each item ships a `diagnosis` with
-   evidence and next steps.
+   evidence and next steps, and a connectivity item's first step follows
+   from its classified `detail`.
 5. Remember `stale: true` means "not online now, showing last-known data" —
    don't read `system`/`gpus` of a stale host as current.
 

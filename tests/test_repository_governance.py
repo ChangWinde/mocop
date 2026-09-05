@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import re
 import subprocess
 import unittest
@@ -30,7 +31,8 @@ TRACKED_ROOT_ENTRIES = {
 # rule. Extract a coherent leaf and lower the budget instead of raising it.
 CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/static/app.js": 5_850,
-    "src/mocop/static/incident-text.js": 200,
+    "src/mocop/static/incident-text.js": 150,
+    "src/mocop/static/diagnosis-text.js": 110,
     "src/mocop/static/attention.js": 175,
     "src/mocop/static/background-asset.js": 350,
     "src/mocop/static/api-contracts.js": 300,
@@ -43,14 +45,20 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/static/gpu-tasks.js": 175,
     "src/mocop/static/process-search.js": 225,
     "src/mocop/static/update-pill.js": 175,
-    "src/mocop/service.py": 2_425,
+    "src/mocop/service.py": 2_423,
     "src/mocop/usage.py": 350,
     "src/mocop/web.py": 1_300,
     "src/mocop/api_manifest.py": 300,
     "src/mocop/api_schema.py": 275,
-    "src/mocop/probe.py": 1_540,
-    "src/mocop/config.py": 375,
+    "src/mocop/probe.py": 1_475,
+    "src/mocop/ssh_failures.py": 125,
+    "src/mocop/config.py": 350,
     "src/mocop/config_loader.py": 1_300,
+    "src/mocop/persistence.py": 1_325,
+    "src/mocop/doctor.py": 985,
+    "src/mocop/__main__.py": 950,
+    "src/mocop/incidents.py": 875,
+    "src/mocop/notifications.py": 860,
 }
 
 
@@ -93,6 +101,26 @@ class RepositoryGovernanceTests(unittest.TestCase):
                     / f"{leaf.removesuffix('.js').replace('-', '_')}_test.mjs"
                 )
                 self.assertTrue(contract.is_file(), f"{leaf} has no Node contract test")
+
+    def test_every_routed_asset_ships_in_the_wheel(self) -> None:
+        # The route table serves files from the installed package, so a routed
+        # file that the package-data globs do not cover would 404 in every
+        # installation while passing the source tree's tests.
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        declared = re.search(
+            r'^"mocop\.static" = \[([^\]]*)\]', pyproject, re.MULTILINE
+        )
+        assert declared is not None, "pyproject.toml declares mocop.static package data"
+        globs = re.findall(r'"([^"]+)"', declared.group(1))
+        self.assertTrue(globs)
+        static = ROOT / "src" / "mocop" / "static"
+        for filename, _type in STATIC_ROUTES.values():
+            with self.subTest(asset=filename):
+                self.assertTrue((static / filename).is_file())
+                self.assertTrue(
+                    any(fnmatch.fnmatch(filename, pattern) for pattern in globs),
+                    f"{filename} is routed but no package-data glob ships it",
+                )
 
     def test_core_module_line_budgets_do_not_regress(self) -> None:
         for relative, budget in CORE_MODULE_LINE_BUDGETS.items():

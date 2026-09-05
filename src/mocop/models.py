@@ -7,6 +7,44 @@ from typing import Literal
 ProbeStatus = Literal["online", "unreachable", "error"]
 WorkloadKind = Literal["process", "slurm", "kubernetes", "docker", "podman"]
 
+# Every string the probe or collector places in a result's ``message``. The
+# strings are stable and free of remote detail, so automation branches on
+# them: ``GET /api/meta`` publishes this list, the dashboard translates it,
+# and ``docs/API.md`` tabulates it. A repository test walks the probe's and
+# collector's emit sites to keep the list complete and free of dead entries.
+SERVER_MESSAGES: tuple[str, ...] = (
+    "SSH host key changed",
+    "SSH host key is not trusted",
+    "SSH authentication failed",
+    "SSH name resolution failed",
+    "SSH jump host could not reach the target",
+    "SSH connection was refused",
+    "SSH connection timed out",
+    "SSH network is unreachable",
+    "SSH connection closed during key exchange",
+    "SSH transport stopped responding",
+    "SSH connection failed",
+    "SSH produced no output before the collection timeout",
+    "Local SSH client could not be started",
+    "Local resource collection timed out",
+    "Local resource probe could not be started",
+    "Local resource output was not recognized",
+    "Remote resource output was not recognized",
+    "Local resource output exceeded the configured limit",
+    "Remote resource output exceeded the configured limit",
+    "Remote collection stalled after partial output",
+    "Resource collection cancelled",
+    "Unexpected collector error",
+    "nvidia-smi is unavailable",
+    "nvidia-smi query failed",
+    "nvidia-smi output was malformed",
+)
+# Messages that end in the fixed script's exit status, e.g. "(exit 137)".
+SERVER_MESSAGE_PREFIXES: tuple[str, ...] = (
+    "Local resource query failed",
+    "Remote resource query failed",
+)
+
 
 def utc_now() -> str:
     return (

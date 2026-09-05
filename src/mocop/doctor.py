@@ -32,10 +32,10 @@ from .probe import (
     _BoundedProcessResult,
     _ProcessCancelled,
     _ProcessOutputLimitExceeded,
-    _safe_ssh_failure,
     ssh_environment,
 )
 from .remote_script import _COMBINED_QUERY_FIELDS
+from .ssh_failures import classify_ssh_failure
 from .ssh_topology import resolve_ssh_options
 
 _SSH_G_TIMEOUT_SECONDS = 10
@@ -216,7 +216,7 @@ def _remote_failure_reason(completed: _BoundedProcessResult) -> str | None:
     if completed.returncode == 0:
         return None
     if completed.returncode == 255:
-        return _safe_ssh_failure(completed.stderr)
+        return classify_ssh_failure(completed.stderr)
     return f"remote command failed (exit {completed.returncode})"
 
 

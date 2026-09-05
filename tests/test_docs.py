@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -140,6 +141,74 @@ class ConfigurationReferenceDriftTests(unittest.TestCase):
             self.assertIn("CONFIGURATION.md", content)
             self.assertIn("OPERATIONS.md", content)
             self.assertIn("SQLite", content)
+
+
+class WebhookContractDriftTests(unittest.TestCase):
+    """The receiver contract in docs/API.md names every key and header the
+    delivery code actually sends."""
+
+    def setUp(self) -> None:
+        reference = (ROOT / "docs" / "API.md").read_text(encoding="utf-8")
+        start = reference.index("## Webhook deliveries")
+        self.section = reference[start : reference.index("\n## ", start + 1)]
+        self.literals = set(re.findall(r"`([^`\n]+)`", self.section))
+
+    def test_payload_keys_headers_and_status_fields_are_documented(self) -> None:
+        from mocop.incidents import IncidentCondition, IncidentEvent
+        from mocop.notifications import NotificationEnvelope, _WebhookWorker
+
+        event = IncidentEvent(
+            event_id=42,
+            host="gpu-01",
+            condition=IncidentCondition(
+                key="connectivity",
+                category="connectivity",
+                resource="SSH",
+                severity="critical",
+                value=None,
+                threshold=None,
+                observed_at="2026-08-10T00:00:00Z",
+                detail="SSH connection timed out",
+            ),
+            state="opened",
+            observed_at="2026-08-10T00:00:00Z",
+        )
+        correlation = {
+            "correlationKey": "configured-path:bastion",
+            "kind": "configured_shared_path",
+            "anchor": "bastion",
+            "hosts": ["gpu-01", "gpu-02"],
+            "severity": "critical",
+            "confidence": "possible",
+            "detail": "2 unreachable nodes share the configured path through bastion",
+        }
+        payload = json.loads(
+            _WebhookWorker._payload(
+                NotificationEnvelope(event, correlation, is_test=True)
+            )
+        )
+        example = json.loads(
+            re.search(r"```json\n(\{.*?\n\})\n```", self.section, re.S).group(1)
+        )
+        # The example body has the same top-level, event, and correlation keys
+        # as a real delivery (the test marker aside), so a receiver written
+        # from it parses real traffic.
+        self.assertEqual(set(example), set(payload) - {"test"})
+        self.assertEqual(set(example["event"]), set(payload["event"]))
+        self.assertEqual(set(example["correlation"]), set(payload["correlation"]))
+        for text in ("X-Mocop-Event-ID", "X-Mocop-Signature: sha256=", '"test": true'):
+            self.assertIn(text, self.section)
+        for key in (
+            "healthy",
+            "queuedDeliveries",
+            "deliveredEvents",
+            "droppedDeliveries",
+            "suppressedDeliveries",
+            "lastError",
+            "lastAttemptAt",
+            "lastSuccessAt",
+        ):
+            self.assertIn(key, self.literals)
 
 
 class DocumentationTests(unittest.TestCase):

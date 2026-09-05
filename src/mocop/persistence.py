@@ -250,6 +250,22 @@ def _reclaim_free_pages(connection: sqlite3.Connection, page_budget: int) -> int
     return reclaimed
 
 
+def _rebuild_file(connection: sqlite3.Connection) -> None:
+    """Return every free page at startup, preferring a one-statement rebuild.
+
+    ``VACUUM`` needs temporary space up to the file's size; on a full disk or
+    a file another process holds it fails without touching the database, so
+    the online reclaim runs instead and the cap check judges what remains.
+    A refusal to start would take collection and the dashboard down over a
+    condition the persistence status already reports.
+    """
+    try:
+        connection.execute("VACUUM")
+    except sqlite3.OperationalError:
+        with connection:
+            _reclaim_free_pages(connection, _VACUUM_PAGES_PER_PRUNE)
+
+
 def _partition_keys(
     connection: sqlite3.Connection, table: str, columns: tuple[str, ...]
 ) -> list[tuple[str, ...]]:
@@ -782,7 +798,7 @@ class SqliteTelemetryPersistence:
                 # interpreter steps the incremental pragma; it runs outside a
                 # transaction and only when there is something to reclaim.
                 if _free_pages(connection) > 0:
-                    connection.execute("VACUUM")
+                    _rebuild_file(connection)
                 with connection:
                     page_size = int(
                         connection.execute("PRAGMA page_size").fetchone()[0]

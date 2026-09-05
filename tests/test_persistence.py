@@ -507,6 +507,66 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         lowered = PersistenceConfig(enabled=True, retention_hours=1, max_bytes=262_144)
         SqliteTelemetryPersistence(lowered, self.path).close()
 
+    def test_startup_falls_back_to_online_reclaim_when_vacuum_cannot_run(self) -> None:
+        # VACUUM needs temporary disk space; when it fails the service must
+        # still start, reclaim what the bounded online path can, and report
+        # nothing worse than the persistence status it already exposes.
+        config = PersistenceConfig(enabled=True, retention_hours=1, max_bytes=8_388_608)
+        store = SqliteTelemetryPersistence(config, self.path)
+        stale_at = utc_text(datetime.now(timezone.utc) - timedelta(hours=2))
+        for index in range(400):
+            store.record_gpu_telemetry(
+                "gpu-01",
+                (),
+                (
+                    {
+                        **process_event(stale_at, "GPU-1", index),
+                        "workload": {"padding": "x" * 2048, "index": index},
+                    },
+                ),
+            )
+        self.assertTrue(store.flush())
+        store.close()
+
+        refused: list[str] = []
+
+        class FullDisk:
+            """A connection whose VACUUM fails the way a full disk makes it fail."""
+
+            def __init__(self, inner: sqlite3.Connection) -> None:
+                self._inner = inner
+
+            def execute(self, sql: str, *args):
+                if sql.strip().upper() == "VACUUM":
+                    refused.append(sql)
+                    raise sqlite3.OperationalError("database or disk is full")
+                return self._inner.execute(sql, *args)
+
+            def __getattr__(self, name: str):
+                return getattr(self._inner, name)
+
+            def __enter__(self):
+                return self._inner.__enter__()
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+        real_connect = sqlite3.connect
+        with mock.patch(
+            "mocop.persistence.sqlite3.connect",
+            lambda *args, **kwargs: FullDisk(real_connect(*args, **kwargs)),
+        ):
+            reopened = SqliteTelemetryPersistence(config, self.path)
+        self.addCleanup(reopened.close)
+        with closing(sqlite3.connect(self.path)) as connection:
+            freelist = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+            rows = int(
+                connection.execute("SELECT count(*) FROM process_events").fetchone()[0]
+            )
+        self.assertEqual(refused, ["VACUUM"])
+        self.assertEqual(rows, 0)
+        self.assertLess(freelist, 400, "the online reclaim still returned pages")
+
     def test_runtime_prune_reclaims_pages_in_bounded_steps(self) -> None:
         config = PersistenceConfig(enabled=True, retention_hours=1, max_bytes=8_388_608)
         store = SqliteTelemetryPersistence(config, self.path)

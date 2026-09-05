@@ -35,6 +35,11 @@ from .remote_script import (
     _SUPPORTED_PROTOCOL_VERSIONS,
     _remote_script,
 )
+from .ssh_failures import (
+    classify_ssh_failure,
+    force_fresh_transport,
+    is_retryable_ssh_transport_failure,
+)
 from .workloads import parse_workload_records
 
 _UNAVAILABLE = {"", "n/a", "[n/a]", "not supported", "[not supported]"}
@@ -1016,81 +1021,6 @@ def _gpu_activity(gpus: tuple[GpuMetrics, ...], thresholds: ThresholdConfig) -> 
     return False
 
 
-def _safe_ssh_failure(stderr: str) -> str:
-    """Classify SSH failures without exposing remote addresses, users or paths."""
-    normalized = stderr.lower()
-    categories = (
-        (("remote host identification has changed",), "SSH host key changed"),
-        (("host key verification failed",), "SSH host key is not trusted"),
-        (("permission denied", "authentication failed"), "SSH authentication failed"),
-        (
-            ("could not resolve hostname", "name or service not known"),
-            "SSH name resolution failed",
-        ),
-        (("connection refused",), "SSH connection was refused"),
-        (("connection timed out", "operation timed out"), "SSH connection timed out"),
-        (("no route to host", "network is unreachable"), "SSH network is unreachable"),
-        (
-            ("timeout, server", "server not responding"),
-            "SSH transport stopped responding",
-        ),
-    )
-    for needles, message in categories:
-        if any(needle in normalized for needle in needles):
-            return message
-    return "SSH connection failed"
-
-
-def _is_retryable_ssh_transport_failure(stderr: str) -> bool:
-    """Recognize stale multiplexed sessions without retrying hard failures.
-
-    A healthy master can still emit ``mux_client_request_session`` or
-    ``control socket connect`` while refusing a session or denying access to
-    its socket; those are not dead transports, so an authentication, host-key
-    or refusal signal vetoes the retry even when a mux marker is present.
-    """
-    normalized = stderr.lower()
-    hard_failures = (
-        "permission denied",
-        "authentication failed",
-        "session open refused",
-        "administratively prohibited",
-        "host key verification failed",
-        "remote host identification has changed",
-        "open failed",
-    )
-    if any(marker in normalized for marker in hard_failures):
-        return False
-    stale_markers = (
-        "mux_client_request_session",
-        "control socket connect",
-        "master is dead",
-        "broken pipe",
-        "read from master failed",
-    )
-    return any(marker in normalized for marker in stale_markers)
-
-
-def _force_fresh_transport(command: list[str]) -> list[str]:
-    """Return the command with any shared ControlMaster bypassed.
-
-    The reused mux socket may point at a dead master whose keepalive this
-    invocation cannot influence, so the recovery attempt opens its own
-    connection instead of re-binding to the same stale control path.
-    """
-    if "--" not in command:
-        return list(command)
-    separator = command.index("--")
-    return [
-        *command[:separator],
-        "-o",
-        "ControlMaster=no",
-        "-o",
-        "ControlPath=none",
-        *command[separator:],
-    ]
-
-
 class OpenSshLinuxResourceProbe:
     """Collect Linux and NVIDIA metrics locally or through one fixed SSH script."""
 
@@ -1428,13 +1358,13 @@ class OpenSshLinuxResourceProbe:
             if (
                 not local
                 and completed.returncode == 255
-                and _is_retryable_ssh_transport_failure(completed.stderr)
+                and is_retryable_ssh_transport_failure(completed.stderr)
             ):
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
                     transport_retries = 1
                     completed = _run_bounded_process(
-                        _force_fresh_transport(command),
+                        force_fresh_transport(command),
                         input_text=script,
                         timeout_seconds=remaining,
                         max_output_bytes=config.max_output_bytes,
@@ -1477,7 +1407,7 @@ class OpenSshLinuxResourceProbe:
         if not local and completed.returncode == 255:
             return failure(
                 "unreachable",
-                _safe_ssh_failure(completed.stderr),
+                classify_ssh_failure(completed.stderr),
                 at=observed_monotonic,
             )
         if completed.returncode != 0:

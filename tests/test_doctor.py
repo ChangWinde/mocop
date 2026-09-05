@@ -1213,6 +1213,46 @@ class DiagnosticsTests(unittest.TestCase):
             if item["label"] in ("current", "threshold")
         }
 
+    def test_connectivity_steps_follow_the_failure_classification(self) -> None:
+        # The classified detail selects the first next step; unclassified
+        # failures keep the generic checks. Every classified message is one the
+        # probe actually emits, and the list stays within the four-step bound.
+        from mocop.diagnostics import _CONNECTIVITY_STEPS
+        from mocop.models import SERVER_MESSAGES
+
+        self.assertLessEqual(set(_CONNECTIVITY_STEPS), set(SERVER_MESSAGES))
+        self.assertGreaterEqual(len(_CONNECTIVITY_STEPS), 10)
+        generic = diagnose_condition(
+            {"category": "connectivity", "resource": "SSH", "detail": None}, None
+        )["nextSteps"]
+        self.assertEqual(len(generic), 2)
+        unknown = diagnose_condition(
+            {
+                "category": "connectivity",
+                "resource": "SSH",
+                "detail": "SSH connection failed",
+            },
+            None,
+        )["nextSteps"]
+        self.assertEqual(unknown, generic)
+        for message, step in _CONNECTIVITY_STEPS.items():
+            with self.subTest(message=message):
+                steps = diagnose_condition(
+                    {"category": "connectivity", "resource": "SSH", "detail": message},
+                    {"consecutiveFailures": 3, "lastSuccessAt": "2026-08-10T00:00:00Z"},
+                )["nextSteps"]
+                self.assertEqual(steps, [step, *generic])
+        jump = diagnose_condition(
+            {
+                "category": "connectivity",
+                "resource": "SSH",
+                "detail": "SSH jump host could not reach the target",
+            },
+            None,
+        )
+        self.assertIn("jump host", jump["nextSteps"][0])
+        self.assertIn("AllowTcpForwarding", jump["nextSteps"][0])
+
     def test_disk_evidence_reports_absolute_headroom(self) -> None:
         server = {
             "system": {
