@@ -24,13 +24,10 @@ from .api_manifest import (
     WRITE_BODY_LIMITS,
     WRITE_REQUIREMENTS,
     WRITE_SCHEMAS,
-    BodyError,
-    QueryError,
     describe_endpoints,
     describe_error_codes,
-    parse_query,
-    validate_body,
 )
+from .api_schema import BodyError, QueryError, parse_query, validate_body
 from .capacity import CapacityRequest, match_capacity
 from .config import (
     is_valid_host_group,
@@ -38,7 +35,12 @@ from .config import (
     is_valid_incident_condition_key,
     is_valid_maintenance_reason,
 )
-from .hostnames import normalize_web_hostname, trusted_web_policy
+from .hostnames import (
+    is_dashboard_read,
+    is_dashboard_write,
+    normalize_web_hostname,
+    trusted_web_policy,
+)
 from .inventory import (
     DashboardConfigController,
     InventoryError,
@@ -1008,68 +1010,14 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             code="UNTRUSTED_ORIGIN",
         )
 
-    def _has_trusted_host(self) -> bool:
-        """Require a Host header naming this server's own trusted hostnames.
-
-        A loopback bind alone does not stop DNS rebinding: an attacker domain
-        re-resolved to 127.0.0.1 makes the victim's browser send same-origin
-        requests here, but with the attacker's hostname in Host. Pinning Host
-        to the loopback/configured allowlist closes that path.
-        """
-        host_values = self.headers.get_all("Host") or []
-        if len(host_values) != 1:
-            return False
-        hostname = normalize_web_hostname(host_values[0], allow_port=True)
-        return (
-            hostname is not None and hostname in self.monitor_server.trusted_hostnames
-        )
-
     def _is_dashboard_request(self) -> bool:
-        if not self._has_trusted_host():
-            return False
-        if self.headers.get("X-Monitor-Request") != "dashboard":
-            return False
-        origin = self.headers.get("Origin")
-        if not origin:
-            return False
-        try:
-            parsed = urlsplit(origin)
-            _ = parsed.port
-        except ValueError:
-            return False
-        fetch_site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
-        return (
-            parsed.scheme in {"http", "https"}
-            and self._has_trusted_origin(parsed)
-            and parsed.username is None
-            and parsed.password is None
-            and parsed.path in {"", "/"}
-            and not parsed.query
-            and not parsed.fragment
-            and fetch_site in {"", "same-origin", "none"}
-        )
-
-    def _has_trusted_origin(self, origin: SplitResult) -> bool:
-        """Match an exact authority or one configured HTTPS subdomain suffix."""
-        hostname = normalize_web_hostname(origin.hostname)
-        if hostname is None:
-            return False
-        if hostname in self.monitor_server.trusted_hostnames:
-            return True
-        if origin.scheme != "https":
-            return False
-        return any(
-            hostname.endswith(f".{suffix}")
-            for suffix in self.monitor_server.trusted_origin_suffixes
+        server = self.monitor_server
+        return is_dashboard_write(
+            self.headers, server.trusted_hostnames, server.trusted_origin_suffixes
         )
 
     def _is_dashboard_read_request(self) -> bool:
-        fetch_site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
-        return (
-            self._has_trusted_host()
-            and self.headers.get("X-Monitor-Request") == "dashboard"
-            and fetch_site in {"", "same-origin", "none"}
-        )
+        return is_dashboard_read(self.headers, self.monitor_server.trusted_hostnames)
 
     def _require_dashboard_read(self) -> bool:
         """Enforce the reader tier; every manifested R route must call this."""

@@ -54,7 +54,7 @@ interfaces without a runtime plugin registry.
 | `config.py` | the configuration schema: limits, typed sections, and the alias/text validators the HTTP layer and configuration controller reuse |
 | `config_loader.py` | path resolution, bounded and private file reads, strict JSON decoding, and one parser per configuration section, run in a fixed order |
 | `privatefiles.py` | private lock and `0600` file primitives shared by the lifecycle and configuration controller |
-| `hostnames.py` | canonical Host/Origin hostname normalization and the trusted web policy |
+| `hostnames.py` | canonical Host/Origin hostname normalization, the trusted web policy, and the Host/marker/Origin/Fetch-Metadata guards for dashboard reads and writes |
 | `discovery_policy.py` | dependency-free SSH discovery policy parsing and bounds |
 | `discovery.py` | explicit inventory and optional OpenSSH alias discovery |
 | `ssh_topology.py` | the one bounded `ssh -G` option resolver (shared with the doctor), effective-route resolution, infrastructure classification, topology and grouping projection |
@@ -74,6 +74,7 @@ interfaces without a runtime plugin registry.
 | `persistence.py` | optional bounded asynchronous SQLite history |
 | `notifications.py` | HTTPS webhook validation, deduplication, throttling, and delivery |
 | `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
+| `api_schema.py` | query-parameter and body-field types with their JSON descriptions, and the two validators that turn a raw query or parsed body into accepted values with stable codes and the rejected field |
 | `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query and body schemas, body caps, error catalog; `/api/meta` publishes it and every GET query and POST body is validated through it |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
 | `client.py` | the local read-only client behind `mocop api`: listener from the configuration, capability from the private file, public and authenticated GETs only |
@@ -348,6 +349,7 @@ by `tests/<leaf>_test.mjs`:
 |---|---|
 | `dashboard-auth.js` | capability ingestion, fragment scrubbing, tab-scoped retention, the token prompt |
 | `format.js` | pure numeric, memory, rate, and relative-time formatting; SSE chunk normalization |
+| `incident-text.js` | the operator-facing wording for collector failures (the exact probe vocabulary, kept aligned by a repository test), incident conditions, state labels, evidence, and diagnosis guidance |
 | `keyed-loader.js` | bounded-backoff loading of one keyed resource: single flight, success-confirmed keys, one 4–30 s retry timer, stale-response rejection |
 | `api-contracts.js` | payload contracts: bounded normalizers for snapshot, incidents, inventory, collector, maintenance, group, and topology responses that throw on anything malformed |
 | `process-search.js` | NFKC term normalization, bounded process/GPU matching, ranking and memory ordering |

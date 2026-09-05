@@ -98,7 +98,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   one function per configuration section, run in the same order so every
   error message and its precedence are unchanged; `config.py` keeps the
   schema — limits, typed sections, validators — and ratchets from 1,550 to
-  375 lines.
+  375 lines. The same split applies to the HTTP contract: `api_schema.py`
+  owns the query and body field types and the two validators, `api_manifest.py`
+  the route tables built from them. The Host, marker, Origin, and Fetch
+  Metadata guards for dashboard reads and writes moved from the request
+  handler into `hostnames.py` beside the trust policy they enforce.
 - The dashboard's payload normalizers (snapshot and incidents envelopes,
   inventory, collector settings, maintenance windows, host groups, topology)
   moved from `app.js` into the `api-contracts.js` leaf, which now has its own
