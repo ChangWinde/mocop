@@ -61,6 +61,7 @@ interfaces without a runtime plugin registry.
 | `inventory.py` | typed dashboard configuration projection and private atomic mutation |
 | `metrics.py` | deterministic OpenMetrics 1.0 snapshot exposition |
 | `capacity.py` | server-side twin of the browser capacity matcher behind `GET /api/capacity` |
+| `ssh_failures.py` | sanitized classification of OpenSSH client failures into the published `servers[].message` vocabulary, and the stale-multiplex retry decision |
 | `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
 | `remote_script.py` | the fixed `MONITOR_V8` collection script: protocol constants, template, rendering |
 | `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |

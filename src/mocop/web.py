@@ -26,6 +26,7 @@ from .api_manifest import (
     WRITE_SCHEMAS,
     describe_endpoints,
     describe_error_codes,
+    describe_server_messages,
 )
 from .api_schema import BodyError, QueryError, parse_query, validate_body
 from .capacity import CapacityRequest, match_capacity
@@ -569,6 +570,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "conventions": FIELD_CONVENTIONS,
                 "write": WRITE_REQUIREMENTS,
                 "errorCodes": describe_error_codes(),
+                "serverMessages": describe_server_messages(),
                 "endpoints": describe_endpoints(),
             }
         )

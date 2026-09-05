@@ -15,7 +15,14 @@ from urllib.request import BaseHandler, Request, build_opener, install_opener, u
 from mocop import __version__
 from mocop.api_manifest import API_ROUTES, ERROR_CODES, QUERY_SCHEMAS, WRITE_SCHEMAS
 from mocop.inventory import InventoryRequestError
-from mocop.models import GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
+from mocop.models import (
+    SERVER_MESSAGE_PREFIXES,
+    SERVER_MESSAGES,
+    GpuMetrics,
+    GpuProcess,
+    ProbeResult,
+    SystemMetrics,
+)
 from mocop.service import StateStore
 from mocop.web import MonitorHttpServer, MonitorRequestHandler
 
@@ -883,6 +890,13 @@ class WebTests(unittest.TestCase):
         self.assertEqual(
             {entry["code"] for entry in meta["errorCodes"]},
             {code for code, _status in ERROR_CODES},
+        )
+        self.assertEqual(
+            meta["serverMessages"],
+            {"exact": list(SERVER_MESSAGES), "prefixes": list(SERVER_MESSAGE_PREFIXES)},
+        )
+        self.assertIn(
+            "SSH jump host could not reach the target", meta["serverMessages"]["exact"]
         )
         self.assertEqual(
             meta["documentation"],

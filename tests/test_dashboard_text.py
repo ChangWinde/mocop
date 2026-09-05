@@ -5,6 +5,8 @@ import re
 import unittest
 from pathlib import Path
 
+from mocop.models import SERVER_MESSAGE_PREFIXES, SERVER_MESSAGES
+
 ROOT = Path(__file__).resolve().parents[1]
 LEAF = ROOT / "src" / "mocop" / "static" / "incident-text.js"
 TRANSLATION = re.compile(r'^\s+"([^"]+)": "[^"]+",$', re.MULTILINE)
@@ -31,11 +33,10 @@ def _probe_failure_messages() -> tuple[set[str], set[str]]:
     """Every message the probe attaches to a result: exact ones and the
     literal heads of the f-string messages that carry an exit code.
 
-    Three emit sites exist: the ``failure(status, message)`` closure, the
-    ``_safe_ssh_failure`` classification table plus its fallback return, and
-    ``gpu_message`` assignments.
+    Three emit sites exist: the ``failure(status, message)`` closure and the
+    ``gpu_message`` assignments in ``probe.py``, and the ``classify_ssh_failure``
+    table plus its fallback return in ``ssh_failures.py``.
     """
-    tree = ast.parse((ROOT / "src" / "mocop" / "probe.py").read_text(encoding="utf-8"))
     exact: set[str] = set()
     prefixed: set[str] = set()
 
@@ -50,7 +51,15 @@ def _probe_failure_messages() -> tuple[set[str], set[str]]:
         elif (message := _literal(expression)) is not None:
             exact.add(message)
 
-    for node in ast.walk(tree):
+    modules = ("probe.py", "ssh_failures.py")
+    nodes = [
+        node
+        for name in modules
+        for node in ast.walk(
+            ast.parse((ROOT / "src" / "mocop" / name).read_text(encoding="utf-8"))
+        )
+    ]
+    for node in nodes:
         is_failure_call = (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -59,7 +68,7 @@ def _probe_failure_messages() -> tuple[set[str], set[str]]:
         if is_failure_call:
             for argument in node.args[1:]:
                 collect(argument)
-        if isinstance(node, ast.FunctionDef) and node.name == "_safe_ssh_failure":
+        if isinstance(node, ast.FunctionDef) and node.name == "classify_ssh_failure":
             for inner in ast.walk(node):
                 pair = (
                     isinstance(inner, ast.Tuple)
@@ -115,6 +124,21 @@ class DashboardFailureVocabularyTests(unittest.TestCase):
         for head in prefixed:
             self.assertTrue(any(head.startswith(prefix) for prefix in prefixes), head)
         for prefix in prefixes:
+            self.assertTrue(any(head.startswith(prefix) for head in prefixed), prefix)
+
+    def test_the_published_vocabulary_is_exactly_what_the_code_emits(self) -> None:
+        # models.SERVER_MESSAGES is what /api/meta publishes; it must list every
+        # message the emit sites can produce and nothing else, in a stable
+        # order without duplicates.
+        exact, prefixed = _probe_failure_messages()
+        exact |= _collector_failure_messages()
+        self.assertEqual(set(SERVER_MESSAGES), exact)
+        self.assertEqual(len(SERVER_MESSAGES), len(set(SERVER_MESSAGES)))
+        for head in prefixed:
+            self.assertTrue(
+                any(head.startswith(prefix) for prefix in SERVER_MESSAGE_PREFIXES), head
+            )
+        for prefix in SERVER_MESSAGE_PREFIXES:
             self.assertTrue(any(head.startswith(prefix) for head in prefixed), prefix)
 
     def test_the_api_reference_lists_every_failure_message(self) -> None:

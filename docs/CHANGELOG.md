@@ -22,10 +22,14 @@ All notable changes are documented here. This project follows Semantic Versionin
   banner or key exchange completed). A live deployment had shown the generic
   message for three hosts across 180 consecutive probes; the root cause was
   the jump host every time.
-- The API reference lists every `servers[].message` string with its meaning
-  as a stable, branchable vocabulary, and the repository test that already
-  kept the probe and the dashboard translations aligned now holds the
-  reference table to the same set.
+- `servers[].message` is a published vocabulary: `GET /api/meta` lists every
+  string it can hold as `serverMessages` (exact strings plus the two prefixes
+  that end in an exit status), the API reference tabulates each with its
+  meaning, and the repository test that already kept the probe and the
+  dashboard translations aligned now holds the manifest and the reference
+  table to the same set. The SSH failure classification and the stale-multiplex
+  retry rules moved from `probe.py` into `ssh_failures.py`, the module that
+  owns that vocabulary's emit sites.
 
 ## [0.12.0] - 2026-09-06
 

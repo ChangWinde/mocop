@@ -471,9 +471,11 @@ Timestamp disambiguation (frequently confused):
 #### Failure messages
 
 `servers[].message` never carries SSH output, addresses, users, or paths. It
-is one of these stable strings, so automation may branch on it; the dashboard
-translates exactly this set, and a repository test keeps the probe, the
-dashboard, and this table aligned.
+is one of these stable strings, so automation may branch on it. `GET /api/meta`
+publishes the same list as `serverMessages` (`exact` strings and the two
+`prefixes` that end in an exit status), the dashboard translates exactly this
+set, and a repository test keeps the probe, the manifest, the dashboard, and
+this table aligned.
 
 | `message` | Meaning |
 |---|---|
@@ -782,6 +784,8 @@ document lives for the running release.
     "dashboardMarker": "X-Monitor-Request: dashboard"
   },
   "errorCodes": [{"code": "INVALID_SCHEMA", "status": 400}],
+  "serverMessages": {"exact": ["SSH connection timed out"],
+                     "prefixes": ["Remote resource query failed"]},
   "endpoints": [
     {"method": "GET", "path": "/api/history", "access": "authenticated",
      "query": {"host": {"type": "alias", "required": true},
@@ -821,9 +825,10 @@ configuration file is dashboard-writable (file metadata only, no SSH);
 `updateSupported` is true when a self-update manager is wired. `write` names
 the Bearer header, `application/json` content type, same-origin Host/Origin
 rule, and the `X-Monitor-Request: dashboard` marker. `errorCodes` lists every
-stable `code` with its HTTP status. The manifest is generated from the same
-table the request handlers validate against, so it cannot describe a
-parameter the server does not accept.
+stable `code` with its HTTP status, and `serverMessages` every string a
+`servers[].message` can hold (see *Failure messages* under the snapshot). The
+manifest is generated from the same tables the request handlers validate
+against, so it cannot describe a parameter the server does not accept.
 
 ### GET /healthz
 

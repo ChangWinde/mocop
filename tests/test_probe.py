@@ -26,7 +26,6 @@ from mocop.probe import (
     _RawSystemSample,
     _remote_script,
     _run_bounded_process,
-    _safe_ssh_failure,
     parse_nvidia_combined_csv,
     parse_nvidia_health_csv,
     parse_nvidia_processes_csv,
@@ -34,6 +33,7 @@ from mocop.probe import (
     parse_workload_records,
 )
 from mocop.remote_script import _CONTAINER_IDENTITY_AWK
+from mocop.ssh_failures import classify_ssh_failure
 
 
 def parse_linux_resource_payload(
@@ -852,7 +852,7 @@ class ProbeTests(unittest.TestCase):
         )
         for stderr, expected in cases:
             with self.subTest(stderr=stderr.splitlines()[0]):
-                message = _safe_ssh_failure(stderr)
+                message = classify_ssh_failure(stderr)
                 self.assertEqual(message, expected)
                 self.assertNotIn("192.0.2.9", message)
                 self.assertNotIn("user@", message)
@@ -1338,7 +1338,7 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(result.status, "unreachable")
 
     def test_transport_retry_classification_excludes_hard_failures(self) -> None:
-        from mocop.probe import _is_retryable_ssh_transport_failure as retryable
+        from mocop.ssh_failures import is_retryable_ssh_transport_failure as retryable
 
         self.assertTrue(
             retryable("mux_client_request_session: read from master failed: pipe")
