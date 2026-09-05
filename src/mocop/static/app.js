@@ -502,6 +502,13 @@ function openExclusiveDialog(dialog) {
 const styleChoiceButtons = [...document.querySelectorAll("[data-style-choice]")];
 const accentChoiceButtons = [...document.querySelectorAll("[data-accent-choice]")];
 
+// Toggle buttons expose their state twice: visually and to assistive
+// technology.
+function setPressed(button, pressed) {
+  button.classList.toggle("active", pressed);
+  button.setAttribute("aria-pressed", String(pressed));
+}
+
 function create(tag, className, text) {
   const element = document.createElement(tag);
   if (className) element.className = className;
@@ -985,8 +992,7 @@ function syncPreferenceControls() {
   );
   document.querySelectorAll(".fleet-filter").forEach((button) => {
     const selected = button.dataset.serverFilter === view.serverFilter;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-pressed", String(selected));
+    setPressed(button, selected);
   });
   styleChoiceButtons.forEach((button) => {
     const selected = button.dataset.styleChoice === preferences.visualStyle;
@@ -2764,8 +2770,7 @@ function renderAttention() {
   document.querySelectorAll(".attention-filter").forEach((button) => {
     const count = counts[button.dataset.attentionFilter];
     const selected = button.dataset.attentionFilter === view.attentionFilter;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-pressed", String(selected));
+    setPressed(button, selected);
     button.disabled = count === 0;
     button.querySelector("span").textContent = count;
   });
@@ -4127,8 +4132,7 @@ function renderHeatmap() {
   });
   document.querySelectorAll(".heatmap-mode").forEach((button) => {
     const selected = button.dataset.heatMetric === view.heatMetric;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-pressed", String(selected));
+    setPressed(button, selected);
   });
   reconcileChildren(elements.heatmapGrid, [
     heatmapAxis(columns),
@@ -5008,8 +5012,7 @@ function syncGpuTaskIdentityFilters(processes) {
     const filter = button.dataset.gpuTaskFilter;
     const active = filter === view.gpuTaskIdentityFilter;
     button.textContent = `${labels[filter]} ${counts[filter]}`;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
+    setPressed(button, active);
   });
 }
 
@@ -5891,8 +5894,7 @@ document.querySelectorAll(".filter").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelectorAll(".filter").forEach((item) => {
       const selected = item === button;
-      item.classList.toggle("active", selected);
-      item.setAttribute("aria-pressed", String(selected));
+      setPressed(item, selected);
     });
     view.filter = button.dataset.filter;
     render();
@@ -6131,8 +6133,7 @@ const gpuTaskSortButtons = [
 function syncGpuTaskSortButtons() {
   gpuTaskSortButtons.forEach((button) => {
     const active = button.dataset.taskSort === preferences.gpuTaskSort;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
+    setPressed(button, active);
   });
 }
 

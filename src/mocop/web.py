@@ -193,15 +193,19 @@ class MonitorHttpServer(ThreadingHTTPServer):
         self.shutdown_event.set()
         super().server_close()
 
-    def _snapshot_cache(self, snapshot: dict[str, object]) -> tuple[bytes, bytes]:
-        persistence = snapshot.get("persistence", {})
-        notifications = snapshot.get("notifications", {})
-        key = (
+    @staticmethod
+    def _projection_key(snapshot: dict[str, object]) -> tuple[object, ...]:
+        # Version counters cover host and incident state; the two adapter
+        # status blocks change on their own and are small enough to repr.
+        return (
             snapshot.get("version"),
             snapshot.get("incidentVersion"),
-            repr(persistence),
-            repr(notifications),
+            repr(snapshot.get("persistence")),
+            repr(snapshot.get("notifications")),
         )
+
+    def _snapshot_cache(self, snapshot: dict[str, object]) -> tuple[bytes, bytes]:
+        key = self._projection_key(snapshot)
         with self._snapshot_cache_lock:
             if key != self._snapshot_cache_key:
                 payload = json.dumps(
@@ -223,12 +227,7 @@ class MonitorHttpServer(ThreadingHTTPServer):
         return self._snapshot_cache(snapshot)[1]
 
     def metrics_payload(self, snapshot: dict[str, object]) -> bytes:
-        key = (
-            snapshot.get("version"),
-            snapshot.get("incidentVersion"),
-            repr(snapshot.get("persistence")),
-            repr(snapshot.get("notifications")),
-        )
+        key = self._projection_key(snapshot)
         with self._snapshot_cache_lock:
             if key != self._metrics_cache_key:
                 self._metrics_cache_payload = render_openmetrics(snapshot)
