@@ -67,7 +67,11 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Workload record parsing moved from `probe.py` into a new `workloads.py`
   module, and the GPU task projections moved from `app.js` into the
   `gpu-tasks.js` leaf ([ADR-0021](adr/0021-incremental-module-boundaries.md));
-  both budgets ratcheted down.
+  both budgets ratcheted down. The per-owner GPU occupancy rollup behind
+  `GET /api/usage` moved from `StateStore` into a pure `usage.py` module that
+  takes a copied timeline and is unit-tested on its own; `service.py`
+  ratcheted from 2,725 to 2,425 lines. The test-only
+  `parse_linux_resource_payload` wrapper left `probe.py` for the test module.
 - The dashboard's payload normalizers (snapshot and incidents envelopes,
   inventory, collector settings, maintenance windows, host groups, topology)
   moved from `app.js` into the `api-contracts.js` leaf, which now has its own

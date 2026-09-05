@@ -65,6 +65,7 @@ interfaces without a runtime plugin registry.
 | `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |
 | `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
+| `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage` |
 | `models.py` | immutable resource result types |
 | `incidents.py` | condition evaluation, bounded transition history, and raw/actionable counts |
 | `correlation.py` | possible shared-path grouping without changing incident truth |

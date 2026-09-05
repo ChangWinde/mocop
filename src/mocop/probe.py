@@ -960,13 +960,6 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
     )
 
 
-def parse_linux_resource_payload(
-    payload: str,
-) -> tuple[_RawSystemSample, tuple[GpuMetrics, ...], str | None]:
-    parsed = _parse_resource_payload(payload)
-    return parsed.system, parsed.gpus, parsed.gpu_message
-
-
 @dataclass(frozen=True, slots=True)
 class _Baseline:
     observed_monotonic: float

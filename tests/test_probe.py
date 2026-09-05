@@ -20,11 +20,12 @@ from mocop.probe import (
     OpenSshLinuxResourceProbe,
     _ActiveProcessRegistry,
     _BoundedProcessResult,
+    _parse_resource_payload,
     _ProcessCancelled,
     _ProcessOutputLimitExceeded,
+    _RawSystemSample,
     _remote_script,
     _run_bounded_process,
-    parse_linux_resource_payload,
     parse_nvidia_combined_csv,
     parse_nvidia_health_csv,
     parse_nvidia_processes_csv,
@@ -32,6 +33,13 @@ from mocop.probe import (
     parse_workload_records,
 )
 from mocop.remote_script import _CONTAINER_IDENTITY_AWK
+
+
+def parse_linux_resource_payload(
+    payload: str,
+) -> tuple[_RawSystemSample, tuple[GpuMetrics, ...], str | None]:
+    parsed = _parse_resource_payload(payload)
+    return parsed.system, parsed.gpus, parsed.gpu_message
 
 
 def config() -> MonitorConfig:
