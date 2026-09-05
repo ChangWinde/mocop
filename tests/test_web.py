@@ -13,7 +13,7 @@ from urllib.error import HTTPError
 from urllib.request import BaseHandler, Request, build_opener, install_opener, urlopen
 
 from mocop import __version__
-from mocop.api_manifest import API_ROUTES, QUERY_SCHEMAS
+from mocop.api_manifest import API_ROUTES, ERROR_CODES, QUERY_SCHEMAS, WRITE_SCHEMAS
 from mocop.inventory import InventoryRequestError
 from mocop.models import GpuMetrics, GpuProcess, ProbeResult, SystemMetrics
 from mocop.service import StateStore
@@ -220,6 +220,9 @@ class _StubNotificationSink:
 
     def close(self, timeout_seconds=5.0):
         return None
+
+    def set_actionable_check(self, check):
+        del check
 
 
 class WebTests(unittest.TestCase):
@@ -856,7 +859,30 @@ class WebTests(unittest.TestCase):
                 "restartSupported": False,
                 "manualProbeSupported": True,
                 "configurationWriteSupported": True,
+                "updateSupported": False,
             },
+        )
+        self.assertEqual(
+            meta["conventions"],
+            {
+                "envelope": "camelCase",
+                "telemetry": "snake_case",
+                "incidentActionWrite": "camelCase",
+                "incidentActionStored": "snake_case",
+            },
+        )
+        self.assertEqual(
+            meta["write"],
+            {
+                "contentType": "application/json",
+                "authorization": "Bearer",
+                "sameOrigin": True,
+                "dashboardMarker": "X-Monitor-Request: dashboard",
+            },
+        )
+        self.assertEqual(
+            {entry["code"] for entry in meta["errorCodes"]},
+            {code for code, _status in ERROR_CODES},
         )
         self.assertEqual(
             meta["documentation"],
@@ -900,6 +926,32 @@ class WebTests(unittest.TestCase):
         self.assertEqual(
             by_path[("POST", "/api/settings/hosts")]["bodyLimitBytes"], 512
         )
+        self.assertEqual(
+            by_path[("POST", "/api/settings/hosts")]["body"],
+            {
+                "type": "object",
+                "exactKeys": True,
+                "fields": {
+                    "action": {
+                        "type": "enum",
+                        "required": True,
+                        "values": ["add", "remove"],
+                    },
+                    "host": {"type": "alias", "required": True},
+                },
+            },
+        )
+        self.assertEqual(
+            by_path[("POST", "/api/service/restart")]["body"],
+            {"type": "object", "empty": True},
+        )
+        self.assertFalse(
+            by_path[("POST", "/api/settings/collector")]["body"]["exactKeys"]
+        )
+        self.assertEqual(
+            {entry["path"] for entry in meta["endpoints"] if entry["method"] == "POST"},
+            set(WRITE_SCHEMAS),
+        )
         self.assertNotIn("query", by_path[("POST", "/api/settings/hosts")])
         response_types = {entry["responseType"] for entry in meta["endpoints"]}
         self.assertEqual(
@@ -933,6 +985,7 @@ class WebTests(unittest.TestCase):
                 "restartSupported": True,
                 "manualProbeSupported": False,
                 "configurationWriteSupported": False,
+                "updateSupported": False,
             },
         )
 
@@ -2062,8 +2115,9 @@ class WebTests(unittest.TestCase):
                 ("127.0.0.1", server.server_port), timeout=5
             )
             self.addCleanup(overflow.close)
-            rejected = self.read_until(overflow, b"\r\n\r\n")
+            rejected = self.read_until(overflow, b"CONNECTION_LIMIT")
             self.assertTrue(rejected.startswith(b"HTTP/1.1 503"), rejected)
+            self.assertIn(b'"code":"CONNECTION_LIMIT"', rejected)
 
     def test_server_close_terminates_live_event_streams(self) -> None:
         server, thread = serve_in_thread("127.0.0.1", 0, StateStore(5))

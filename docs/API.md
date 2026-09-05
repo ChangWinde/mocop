@@ -3,7 +3,7 @@
 This is the complete reference for Mocop's HTTP API. It is written for both
 human operators and automation ("agents"). A repository test
 (`tests/test_docs.py`) checks every route, method, and access tier below against
-the live manifest (`API_ROUTES` in `src/mocop/web.py`), checks that every
+the live manifest (`API_ROUTES` in `src/mocop/api_manifest.py`), checks that every
 documented error code exists, and a second test proves each manifested tier is
 the tier its handler enforces. Field-level examples are maintained by hand.
 
@@ -23,8 +23,10 @@ the tier its handler enforces. Field-level examples are maintained by hand.
   Deprecations and removals are announced in [CHANGELOG.md](CHANGELOG.md).
   No endpoint is currently deprecated.
 - **Self-description:** `GET /api/meta` returns the exact endpoint manifest
-  (method, path, access tier) plus capability flags, so an agent can discover
-  what this deployment supports before calling anything else.
+  (method, path, access tier, GET query schema, POST body schema and byte
+  cap), capability flags, field conventions, writer requirements, and the
+  error-code catalog, so an agent can discover what this deployment supports
+  before calling anything else.
 
 ## Base URL and transport conventions
 
@@ -37,8 +39,10 @@ the tier its handler enforces. Field-level examples are maintained by hand.
   timezones and no sub-second precision anywhere in the API.
 - **Caching:** JSON, SSE, and OpenMetrics responses are `Cache-Control:
   no-store`. Static dashboard assets (`/`, `/index.html`, `/app.js`,
-  `/styles.css`, `/favicon.svg`) are `no-cache` with a strong content
-  `ETag`; a matching `If-None-Match` yields `304 Not Modified`.
+  `/styles.css`, `/favicon.svg`) are   `no-cache` with a strong content
+  `ETag`; a matching `If-None-Match` yields `304 Not Modified`. Every path
+  listed in `STATIC_ROUTES` (`src/mocop/static_assets.py`) is cached this way,
+  including the dashboard leaf scripts.
 - `HEAD` is supported on every `GET` route except `GET /api/events`
   (the event stream answers `405` with `Allow: GET`).
 - A `GET`/`HEAD` request that declares a body is rejected with
@@ -46,7 +50,7 @@ the tier its handler enforces. Field-level examples are maintained by hand.
 - `OPTIONS` always answers `403 UNTRUSTED_ORIGIN`: the API intentionally has
   no cross-origin contract and never grants CORS permission.
 - **Connection bounds:** at most 64 concurrent connections (excess
-  connections receive a bare `503` with an empty body, not JSON) and at most
+  connections receive a canned JSON `503 CONNECTION_LIMIT`) and at most
   16 concurrent event-stream clients (the 17th receives a JSON `503`).
 - Unknown paths and wrong methods under the API family (`/api/...`,
   `/healthz`, `/readyz`, `/metrics`) answer with the JSON error envelope:
@@ -225,6 +229,7 @@ never included.
 | `SERVICE_UNAVAILABLE` | 503 | The capability is not available (no config controller, restart not supervised, manual probing disabled, SSE slots exhausted, scan/persist failure). |
 | `METRICS_LIMIT_EXCEEDED` | 503 | Rendering would exceed the fixed 100,000-series OpenMetrics budget. |
 | `NOTIFICATIONS_DISABLED` | 503 | Notification test requested but no webhook is configured. |
+| `CONNECTION_LIMIT` | 503 | The process already has 64 concurrent HTTP connections. |
 
 ### Retries and idempotency
 
@@ -683,8 +688,9 @@ Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_LIMIT`.
 
 API self-description. Tier P. Query: rejected (`QUERY_NOT_ALLOWED`). This is
 the one response an agent needs before calling anything else: it names the
-versions, the capabilities of this deployment, the exact parameters and body
-cap of every route, and where this document lives for the running release.
+versions, the capabilities of this deployment, GET query schemas, POST body
+field lists, writer requirements, the error-code catalog, and where this
+document lives for the running release.
 
 ```json
 {
@@ -695,8 +701,22 @@ cap of every route, and where this document lives for the running release.
   "capabilities": {
     "restartSupported": true,
     "manualProbeSupported": true,
-    "configurationWriteSupported": true
+    "configurationWriteSupported": true,
+    "updateSupported": true
   },
+  "conventions": {
+    "envelope": "camelCase",
+    "telemetry": "snake_case",
+    "incidentActionWrite": "camelCase",
+    "incidentActionStored": "snake_case"
+  },
+  "write": {
+    "contentType": "application/json",
+    "authorization": "Bearer",
+    "sameOrigin": true,
+    "dashboardMarker": "X-Monitor-Request: dashboard"
+  },
+  "errorCodes": [{"code": "INVALID_SCHEMA", "status": 400}],
   "endpoints": [
     {"method": "GET", "path": "/api/history", "access": "authenticated",
      "query": {"host": {"type": "alias", "required": true},
@@ -704,7 +724,12 @@ cap of every route, and where this document lives for the running release.
                          "minimum": 2, "maximum": 300, "default": 120}},
      "responseType": "application/json"},
     {"method": "POST", "path": "/api/settings/hosts", "access": "writer",
-     "bodyLimitBytes": 512, "responseType": "application/json"}
+     "bodyLimitBytes": 512,
+     "body": {"type": "object", "exactKeys": true,
+              "fields": {"action": {"type": "enum", "required": true,
+                                    "values": ["add", "remove"]},
+                         "host": {"type": "alias", "required": true}}},
+     "responseType": "application/json"}
   ]
 }
 ```
@@ -713,16 +738,21 @@ cap of every route, and where this document lives for the running release.
 `authenticated`, `reader`, `writer`). GET routes carry `query`: the complete
 set of accepted parameter names (an empty object means the route rejects any
 query string), each with a `type` of `alias` (a safe SSH alias), `identity`
-(a bounded GPU identity), or `integer` (with `minimum`, `maximum`, and the
-`default` used when omitted), plus `required`. POST routes carry
-`bodyLimitBytes`, the hard cap on the JSON request body. `responseType` is
-`application/json` except for the `/api/events` stream and `/metrics`.
-`restartSupported` is true only under the supervised user service;
-`manualProbeSupported` requires the live scheduler;
-`configurationWriteSupported` reports whether the active configuration file
-is dashboard-writable (file metadata only, no SSH). The manifest is generated
-from the same table the request handlers validate against, so it cannot
-describe a parameter the server does not accept.
+(a bounded GPU identity), `text` (1–128 printable characters), or `integer`
+(with `minimum`, `maximum`, and the `default` used when omitted), plus
+`required`. POST routes carry `bodyLimitBytes` and `body`: the exact JSON
+object (`exactKeys: true`), a non-empty field subset (`exactKeys: false`), or
+an empty object (`empty: true`). `responseType` is `application/json` except
+for the `/api/events` stream and `/metrics`. `restartSupported` is true only
+under the supervised user service; `manualProbeSupported` requires the live
+scheduler; `configurationWriteSupported` reports whether the active
+configuration file is dashboard-writable (file metadata only, no SSH);
+`updateSupported` is true when a self-update manager is wired. `write` names
+the Bearer header, `application/json` content type, same-origin Host/Origin
+rule, and the `X-Monitor-Request: dashboard` marker. `errorCodes` lists every
+stable `code` with its HTTP status. The manifest is generated from the same
+table the request handlers validate against, so it cannot describe a
+parameter the server does not accept.
 
 ### GET /healthz
 

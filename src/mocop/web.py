@@ -18,11 +18,14 @@ from .api_manifest import (
     API_SCHEMA_VERSION,
     API_VERSION,
     DOCUMENTATION_URL,
+    FIELD_CONVENTIONS,
     QUERY_SCHEMAS,
     ROUTE_METHODS,
     WRITE_BODY_LIMITS,
+    WRITE_REQUIREMENTS,
     QueryError,
     describe_endpoints,
+    describe_error_codes,
     parse_query,
 )
 from .capacity import CapacityRequest, match_capacity
@@ -73,9 +76,13 @@ _SSE_HEARTBEAT_SECONDS = 15.0
 _SSE_STOP_POLL_SECONDS = 1.0
 _SSE_SNAPSHOT_PREFIX = b"event: snapshot\ndata: "
 _SSE_HEARTBEAT_FRAME = b"event: heartbeat\ndata: {}\n\n"
+_CONNECTION_LIMIT_BODY = b'{"error":"too many connections","code":"CONNECTION_LIMIT"}'
 _SERVICE_UNAVAILABLE_RESPONSE = (
     b"HTTP/1.1 503 Service Unavailable\r\n"
-    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+    b"Connection: close\r\n"
+    b"Content-Type: application/json\r\n"
+    b"Content-Length: " + str(len(_CONNECTION_LIMIT_BODY)).encode("ascii") + b"\r\n"
+    b"\r\n" + _CONNECTION_LIMIT_BODY
 )
 
 
@@ -567,7 +574,11 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                     "configurationWriteSupported": (
                         self._configuration_write_supported()
                     ),
+                    "updateSupported": server.updates is not None,
                 },
+                "conventions": FIELD_CONVENTIONS,
+                "write": WRITE_REQUIREMENTS,
+                "errorCodes": describe_error_codes(),
                 "endpoints": describe_endpoints(),
             }
         )
