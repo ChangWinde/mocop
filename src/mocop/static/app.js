@@ -258,6 +258,12 @@ const view = {
   gpuTaskRowCache: new Map(),
   programSearchRowCache: new Map(),
   selectedIncident: null,
+  // The last live record for the selected condition, kept so the dialog can
+  // still explain a condition that recovered while it was open.
+  selectedIncidentRecord: null,
+  // What this code last wrote into the reason field; an operator edit makes
+  // the two differ, and then snapshots stop overwriting the field.
+  incidentReasonSeed: "",
   incidentActionPending: false,
   manualProbePending: false,
   notificationTestPending: false,
@@ -3144,19 +3150,22 @@ function localizedDiagnosis(condition) {
 
 function renderIncidentDetail() {
   if (!elements.incidentDetailDialog.open) return;
-  const condition = selectedIncidentRecord();
-  if (!condition) {
-    elements.incidentDetailDialog.close();
-    view.selectedIncident = null;
-    return;
-  }
+  const live = selectedIncidentRecord();
+  if (live) view.selectedIncidentRecord = live;
+  const condition = view.selectedIncidentRecord;
+  // A condition that recovers mid-edit stays on screen as resolved instead of
+  // closing under the operator's cursor; only the actions are withdrawn.
+  const resolved = live == null;
   const diagnosis = condition.diagnosis || {};
   const [diagnosisTitle, diagnosisSummary, diagnosisSteps] = localizedDiagnosis(condition);
-  const actionLabel = condition.action === "silenced"
-    ? "已静默" : condition.action === "acknowledged" ? "已确认" : "待处理";
+  const actionLabel = resolved
+    ? "已恢复"
+    : condition.action === "silenced"
+      ? "已静默" : condition.action === "acknowledged" ? "已确认" : "待处理";
   elements.incidentDetailHost.textContent = `${condition.host} · ${condition.resource || "资源"}`;
   elements.incidentDetailTitle.textContent = diagnosisTitle;
-  elements.incidentDetailStatus.className = `incident-detail-status ${condition.severity}`;
+  elements.incidentDetailStatus.className =
+    `incident-detail-status ${resolved ? "resolved" : condition.severity}`;
   elements.incidentDetailStatus.textContent = [
     condition.severity === "critical" ? "严重" : "警告",
     actionLabel,
@@ -3178,8 +3187,16 @@ function renderIncidentDetail() {
   const targetIndex = diagnosis.targetGpuIndex;
   elements.incidentOpenGpu.hidden = !Number.isInteger(targetIndex);
   elements.incidentOpenGpu.dataset.gpuIndex = Number.isInteger(targetIndex) ? targetIndex : "";
-  elements.incidentActionReason.value = condition.actionReason || "";
+  // Snapshots must not overwrite text the operator is still typing.
+  if (elements.incidentActionReason.value === view.incidentReasonSeed) {
+    view.incidentReasonSeed = condition.actionReason || "";
+    elements.incidentActionReason.value = view.incidentReasonSeed;
+  }
   elements.clearIncidentAction.hidden = !condition.action;
+  if (resolved && !view.incidentActionPending) {
+    elements.incidentActionFeedback.textContent = "该问题已恢复，无需再处理";
+    elements.incidentActionFeedback.className = "incident-action-feedback";
+  }
   [
     elements.acknowledgeIncident,
     elements.silenceIncident,
@@ -3187,7 +3204,7 @@ function renderIncidentDetail() {
     elements.incidentOpenMaintenance,
     elements.incidentActionDuration,
     elements.incidentActionReason,
-  ].forEach((element) => { element.disabled = view.incidentActionPending; });
+  ].forEach((element) => { element.disabled = view.incidentActionPending || resolved; });
 }
 
 function openIncidentDetail(condition) {
@@ -3195,6 +3212,8 @@ function openIncidentDetail(condition) {
     host: condition.host,
     conditionKey: condition.conditionKey,
   };
+  view.selectedIncidentRecord = condition;
+  view.incidentReasonSeed = elements.incidentActionReason.value;
   elements.incidentActionFeedback.textContent = "";
   elements.incidentActionFeedback.className = "incident-action-feedback";
   openExclusiveDialog(elements.incidentDetailDialog);
@@ -3222,6 +3241,8 @@ async function updateIncidentAction(action) {
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "保存失败");
+    // The saved text is now the server's; let later renders sync it again.
+    view.incidentReasonSeed = elements.incidentActionReason.value;
     view.incidentVersion = -1;
     view.incidentLoadingVersion = null;
     await syncIncidents();
@@ -3352,7 +3373,8 @@ function serverGpuUsage(server) {
 }
 
 function serverUtilizationRow(label, value, kind, warning = false) {
-  const row = create("div", `server-util-row ${kind}${warning ? " warning" : ""}`);
+  // Phrasing content only: these rows live inside <button> fleet items.
+  const row = create("span", `server-util-row ${kind}${warning ? " warning" : ""}`);
   const track = create("span", "server-util-track");
   const bar = create("i");
   bar.style.width = `${clamp(value)}%`;
@@ -3893,16 +3915,16 @@ function serverItem(server, selectedHost) {
   });
   enableServerDrag(item, server.host);
 
-  const main = create("div", "server-main");
-  const identity = create("div", "server-main");
+  const main = create("span", "server-main");
+  const identity = create("span", "server-main");
   identity.append(create("i", `status-dot ${stateClass}`), create("span", "server-name", displayHost(server)));
   const group = hostGroupName(server);
   if (group) identity.append(create("span", "server-group-badge", group));
   const gpuLabel = `${server.gpus.length} GPU${server.stale ? " · 历史" : ""}`;
   main.append(identity, create("span", "server-gpu-count", gpuLabel));
 
-  const stats = create("div", "server-stats");
-  const utilization = create("div", "server-utilization");
+  const stats = create("span", "server-stats");
+  const utilization = create("span", "server-utilization");
   const gpuUsage = serverGpuUsage(server);
   utilization.append(
     serverUtilizationRow(
@@ -3990,8 +4012,8 @@ function fleetAllItem(label, gpuCount) {
   item.dataset.host = "all";
   if (view.selectedHost === "all") item.setAttribute("aria-current", "true");
   item.addEventListener("click", () => selectHost("all"));
-  const main = create("div", "server-main");
-  const identity = create("div", "server-main");
+  const main = create("span", "server-main");
+  const identity = create("span", "server-main");
   identity.append(
     create("i", "status-dot online"),
     create("span", "server-name", label),

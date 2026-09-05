@@ -1320,6 +1320,49 @@ try {
     "focus lands in the maintenance editor of the target host",
   );
 
+  // A reason the operator is typing must survive the snapshot renders that
+  // arrive every few seconds, and a condition that recovers while the dialog
+  // is open is shown as resolved instead of closing under the cursor.
+  const incidentEditing = await cdp.evaluate(`(() => {
+    const condition = view.incidents.active.find(
+      (item) => item.host === "atlas-03" && item.category === "connectivity",
+    );
+    openIncidentDetail(condition);
+    const dialog = document.querySelector("#incident-detail-dialog");
+    const reason = document.querySelector("#incident-action-reason");
+    const seeded = reason.value;
+    reason.value = "cooling fan replaced";
+    render();
+    renderIncidentDetail();
+    const afterRender = reason.value;
+    const withoutCondition = {
+      ...view.incidents,
+      active: view.incidents.active.filter((item) => item !== condition),
+    };
+    const previousIncidents = view.incidents;
+    acceptIncidents(withoutCondition);
+    render();
+    const result = {
+      seeded,
+      afterRender,
+      stillOpen: dialog.open,
+      status: document.querySelector("#incident-detail-status").textContent,
+      feedback: document.querySelector("#incident-action-feedback").textContent,
+      actionsDisabled: document.querySelector("#acknowledge-incident").disabled,
+      reasonKept: reason.value,
+    };
+    acceptIncidents(previousIncidents);
+    dialog.close();
+    render();
+    return result;
+  })()`);
+  assert.equal(incidentEditing.afterRender, "cooling fan replaced");
+  assert.equal(incidentEditing.stillOpen, true);
+  assert.match(incidentEditing.status, /已恢复/);
+  assert.match(incidentEditing.feedback, /已恢复/);
+  assert.equal(incidentEditing.actionsDisabled, true);
+  assert.equal(incidentEditing.reasonKept, "cooling fan replaced");
+
   const grouping = await cdp.evaluate(`(() => {
     const sort = document.querySelector("#server-sort");
     sort.value = "group";

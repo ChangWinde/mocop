@@ -1337,6 +1337,7 @@ html[data-density="compact"] .gpu-table td { height: 56px; padding-top: 7px; pad
 .incident-diagnosis, .incident-actions { min-width: 0; padding: 20px; background: var(--panel-background); }
 .incident-detail-status { padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--amber) 24%, var(--line)); border-radius: 10px; color: var(--amber); background: color-mix(in srgb, var(--amber) 6%, var(--panel-deep)); font-size: 9px; line-height: 1.55; }
 .incident-detail-status.critical { color: var(--red); border-color: color-mix(in srgb, var(--red) 26%, var(--line)); background: color-mix(in srgb, var(--red) 5%, var(--panel-deep)); }
+.incident-detail-status.resolved { color: var(--green); border-color: color-mix(in srgb, var(--green) 26%, var(--line)); background: color-mix(in srgb, var(--green) 6%, var(--panel-deep)); }
 .incident-diagnosis > p { margin: 15px 0; color: var(--muted); font-size: 10px; line-height: 1.7; }
 .incident-evidence { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
 .incident-evidence-item { min-width: 0; padding: 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel-solid); }

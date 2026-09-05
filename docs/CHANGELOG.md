@@ -91,6 +91,12 @@ All notable changes are documented here. This project follows Semantic Versionin
   first snapshot arrives over the live stream.
 - The owners dialog shows when its data was last collected instead of a
   static "实时更新" label.
+- The incident detail dialog no longer overwrites a reason the operator is
+  typing every time a snapshot arrives, and a condition that recovers while
+  the dialog is open is shown as resolved with its actions withdrawn instead
+  of closing the dialog under the cursor.
+- Fleet rail items are valid HTML: the rows inside each `<button>` are now
+  phrasing content, so assistive technology no longer has to flatten them.
 
 ### Removed
 
