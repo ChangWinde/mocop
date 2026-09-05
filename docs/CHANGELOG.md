@@ -11,6 +11,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   file's size) the service starts anyway, reclaims what the bounded online
   path can, and leaves the condition to the persistence status it already
   reports, instead of refusing to start over it.
+- A GPU that vanishes from an online host (an XID fault or a bus drop takes
+  the device out of `nvidia-smi`) now closes its confirmed process occupancy
+  at the last process sample, the way a failed process query already did.
+  The rollup previously had to drop that occupancy as an unanchorable start,
+  undercounting the owner and raising `droppedRecords`.
 
 ### Added
 

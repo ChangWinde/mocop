@@ -1322,22 +1322,11 @@ class StateStore:
             if not gpu.processes_sampled:
                 continue
             if not gpu.processes_available:
-                unavailable_transitions = self._close_process_inventory_locked(
-                    key,
-                    gpu.index,
-                    self._process_last_observed_at.get(key),
+                unavailable_transitions = self._close_unobservable_inventory_locked(
+                    key, gpu.index
                 )
-                if unavailable_transitions:
-                    unavailable_transitions = tuple(
-                        replace(event, visible=False)
-                        for event in unavailable_transitions
-                    )
-                    event_history = self._process_events.setdefault(
-                        key, deque(maxlen=self._process_event_points)
-                    )
-                    event_history.extend(unavailable_transitions)
-                    if captured_transitions is not None:
-                        captured_transitions.extend(unavailable_transitions)
+                if captured_transitions is not None:
+                    captured_transitions.extend(unavailable_transitions)
                 initialized_gpu_ids.discard(gpu_id)
                 continue
             self._process_last_observed_at[key] = result.observed_at
@@ -1495,8 +1484,12 @@ class StateStore:
             self._process_last_observed_at.pop(evicted_key, None)
             initialized_gpu_ids.discard(evicted_gpu_id)
         for gpu_id in initialized_gpu_ids - observed_gpu_ids:
-            self._active_gpu_processes.pop((result.host, gpu_id), None)
-            self._process_last_observed_at.pop((result.host, gpu_id), None)
+            # A device that vanished from an online host takes its process
+            # table with it; the occupancy confirmed up to its last process
+            # sample closes there, as it does when the process query fails.
+            closed = self._close_unobservable_inventory_locked((result.host, gpu_id))
+            if captured_transitions is not None:
+                captured_transitions.extend(closed)
         initialized_gpu_ids.intersection_update(observed_gpu_ids)
         if not initialized_gpu_ids:
             self._process_inventory_initialized.pop(result.host, None)
@@ -1510,19 +1503,36 @@ class StateStore:
         """Close confirmed occupancy at its last successful process sample."""
         transitions: list[_GpuProcessTransition] = []
         for gpu_id in self._process_inventory_initialized.pop(host, ()):
-            key = (host, gpu_id)
-            history = self._gpu_history.get(key)
-            index = _GPU_HISTORY_VALUES.unpack(history[-1].values)[0] if history else 0
-            closed = self._close_process_inventory_locked(
-                key, int(index), self._process_last_observed_at.pop(key, None)
+            transitions.extend(
+                self._close_unobservable_inventory_locked((host, gpu_id))
             )
-            if closed:
-                closed = tuple(replace(event, visible=False) for event in closed)
-                self._process_events.setdefault(
-                    key, deque(maxlen=self._process_event_points)
-                ).extend(closed)
-                transitions.extend(closed)
         return tuple(transitions)
+
+    def _close_unobservable_inventory_locked(
+        self, key: tuple[str, str], gpu_index: int | None = None
+    ) -> tuple[_GpuProcessTransition, ...]:
+        """Close a GPU's confirmed occupancy once its process table is gone.
+
+        The process query failed, the device vanished from an online host, or
+        the host stopped answering: the occupancy confirmed up to the last
+        process sample ends there as bookkeeping. Nothing was observed to
+        stop, so the transitions stay out of the dashboard's event list.
+        """
+        if gpu_index is None:
+            history = self._gpu_history.get(key)
+            gpu_index = (
+                int(_GPU_HISTORY_VALUES.unpack(history[-1].values)[0]) if history else 0
+            )
+        closed = self._close_process_inventory_locked(
+            key, gpu_index, self._process_last_observed_at.pop(key, None)
+        )
+        if not closed:
+            return ()
+        closed = tuple(replace(event, visible=False) for event in closed)
+        self._process_events.setdefault(
+            key, deque(maxlen=self._process_event_points)
+        ).extend(closed)
+        return closed
 
     def _close_process_inventory_locked(
         self,
