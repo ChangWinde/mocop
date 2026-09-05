@@ -687,7 +687,9 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         try:
             body = validate_body(WRITE_SCHEMAS[request_url.path], payload)
         except BodyError as error:
-            self._send_error(str(error), HTTPStatus.BAD_REQUEST, code=error.code)
+            self._send_error(
+                str(error), HTTPStatus.BAD_REQUEST, code=error.code, field=error.field
+            )
             return
         handlers: dict[str, Callable[[dict[str, object]], None]] = {
             "/api/settings/hosts": self._change_inventory,
@@ -775,17 +777,23 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         duration = body["durationSeconds"]
         reason = body["reason"]
         clearing = action == "clear"
-        if (
-            not is_valid_incident_condition_key(condition_key)
-            or not is_valid_incident_action_reason(reason)
-            or clearing != (duration == 0)
-            or clearing != (incident_started_at is None)
-            or incident_started_at == ""
-        ):
+        rejected_field = (
+            "conditionKey"
+            if not is_valid_incident_condition_key(condition_key)
+            else "reason"
+            if not is_valid_incident_action_reason(reason)
+            else "durationSeconds"
+            if clearing != (duration == 0)
+            else "incidentStartedAt"
+            if clearing != (incident_started_at is None) or incident_started_at == ""
+            else None
+        )
+        if rejected_field is not None:
             self._send_error(
                 "invalid incident action settings",
                 HTTPStatus.BAD_REQUEST,
                 code="INVALID_SETTINGS",
+                field=rejected_field,
             )
             return
         if not self._incident_generation_matches(
@@ -927,6 +935,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "invalid host group settings",
                 HTTPStatus.BAD_REQUEST,
                 code="INVALID_SETTINGS",
+                field="group",
             )
             return
         snapshot = self._write_configuration(
@@ -942,6 +951,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 "invalid maintenance settings",
                 HTTPStatus.BAD_REQUEST,
                 code="INVALID_SETTINGS",
+                field="reason",
             )
             return
         snapshot = self._write_configuration(
@@ -1077,7 +1087,9 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         try:
             return parse_query(QUERY_SCHEMAS[path], query)
         except QueryError as exc:
-            self._send_error(str(exc), HTTPStatus.BAD_REQUEST, code=exc.code)
+            self._send_error(
+                str(exc), HTTPStatus.BAD_REQUEST, code=exc.code, field=exc.field
+            )
             return None
 
     def _send_history(self, query: str) -> None:
@@ -1212,15 +1224,20 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         status: HTTPStatus,
         code: str | None = None,
         extra_headers: tuple[tuple[str, str], ...] = (),
+        *,
+        field: str | None = None,
     ) -> None:
         """Central JSON error envelope.
 
         `error` stays the human-readable string existing clients rely on;
-        `code` is the stable machine-readable UPPER_SNAKE tag.
+        `code` is the stable machine-readable UPPER_SNAKE tag; `field` names
+        the query parameter or body field at fault when exactly one is.
         """
         body: dict[str, object] = {"error": message}
         if code is not None:
             body["code"] = code
+        if field is not None:
+            body["field"] = field
         self._send_json(body, status, extra_headers)
 
     def _send_json(

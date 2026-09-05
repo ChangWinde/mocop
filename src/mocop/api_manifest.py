@@ -89,11 +89,13 @@ RESPONSE_TYPES: dict[str, str] = {
 
 
 class QueryError(ValueError):
-    """A rejected query string carrying the stable machine-readable code."""
+    """A rejected query string: the stable code and, when one parameter is at
+    fault, its name."""
 
-    def __init__(self, message: str, code: str) -> None:
+    def __init__(self, message: str, code: str, field: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.field = field
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,11 +214,14 @@ def parse_query(schema: QuerySchema, query: str) -> dict[str, object]:
     integers take their default; absent optional strings are ``None``.
     """
     raw = parse_qs(query, keep_blank_values=True)
-    if set(raw) - set(schema.parameters):
-        raise QueryError("unknown query parameter", "UNKNOWN_QUERY_PARAMETER")
-    shape_error = QueryError(schema.shape_message, schema.shape_code)
+    unknown = sorted(set(raw) - set(schema.parameters))
+    if unknown:
+        raise QueryError(
+            "unknown query parameter", "UNKNOWN_QUERY_PARAMETER", unknown[0]
+        )
     supplied: dict[str, str] = {}
     for name, parameter in schema.parameters.items():
+        shape_error = QueryError(schema.shape_message, schema.shape_code, name)
         given = raw.get(name, [])
         if len(given) > 1 or (parameter.required and not given):
             raise shape_error
@@ -245,6 +250,7 @@ def parse_query(schema: QuerySchema, query: str) -> dict[str, object]:
             raise QueryError(
                 f"{name} must be between {parameter.minimum} and {parameter.maximum}",
                 parameter.invalid_code,
+                name,
             )
         values[name] = number
     return values
@@ -257,11 +263,13 @@ _ENUM_ACTIONS = ("acknowledged", "silenced", "clear")
 
 
 class BodyError(ValueError):
-    """A rejected write body carrying the stable machine-readable code."""
+    """A rejected write body: the stable code and, when one field is at fault,
+    its name."""
 
-    def __init__(self, message: str, code: str) -> None:
+    def __init__(self, message: str, code: str, field: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.field = field
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,9 +383,11 @@ def validate_body(schema: BodySchema, payload: object) -> dict[str, object]:
     for name, value in payload.items():
         field = schema.fields[name]
         if not field.well_typed(value):
-            raise BodyError(f"{name} has the wrong type", "INVALID_SCHEMA")
+            raise BodyError(f"{name} has the wrong type", "INVALID_SCHEMA", name)
         if not field.accepts(value):
-            raise BodyError(f"{name} is not an accepted value", "INVALID_SETTINGS")
+            raise BodyError(
+                f"{name} is not an accepted value", "INVALID_SETTINGS", name
+            )
     return payload
 
 

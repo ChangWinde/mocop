@@ -49,6 +49,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   their marker header and same-origin checks belong to the dashboard.
 - `GET /api/meta` capabilities now include `updateSupported`. Excess
   connections answer `503 CONNECTION_LIMIT` as JSON instead of an empty body.
+- Error envelopes carry `field` whenever exactly one query parameter or body
+  field is at fault — an unknown parameter's name, a malformed or out-of-bounds
+  parameter, a wrongly typed or unaccepted body field, and the single-field
+  cross checks on maintenance, host-group, and incident-action writes — so an
+  agent maps a rejection back to its input without parsing the message.
 - `403 AUTHENTICATION_REQUIRED` responses carry a `hint` naming the header to
   send and where the capability file lives, plus the `documentation` URL, so
   an agent can recover from a cold start without out-of-band knowledge.

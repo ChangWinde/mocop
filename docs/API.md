@@ -202,13 +202,17 @@ Every API error response is a JSON object:
 ```
 
 `code` is stable and safe to branch on; `error` is for humans and may be
-reworded. One exception: the `POST /api/probe` conflict/rate-limit/unknown
-responses carry the probe status body *plus* a `code` field instead of an
-`error` key (see the endpoint entry). `403 AUTHENTICATION_REQUIRED` additionally
-carries `hint` (where the capability lives and which header to send) and
-`documentation` (this reference for the running release), so a cold client can
-recover without any out-of-band knowledge; the capability value itself is
-never included.
+reworded. When exactly one query parameter or body field is at fault, the
+envelope also carries `field` with its name (`{"error": "limit must be between
+2 and 300", "code": "INVALID_LIMIT", "field": "limit"}`), so a client can map
+a rejection back to the input it sent without parsing the message; shape
+problems such as a missing key or a non-object body carry no `field`. One
+exception: the `POST /api/probe` conflict/rate-limit/unknown responses carry
+the probe status body *plus* a `code` field instead of an `error` key (see the
+endpoint entry). `403 AUTHENTICATION_REQUIRED` additionally carries `hint`
+(where the capability lives and which header to send) and `documentation`
+(this reference for the running release), so a cold client can recover without
+any out-of-band knowledge; the capability value itself is never included.
 
 | Code | HTTP | Meaning |
 |---|---|---|
@@ -349,12 +353,13 @@ curl -s -H "Authorization: Bearer ${MOCOP_TOKEN}" \
   http://127.0.0.1:8787/metrics
 ```
 
-7. Error handling — branch on the stable `code`, never on the message:
+7. Error handling — branch on the stable `code` and the rejected `field`,
+   never on the message:
 
 ```bash
 curl -s -H "Authorization: Bearer ${MOCOP_TOKEN}" \
-  'http://127.0.0.1:8787/api/incidents?limit=0' | jq -r '.code'
-# INVALID_LIMIT
+  'http://127.0.0.1:8787/api/incidents?limit=0' | jq -r '"\(.code) \(.field)"'
+# INVALID_LIMIT limit
 ```
 
 ## Endpoint index
