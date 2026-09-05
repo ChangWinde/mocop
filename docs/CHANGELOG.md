@@ -170,17 +170,20 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
-- The history database now actually shrinks after retention deletes. Python's
+- The history database now actually shrinks after a bulk expiry. Python's
   `sqlite3` steps `PRAGMA incremental_vacuum` once per `execute()`, so every
   prune since persistence was introduced had returned exactly one page to the
-  filesystem: a live 476 MB file held 130 MB of data, and because the startup
-  cap check counts free pages, lowering `persistence.max_bytes` below the
-  file's high-water mark refused to start even though the live data fitted.
-  Startup now rebuilds a file that has free pages with `VACUUM` before the
-  cap is compared (0.5 s for that 476 MB file, which came back at 115 MB), and
-  each 60-second prune reclaims up to 8 MiB online in a bounded number of
-  pragma calls, because CPython 3.11's `sqlite3` frees one page per call
-  regardless of how the cursor is consumed.
+  filesystem. In steady state inserts reuse the freed pages and nothing shows,
+  but after a long downtime or a shortened retention the pages stay in the
+  file: on a copy of a 438 MB live history where two of its three days had
+  expired at once, 79,000 free pages (310 MB) remained, and because the
+  startup cap check counts free pages, lowering `persistence.max_bytes` below
+  that high-water mark refused to start even though the live data fitted.
+  Startup now rebuilds a file that has free pages with `VACUUM` before the cap
+  is compared (0.5 s for that copy, which came back at 115 MB), and each
+  60-second prune reclaims up to 8 MiB online in a bounded number of pragma
+  calls, because CPython 3.11's `sqlite3` frees one page per call regardless
+  of how the cursor is consumed.
 - Restoring history at startup no longer scans the whole SQLite database: the
   newest points of each host and GPU are read through the tables' primary
   keys instead of a window function that SQLite executed as a full scan plus
