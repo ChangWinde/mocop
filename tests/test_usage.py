@@ -32,6 +32,41 @@ class AggregateUsageTests(unittest.TestCase):
     """The pure rollup behind StateStore.usage(); the store tests cover the
     live timeline, this pins the module boundary and the accounting rules."""
 
+    def test_live_processes_of_a_failing_host_count_up_to_its_last_sample(self) -> None:
+        # While a host is failing its probes the live table is a blind spot;
+        # an active process occupies the device up to the last confirmed
+        # sample, never through the gap to now. Both the unmatched-start and
+        # the seeded-process anchors honour it.
+        started = Transition(_at(50), "started", 1, "train", {"owner": "alice"})
+        seeded = GpuProcess(2, "serve", 100, None, first_seen_at=_at(40))
+        usage = aggregate_usage(
+            now=NOW,
+            window_hours=1,
+            owner_limit=10,
+            busy_pct=20.0,
+            events_by_gpu={GPU: [started]},
+            active_by_gpu={
+                GPU: {(1, "train"): GpuProcess(1, "train", 100), (2, "serve"): seeded}
+            },
+            utilization_by_gpu={},
+            observed_until_by_gpu={GPU: _at(20)},
+        )
+        by_owner = {entry["owner"]: entry for entry in usage["owners"]}
+        self.assertEqual(by_owner["alice"]["gpuSeconds"], 30 * 60.0)
+        self.assertEqual(by_owner[None]["gpuSeconds"], 20 * 60.0)
+        # An online host (no entry) still counts to now.
+        online = aggregate_usage(
+            now=NOW,
+            window_hours=1,
+            owner_limit=10,
+            busy_pct=20.0,
+            events_by_gpu={GPU: [started]},
+            active_by_gpu={GPU: {(1, "train"): GpuProcess(1, "train", 100)}},
+            utilization_by_gpu={},
+            observed_until_by_gpu={},
+        )
+        self.assertEqual(online["owners"][0]["gpuSeconds"], 50 * 60.0)
+
     def test_reports_devices_whose_retained_timeline_starts_inside_the_window(
         self,
     ) -> None:

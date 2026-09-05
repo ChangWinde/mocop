@@ -846,7 +846,11 @@ class StateStoreTests(unittest.TestCase):
         point = store.history("gpu-1", 10)["points"][-1]
         self.assertEqual(point["gpuMemoryUsagePct"], 25.0)
 
-    def test_process_transitions_require_consecutive_available_samples(self) -> None:
+    def test_process_transitions_survive_a_short_blind_gap(self) -> None:
+        # One failed probe is a blind spot, not evidence that processes ended:
+        # the inventory is kept and a real change across the gap is attributed
+        # to the first sample after it. A failed process query and a vanished
+        # device still close occupancy invisibly and re-seed invisibly.
         gpu = GpuMetrics(
             index=0,
             uuid="GPU-1",
@@ -887,7 +891,20 @@ class StateStoreTests(unittest.TestCase):
                 observed_at="2026-08-10T00:00:10Z",
             )
         )
-        self.assertEqual(store.gpu_history("gpu-1", "GPU-1", 10)["processEvents"], [])
+        after_gap_events = store.gpu_history("gpu-1", "GPU-1", 10)["processEvents"]
+        self.assertEqual(
+            {
+                (event["event"], event["pid"], event["observedAt"])
+                for event in after_gap_events
+            },
+            {
+                ("stopped", 10, "2026-08-10T00:00:10Z"),
+                ("started", 11, "2026-08-10T00:00:10Z"),
+            },
+        )
+        # The stop still names when the monitor first saw the process.
+        stopped = next(e for e in after_gap_events if e["event"] == "stopped")
+        self.assertEqual(stopped["firstSeenAt"], "2026-08-10T00:00:00Z")
 
         store.apply(
             ProbeResult(
@@ -901,7 +918,7 @@ class StateStoreTests(unittest.TestCase):
         events = store.gpu_history("gpu-1", "GPU-1", 10)["processEvents"]
         self.assertEqual(
             {(event["event"], event["pid"]) for event in events},
-            {("started", 12), ("stopped", 11)},
+            {("stopped", 10), ("started", 11), ("started", 12), ("stopped", 11)},
         )
 
         store.apply(
@@ -940,6 +957,69 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(
             store.gpu_history("gpu-1", "GPU-1", 10)["processEvents"], events
         )
+
+    def test_stale_host_closes_occupancy_at_its_last_sample_and_reseeds(self) -> None:
+        # Live evidence: every transient probe failure (a relay hiccup) closed
+        # a host's whole inventory and re-seeded it seconds later, resetting
+        # first_seen and flooding the retained timeline with hidden pairs.
+        # Now the inventory follows the same staleness definition as the rest
+        # of the host's data: collection_stale_cycles consecutive failures.
+        gpu = GpuMetrics(
+            index=0,
+            uuid="GPU-1",
+            name="Test GPU",
+            driver_version="550",
+            pstate="P0",
+            temperature_c=60,
+            utilization_gpu_pct=50,
+            utilization_memory_pct=20,
+            memory_total_mib=1000,
+            memory_used_mib=250,
+            memory_free_mib=750,
+            power_draw_w=100,
+            power_limit_w=200,
+            processes=(GpuProcess(10, "train.py", 250),),
+        )
+        store = StateStore(5, collection_stale_cycles=3)
+        store.set_hosts(("gpu-1",))
+
+        def at(second: int) -> str:
+            return f"2026-08-10T00:00:{second:02d}Z"
+
+        store.apply(ProbeResult("gpu-1", "online", 1, (gpu,), observed_at=at(0)))
+        store.apply(ProbeResult("gpu-1", "online", 1, (gpu,), observed_at=at(5)))
+        store.apply(ProbeResult("gpu-1", "unreachable", 5000, observed_at=at(10)))
+        store.apply(ProbeResult("gpu-1", "unreachable", 5000, observed_at=at(15)))
+        # Two failures: still a blind spot, first_seen intact, no transitions.
+        self.assertEqual(
+            [e.event for e in store._process_events[("gpu-1", "GPU-1")]], ["started"]
+        )
+        self.assertEqual(
+            store._active_gpu_processes[("gpu-1", "GPU-1")][
+                (10, "train.py")
+            ].first_seen_at,
+            at(0),
+        )
+        # The third failure makes the host stale: occupancy closes at the last
+        # confirmed sample, invisibly.
+        store.apply(ProbeResult("gpu-1", "unreachable", 5000, observed_at=at(20)))
+        transitions = list(store._process_events[("gpu-1", "GPU-1")])
+        self.assertEqual(
+            [(e.event, e.observed_at, e.visible) for e in transitions],
+            [("started", at(0), False), ("stopped", at(5), False)],
+        )
+        self.assertEqual(transitions[-1].first_seen_at, at(0))
+        self.assertNotIn(("gpu-1", "GPU-1"), store._active_gpu_processes)
+        # Recovery re-seeds invisibly with a fresh first_seen.
+        store.apply(ProbeResult("gpu-1", "online", 1, (gpu,), observed_at=at(25)))
+        self.assertEqual(
+            [
+                (e.event, e.observed_at, e.visible)
+                for e in store._process_events[("gpu-1", "GPU-1")]
+            ][-1],
+            ("started", at(25), False),
+        )
+        self.assertEqual(store.gpu_history("gpu-1", "GPU-1", 10)["processEvents"], [])
 
     def test_skipped_process_sample_preserves_transition_baseline(self) -> None:
         initial = GpuMetrics(

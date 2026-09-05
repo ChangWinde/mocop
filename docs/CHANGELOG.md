@@ -6,6 +6,19 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- A single failed probe no longer closes a host's whole GPU process
+  inventory. On a live deployment behind an SSH relay, every transient
+  failure emitted a hidden `stopped` for each process, re-seeded them all a
+  few seconds later, reset every `first_seen_at` (the dashboard's observed
+  runtime), and flooded the retained timeline with these pairs. The inventory
+  now follows the same staleness definition as the rest of a host's data: it
+  is kept as a blind spot until the host has failed for
+  `collection_stale_cycles` consecutive cycles, then closed at its last
+  confirmed sample. A real process change across a shorter gap is attributed
+  to the first sample after it. The usage rollup counts a failing host's live
+  processes only up to that last confirmed sample, so a blind gap is never
+  billed as occupancy.
+
 - `/api/usage` no longer loses the occupancy of runs whose `started` edge has
   left the retained event window. On a live deployment a 24-hour report
   dropped 644 records, 592 of them orphan `stopped` events from GPUs that
@@ -74,8 +87,9 @@ All notable changes are documented here. This project follows Semantic Versionin
   `incidents.py` and the integration section parsers
   (`config_integrations.py`) left `config_loader.py`, the maintenance window
   type (`maintenance.py`) left `config.py`, the restore path
-  (`persistence_restore.py`) left `persistence.py`, and occupancy pairing
-  (`occupancy.py`) left `usage.py`. Every ceiling ratchets down.
+  (`persistence_restore.py`) left `persistence.py`, occupancy pairing
+  (`occupancy.py`) left `usage.py`, and the snapshot's fleet totals
+  (`fleet_stats.py`) left `service.py`. Every ceiling ratchets down.
 - A connectivity incident's `diagnosis.nextSteps` (and the dashboard's
   incident dialog) now open with the step that follows from the failure
   classification — check the jump host's forwarding, the node's `sshd`

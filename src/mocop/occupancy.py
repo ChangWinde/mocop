@@ -68,12 +68,21 @@ def pair_intervals(
     *,
     window_start: float,
     now_epoch: float,
+    observed_until: float | None = None,
 ) -> tuple[list[Interval], int, float | None]:
     """Pair start/stop transitions into clipped occupancy intervals.
+
+    ``observed_until`` is the last time the live process table was actually
+    confirmed; while a host is failing its probes the table is kept as a
+    blind spot rather than evidence, so a process it still lists occupies the
+    device only up to that observation, never through the gap to ``now``.
 
     Returns the intervals, the count of dropped (unanchorable) records,
     and the earliest event timestamp seen before clipping.
     """
+    active_until = (
+        now_epoch if observed_until is None else min(now_epoch, observed_until)
+    )
     intervals: list[Interval] = []
     dropped = 0
     earliest: float | None = None
@@ -127,7 +136,7 @@ def pair_intervals(
         if process_key not in active_processes:
             dropped += 1
             continue
-        close(started, now_epoch, workload)
+        close(started, active_until, workload)
 
     # Processes seeded from the first sample of a GPU never emitted a
     # started transition, so the live process table fills that gap.
@@ -139,7 +148,7 @@ def pair_intervals(
         if anchored_start is None:
             dropped += 1
             continue
-        close(anchored_start, now_epoch, workload_dict)
+        close(anchored_start, active_until, workload_dict)
 
     return intervals, dropped, earliest
 

@@ -70,7 +70,8 @@ interfaces without a runtime plugin registry.
 | `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
 | `telemetry_points.py` | compact in-memory history records: struct-packed host and GPU samples, process transitions |
-| `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage` |
+| `fleet_stats.py` | the snapshot's fleet-wide `stats` block: host, incident, GPU, and capacity totals over the serialized servers |
+| `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage`; a failing host's live processes count only up to its last confirmed sample |
 | `occupancy.py` | pairing a device's process transitions into runs: start/stop pairing, first-observation anchors, owner attribution, same-owner merging |
 | `models.py` | immutable resource result types |
 | `incident_types.py` | the incident vocabulary: conditions, transition events, restored open incidents, the policy protocol |

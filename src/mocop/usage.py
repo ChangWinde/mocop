@@ -114,6 +114,7 @@ def aggregate_usage(
     active_by_gpu: Mapping[GpuKey, Mapping[ProcessKey, GpuProcess]],
     utilization_by_gpu: Mapping[GpuKey, Sequence[UtilizationSample]],
     event_cap: int | None = None,
+    observed_until_by_gpu: Mapping[GpuKey, str] | None = None,
 ) -> dict[str, object]:
     """Aggregate per-owner GPU occupancy over the requested window.
 
@@ -134,11 +135,17 @@ def aggregate_usage(
 
     for key in sorted(set(events_by_gpu) | set(active_by_gpu)):
         events = events_by_gpu.get(key, ())
+        observed_until = (
+            epoch_seconds(observed_until_by_gpu.get(key))
+            if observed_until_by_gpu is not None
+            else None
+        )
         intervals, dropped, earliest = pair_intervals(
             events,
             active_by_gpu.get(key, {}),
             window_start=window_start,
             now_epoch=now_epoch,
+            observed_until=observed_until,
         )
         dropped_records += dropped
         if earliest is not None:

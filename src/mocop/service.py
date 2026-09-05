@@ -33,6 +33,7 @@ from .discovery import (
     HostSource,
     resolve_host_discovery,
 )
+from .fleet_stats import fleet_stats
 from .incident_types import IncidentPolicy
 from .incidents import IncidentTracker, ThresholdIncidentPolicy
 from .maintenance import MaintenanceWindowConfig
@@ -587,7 +588,12 @@ class StateStore:
                     result
                 )
                 result = self._first_seen_annotated_locked(result)
-            else:
+            elif state.consecutive_failures + 1 >= self._collection_stale_cycles:
+                # A failed probe is a blind spot, not evidence that the
+                # processes ended: the inventory is kept, with its first-seen
+                # stamps, until the host has been failing for the same number
+                # of cycles that marks its data stale everywhere else. Only
+                # then is the confirmed occupancy closed at its last sample.
                 process_events = self._invalidate_process_inventory_locked(result.host)
             state.apply(result, next_retry_at=next_retry_at)
             if result.status == "online" and result.system is not None:
@@ -734,6 +740,15 @@ class StateStore:
                 key: dict(processes)
                 for key, processes in self._active_gpu_processes.items()
             }
+            # A host that is failing its probes keeps its process table as a
+            # blind spot until it is stale; its processes occupy their devices
+            # only up to the last confirmed sample, never through the gap.
+            observed_until_by_gpu = {
+                key: observed_at
+                for key, observed_at in self._process_last_observed_at.items()
+                if (server := self._servers.get(key[0])) is not None
+                and server.status != "online"
+            }
             utilization_by_gpu = {
                 key: [
                     (
@@ -756,6 +771,7 @@ class StateStore:
             active_by_gpu=active_by_gpu,
             utilization_by_gpu=utilization_by_gpu,
             event_cap=self._process_event_points,
+            observed_until_by_gpu=observed_until_by_gpu,
         )
 
     def incidents(self, limit: int) -> dict[str, object]:
@@ -1556,58 +1572,6 @@ class StateStore:
                     condition["severity"] == "critical" for condition in actionable
                 ),
             }
-        online = sum(server["status"] == "online" for server in servers)
-        current_servers = [server for server in servers if server["status"] == "online"]
-        gpus = [gpu for server in current_servers for gpu in server["gpus"]]
-        systems = [server["system"] for server in current_servers if server["system"]]
-        memory_total = sum(float(gpu["memory_total_mib"] or 0) for gpu in gpus)
-        memory_used = sum(float(gpu["memory_used_mib"] or 0) for gpu in gpus)
-        busy = sum(
-            float(gpu["utilization_gpu_pct"] or 0) >= self._thresholds.gpu_busy_pct
-            for gpu in gpus
-        )
-        cpu_values = [
-            float(system["cpu_usage_pct"])
-            for system in systems
-            if system["cpu_usage_pct"] is not None
-        ]
-        system_memory_total = sum(
-            float(system["memory_total_mib"]) for system in systems
-        )
-        system_memory_used = sum(float(system["memory_used_mib"]) for system in systems)
-        swap_total = sum(float(system["swap_total_mib"]) for system in systems)
-        swap_used = sum(float(system["swap_used_mib"]) for system in systems)
-        disk_total = sum(float(system["disk_total_mib"]) for system in systems)
-        disk_used = sum(float(system["disk_used_mib"]) for system in systems)
-        network_rx = sum(float(system["network_rx_bps"] or 0) for system in systems)
-        network_tx = sum(float(system["network_tx_bps"] or 0) for system in systems)
-        disk_read = sum(float(system["disk_read_bps"] or 0) for system in systems)
-        disk_write = sum(float(system["disk_write_bps"] or 0) for system in systems)
-        active_incidents = len(active_conditions)
-        critical_incidents = sum(
-            condition["severity"] == "critical" for condition in active_conditions
-        )
-        active_incident_hosts = frozenset(host_incidents)
-        maintenance_hosts = frozenset(active_maintenance)
-        actionable_conditions = [
-            condition for condition in active_conditions if condition["actionable"]
-        ]
-        actionable_incidents = len(actionable_conditions)
-        actionable_critical = sum(
-            condition["severity"] == "critical" for condition in actionable_conditions
-        )
-        actionable_incident_hosts = frozenset(
-            str(condition["host"]) for condition in actionable_conditions
-        )
-        non_online_hosts = {
-            str(server["host"]) for server in servers if server["status"] != "online"
-        }
-        untracked_non_online_hosts = {
-            host for host in non_online_hosts if host not in active_incident_hosts
-        }
-        actionable_issue_hosts = (
-            untracked_non_online_hosts - maintenance_hosts
-        ) | actionable_incident_hosts
         snapshot = {
             "version": self._version,
             "appVersion": __version__,
@@ -1622,39 +1586,12 @@ class StateStore:
             "persistence": persistence_status,
             "notifications": notification_status,
             "thresholds": self._thresholds.to_dict(),
-            "stats": {
-                "servers": len(servers),
-                "onlineServers": online,
-                "issueServers": len(non_online_hosts | active_incident_hosts),
-                "incidentServers": len(active_incident_hosts),
-                "actionableIssueServers": len(actionable_issue_hosts),
-                "actionableIncidentServers": len(actionable_incident_hosts),
-                "maintenanceServers": len(maintenance_hosts),
-                "staleServers": sum(bool(server["stale"]) for server in servers),
-                "pollingServers": sum(bool(server["polling"]) for server in servers),
-                "activeIncidents": active_incidents,
-                "criticalIncidents": critical_incidents,
-                "actionableIncidents": actionable_incidents,
-                "actionableCriticalIncidents": actionable_critical,
-                "gpus": len(gpus),
-                "busyGpus": busy,
-                "memoryTotalMiB": round(memory_total, 1),
-                "memoryUsedMiB": round(memory_used, 1),
-                "cpuAveragePct": round(sum(cpu_values) / len(cpu_values), 2)
-                if cpu_values
-                else None,
-                "cpuCores": sum(int(system["cpu_cores"]) for system in systems),
-                "systemMemoryTotalMiB": round(system_memory_total, 1),
-                "systemMemoryUsedMiB": round(system_memory_used, 1),
-                "swapTotalMiB": round(swap_total, 1),
-                "swapUsedMiB": round(swap_used, 1),
-                "diskTotalMiB": round(disk_total, 1),
-                "diskUsedMiB": round(disk_used, 1),
-                "networkRxBps": round(network_rx, 1),
-                "networkTxBps": round(network_tx, 1),
-                "diskReadBps": round(disk_read, 1),
-                "diskWriteBps": round(disk_write, 1),
-            },
+            "stats": fleet_stats(
+                servers,
+                active_conditions,
+                active_maintenance,
+                busy_pct=self._thresholds.gpu_busy_pct,
+            ),
             "servers": servers,
         }
         self._snapshot_cache_key = cache_key
