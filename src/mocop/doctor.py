@@ -38,6 +38,23 @@ from .remote_script import _COMBINED_QUERY_FIELDS
 
 _SSH_G_TIMEOUT_SECONDS = 10
 _SSH_G_MAX_OUTPUT_BYTES = 262_144
+
+
+def _refuse(message: str, code: str, as_json: bool, stdout: TextIO) -> int:
+    """Exit 2 for a usage or discovery refusal; JSON stays on stdout."""
+    if as_json:
+        json.dump(
+            {"ok": False, "code": code, "error": message},
+            stdout,
+            ensure_ascii=False,
+            indent=2,
+        )
+        stdout.write("\n")
+    else:
+        print(message, file=sys.stderr)
+    return 2
+
+
 _PROBE_MAX_OUTPUT_BYTES = 65_536
 _REUSE_MODES = frozenset({"auto", "autoask", "yes", "ask"})
 _SERVER_ALIVE_COUNT_MAX = 2
@@ -759,24 +776,37 @@ def run_doctor(
 ) -> int:
     """Diagnose configured aliases; return 0 when every alias is usable."""
     if profile and not probe_connection:
-        print("--profile requires live connection tests", file=sys.stderr)
-        return 2
+        return _refuse(
+            "--profile requires live connection tests",
+            "INVALID_ARGUMENTS",
+            as_json,
+            stdout,
+        )
     if collect and not probe_connection:
-        print("--probe requires live connection tests", file=sys.stderr)
-        return 2
+        return _refuse(
+            "--probe requires live connection tests",
+            "INVALID_ARGUMENTS",
+            as_json,
+            stdout,
+        )
     try:
         monitored_hosts = OpenSshConfigHostSource().hosts(config)
     except (OSError, ValueError) as exc:
-        print(f"host discovery failed: {exc}", file=sys.stderr)
-        return 2
+        return _refuse(
+            f"host discovery failed: {exc}",
+            "HOST_DISCOVERY_FAILED",
+            as_json,
+            stdout,
+        )
     if host_filter:
         unknown = tuple(host for host in host_filter if host not in monitored_hosts)
         if unknown:
-            print(
+            return _refuse(
                 f"unknown monitored aliases: {', '.join(sorted(unknown))}",
-                file=sys.stderr,
+                "UNKNOWN_HOST",
+                as_json,
+                stdout,
             )
-            return 2
         selected_hosts = tuple(host for host in monitored_hosts if host in host_filter)
     else:
         selected_hosts = monitored_hosts
@@ -823,6 +853,14 @@ def run_doctor(
                 for future in done:
                     ordered_reports[indexed[future]] = future.result()
             reports = [report for report in ordered_reports if report is not None]
+        if selected_local_host is not None:
+            local_report = {
+                "alias": selected_local_host,
+                "local": True,
+                "reachable": True,
+                "transport": "local",
+            }
+            reports.insert(selected_hosts.index(selected_local_host), local_report)
     except BaseException:
         process_registry.cancel()
         if collection_probe is not None:
@@ -845,6 +883,7 @@ def run_doctor(
 
     if as_json:
         document: dict[str, object] = {
+            "ok": not failed,
             "transportDiscipline": transport,
             "localHost": selected_local_host,
             "hosts": reports,
@@ -852,7 +891,7 @@ def run_doctor(
         }
         if service is not None:
             document["service"] = service
-        json.dump(document, stdout, indent=2)
+        json.dump(document, stdout, ensure_ascii=False, indent=2)
         stdout.write("\n")
     else:
         stdout.write(
@@ -864,6 +903,8 @@ def run_doctor(
         if selected_local_host:
             stdout.write(f"{selected_local_host}: local target, SSH not used\n")
         for report in reports:
+            if report.get("local"):
+                continue
             _write_text_report(report, stdout)
         if not remote_hosts and selected_local_host is None:
             stdout.write("no remote SSH aliases are configured\n")

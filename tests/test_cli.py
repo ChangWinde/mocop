@@ -8,6 +8,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from mocop import __version__
 from mocop.__main__ import _arguments, main
 from mocop.config import load_config
 from mocop.lifecycle import LifecycleError
@@ -109,6 +110,20 @@ class CliTests(unittest.TestCase):
         with redirect_stderr(stderr):
             self.assertEqual(main(["--strict"]), 2)
         self.assertIn("--strict requires --once", stderr.getvalue())
+
+    def test_once_and_strict_are_rejected_with_a_subcommand(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(main(["--once", "doctor"]), 2)
+        self.assertIn("default monitor command", stderr.getvalue())
+
+    def test_version_flag_prints_the_package_version(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit) as caught:
+            _arguments(["--version"])
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn(__version__, stdout.getvalue())
+        self.assertIn("mocop", stdout.getvalue())
 
     def test_once_strict_fails_when_a_host_is_not_online(self) -> None:
         config_path = write_config(self.root / "config.json")
@@ -237,6 +252,23 @@ class CliTests(unittest.TestCase):
         )
 
     @patch("mocop.__main__.initialize_config")
+    def test_init_json_reports_the_created_path_and_next_steps(
+        self, initialize
+    ) -> None:
+        initialize.return_value = Path("/tmp/mocop/config.json")
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            result = main(["init", "--json", "--host", "gpu-01"])
+
+        self.assertEqual(result, 0)
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["ok"], True)
+        self.assertEqual(report["configPath"], "/tmp/mocop/config.json")
+        self.assertEqual(report["hostsAdded"], 1)
+        self.assertEqual(report["next"], ["mocop doctor", "mocop service install"])
+
+    @patch("mocop.__main__.initialize_config")
     def test_init_suggests_doctor_before_service_install(self, initialize) -> None:
         initialize.return_value = Path("/tmp/mocop/config.json")
 
@@ -257,6 +289,45 @@ class CliTests(unittest.TestCase):
             result = main(["init"])
 
         self.assertEqual(result, 2)
+
+    @patch("mocop.__main__.initialize_config")
+    def test_lifecycle_errors_emit_json_when_requested(self, initialize) -> None:
+        initialize.side_effect = LifecycleError("already exists")
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            result = main(["init", "--json"])
+
+        self.assertEqual(result, 2)
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["ok"], False)
+        self.assertEqual(report["code"], "LIFECYCLE_ERROR")
+        self.assertEqual(report["error"], "already exists")
+
+    @patch("mocop.__main__.UserServiceManager")
+    def test_service_status_json_reports_active_state(self, manager_cls) -> None:
+        manager = manager_cls.return_value
+        manager.inspect.return_value = {
+            "active": True,
+            "unitPath": "/tmp/systemd/mocop.service",
+            "unit": "mocop.service",
+        }
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            result = main(["service", "status", "--json"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {
+                "ok": True,
+                "active": True,
+                "unitPath": "/tmp/systemd/mocop.service",
+                "unit": "mocop.service",
+            },
+        )
+        manager.status.assert_not_called()
 
     @patch("mocop.__main__.socket.gethostname", return_value="monitor-01")
     @patch("mocop.__main__._install_service", return_value=0)
@@ -280,7 +351,7 @@ class CliTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 0)
-        install_service.assert_called_once_with(target)
+        install_service.assert_called_once_with(target, as_json=False)
         config = load_config(target)
         self.assertEqual(config.hosts, ("monitor-01", "gpu-01"))
         self.assertEqual(config.local_host, "monitor-01")
@@ -526,6 +597,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 2)
         failure = json.loads(stdout.getvalue())
         self.assertEqual(failure["ok"], False)
+        self.assertEqual(failure["code"], "INVALID_CONFIG")
         self.assertIn("missing config keys", failure["error"])
 
     @patch("mocop.__main__.read_access_token", return_value="A" * 43)

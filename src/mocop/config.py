@@ -42,6 +42,8 @@ CONFIG_MAX_HOST_ALIASES = 1_024
 class ConfigError(ValueError):
     """Raised when monitor configuration is invalid."""
 
+    code = "INVALID_CONFIG"
+
 
 @dataclass(frozen=True, slots=True)
 class ThresholdConfig:

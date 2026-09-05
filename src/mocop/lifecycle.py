@@ -37,6 +37,8 @@ _UnitBackup = tuple[str, bytes | str | None, int]
 class LifecycleError(RuntimeError):
     """Raised when local setup or service management cannot complete safely."""
 
+    code = "LIFECYCLE_ERROR"
+
 
 def user_config_path(environ: dict[str, str] | None = None) -> Path:
     values = os.environ if environ is None else environ
@@ -511,6 +513,18 @@ class UserServiceManager:
             )
         except OSError as exc:
             raise LifecycleError(f"cannot read service unit: {self.unit_path}") from exc
+
+    def inspect(self) -> dict[str, object]:
+        """Machine-readable unit state: never dumps ``systemctl`` text."""
+        active = (
+            self._run(("systemctl", "--user", "is-active", "--quiet", SERVICE_NAME))
+            == 0
+        )
+        return {
+            "active": active,
+            "unitPath": str(self.unit_path),
+            "unit": SERVICE_NAME,
+        }
 
     def status(self) -> int:
         result = self._run(

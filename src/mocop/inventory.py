@@ -497,10 +497,7 @@ class ConfigInventory:
         discovery = self._discover(config)
         scanned = discovery.aliases
         eligible = discovery.eligible_aliases
-        try:
-            active = discovery.hosts
-        except (OSError, ValueError) as exc:
-            raise InventoryError("active inventory could not be resolved") from exc
+        active = discovery.hosts
         active_set = set(active)
         # One clock sample keeps the active-window decision and the serialized
         # instance end consistent when a recurring boundary is being crossed.

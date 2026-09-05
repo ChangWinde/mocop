@@ -539,11 +539,7 @@ class StateStore:
                     )
                 )
 
-        set_actionable_check = getattr(
-            self._notifications, "set_actionable_check", None
-        )
-        if set_actionable_check is not None:
-            set_actionable_check(_notification_event_actionable)
+        self._notifications.set_actionable_check(_notification_event_actionable)
         self._active_maintenance_signature = self._maintenance_signature_locked()
         self._active_action_signature = self._incident_action_signature_locked()
         self._incident_revision = self._incidents.version

@@ -440,6 +440,40 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("star-l: local target", output)
 
     @patch("mocop.doctor._run_bounded_process")
+    def test_json_hosts_include_the_local_target(self, run) -> None:
+        code, output = self.run_doctor(
+            config(hosts=("star-l",), local_host="star-l"),
+            probe_connection=False,
+            as_json=True,
+        )
+
+        self.assertEqual(code, 0)
+        run.assert_not_called()
+        report = json.loads(output)
+        self.assertTrue(report["ok"])
+        self.assertEqual(
+            report["hosts"],
+            [
+                {
+                    "alias": "star-l",
+                    "local": True,
+                    "reachable": True,
+                    "transport": "local",
+                }
+            ],
+        )
+
+    @patch("mocop.doctor._run_bounded_process")
+    def test_json_refusals_use_the_cli_envelope(self, _run) -> None:
+        code, output = self.run_doctor(config(), host_filter=("absent",), as_json=True)
+
+        self.assertEqual(code, 2)
+        report = json.loads(output)
+        self.assertEqual(report["ok"], False)
+        self.assertEqual(report["code"], "UNKNOWN_HOST")
+        self.assertIn("absent", report["error"])
+
+    @patch("mocop.doctor._run_bounded_process")
     def test_auto_discovered_hosts_are_diagnosed(self, run) -> None:
         with tempfile.TemporaryDirectory() as directory:
             ssh_config = Path(directory) / "config"
