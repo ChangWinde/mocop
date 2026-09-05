@@ -38,6 +38,15 @@ All notable changes are documented here. This project follows Semantic Versionin
   and every `service` action accept `--json` and write one `{ok, code?, ...}`
   document, matching `config check --json` and `doctor --json`. Refusals stay
   on that envelope so an agent never has to parse English from stderr.
+- `mocop api PATH` asks the running service any public or authenticated GET
+  question from the monitor host without knowing the listen address, the
+  capability file, or the Bearer header: both come from the configuration
+  directory, the response body is written to stdout unchanged (`/api/events`
+  streams until interrupted), and the exit code follows the CLI table (`0` for
+  a 2xx, `1` for any other status or an unreachable service, `2` for usage or
+  configuration problems) with a JSON `{error, code}` envelope on every
+  failure. Reader and writer routes are refused with `DASHBOARD_ONLY` because
+  their marker header and same-origin checks belong to the dashboard.
 - `GET /api/meta` capabilities now include `updateSupported`. Excess
   connections answer `503 CONNECTION_LIMIT` as JSON instead of an empty body.
 - `403 AUTHENTICATION_REQUIRED` responses carry a `hint` naming the header to

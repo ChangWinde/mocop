@@ -176,9 +176,11 @@ mocop service uninstall
 code 与 P/A/R/W 访问分级。公开的 `GET /api/meta` 清单列出每个路由的分级、
 可接受的查询参数及取值范围、POST 字段、响应类型、错误码目录，以及当前
 版本对应的文档链接；`403` 响应会说明能力令牌存放在哪里——AI 代理无需任何
-额外知识即可驾驭一个部署。只有 API 发现与健康检查公开；带认证的 curl 示例，以及
-非观众型自动化不应发送 `X-Monitor-Request: dashboard` 标记头的原因见
-[API 参考](../../API.md)。
+额外知识即可驾驭一个部署。在监控主机本地，`mocop api PATH` 会从配置读取监听
+地址与能力令牌，直接完成任意公开或已认证的 GET（如
+`mocop api '/api/capacity?gpus=2'`）。只有 API 发现与健康检查公开；带认证的
+curl 示例，以及非观众型自动化不应发送 `X-Monitor-Request: dashboard` 标记头的
+原因见 [API 参考](../../API.md)。
 
 ## 指标与故障排查
 

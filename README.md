@@ -122,9 +122,9 @@ mocop config check
 mocop doctor
 ```
 
-`mocop config check` validates the configuration without starting the web server or opening any SSH connection, reports the resolved path, host count, and persistence/workload/topology/webhook state (never secret values), and exits `0` when valid or `2` when not.
+`mocop config check` validates the configuration without a web server or SSH connection, reports the resolved path, host count, and persistence/workload/topology/webhook state (never secret values), and exits `0` when valid or `2` when not.
 
-`mocop doctor` then verifies non-interactive SSH reachability and connection reuse for every monitored alias: exit `0` when every alias is usable, `1` when at least one failed, `2` for a configuration or usage error. Add `--json` for a machine-readable report; the [operations runbook](docs/OPERATIONS.md#command-reference-and-exit-codes) lists every command, flag, and exit code.
+`mocop doctor` then verifies non-interactive SSH reachability and connection reuse for every monitored alias: exit `0` when every alias is usable, `1` when at least one failed, `2` for a configuration or usage error. Both accept `--json`; the [operations runbook](docs/OPERATIONS.md#command-reference-and-exit-codes) lists every command, flag, and exit code.
 
 ### 4. Open the dashboard
 
@@ -174,9 +174,11 @@ disabled by default. After a manual edit, run `mocop config check` and follow th
 
 Everything the dashboard shows is also a small JSON API with stable error codes
 and P/A/R/W access tiers. `GET /api/meta` names every route's tier, query
-bounds, POST body fields, error-code catalog, and the documentation URL; a
-`403` says where the capability lives. Only discovery and health are public;
-see the [API reference](docs/API.md) for curl examples and why non-viewer
+bounds, POST body fields, error-code catalog, and documentation URL; a `403`
+says where the capability lives. On the monitor host, `mocop api PATH` performs
+any public or authenticated GET with the listener and capability taken from the
+configuration. Only discovery and health are public; the
+[API reference](docs/API.md) has curl examples and explains why non-viewer
 automation must not send `X-Monitor-Request: dashboard`.
 
 ## Metrics and troubleshooting

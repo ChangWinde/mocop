@@ -271,9 +271,22 @@ never included.
 
 ## Quick start
 
-Copy-paste examples against a default managed deployment. The capability file
-is beside the selected configuration; this example uses the default path. Do
-not put the value in logs, shell history, or source control.
+On the monitor host itself, `mocop api PATH` performs any P- or A-tier GET
+without this plumbing: it reads the listener from the configuration and the
+capability from the private file beside it, writes the response body to
+stdout unchanged, and exits `0` on a 2xx, `1` on any other status (the
+server's error envelope is the output) or an unreachable service, and `2`
+for usage or configuration problems. R- and W-tier paths are refused with
+`DASHBOARD_ONLY` because they belong to the same-origin dashboard.
+
+```bash
+mocop api '/api/capacity?gpus=4&min_vram_gib=40' | jq '.candidates[] | select(.satisfies) | .host'
+mocop api /api/events        # streams until interrupted
+```
+
+The remaining examples are copy-paste `curl` calls for any other host. The
+capability file is beside the selected configuration; this example uses the
+default path. Do not put the value in logs, shell history, or source control.
 
 ```bash
 MOCOP_TOKEN="$(<"${XDG_CONFIG_HOME:-$HOME/.config}/mocop/access-token")"

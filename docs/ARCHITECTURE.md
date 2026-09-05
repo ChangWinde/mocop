@@ -75,6 +75,7 @@ interfaces without a runtime plugin registry.
 | `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
 | `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query and body schemas, body caps, error catalog; `/api/meta` publishes it and every GET query and POST body is validated through it |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
+| `client.py` | the local read-only client behind `mocop api`: listener from the configuration, capability from the private file, public and authenticated GETs only |
 | `static_assets.py` | static asset route table, strong ETags, and conditional-delivery validators |
 | `lifecycle.py` | private config creation and user-level systemd management |
 | `migration.py` | non-destructive cross-machine config transformation and private target creation |

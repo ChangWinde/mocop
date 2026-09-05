@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 
 from . import __version__
+from . import client as api_client
 from .config import (
     ConfigError,
     MonitorConfig,
@@ -321,6 +322,48 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     _add_json_flag(doctor_parser)
+
+    api_parser = commands.add_parser(
+        "api",
+        help=(
+            "GET one public or authenticated route from the running service "
+            "and write the response body to stdout"
+        ),
+        description=(
+            "Read the running monitor without spelling the listen address or "
+            "the Bearer header: the listener comes from the configuration and "
+            "the capability from the private access-token file beside it. "
+            "Routes the dashboard reserves for itself (reader and writer tiers) "
+            "are refused with DASHBOARD_ONLY. /api/events streams until "
+            "interrupted. Exit 0 on a 2xx, 1 on any other HTTP status or an "
+            "unreachable service, 2 on a usage or configuration problem; a "
+            "non-zero exit always leaves a JSON error envelope on stdout."
+        ),
+    )
+    api_parser.add_argument(
+        "path",
+        metavar="PATH",
+        help="absolute API path with optional query, e.g. /api/capacity?gpus=2",
+    )
+    api_parser.add_argument(
+        "--config",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="configuration naming the listener and the access-token location",
+    )
+    api_parser.add_argument(
+        "--token-file",
+        type=Path,
+        default=None,
+        help="capability file (default: the access-token file beside the config)",
+    )
+    api_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        metavar="SECONDS",
+        help="socket timeout for the request (default: 10)",
+    )
     return parser.parse_args(argv)
 
 
@@ -615,6 +658,31 @@ def _print_config_check_report(report: dict[str, object]) -> None:
         print(f"  {webhook['name']}: {', '.join(references)}")
 
 
+def _run_api(args: argparse.Namespace) -> int:
+    """Forward one GET to the running service; the body is the whole output."""
+    try:
+        response = api_client.request(
+            args.path,
+            config_path=args.config,
+            token_file=args.token_file,
+            timeout=args.timeout,
+        )
+    except api_client.ApiClientError as exc:
+        _emit_json({"error": str(exc), "code": exc.code})
+        return exc.exit_code
+    try:
+        api_client.write_response(response, sys.stdout.buffer)
+    except KeyboardInterrupt:
+        # Ctrl-C on an event stream is the normal way to stop following it.
+        return 0
+    except BrokenPipeError:
+        # `mocop api ... | head` closed the pipe; hand stdout to /dev/null so
+        # the interpreter's final flush cannot raise the same error again.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
+    return 0 if 200 <= response.status < 300 else 1
+
+
 def _run_config_check(args: argparse.Namespace) -> int:
     """Parse and validate only: no web server, no SSH connections."""
     try:
@@ -848,6 +916,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command is None:
         return _run_monitor(args)
+    if args.command == "api":
+        return _run_api(args)
     if args.command == "config":
         return _run_config_check(args)
     if args.command == "doctor":
