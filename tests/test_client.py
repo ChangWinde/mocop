@@ -9,6 +9,7 @@ import unittest
 from contextlib import redirect_stdout
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from mocop import client
 from mocop.__main__ import main
@@ -150,6 +151,23 @@ class ApiClientTests(unittest.TestCase):
         self.assertEqual(first, b"event: snapshot\n")
         payload = json.loads(next(response.lines).removeprefix(b"data: "))
         self.assertEqual(payload["pollIntervalSeconds"], config.poll_interval_seconds)
+
+    def test_silent_event_stream_becomes_a_connection_failure(self) -> None:
+        # A followed stream that stops delivering heartbeats must end with the
+        # envelope and exit code of an unreachable service, not a traceback.
+        with patch.object(client, "_STREAM_SILENCE_SECONDS", 0.5):
+            response = client.request(
+                "/api/events", config_path=self.config_path, timeout=0.5
+            )
+            assert response.lines is not None
+            self.assertEqual(next(response.lines), b"event: snapshot\n")
+            # The fixture store publishes nothing else and the heartbeat is
+            # 15 s away, so the next read outlives the shortened silence bound.
+            with self.assertRaises(client.ApiClientError) as raised:
+                for _line in response.lines:
+                    pass
+        self.assertEqual(raised.exception.code, "CONNECTION_FAILED")
+        self.assertEqual(raised.exception.exit_code, 1)
 
     def test_wildcard_binds_map_to_loopback(self) -> None:
         config = load_config(self.config_path)

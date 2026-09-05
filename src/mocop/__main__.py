@@ -667,11 +667,12 @@ def _run_api(args: argparse.Namespace) -> int:
             token_file=args.token_file,
             timeout=args.timeout,
         )
+        api_client.write_response(response, sys.stdout.buffer)
     except api_client.ApiClientError as exc:
+        # Also reached when a followed event stream falls silent: the frames
+        # already written are complete, and the envelope follows them.
         _emit_json({"error": str(exc), "code": exc.code})
         return exc.exit_code
-    try:
-        api_client.write_response(response, sys.stdout.buffer)
     except KeyboardInterrupt:
         # Ctrl-C on an event stream is the normal way to stop following it.
         return 0

@@ -21,11 +21,13 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from . import __version__
-from .api_manifest import API_ROUTES, EVENT_STREAM_RESPONSE_TYPE
+from .api_manifest import API_ROUTES, EVENT_STREAM_RESPONSE_TYPE, RESPONSE_TYPES
 from .config import ConfigError, MonitorConfig, load_config, resolve_config_path
 from .lifecycle import LifecycleError, access_token_path, read_access_token
 
 _WILDCARD_BINDS = {"": "127.0.0.1", "0.0.0.0": "127.0.0.1", "::": "::1"}
+# Four missed 15 s heartbeats before a followed event stream is declared dead.
+_STREAM_SILENCE_SECONDS = 60.0
 # No path is routed for both methods, so one tier per path is exact.
 _ROUTE_ACCESS = {path: access for _method, path, access in API_ROUTES}
 _PUBLIC = "public"
@@ -109,6 +111,11 @@ def request(
             ) from exc
         headers["Authorization"] = f"Bearer {token}"
     url = f"{service_url(config)}{target}"
+    streaming = RESPONSE_TYPES.get(parsed.path) == EVENT_STREAM_RESPONSE_TYPE
+    if streaming:
+        # The socket timeout bounds each read; a quiet stream still carries a
+        # heartbeat every 15 s, so silence beyond this means the service is gone.
+        timeout = max(timeout, _STREAM_SILENCE_SECONDS)
     try:
         response = urlopen(Request(url, headers=headers), timeout=timeout)
     except HTTPError as error:
@@ -132,7 +139,14 @@ def request(
 
 def _stream_lines(response: HTTPResponse) -> Iterator[bytes]:
     with response:
-        yield from response
+        try:
+            yield from response
+        except OSError as exc:
+            raise ApiClientError(
+                f"the event stream went silent ({exc}); check `mocop service status`",
+                "CONNECTION_FAILED",
+                exit_code=1,
+            ) from exc
 
 
 def write_response(response: ApiResponse, stream: BinaryIO) -> None:
