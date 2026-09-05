@@ -2569,10 +2569,10 @@ try {
     removeDisabled: true,
     status: "背景已从当前浏览器移除",
   });
-  // Service metadata endpoint (new contract) plus the end-to-end viewer
-  // marker audit: every dashboard-initiated read of the level-triggered API
-  // paths must have carried X-Monitor-Request, or SSE-outage polling would
-  // drop the page back to the unattended sampling cadence.
+  // The public service manifest the dashboard booted from, then the
+  // end-to-end viewer marker audit: every dashboard-initiated read of the
+  // level-triggered API paths must have carried X-Monitor-Request, or
+  // SSE-outage polling would drop the page back to the unattended cadence.
   const meta = await (
     await fetch(`http://127.0.0.1:${monitorPort}/api/meta`)
   ).json();
@@ -2580,15 +2580,19 @@ try {
   assert.equal(typeof meta.appVersion, "string");
   assert.equal(typeof meta.schemaVersion, "number");
   assert.equal(meta.capabilities.restartSupported, false);
+  assert.equal(meta.capabilities.configurationWriteSupported, true);
   assert(Array.isArray(meta.endpoints)
     && meta.endpoints.some((endpoint) => endpoint.path === "/api/snapshot"));
+  const audit = await (
+    await fetch(`http://127.0.0.1:${monitorPort}/fixture/audit`)
+  ).json();
   assert.equal(
-    meta.fixture.unmarkedDashboardReads,
+    audit.unmarkedDashboardReads,
     0,
     "all dashboard reads carry the X-Monitor-Request marker",
   );
   assert.equal(
-    meta.fixture.unauthenticatedPrivateRequests,
+    audit.unauthenticatedPrivateRequests,
     1,
     "only the explicit wrong-token submission reaches a private route unauthenticated",
   );
@@ -2601,7 +2605,7 @@ try {
     capacity, owners, ownersUsage, ownersDrilldown,
     incidentMaintenance, grouping, emptyFleet,
     personalization, gpuTasks, resilience,
-    persistedAppearance, persistedTaskSort, mobile, removedBackground, meta,
+    persistedAppearance, persistedTaskSort, mobile, removedBackground, meta, audit,
   }));
 } catch (error) {
   console.error(error);
