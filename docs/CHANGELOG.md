@@ -18,7 +18,6 @@ All notable changes are documented here. This project follows Semantic Versionin
   usual rules, bound acknowledgements keep applying, and webhook workers are
   primed so the eventual `resolved` still pairs with the `opened` an earlier
   process delivered.
-
 - The startup `VACUUM` that returns expired pages is best-effort: when it
   cannot run (typically a full disk, since it needs temporary space up to the
   file's size) the service starts anyway, reclaims what the bounded online
@@ -46,8 +45,8 @@ All notable changes are documented here. This project follows Semantic Versionin
   checkpoint and evaluation pauses. Connectivity and GPU-availability
   conditions still open immediately; set either floor to `0` to confirm by
   cycles alone as before.
-- Four modules crossed their line ceilings with the incident-restore fix and were split along
-  existing seams instead: the struct-packed history records moved from
+- Seven modules crossed their line ceilings during this round and were split
+  along existing seams instead: the struct-packed history records moved from
   `service.py` into `telemetry_points.py`, the bounded HTTPS delivery
   transport (pinned DNS, SSRF guards) from `notifications.py` into
   `webhook_transport.py`, the telemetry-domain rules from `incidents.py` into
