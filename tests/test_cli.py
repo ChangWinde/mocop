@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from mocop import __version__
 from mocop.__main__ import _arguments, main
-from mocop.config import load_config
+from mocop.config_loader import load_config
 from mocop.lifecycle import LifecycleError
 from mocop.migration import MigrationResult
 from mocop.models import ProbeResult

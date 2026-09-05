@@ -9,7 +9,8 @@ from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
 
-from mocop.config import BUNDLED_CONFIG_PATH, load_config
+from mocop.config import BUNDLED_CONFIG_PATH
+from mocop.config_loader import load_config
 from mocop.discovery import OpenSshConfigHostSource
 from mocop.inventory import ConfigInventory, InventoryError
 from mocop.lifecycle import initialize_config

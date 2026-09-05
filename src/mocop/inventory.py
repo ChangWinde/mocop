@@ -22,8 +22,8 @@ from .config import (
     is_valid_incident_action_reason,
     is_valid_incident_condition_key,
     is_valid_maintenance_reason,
-    load_config,
 )
+from .config_loader import load_config
 from .discovery import (
     HostDiscoverySnapshot,
     HostSource,

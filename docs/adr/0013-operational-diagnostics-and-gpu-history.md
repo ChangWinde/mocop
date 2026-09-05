@@ -52,7 +52,8 @@ or configuration values.
 
 ## Impact
 
-- `config.py` and `inventory.py` own durable incident-action validation and writes.
+- `config.py` (validators), `config_loader.py` (the `incident_actions` section
+  parser), and `inventory.py` own durable incident-action validation and writes.
 - `service.py` owns action evaluation, GPU timelines, diagnostic projection, and
   manual-probe scheduling.
 - `persistence.py` stores bounded per-GPU samples and process transitions without

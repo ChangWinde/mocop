@@ -6,13 +6,8 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import (
-    ConfigError,
-    MonitorConfig,
-    is_safe_alias,
-    load_private_config,
-    load_private_config_document,
-)
+from .config import ConfigError, MonitorConfig, is_safe_alias
+from .config_loader import load_private_config, load_private_config_document
 from .lifecycle import LifecycleError
 from .privatefiles import PRIVATE_FILE_MODE
 

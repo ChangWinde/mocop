@@ -87,7 +87,13 @@ All notable changes are documented here. This project follows Semantic Versionin
   `parse_linux_resource_payload` wrapper left `probe.py` for the test module,
   and the doctor and the route resolver share one `ssh -G` option resolver in
   `ssh_topology.py` instead of two copies that had already drifted on how a
-  bare option line is read.
+  bare option line is read. Configuration loading moved out of `config.py`
+  into `config_loader.py` (`load_config`, `load_private_config`,
+  `resolve_config_path`, and friends), and the single 575-line parser became
+  one function per configuration section, run in the same order so every
+  error message and its precedence are unchanged; `config.py` keeps the
+  schema — limits, typed sections, validators — and ratchets from 1,550 to
+  375 lines.
 - The dashboard's payload normalizers (snapshot and incidents envelopes,
   inventory, collector settings, maintenance windows, host groups, topology)
   moved from `app.js` into the `api-contracts.js` leaf, which now has its own
@@ -102,7 +108,12 @@ All notable changes are documented here. This project follows Semantic Versionin
   bisection and shrink loop are tested in Node for the first time; `format.js`
   gained the contract test the leaf pattern always required, and a repository
   test now checks that every leaf is routed, loaded before `app.js`, and
-  tested. The `app.js` ceiling ratcheted down to 6,100 lines.
+  tested. The attention panel's decisions — which active conditions a host
+  contributes, the shared-path and shared-storage grouping that consumes the
+  conditions it explains, per-host issues, and ranking — moved into the
+  `attention.js` leaf with a contract test that pins every grouping rule
+  previously exercised only through the browser journey. The `app.js` ceiling
+  ratcheted down to 6,000 lines.
 - Every HTTP server instance now requires the Bearer capability: the
   unauthenticated server mode that only tests used is gone, `GET /api/meta`
   no longer reports the constant `authenticationRequired` flag, and the
@@ -150,6 +161,13 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Restoring history at startup no longer scans the whole SQLite database: the
+  newest points of each host and GPU are read through the tables' primary
+  keys instead of a window function that SQLite executed as a full scan plus
+  temporary sort. Against a copy of a 476 MB live history (2 million GPU
+  points) the restore fell from 2.85 s to 0.4 s with identical results, and
+  from 9–18 s on the live host where the writer thread contended for the
+  lock; no schema change is involved.
 - `mocop service install` could not verify a service publishing the complete
   `/api/meta` manifest: the installer's liveness probe rejected any manifest
   longer than 4 KiB, so every install of this release rolled back with

@@ -1077,6 +1077,65 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         self.assertEqual(loaded.history, {})
         self.assertEqual(loaded.incident_events, ())
 
+    def test_load_walks_partition_keys_around_non_text_keys(self) -> None:
+        # The restore enumerates hosts and GPU identities by seeking past the
+        # last key. The key columns have TEXT affinity, so the only non-text
+        # value a foreign writer can leave behind is a blob, which SQLite
+        # sorts after every text key: it must end the walk without hiding the
+        # valid keys before it or restoring its own rows, and the per-partition
+        # limit and ordering must hold for the keys that remain.
+        now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+        stamps = [
+            (now - timedelta(seconds=offset)).isoformat().replace("+00:00", "Z")
+            for offset in (30, 20, 10)
+        ]
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        for host in ("gpu-01", "gpu-02"):
+            for index, stamp in enumerate(stamps):
+                store.record_history(host, history_point(stamp, 10 + index))
+            store.record_gpu_telemetry(
+                host,
+                tuple(
+                    gpu_point(stamp, 10 + index) for index, stamp in enumerate(stamps)
+                ),
+                (),
+            )
+        self.assertTrue(store.flush())
+        store.close()
+        blob = b"\xffblob"
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute(
+                "INSERT INTO history VALUES (?, ?, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0)",
+                (blob, stamps[2]),
+            )
+            connection.execute(
+                "INSERT INTO gpu_history VALUES (?, 'GPU-1', 0, ?, 1, 1, 1, 1, 1)",
+                (blob, stamps[2]),
+            )
+            connection.execute(
+                "INSERT INTO gpu_history VALUES ('gpu-01', ?, 0, ?, 1, 1, 1, 1, 1)",
+                (blob, stamps[2]),
+            )
+
+        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(reopened.close)
+        loaded = reopened.load(2, 20)
+
+        self.assertEqual(list(loaded.history), ["gpu-01", "gpu-02"])
+        self.assertEqual(
+            [point["observedAt"] for point in loaded.history["gpu-01"]], stamps[1:]
+        )
+        self.assertEqual(
+            list(loaded.gpu_history), [("gpu-01", "GPU-1"), ("gpu-02", "GPU-1")]
+        )
+        self.assertEqual(
+            [
+                point["utilizationGpuPct"]
+                for point in loaded.gpu_history["gpu-02", "GPU-1"]
+            ],
+            [11, 12],
+        )
+
     def test_load_skips_history_rows_with_null_required_percentages(self) -> None:
         # A NULL in a required percentage column (foreign writer or partial
         # corruption) used to survive load() and crash host initialization on

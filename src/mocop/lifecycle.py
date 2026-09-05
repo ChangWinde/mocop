@@ -17,9 +17,8 @@ from .config import (
     ConfigError,
     MonitorConfig,
     is_safe_alias,
-    load_config,
-    load_private_config,
 )
+from .config_loader import load_config, load_private_config
 from .privatefiles import (
     PRIVATE_FILE_MODE,
     acquire_private_lock,

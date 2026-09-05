@@ -13,13 +13,8 @@ from pathlib import Path
 
 from . import __version__
 from . import client as api_client
-from .config import (
-    ConfigError,
-    MonitorConfig,
-    load_config,
-    load_private_config,
-    resolve_config_path,
-)
+from .config import ConfigError, MonitorConfig
+from .config_loader import load_config, load_private_config, resolve_config_path
 from .discovery import OpenSshConfigHostSource
 from .doctor import run_doctor
 from .inventory import ConfigInventory
