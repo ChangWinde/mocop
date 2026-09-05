@@ -17,6 +17,12 @@ All notable changes are documented here. This project follows Semantic Versionin
   `workload_json` column, keeping the process table's nine-column contract,
   and the dashboard's GPU timeline states how long each finished run held
   the device.
+- `/api/usage` reports `partialGpus`: the devices whose retained transition
+  timeline is full yet begins inside the requested window, so their occupancy
+  before that point is missing from the totals. `earliestDataAt` alone could
+  not show this because it is the earliest record across all devices, and a
+  quiet device made a report look complete while a busy one's timeline
+  reached back only an hour; the dashboard's owner summary names the count.
 
 - Incidents that were open when the service stopped resume their generation
   at startup instead of opening again. A live deployment had re-emitted
@@ -67,9 +73,9 @@ All notable changes are documented here. This project follows Semantic Versionin
   pushed two more over, so the incident vocabulary (`incident_types.py`) left
   `incidents.py` and the integration section parsers
   (`config_integrations.py`) left `config_loader.py`, the maintenance window
-  type (`maintenance.py`) left `config.py`, and the restore path
-  (`persistence_restore.py`) left `persistence.py`. Every ceiling ratchets
-  down.
+  type (`maintenance.py`) left `config.py`, the restore path
+  (`persistence_restore.py`) left `persistence.py`, and occupancy pairing
+  (`occupancy.py`) left `usage.py`. Every ceiling ratchets down.
 - A connectivity incident's `diagnosis.nextSteps` (and the dashboard's
   incident dialog) now open with the step that follows from the failure
   classification — check the jump host's forwarding, the node's `sshd`

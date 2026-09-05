@@ -631,6 +631,7 @@ Response fields:
 | `totalGpuSeconds` | number | Sum of `gpuSeconds` across every owner (not just the returned rows). |
 | `earliestDataAt` | timestamp \| null | Oldest timeline record that informed this rollup. If it is later than `sinceAt`, the window is only partially covered. |
 | `droppedRecords` | int | Timeline records skipped because no trustworthy start anchor existed. |
+| `partialGpus` | int | Devices whose retained transition timeline is full (`incident_history_points` records) yet begins inside the window: their occupancy before its first retained record is missing from the totals even when `earliestDataAt` looks complete, because that timestamp is the earliest across all devices. |
 
 `owners[]` fields:
 

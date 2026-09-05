@@ -32,6 +32,48 @@ class AggregateUsageTests(unittest.TestCase):
     """The pure rollup behind StateStore.usage(); the store tests cover the
     live timeline, this pins the module boundary and the accounting rules."""
 
+    def test_reports_devices_whose_retained_timeline_starts_inside_the_window(
+        self,
+    ) -> None:
+        # earliestDataAt is the earliest record across all devices, so a quiet
+        # device can make a report look complete while a busy one's full
+        # timeline only reaches back an hour. partialGpus counts the latter.
+        quiet = [Transition(_at(23 * 60), "started", 1, "notebook", {"owner": "a"})]
+        busy = [
+            Transition(
+                _at(60 - index),
+                "started" if index % 2 == 0 else "stopped",
+                100 + index // 2,
+                "job",
+            )
+            for index in range(4)
+        ]
+        usage = aggregate_usage(
+            now=NOW,
+            window_hours=24,
+            owner_limit=10,
+            busy_pct=20.0,
+            events_by_gpu={GPU: quiet, ("node-b", "GPU-2"): busy},
+            active_by_gpu={GPU: {}, ("node-b", "GPU-2"): {}},
+            utilization_by_gpu={},
+            event_cap=4,
+        )
+        self.assertEqual(usage["partialGpus"], 1)
+        self.assertEqual(usage["earliestDataAt"], _at(23 * 60))
+        # Without a cap nothing can be judged truncated; a device below the cap
+        # holds its complete timeline even when it starts inside the window.
+        complete = aggregate_usage(
+            now=NOW,
+            window_hours=24,
+            owner_limit=10,
+            busy_pct=20.0,
+            events_by_gpu={GPU: quiet, ("node-b", "GPU-2"): busy},
+            active_by_gpu={},
+            utilization_by_gpu={},
+            event_cap=5,
+        )
+        self.assertEqual(complete["partialGpus"], 0)
+
     def test_unmatched_stops_anchor_on_the_monitors_first_observation(self) -> None:
         # Live evidence: a busy GPU churns hundreds of processes a day, so the
         # started edge of many runs leaves the retained event window before

@@ -2053,7 +2053,8 @@ function renderOwnersUsage() {
     && Date.parse(usage.earliestDataAt) > Date.parse(usage.sinceAt) + 60_000;
   elements.ownersUsageSummary.textContent =
     `${numeric(usage.totalOwners)} 个归属方 · 共 ${gpuHoursLabel(usage.totalGpuSeconds)}`
-    + (coverageGap ? ` · 数据自 ${age(usage.earliestDataAt)}起` : "");
+    + (coverageGap ? ` · 数据自 ${age(usage.earliestDataAt)}起` : "")
+    + (usage.partialGpus > 0 ? ` · ${usage.partialGpus} 张卡的时间线不完整` : "");
   for (const entry of owners.slice(0, 50)) {
     const card = create(
       "article",

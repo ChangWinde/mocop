@@ -71,6 +71,7 @@ interfaces without a runtime plugin registry.
 | `service.py` | concurrent scheduling, failure backoff, state publication |
 | `telemetry_points.py` | compact in-memory history records: struct-packed host and GPU samples, process transitions |
 | `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage` |
+| `occupancy.py` | pairing a device's process transitions into runs: start/stop pairing, first-observation anchors, owner attribution, same-owner merging |
 | `models.py` | immutable resource result types |
 | `incident_types.py` | the incident vocabulary: conditions, transition events, restored open incidents, the policy protocol |
 | `incidents.py` | condition evaluation, bounded transition history, restored generations, and raw/actionable counts |

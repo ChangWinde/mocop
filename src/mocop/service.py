@@ -755,6 +755,7 @@ class StateStore:
             events_by_gpu=events_by_gpu,
             active_by_gpu=active_by_gpu,
             utilization_by_gpu=utilization_by_gpu,
+            event_cap=self._process_event_points,
         )
 
     def incidents(self, limit: int) -> dict[str, object]:
