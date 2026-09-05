@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mocop.config import BUNDLED_CONFIG_PATH, load_private_config
+from mocop.config import BUNDLED_CONFIG_PATH
+from mocop.config_loader import load_private_config
 from mocop.lifecycle import LifecycleError
 from mocop.migration import migrate_config
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from mocop.api_manifest import API_ROUTES, API_VERSION, ERROR_CODES
-from mocop.config import _OPTIONAL_KEYS, _REQUIRED_KEYS
+from mocop.config_loader import _OPTIONAL_KEYS, _REQUIRED_KEYS
 from mocop.remote_script import _PROTOCOL_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]

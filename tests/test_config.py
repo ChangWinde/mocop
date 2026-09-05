@@ -12,10 +12,8 @@ from mocop.config import (
     CONFIG_ENV_VAR,
     CONFIG_MAX_BYTES,
     ConfigError,
-    load_config,
-    load_private_config,
-    resolve_config_path,
 )
+from mocop.config_loader import load_config, load_private_config, resolve_config_path
 
 
 def valid_config() -> dict[str, object]:

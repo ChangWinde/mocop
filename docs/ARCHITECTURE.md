@@ -51,7 +51,8 @@ interfaces without a runtime plugin registry.
 
 | Module | Responsibility |
 |---|---|
-| `config.py` | configuration discovery, strict schema validation, safe defaults |
+| `config.py` | the configuration schema: limits, typed sections, and the alias/text validators the HTTP layer and configuration controller reuse |
+| `config_loader.py` | path resolution, bounded and private file reads, strict JSON decoding, and one parser per configuration section, run in a fixed order |
 | `privatefiles.py` | private lock and `0600` file primitives shared by the lifecycle and configuration controller |
 | `hostnames.py` | canonical Host/Origin hostname normalization and the trusted web policy |
 | `discovery_policy.py` | dependency-free SSH discovery policy parsing and bounds |

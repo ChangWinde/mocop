@@ -22,7 +22,8 @@ from urllib.request import Request, urlopen
 
 from . import __version__
 from .api_manifest import API_ROUTES, EVENT_STREAM_RESPONSE_TYPE, RESPONSE_TYPES
-from .config import ConfigError, MonitorConfig, load_config, resolve_config_path
+from .config import ConfigError, MonitorConfig
+from .config_loader import load_config, resolve_config_path
 from .lifecycle import LifecycleError, access_token_path, read_access_token
 
 _WILDCARD_BINDS = {"": "127.0.0.1", "0.0.0.0": "127.0.0.1", "::": "::1"}

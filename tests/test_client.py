@@ -14,7 +14,7 @@ from unittest.mock import patch
 from mocop import client
 from mocop.__main__ import main
 from mocop.api_manifest import API_ROUTES
-from mocop.config import load_config
+from mocop.config_loader import load_config
 from mocop.service import StateStore
 from mocop.web import MonitorHttpServer
 

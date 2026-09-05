@@ -37,9 +37,8 @@ from .config import (
     is_valid_incident_action_reason,
     is_valid_incident_condition_key,
     is_valid_maintenance_reason,
-    normalize_web_hostname,
 )
-from .hostnames import trusted_web_policy
+from .hostnames import normalize_web_hostname, trusted_web_policy
 from .inventory import (
     DashboardConfigController,
     InventoryError,

@@ -46,7 +46,8 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/web.py": 1_325,
     "src/mocop/api_manifest.py": 525,
     "src/mocop/probe.py": 1_540,
-    "src/mocop/config.py": 1_550,
+    "src/mocop/config.py": 375,
+    "src/mocop/config_loader.py": 1_300,
 }
 
 

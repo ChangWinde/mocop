@@ -87,7 +87,13 @@ All notable changes are documented here. This project follows Semantic Versionin
   `parse_linux_resource_payload` wrapper left `probe.py` for the test module,
   and the doctor and the route resolver share one `ssh -G` option resolver in
   `ssh_topology.py` instead of two copies that had already drifted on how a
-  bare option line is read.
+  bare option line is read. Configuration loading moved out of `config.py`
+  into `config_loader.py` (`load_config`, `load_private_config`,
+  `resolve_config_path`, and friends), and the single 575-line parser became
+  one function per configuration section, run in the same order so every
+  error message and its precedence are unchanged; `config.py` keeps the
+  schema — limits, typed sections, validators — and ratchets from 1,550 to
+  375 lines.
 - The dashboard's payload normalizers (snapshot and incidents envelopes,
   inventory, collector settings, maintenance windows, host groups, topology)
   moved from `app.js` into the `api-contracts.js` leaf, which now has its own
