@@ -56,7 +56,7 @@ interfaces without a runtime plugin registry.
 | `hostnames.py` | canonical Host/Origin hostname normalization and the trusted web policy |
 | `discovery_policy.py` | dependency-free SSH discovery policy parsing and bounds |
 | `discovery.py` | explicit inventory and optional OpenSSH alias discovery |
-| `ssh_topology.py` | bounded effective-route resolution, infrastructure classification, topology and grouping projection |
+| `ssh_topology.py` | the one bounded `ssh -G` option resolver (shared with the doctor), effective-route resolution, infrastructure classification, topology and grouping projection |
 | `inventory.py` | typed dashboard configuration projection and private atomic mutation |
 | `metrics.py` | deterministic OpenMetrics 1.0 snapshot exposition |
 | `capacity.py` | server-side twin of the browser capacity matcher behind `GET /api/capacity` |

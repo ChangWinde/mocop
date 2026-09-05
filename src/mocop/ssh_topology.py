@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import shlex
 import socket
@@ -12,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Protocol
 
+from . import probe
 from .config import (
     TOPOLOGY_MAX_LINKS,
     ConnectionTopologyConfig,
@@ -23,9 +23,11 @@ from .probe import (
     _ActiveProcessRegistry,
     _ProcessCancelled,
     _ProcessOutputLimitExceeded,
-    _run_bounded_process,
+    ssh_environment,
 )
 
+# `ssh -G` prints one line per option; even a sprawling configuration stays
+# far below this, so a larger reply means something other than OpenSSH answered.
 _SSH_G_MAX_OUTPUT_BYTES = 262_144
 _SSH_ROUTE_KEYS = frozenset({"proxycommand", "proxyjump"})
 _NONE_OPTIONS = frozenset({"", "none"})
@@ -72,10 +74,46 @@ class SshRouteResolver(Protocol):
     def cancel(self) -> None: ...
 
 
-def _environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment["LC_ALL"] = "C"
-    return environment
+def resolve_ssh_options(
+    alias: str,
+    config: MonitorConfig,
+    keys: frozenset[str],
+    *,
+    timeout_seconds: float,
+    process_registry: _ActiveProcessRegistry | None = None,
+) -> dict[str, str] | None:
+    """The lowercase OpenSSH options ``ssh -G`` resolves for ``alias``.
+
+    Only ``keys`` are retained, so callers never hold usernames or addresses
+    they did not ask for. ``None`` means the client failed, timed out, was
+    cancelled, or overran the output cap; it never initiates a connection.
+    The doctor and the route resolver share this one implementation.
+    """
+    try:
+        completed = probe._run_bounded_process(
+            ["ssh", "-G", "-F", str(config.ssh_config), "--", alias],
+            input_text="",
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=_SSH_G_MAX_OUTPUT_BYTES,
+            environment=ssh_environment(),
+            process_registry=process_registry,
+        )
+    except (
+        OSError,
+        subprocess.TimeoutExpired,
+        _ProcessOutputLimitExceeded,
+        _ProcessCancelled,
+    ):
+        return None
+    if completed.returncode != 0:
+        return None
+    options: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        key, separator, value = line.partition(" ")
+        normalized = key.strip().lower()
+        if separator and normalized in keys:
+            options[normalized] = value.strip()
+    return options
 
 
 def _known_alias_index(aliases: tuple[str, ...]) -> dict[str, str]:
@@ -180,30 +218,15 @@ class OpenSshRouteResolver:
         known_aliases: tuple[str, ...],
         timeout_seconds: float,
     ) -> SshRoute | None:
-        try:
-            completed = _run_bounded_process(
-                ["ssh", "-G", "-F", str(config.ssh_config), "--", alias],
-                input_text="",
-                timeout_seconds=timeout_seconds,
-                max_output_bytes=_SSH_G_MAX_OUTPUT_BYTES,
-                environment=_environment(),
-                process_registry=self._processes,
-            )
-        except (
-            OSError,
-            subprocess.TimeoutExpired,
-            _ProcessOutputLimitExceeded,
-            _ProcessCancelled,
-        ):
+        options = resolve_ssh_options(
+            alias,
+            config,
+            _SSH_ROUTE_KEYS,
+            timeout_seconds=timeout_seconds,
+            process_registry=self._processes,
+        )
+        if options is None:
             return None
-        if completed.returncode != 0:
-            return None
-        options: dict[str, str] = {}
-        for line in completed.stdout.splitlines():
-            key, separator, value = line.partition(" ")
-            normalized = key.strip().lower()
-            if separator and normalized in _SSH_ROUTE_KEYS:
-                options[normalized] = value.strip()
         aliases = _known_alias_index(known_aliases)
         proxy_jump = options.get("proxyjump", "").strip()
         if proxy_jump.lower() not in _NONE_OPTIONS:

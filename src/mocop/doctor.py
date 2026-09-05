@@ -21,6 +21,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import TextIO
 
+from . import probe
 from .config import MonitorConfig, is_safe_alias
 from .discovery import OpenSshConfigHostSource
 from .lifecycle import user_unit_path
@@ -31,13 +32,13 @@ from .probe import (
     _BoundedProcessResult,
     _ProcessCancelled,
     _ProcessOutputLimitExceeded,
-    _run_bounded_process,
     _safe_ssh_failure,
+    ssh_environment,
 )
 from .remote_script import _COMBINED_QUERY_FIELDS
+from .ssh_topology import resolve_ssh_options
 
 _SSH_G_TIMEOUT_SECONDS = 10
-_SSH_G_MAX_OUTPUT_BYTES = 262_144
 
 
 def _refuse(message: str, code: str, as_json: bool, stdout: TextIO) -> int:
@@ -100,12 +101,6 @@ printf '__MARKER__\t%s\t%s\t%s\t%s\n' "$t0" "$t1" "$t2" "$nvidia_status"
 )
 
 
-def _environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment["LC_ALL"] = "C"
-    return environment
-
-
 def _effective_probe_timeout_seconds(alias: str, config: MonitorConfig) -> float:
     """Per-host effective probe timeout, matching the production probe."""
     override = config.host_override(alias)
@@ -148,41 +143,6 @@ def _stage_timeout(deadline: float, stage_timeout_seconds: float) -> float | Non
     if remaining <= 0:
         return None
     return min(stage_timeout_seconds, remaining)
-
-
-def _resolved_options(
-    alias: str,
-    config: MonitorConfig,
-    *,
-    timeout_seconds: float = _SSH_G_TIMEOUT_SECONDS,
-    process_registry: _ActiveProcessRegistry | None = None,
-) -> dict[str, str] | None:
-    """Return the lowercase OpenSSH options `ssh -G` resolves for the alias."""
-    try:
-        completed = _run_bounded_process(
-            ["ssh", "-G", "-F", str(config.ssh_config), "--", alias],
-            input_text="",
-            timeout_seconds=timeout_seconds,
-            max_output_bytes=_SSH_G_MAX_OUTPUT_BYTES,
-            environment=_environment(),
-            process_registry=process_registry,
-        )
-    except (
-        OSError,
-        subprocess.TimeoutExpired,
-        _ProcessOutputLimitExceeded,
-        _ProcessCancelled,
-    ):
-        return None
-    if completed.returncode != 0:
-        return None
-    options: dict[str, str] = {}
-    for line in completed.stdout.splitlines():
-        key, _, value = line.partition(" ")
-        key = key.strip().lower()
-        if key in _QUERY_KEYS:
-            options[key] = value.strip()
-    return options
 
 
 def _run_remote(
@@ -228,12 +188,12 @@ def _run_remote(
     command += ["--", alias, *remote_args]
     started = time.monotonic()
     try:
-        completed = _run_bounded_process(
+        completed = probe._run_bounded_process(
             command,
             input_text=input_text,
             timeout_seconds=timeout_seconds,
             max_output_bytes=max_output_bytes,
-            environment=_environment(),
+            environment=ssh_environment(),
             process_registry=process_registry,
         )
     except subprocess.TimeoutExpired:
@@ -518,9 +478,10 @@ def _diagnose_host(
         report["reachable"] = False
         warnings.append(_BUDGET_EXHAUSTED)
         return report
-    options = _resolved_options(
+    options = resolve_ssh_options(
         alias,
         config,
+        _QUERY_KEYS,
         timeout_seconds=resolve_timeout,
         process_registry=process_registry,
     )
@@ -607,12 +568,12 @@ _FIND_SPEC_CODE = (
 def _installed_package_dir(python_path: Path) -> Path | None:
     """Ask the unit's interpreter where the mocop package is installed."""
     try:
-        completed = _run_bounded_process(
+        completed = probe._run_bounded_process(
             [str(python_path), "-c", _FIND_SPEC_CODE],
             input_text="",
             timeout_seconds=_SSH_G_TIMEOUT_SECONDS,
             max_output_bytes=_PROBE_MAX_OUTPUT_BYTES,
-            environment=_environment(),
+            environment=ssh_environment(),
         )
     except (OSError, subprocess.TimeoutExpired, _ProcessOutputLimitExceeded):
         return None
@@ -666,20 +627,20 @@ def _service_start_epoch() -> tuple[float, str] | None:
         "mocop.service",
         "--property=ActiveState,ExecMainStartTimestamp,ExecMainStartTimestampMonotonic",
     ]
-    completed = _run_bounded_process(
+    completed = probe._run_bounded_process(
         [*show_command, "--timestamp=unix"],
         input_text="",
         timeout_seconds=_SSH_G_TIMEOUT_SECONDS,
         max_output_bytes=_PROBE_MAX_OUTPUT_BYTES,
-        environment=_environment(),
+        environment=ssh_environment(),
     )
     if completed.returncode != 0:
-        completed = _run_bounded_process(
+        completed = probe._run_bounded_process(
             show_command,
             input_text="",
             timeout_seconds=_SSH_G_TIMEOUT_SECONDS,
             max_output_bytes=_PROBE_MAX_OUTPUT_BYTES,
-            environment=_environment(),
+            environment=ssh_environment(),
         )
     if completed.returncode != 0:
         return None

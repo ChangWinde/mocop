@@ -129,7 +129,7 @@ class DoctorTests(unittest.TestCase):
         code = run_doctor(config_value, stdout=stdout, **kwargs)
         return code, stdout.getvalue()
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_reports_reachable_alias_with_reuse_configured(self, run) -> None:
         with tempfile.TemporaryDirectory() as directory:
             socket_dir = Path(directory) / "sockets"
@@ -169,7 +169,7 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("192.0.2.10", output)
         self.assertNotIn("operator", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_warns_when_connection_reuse_is_disabled(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -182,7 +182,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("connection reuse is disabled", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_warns_on_group_accessible_socket_directory(self, run) -> None:
         with tempfile.TemporaryDirectory() as directory:
             socket_dir = Path(directory) / "sockets"
@@ -206,7 +206,7 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("restrict it to 0700", output)
         self.assertIn("connection test skipped", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_missing_socket_directory_is_reported(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(
@@ -225,7 +225,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("control socket directory does not exist", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_warns_when_socket_parent_is_not_a_directory(self, run) -> None:
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory) / "sockets"
@@ -247,7 +247,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("not a directory", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_warns_when_socket_directory_owned_by_another_user(self, run) -> None:
         with tempfile.TemporaryDirectory() as directory:
             socket_dir = Path(directory) / "sockets"
@@ -270,7 +270,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("not owned by the current user", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_warns_when_controlpersist_is_shorter_than_poll_interval(self, run) -> None:
         cases = (
             ("1", True),
@@ -304,7 +304,7 @@ class DoctorTests(unittest.TestCase):
                 else:
                     self.assertNotIn("shorter than", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_controlpersist_compares_against_host_poll_override(self, run) -> None:
         override = HostOverrideConfig(poll_interval_seconds=600.0)
         with tempfile.TemporaryDirectory() as directory:
@@ -330,7 +330,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("shorter than the 600s collection interval", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_unreachable_alias_fails_with_redacted_reason(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -353,7 +353,7 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("SSH authentication failed", output)
         self.assertNotIn("192.0.2.10", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_remote_command_failure_is_not_reported_as_ssh_failure(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -368,7 +368,7 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("SSH connection failed", output)
         self.assertNotIn("not found", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_timeout_during_connection_test_is_bounded(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -381,7 +381,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("SSH connection attempt timed out", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_output_limit_during_probe_is_a_redacted_failure(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -394,7 +394,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("remote output exceeded the configured limit", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_output_limit_during_alias_resolution_is_reported(self, run) -> None:
         run.side_effect = (_ProcessOutputLimitExceeded(),)
 
@@ -403,7 +403,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("ssh -G could not resolve the alias", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_unresolvable_alias_is_a_failure(self, run) -> None:
         run.side_effect = (_BoundedProcessResult(255, stdout="", stderr="no alias"),)
 
@@ -416,7 +416,7 @@ class DoctorTests(unittest.TestCase):
         code, _ = self.run_doctor(config(), host_filter=("absent",))
         self.assertEqual(code, 2)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_local_host_skips_ssh_and_is_reported(self, run) -> None:
         code, output = self.run_doctor(
             config(hosts=("star-l",), local_host="star-l"), probe_connection=False
@@ -427,7 +427,7 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("local target, SSH not used", output)
         self.assertNotIn("no remote SSH aliases", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_local_host_filter_is_valid_and_never_uses_ssh(self, run) -> None:
         code, output = self.run_doctor(
             config(hosts=("star-l", "gpu-1"), local_host="star-l"),
@@ -439,7 +439,7 @@ class DoctorTests(unittest.TestCase):
         run.assert_not_called()
         self.assertIn("star-l: local target", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_json_hosts_include_the_local_target(self, run) -> None:
         code, output = self.run_doctor(
             config(hosts=("star-l",), local_host="star-l"),
@@ -463,7 +463,7 @@ class DoctorTests(unittest.TestCase):
             ],
         )
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_json_refusals_use_the_cli_envelope(self, _run) -> None:
         code, output = self.run_doctor(config(), host_filter=("absent",), as_json=True)
 
@@ -473,7 +473,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(report["code"], "UNKNOWN_HOST")
         self.assertIn("absent", report["error"])
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_auto_discovered_hosts_are_diagnosed(self, run) -> None:
         with tempfile.TemporaryDirectory() as directory:
             ssh_config = Path(directory) / "config"
@@ -495,7 +495,7 @@ class DoctorTests(unittest.TestCase):
             [item["alias"] for item in report["hosts"]], ["discovered-gpu"]
         )
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_rejects_unsafe_alias_without_subprocess(self, run) -> None:
         code, output = self.run_doctor(
             config(hosts=("gpu-1;rm",)), probe_connection=False
@@ -505,7 +505,7 @@ class DoctorTests(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(output, "")
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_probe_uses_keepalive_and_host_timeout_override(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -527,7 +527,7 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("ServerAliveCountMax=2", command)
         self.assertEqual(probe_call.kwargs["timeout_seconds"], 44.0)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_reuse_probe_warms_up_master_before_timing(self, run) -> None:
         with tempfile.TemporaryDirectory() as directory:
             socket_dir = Path(directory) / "sockets"
@@ -556,7 +556,7 @@ class DoctorTests(unittest.TestCase):
         for call in run.call_args_list[2:]:
             self.assertNotIn("ControlMaster=no", call.args[0])
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_expired_budget_short_circuits_all_stages(self, run) -> None:
         report = doctor._diagnose_host(
             "gpu-1",
@@ -570,7 +570,7 @@ class DoctorTests(unittest.TestCase):
         self.assertFalse(report["reachable"])
         self.assertIn("host diagnosis time budget exhausted", report["warnings"])
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_hosts_are_diagnosed_concurrently_in_config_order(self, run) -> None:
         def fake_run(command, **kwargs):
             if "-G" in command:
@@ -631,7 +631,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertIsNotNone(doctor._parse_profile_marker(completed.stdout))
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_profile_runs_one_instrumented_remote_call(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -654,7 +654,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(profile_call.args[0][-2:], ["sh", "-s"])
         self.assertIn("MOCOP_PROFILE_V1", profile_call.kwargs["input_text"])
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_profile_is_skipped_when_transport_failed(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -668,7 +668,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(run.call_count, 3)
         self.assertNotIn("profile", json.loads(output)["hosts"][0])
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_profile_reports_missing_nvidia_without_failing(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -688,7 +688,7 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("profile warning:", output)
         self.assertIn("nvidia-smi is unavailable", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_profile_stage_failure_fails_doctor(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -706,7 +706,7 @@ class DoctorTests(unittest.TestCase):
         self.assertTrue(host["reachable"])
         self.assertEqual(host["profile"]["failure"], "remote command failed (exit 127)")
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_profile_unrecognized_output_is_a_failure(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -746,7 +746,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(base, 10 + 3 * 12)
         self.assertEqual(collecting, 10 + 4 * 12)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_collection_probe_reports_production_summary(self, run) -> None:
         processes = (
             GpuProcess(
@@ -795,7 +795,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(created[0].calls, ["gpu-1"])
         self.assertTrue(created[0].closed)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_collection_probe_text_report_and_disabled_workloads(self, run) -> None:
         processes = (GpuProcess(pid=4242, name="python", used_memory_mib=2048.0),)
         self.patch_collection_probe(
@@ -822,7 +822,7 @@ class DoctorTests(unittest.TestCase):
             output,
         )
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_collection_probe_failure_fails_doctor(self, run) -> None:
         self.patch_collection_probe(
             {
@@ -849,7 +849,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(probe_report["status"], "unreachable")
         self.assertIn("no output", probe_report["message"])
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_collection_probe_is_skipped_when_transport_failed(self, run) -> None:
         created = self.patch_collection_probe()
         run.side_effect = (
@@ -864,7 +864,7 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("probe", json.loads(output)["hosts"][0])
         self.assertEqual(created[0].calls, [])
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_collection_probe_is_shared_across_hosts(self, run) -> None:
         created = self.patch_collection_probe()
 
@@ -884,7 +884,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(created[0].calls, ["gpu-1", "gpu-2"])
         self.assertTrue(created[0].closed)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_collection_stage_respects_the_host_budget(self, run) -> None:
         run.side_effect = (
             _BoundedProcessResult(0, stdout=ssh_g_output(), stderr=""),
@@ -913,7 +913,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(fake.calls, [])
         self.assertTrue(doctor._report_failed(report))
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_shared_controlpath_across_aliases_warns_each_alias(self, run) -> None:
         with tempfile.TemporaryDirectory() as directory:
             shared_path = str(Path(directory) / "fixed-socket")
@@ -953,7 +953,7 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("fixed-socket", output)
         self.assertNotIn("_controlPath", output)
 
-    @patch("mocop.doctor._run_bounded_process")
+    @patch("mocop.probe._run_bounded_process")
     def test_distinct_controlpaths_do_not_warn(self, run) -> None:
         with tempfile.TemporaryDirectory() as directory:
             socket_dir = Path(directory) / "sockets"
@@ -1036,7 +1036,7 @@ class ServiceStalenessTests(unittest.TestCase):
         )
         with (
             patch("mocop.doctor.user_unit_path", return_value=unit),
-            patch("mocop.doctor._run_bounded_process", return_value=systemctl),
+            patch("mocop.probe._run_bounded_process", return_value=systemctl),
             patch("mocop.doctor._system_uptime_seconds", return_value=uptime),
         ):
             return doctor._service_staleness()
@@ -1097,7 +1097,7 @@ class ServiceStalenessTests(unittest.TestCase):
             with (
                 patch("mocop.doctor.user_unit_path", return_value=unit),
                 patch(
-                    "mocop.doctor._run_bounded_process",
+                    "mocop.probe._run_bounded_process",
                     side_effect=(systemctl, find_spec),
                 ),
                 patch("mocop.doctor._system_uptime_seconds", return_value=1.0),
@@ -1130,7 +1130,7 @@ class ServiceStalenessTests(unittest.TestCase):
             with (
                 patch("mocop.doctor.user_unit_path", return_value=unit),
                 patch(
-                    "mocop.doctor._run_bounded_process",
+                    "mocop.probe._run_bounded_process",
                     side_effect=(rejected, systemctl, find_spec),
                 ) as run,
                 patch("mocop.doctor._system_uptime_seconds", return_value=5_000.0),
@@ -1169,7 +1169,7 @@ class ServiceStalenessTests(unittest.TestCase):
             with (
                 patch("mocop.doctor.user_unit_path", return_value=unit),
                 patch(
-                    "mocop.doctor._run_bounded_process",
+                    "mocop.probe._run_bounded_process",
                     side_effect=(systemctl, find_spec),
                 ) as run,
                 patch("mocop.doctor._system_uptime_seconds", return_value=5_000.0),

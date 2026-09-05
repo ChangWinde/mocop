@@ -150,6 +150,13 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
             process.kill()
 
 
+def ssh_environment() -> dict[str, str]:
+    """The inherited environment with OpenSSH output pinned to the C locale."""
+    environment = os.environ.copy()
+    environment["LC_ALL"] = "C"
+    return environment
+
+
 def _run_bounded_process(
     command: list[str],
     *,
@@ -1095,8 +1102,7 @@ class OpenSshLinuxResourceProbe:
         self._process_retry_forced: set[str] = set()
         self._attended = True
         self._processes = _ActiveProcessRegistry()
-        self._environment = os.environ.copy()
-        self._environment["LC_ALL"] = "C"
+        self._environment = ssh_environment()
 
     def cancel(self) -> None:
         """Stop active child processes when the owning service is shutting down."""
