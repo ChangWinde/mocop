@@ -542,7 +542,7 @@ that resource.
 | `name` | string | Process name from `nvidia-smi`. |
 | `used_memory_mib` | number \| null | VRAM used by this process. |
 | `workload` | object \| null | Present only with `workloads.mode` `identity`/`auto`: `{kind, workload_id, name, owner, queue, namespace, command, started_at, cpu_seconds, rss_mib}`; `kind` is `process`, `slurm`, `kubernetes`, `docker`, or `podman`, everything else nullable. `command`, `started_at` (true start time), `cpu_seconds` (cumulative host CPU time) and `rss_mib` (resident host memory) are populated by both tiers; the container kinds and scheduler identifiers additionally require the `auto` tier's cgroup read. |
-| `first_seen_at` | timestamp \| null | **Monitor-relative lower bound**: when this monitor first observed the `(pid, name)` pair on this device. Resets on monitor restart. When a PID is reused and the workload `started_at` changes, the server treats it as a new instance: a stop/start event pair is emitted and `first_seen_at` restarts. |
+| `first_seen_at` | timestamp \| null | **Monitor-relative lower bound**: when this monitor first observed the `(pid, name)` pair on this device. Survives probe failures shorter than the stale window (`collection_stale_cycles` consecutive failures); resets on monitor restart and once the host has gone stale. When a PID is reused and the workload `started_at` changes, the server treats it as a new instance: a stop/start event pair is emitted and `first_seen_at` restarts. |
 
 The dashboard's global/selected-host program search is a bounded browser-side
 projection of these authenticated snapshot records; it does not define another
@@ -609,7 +609,11 @@ Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_LIMIT`,
 Per-owner GPU occupancy rollup over a bounded window. Tier A. Aggregates
 the in-memory process timeline (started/stopped transitions plus the live
 process table), so coverage is limited to what the monitor observed — the
-response says so explicitly instead of extrapolating.
+response says so explicitly instead of extrapolating. A process the live
+table still lists occupies its device up to the host's last confirmed sample
+while the host is failing its probes, never through the blind gap to now;
+once the host has failed for `collection_stale_cycles` cycles its inventory
+is closed at that last sample.
 
 Query parameters:
 
@@ -631,6 +635,7 @@ Response fields:
 | `totalGpuSeconds` | number | Sum of `gpuSeconds` across every owner (not just the returned rows). |
 | `earliestDataAt` | timestamp \| null | Oldest timeline record that informed this rollup. If it is later than `sinceAt`, the window is only partially covered. |
 | `droppedRecords` | int | Timeline records skipped because no trustworthy start anchor existed. |
+| `partialGpus` | int | Devices whose retained transition timeline is full (`incident_history_points` records) yet begins inside the window: their occupancy before its first retained record is missing from the totals even when `earliestDataAt` looks complete, because that timestamp is the earliest across all devices. |
 
 `owners[]` fields:
 
@@ -880,7 +885,11 @@ processEvents[]}`. Points: `observedAt`, `gpuId`, `index`,
 `utilizationGpuPct`, `memoryUsedMiB`, `memoryTotalMiB`, `temperatureC`,
 `powerDrawW` (all nullable). Process events: `observedAt`, `gpuId`,
 `index`, `event` (`started`/`stopped`), `pid`, `name`, `usedMemoryMiB`
-(nullable), `workload` (nullable object as in the snapshot).
+(nullable), `workload` (nullable object as in the snapshot), and
+`firstSeenAt` (nullable): when this monitor first observed the process on the
+device, so a `stopped` event describes the whole run on its own — the
+`/api/usage` rollup anchors a stop whose start has left the retained window
+on it.
 
 Errors: `403 UNTRUSTED_ORIGIN`, `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`,
 `INVALID_LIMIT`, `404 UNKNOWN_GPU`.

@@ -15,11 +15,8 @@ from unittest import mock
 from mocop.config import PersistenceConfig
 from mocop.incident_types import IncidentCondition, IncidentEvent
 from mocop.models import GpuMetrics, ProbeResult, SystemMetrics
-from mocop.persistence import (
-    LoadedTelemetry,
-    SqliteTelemetryPersistence,
-    user_state_path,
-)
+from mocop.persistence import SqliteTelemetryPersistence, user_state_path
+from mocop.persistence_restore import LoadedTelemetry
 from mocop.service import StateStore
 
 
@@ -314,6 +311,70 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
             ],
         )
         self.assertTrue(all(item.host == "gpu-01" for item in loaded.open_incidents))
+
+    def test_transitions_keep_their_first_observation_across_a_restore(self) -> None:
+        # The nine-column table contract is frozen, so firstSeenAt rides in
+        # workload_json: alongside the workload of a visible transition, alone
+        # when there is no workload, and inside the hidden-usage envelope. The
+        # sidecar never leaks into the restored workload, and rows written by
+        # earlier releases simply restore without it.
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+
+        def at(seconds: int) -> str:
+            return utc_text(now - timedelta(seconds=seconds))
+
+        store.record_gpu_telemetry(
+            "gpu-01",
+            (),
+            (
+                {
+                    **process_event(at(30), "GPU-1", 1, "stopped"),
+                    "workload": {"kind": "slurm", "owner": "alice"},
+                    "firstSeenAt": at(90),
+                },
+                {**process_event(at(20), "GPU-1", 2, "stopped"), "firstSeenAt": at(80)},
+                {
+                    **process_event(at(10), "GPU-1", 3, "stopped"),
+                    "firstSeenAt": at(70),
+                    "_visible": False,
+                },
+                process_event(at(5), "GPU-1", 4, "started"),
+            ),
+        )
+        self.assertTrue(store.flush())
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute(
+                "INSERT INTO process_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "gpu-01",
+                    "GPU-1",
+                    0,
+                    at(2),
+                    "stopped",
+                    5,
+                    "legacy.py",
+                    64.0,
+                    '{"kind": "process"}',
+                ),
+            )
+            connection.commit()
+
+        restored = store.load(history_points=10, incident_points=10).process_events[
+            ("gpu-01", "GPU-1")
+        ]
+
+        by_pid = {item["pid"]: item for item in restored}
+        self.assertEqual(by_pid[1]["firstSeenAt"], at(90))
+        self.assertEqual(by_pid[1]["workload"], {"kind": "slurm", "owner": "alice"})
+        self.assertEqual(by_pid[2]["firstSeenAt"], at(80))
+        self.assertIsNone(by_pid[2]["workload"])
+        self.assertEqual(by_pid[3]["firstSeenAt"], at(70))
+        self.assertIs(by_pid[3].get("_visible"), False)
+        self.assertIsNone(by_pid[4]["firstSeenAt"])
+        self.assertIsNone(by_pid[5]["firstSeenAt"])
+        self.assertEqual(by_pid[5]["workload"], {"kind": "process"})
 
     def test_roundtrips_gpu_samples_and_process_transitions_as_one_batch(self) -> None:
         store = SqliteTelemetryPersistence(self.config, self.path)

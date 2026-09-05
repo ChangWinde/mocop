@@ -179,7 +179,7 @@ const attention = globalThis.MocopAttention.create({
   safeStoredHosts,
   conditionMessage: (condition) => incidentConditionMessage(condition),
 });
-const gpuTasks = globalThis.MocopGpuTasks.create();
+const gpuTasks = globalThis.MocopGpuTasks.create({ durationSince });
 const capacityWatch = globalThis.MocopCapacityWatch.create({ storage: localStorage });
 
 const view = {
@@ -2053,7 +2053,8 @@ function renderOwnersUsage() {
     && Date.parse(usage.earliestDataAt) > Date.parse(usage.sinceAt) + 60_000;
   elements.ownersUsageSummary.textContent =
     `${numeric(usage.totalOwners)} 个归属方 · 共 ${gpuHoursLabel(usage.totalGpuSeconds)}`
-    + (coverageGap ? ` · 数据自 ${age(usage.earliestDataAt)}起` : "");
+    + (coverageGap ? ` · 数据自 ${age(usage.earliestDataAt)}起` : "")
+    + (usage.partialGpus > 0 ? ` · ${usage.partialGpus} 张卡的时间线不完整` : "");
   for (const entry of owners.slice(0, 50)) {
     const card = create(
       "article",
@@ -4403,8 +4404,7 @@ function renderGpuHistory() {
   }
   elements.gpuProcessTimeline.replaceChildren(...events.slice(0, 24).map((event) => {
     const item = create("article", `gpu-timeline-item ${event.event}`);
-    const process = gpuProcessName(event);
-    const summary = `${event.event === "started" ? "进入" : "退出"} · ${process} · PID ${event.pid}`;
+    const summary = gpuTasks.timelineSummary(event);
     item.append(
       create("i"),
       create("span", "", summary),

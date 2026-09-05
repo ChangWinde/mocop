@@ -70,14 +70,17 @@ interfaces without a runtime plugin registry.
 | `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
 | `telemetry_points.py` | compact in-memory history records: struct-packed host and GPU samples, process transitions |
-| `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage` |
+| `fleet_stats.py` | the snapshot's fleet-wide `stats` block: host, incident, GPU, and capacity totals over the serialized servers |
+| `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage`; a failing host's live processes count only up to its last confirmed sample |
+| `occupancy.py` | pairing a device's process transitions into runs: start/stop pairing, first-observation anchors, owner attribution, same-owner merging |
 | `models.py` | immutable resource result types |
 | `incident_types.py` | the incident vocabulary: conditions, transition events, restored open incidents, the policy protocol |
 | `incidents.py` | condition evaluation, bounded transition history, restored generations, and raw/actionable counts |
 | `incident_domains.py` | which telemetry domains a condition's recovery needs and when a sample is blind to them |
 | `correlation.py` | possible shared-path grouping without changing incident truth |
 | `diagnostics.py` | deterministic incident guidance and redacted support bundles |
-| `persistence.py` | optional bounded asynchronous SQLite history, restore of open incidents |
+| `persistence.py` | optional bounded asynchronous SQLite history: the writer thread, retention, and the size cap |
+| `persistence_restore.py` | restore of the retained window per host and device, and of the incidents open at shutdown |
 | `persistence_schema.py` | the history database's DDL, column contracts, and row validity filters |
 | `notifications.py` | webhook endpoint validation, deduplication, throttling, pairing, and retry policy |
 | `webhook_transport.py` | one bounded HTTPS delivery attempt: pinned DNS, SSRF guards, response bound |

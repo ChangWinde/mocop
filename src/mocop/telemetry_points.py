@@ -178,10 +178,16 @@ class GpuProcessTransition:
     used_memory_mib: float | None
     workload: dict[str, object] | None
     visible: bool = True
+    # When this monitor first observed the process on the device. A stopped
+    # transition therefore describes its whole run on its own, so occupancy
+    # survives even when the matching started transition has left the
+    # retained window.
+    first_seen_at: str | None = None
 
     @classmethod
     def from_dict(cls, event: dict[str, object]) -> GpuProcessTransition:
         workload = event.get("workload")
+        first_seen_at = event.get("firstSeenAt")
         return cls(
             observed_at=str(event["observedAt"]),
             gpu_id=str(event["gpuId"]),
@@ -192,6 +198,7 @@ class GpuProcessTransition:
             used_memory_mib=optional_float(event.get("usedMemoryMiB")),
             workload=dict(workload) if isinstance(workload, dict) else None,
             visible=event.get("_visible") is not False,
+            first_seen_at=first_seen_at if isinstance(first_seen_at, str) else None,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -204,6 +211,7 @@ class GpuProcessTransition:
             "name": self.name,
             "usedMemoryMiB": self.used_memory_mib,
             "workload": dict(self.workload) if self.workload is not None else None,
+            "firstSeenAt": self.first_seen_at,
         }
 
     def persistence_dict(self) -> dict[str, object]:

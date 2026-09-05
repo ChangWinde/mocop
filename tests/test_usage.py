@@ -18,18 +18,125 @@ def _at(minutes_before_now: int) -> str:
 
 @dataclass(frozen=True)
 class Transition:
-    """Any record with the five fields the aggregator reads is accepted."""
+    """Any record with the six fields the aggregator reads is accepted."""
 
     observed_at: str
     event: str
     pid: int
     name: str
     workload: dict[str, object] | None = None
+    first_seen_at: str | None = None
 
 
 class AggregateUsageTests(unittest.TestCase):
     """The pure rollup behind StateStore.usage(); the store tests cover the
     live timeline, this pins the module boundary and the accounting rules."""
+
+    def test_live_processes_of_a_failing_host_count_up_to_its_last_sample(self) -> None:
+        # While a host is failing its probes the live table is a blind spot;
+        # an active process occupies the device up to the last confirmed
+        # sample, never through the gap to now. Both the unmatched-start and
+        # the seeded-process anchors honour it.
+        started = Transition(_at(50), "started", 1, "train", {"owner": "alice"})
+        seeded = GpuProcess(2, "serve", 100, None, first_seen_at=_at(40))
+        usage = aggregate_usage(
+            now=NOW,
+            window_hours=1,
+            owner_limit=10,
+            busy_pct=20.0,
+            events_by_gpu={GPU: [started]},
+            active_by_gpu={
+                GPU: {(1, "train"): GpuProcess(1, "train", 100), (2, "serve"): seeded}
+            },
+            utilization_by_gpu={},
+            observed_until_by_gpu={GPU: _at(20)},
+        )
+        by_owner = {entry["owner"]: entry for entry in usage["owners"]}
+        self.assertEqual(by_owner["alice"]["gpuSeconds"], 30 * 60.0)
+        self.assertEqual(by_owner[None]["gpuSeconds"], 20 * 60.0)
+        # An online host (no entry) still counts to now.
+        online = aggregate_usage(
+            now=NOW,
+            window_hours=1,
+            owner_limit=10,
+            busy_pct=20.0,
+            events_by_gpu={GPU: [started]},
+            active_by_gpu={GPU: {(1, "train"): GpuProcess(1, "train", 100)}},
+            utilization_by_gpu={},
+            observed_until_by_gpu={},
+        )
+        self.assertEqual(online["owners"][0]["gpuSeconds"], 50 * 60.0)
+
+    def test_reports_devices_whose_retained_timeline_starts_inside_the_window(
+        self,
+    ) -> None:
+        # earliestDataAt is the earliest record across all devices, so a quiet
+        # device can make a report look complete while a busy one's full
+        # timeline only reaches back an hour. partialGpus counts the latter.
+        quiet = [Transition(_at(23 * 60), "started", 1, "notebook", {"owner": "a"})]
+        busy = [
+            Transition(
+                _at(60 - index),
+                "started" if index % 2 == 0 else "stopped",
+                100 + index // 2,
+                "job",
+            )
+            for index in range(4)
+        ]
+        usage = aggregate_usage(
+            now=NOW,
+            window_hours=24,
+            owner_limit=10,
+            busy_pct=20.0,
+            events_by_gpu={GPU: quiet, ("node-b", "GPU-2"): busy},
+            active_by_gpu={GPU: {}, ("node-b", "GPU-2"): {}},
+            utilization_by_gpu={},
+            event_cap=4,
+        )
+        self.assertEqual(usage["partialGpus"], 1)
+        self.assertEqual(usage["earliestDataAt"], _at(23 * 60))
+        # Without a cap nothing can be judged truncated; a device below the cap
+        # holds its complete timeline even when it starts inside the window.
+        complete = aggregate_usage(
+            now=NOW,
+            window_hours=24,
+            owner_limit=10,
+            busy_pct=20.0,
+            events_by_gpu={GPU: quiet, ("node-b", "GPU-2"): busy},
+            active_by_gpu={},
+            utilization_by_gpu={},
+            event_cap=5,
+        )
+        self.assertEqual(complete["partialGpus"], 0)
+
+    def test_unmatched_stops_anchor_on_the_monitors_first_observation(self) -> None:
+        # Live evidence: a busy GPU churns hundreds of processes a day, so the
+        # started edge of many runs leaves the retained event window before
+        # the stopped edge does; 592 of 644 dropped records in a 24-hour
+        # report were such orphan stops. A stop that carries when this monitor
+        # first saw the process on the device is a complete run on its own.
+        carol = {"owner": "carol", "kind": "process"}
+        events = [
+            Transition(_at(20), "stopped", 5, "train", carol, first_seen_at=_at(50)),
+            # A first observation after the stop is corrupt and stays dropped,
+            # as does a stop without one.
+            Transition(_at(15), "stopped", 6, "eval", carol, first_seen_at=_at(10)),
+            Transition(_at(12), "stopped", 7, "ghost", carol),
+        ]
+        usage = aggregate_usage(
+            now=NOW,
+            window_hours=1,
+            owner_limit=10,
+            busy_pct=20.0,
+            events_by_gpu={GPU: events},
+            active_by_gpu={GPU: {}},
+            utilization_by_gpu={GPU: []},
+        )
+        self.assertEqual(usage["droppedRecords"], 2)
+        (owner,) = usage["owners"]
+        self.assertEqual(owner["owner"], "carol")
+        self.assertEqual(owner["gpuSeconds"], 30 * 60.0)
+        self.assertEqual(usage["earliestDataAt"], _at(50))
 
     def test_pairs_transitions_merges_owners_and_classifies_idle_time(self) -> None:
         alice = {"owner": "alice", "kind": "slurm"}
@@ -40,7 +147,8 @@ class AggregateUsageTests(unittest.TestCase):
             Transition(_at(40), "started", 2, "eval", alice),
             Transition(_at(30), "stopped", 2, "eval", alice),
             Transition(_at(20), "stopped", 1, "train", alice),
-            # An unmatched stop has no safe anchor and is reported dropped.
+            # An unmatched stop without the monitor's first observation has
+            # no safe anchor and is reported dropped.
             Transition(_at(10), "stopped", 9, "ghost"),
         ]
         # One sample per minute; each segment takes the classification of the

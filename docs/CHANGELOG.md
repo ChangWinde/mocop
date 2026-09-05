@@ -6,6 +6,37 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- A single failed probe no longer closes a host's whole GPU process
+  inventory. On a live deployment behind an SSH relay, every transient
+  failure emitted a hidden `stopped` for each process, re-seeded them all a
+  few seconds later, reset every `first_seen_at` (the dashboard's observed
+  runtime), and flooded the retained timeline with these pairs. The inventory
+  now follows the same staleness definition as the rest of a host's data: it
+  is kept as a blind spot until the host has failed for
+  `collection_stale_cycles` consecutive cycles, then closed at its last
+  confirmed sample. A real process change across a shorter gap is attributed
+  to the first sample after it. The usage rollup counts a failing host's live
+  processes only up to that last confirmed sample, so a blind gap is never
+  billed as occupancy.
+
+- `/api/usage` no longer loses the occupancy of runs whose `started` edge has
+  left the retained event window. On a live deployment a 24-hour report
+  dropped 644 records, 592 of them orphan `stopped` events from GPUs that
+  churn hundreds of processes a day (the restore keeps the last 500
+  transitions per device). Every transition now carries `firstSeenAt`, this
+  monitor's first observation of the process on the device — a genuine
+  GPU-occupancy observation, unlike the process start time — so an orphan
+  stop is a complete run on its own; the value rides inside the existing
+  `workload_json` column, keeping the process table's nine-column contract,
+  and the dashboard's GPU timeline states how long each finished run held
+  the device.
+- `/api/usage` reports `partialGpus`: the devices whose retained transition
+  timeline is full yet begins inside the requested window, so their occupancy
+  before that point is missing from the totals. `earliestDataAt` alone could
+  not show this because it is the earliest record across all devices, and a
+  quiet device made a report look complete while a busy one's timeline
+  reached back only an hour; the dashboard's owner summary names the count.
+
 - Incidents that were open when the service stopped resume their generation
   at startup instead of opening again. A live deployment had re-emitted
   `opened` for every persisting condition after each restart — 17 per restart
@@ -54,9 +85,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   `persistence.py` into `persistence_schema.py`; the duration floor then
   pushed two more over, so the incident vocabulary (`incident_types.py`) left
   `incidents.py` and the integration section parsers
-  (`config_integrations.py`) left `config_loader.py`, and the maintenance
-  window type (`maintenance.py`) left `config.py`. Every ceiling ratchets
-  down.
+  (`config_integrations.py`) left `config_loader.py`, the maintenance window
+  type (`maintenance.py`) left `config.py`, the restore path
+  (`persistence_restore.py`) left `persistence.py`, occupancy pairing
+  (`occupancy.py`) left `usage.py`, and the snapshot's fleet totals
+  (`fleet_stats.py`) left `service.py`. Every ceiling ratchets down.
 - A connectivity incident's `diagnosis.nextSteps` (and the dashboard's
   incident dialog) now open with the step that follows from the failure
   classification — check the jump host's forwarding, the node's `sshd`
