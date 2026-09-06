@@ -17,7 +17,9 @@
 
     // Actionable active conditions of one host in the panel's own shape.
     // Connectivity ranks above every resource problem; a critical resource
-    // problem ranks above a warning.
+    // problem ranks above a warning. A resource condition on a host that is
+    // not online is frozen: the service keeps it open across failed probes,
+    // so its value dates from the last successful sample, not from now.
     function serverConditions(server, activeConditions) {
       return activeConditions
         .filter((condition) => condition.actionable !== false)
@@ -30,11 +32,16 @@
           message: condition.category === "connectivity" && server.status === "online"
             ? "SSH 已恢复，等待稳定确认"
             : conditionMessage(condition),
+          frozen: condition.category !== "connectivity" && server.status !== "online",
           device: String(condition.resource || ""),
           usage: condition.value == null ? -1 : numeric(condition.value, -1),
           sharedKey: condition.groupKey || null,
           source: condition,
         }));
+    }
+
+    function conditionLabel(condition) {
+      return condition.frozen ? `${condition.message}（离线前）` : condition.message;
     }
 
     // One host's remaining conditions as a single issue; the fullest disk
@@ -46,9 +53,9 @@
         .sort((a, b) => b.usage - a.usage);
       const messages = conditions
         .filter((condition) => condition.kind !== "disk")
-        .map((condition) => condition.message);
+        .map(conditionLabel);
       if (disks.length) {
-        messages.unshift(`${disks[0].message}${disks.length > 1 ? ` +${disks.length - 1}` : ""}`);
+        messages.unshift(`${conditionLabel(disks[0])}${disks.length > 1 ? ` +${disks.length - 1}` : ""}`);
       }
       return {
         server,
@@ -123,7 +130,10 @@
           hosts,
           severity: unique.some(({ condition }) => condition.severity === "critical") ? "critical" : "warning",
           priority: Math.max(...unique.map(({ condition }) => condition.priority)),
-          messages: [`${hottest.condition.device} ${format(hottest.condition.usage)}% · 影响 ${hosts.length} 台`],
+          messages: [
+            `${hottest.condition.device} ${format(hottest.condition.usage)}%`
+            + `${hottest.condition.frozen ? "（离线前）" : ""} · 影响 ${hosts.length} 台`,
+          ],
           categories: ["storage"],
           sortName: hottest.condition.device,
         });

@@ -54,6 +54,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   file's size) the service starts anyway, reclaims what the bounded online
   path can, and leaves the condition to the persistence status it already
   reports, instead of refusing to start over it.
+- The attention panel marks a resource condition whose host is not online
+  with `（离线前）`: the service keeps such conditions open across failed
+  probes, so their figures date from the last successful sample. On a live
+  deployment a node unreachable for 533 consecutive probes was listed with
+  three VRAM figures that were two days old and read as current.
 - A GPU that vanishes from an online host (an XID fault or a bus drop takes
   the device out of `nvidia-smi`) now closes its confirmed process occupancy
   at the last process sample, the way a failed process query already did.

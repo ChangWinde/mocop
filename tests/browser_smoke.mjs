@@ -835,6 +835,46 @@ try {
   );
   assert.equal(failureMappings.unknownPassthrough, "Some new backend message");
 
+  // A resource condition on a host that is not online is frozen at its last
+  // successful sample (the service keeps it open across failed probes); the
+  // panel marks the figure so it is not read as current. atlas-03 is the
+  // fixture's stale host, so its synthetic VRAM condition gets the marker
+  // and atlas-01's identical condition does not.
+  const frozenAttention = await cdp.evaluate(`(() => {
+    const original = view.incidents;
+    const vramCondition = (host, uuid) => ({
+      host, conditionKey: "gpu_memory:" + uuid, category: "gpu_memory",
+      resource: "GPU 0 VRAM", severity: "critical", value: 95.3, threshold: 90,
+      observedAt: "2026-09-04T23:05:41Z", detail: null, groupKey: null,
+      firstObservedAt: "2026-09-04T19:54:38Z", lastObservedAt: "2026-09-04T23:05:41Z",
+      maintenanceSilenced: false, silenced: false, acknowledged: false,
+      actionable: true, action: null, actionUntil: null, actionReason: null,
+      diagnosis: null,
+    });
+    acceptIncidents({
+      ...original,
+      active: [
+        ...original.active,
+        vramCondition("atlas-03", "GPU-DEMO-atlas-03-00"),
+        vramCondition("atlas-01", "GPU-DEMO-atlas-01-00"),
+      ],
+    });
+    renderAttention();
+    const messageFor = (host) => [...document.querySelectorAll("#attention-list .attention-item")]
+      .filter((item) => item.querySelector("strong")?.textContent === host)
+      .map((item) => item.querySelector(".attention-message").textContent);
+    const result = { stale: messageFor("atlas-03"), online: messageFor("atlas-01") };
+    acceptIncidents(original);
+    renderAttention();
+    result.restored = messageFor("atlas-01");
+    return result;
+  })()`);
+  assert.equal(frozenAttention.stale.length, 1);
+  assert.match(frozenAttention.stale[0], /GPU 0 VRAM 95\.3%（离线前）/);
+  assert.equal(frozenAttention.online.length, 1);
+  assert.match(frozenAttention.online[0], /GPU 0 VRAM 95\.3%$/);
+  assert.deepEqual(frozenAttention.restored, []);
+
   const screenshotPath = process.env.MOCOP_BROWSER_SCREENSHOT;
   if (screenshotPath) {
     const screenshot = await cdp.send("Page.captureScreenshot", {
