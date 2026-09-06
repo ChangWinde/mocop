@@ -133,6 +133,15 @@ All notable changes are documented here. This project follows Semantic Versionin
   and `correlation` shapes, the test delivery marker, and the retry, throttle,
   and suppression rules — and a repository test keeps the documented example
   body's keys equal to what the delivery code sends.
+- Three decision records for this round's architectural choices:
+  [ADR-0027](adr/0027-restored-incident-generations.md) (incident generations
+  resume from each condition's latest persisted transition, webhook workers
+  primed with the restored keys), [ADR-0028](adr/0028-duration-floor-for-resource-conditions.md)
+  (the wall-clock confirmation floor beside the cycle count), and
+  [ADR-0029](adr/0029-process-inventory-observation-gaps.md) (the process
+  inventory as a blind spot until `collection_stale_cycles`, self-anchored
+  stops through `firstSeenAt`, `partialGpus`), each with the rejected
+  alternatives and the live figures that motivated them.
 - The self-update worker's `uv` install path — the one a `uv tool install`
   deployment takes, since those environments have no `pip` — and every
   refusal of the update state machine are under test (`updates.py` coverage
