@@ -305,6 +305,11 @@ class SqliteTelemetryPersistence:
                     self._dropped_writes += 1
                     self._last_error = "history persistence is closed"
                     return
+                if not self._writer.is_alive():
+                    # The writer recorded why it stopped; queueing behind it
+                    # would only replace that cause with "queue is full".
+                    self._dropped_writes += 1
+                    return
             try:
                 self._queue.put_nowait(item)
             except queue.Full:

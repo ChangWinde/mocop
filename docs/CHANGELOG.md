@@ -92,6 +92,15 @@ All notable changes are documented here. This project follows Semantic Versionin
   a second on an idle deployment (0.15 % of a core on a 386 MB file — cheap in
   steady state, but 600 times the intended reclaim rate while a backlog
   drained).
+- A history writer that has stopped (it could not open the database, or a
+  corrupt internal record ended it) keeps that cause in the persistence
+  status. Producers used to keep queueing behind the dead thread until the
+  4096 slots ran out and then overwrite `lastError` with `history write queue
+  is full`, so the status suggested back-pressure where the writer had in
+  fact stopped; writes are now counted as dropped immediately and the writer's
+  own message stands. The writer's failure paths — open failure, crash,
+  prune failure, and a full disk whose recovery prune also fails — are under
+  test for the first time.
 
 ### Changed
 

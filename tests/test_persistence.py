@@ -21,7 +21,11 @@ from mocop.models import (
     SystemMetrics,
     WorkloadMetadata,
 )
-from mocop.persistence import SqliteTelemetryPersistence, user_state_path
+from mocop.persistence import (
+    _QUEUE_CAPACITY,
+    SqliteTelemetryPersistence,
+    user_state_path,
+)
 from mocop.persistence_restore import LoadedTelemetry
 from mocop.service import StateStore
 
@@ -1087,6 +1091,106 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
             while time.monotonic() < deadline and store.load(10, 10).history:
                 time.sleep(0.1)
             self.assertEqual(store.load(10, 10).history, {})
+
+    def test_writer_that_cannot_open_the_database_keeps_that_as_the_cause(
+        self,
+    ) -> None:
+        with mock.patch.object(
+            SqliteTelemetryPersistence,
+            "_connect",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            store = SqliteTelemetryPersistence(self.config, self.path)
+            self.addCleanup(store.close)
+            store._writer.join(10.0)
+        self.assertFalse(store._writer.is_alive())
+        cause = "history writer could not open the database"
+        self.assertEqual(store.status()["lastError"], cause)
+
+        store.record_history("gpu-01", history_point("2026-08-10T00:00:00Z", 10.0))
+
+        status = store.status()
+        self.assertFalse(status["healthy"])
+        self.assertEqual(
+            (status["queuedWrites"], status["droppedWrites"], status["lastError"]),
+            (0, 1, cause),
+        )
+
+    def test_writer_crash_is_not_masked_by_the_queue_filling_behind_it(self) -> None:
+        # Once the writer has died, every later write used to sit in the queue
+        # until its 4096 slots ran out and then replace the recorded cause
+        # with "history write queue is full", so an operator saw back-pressure
+        # where the writer had in fact stopped.
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+
+        def corrupt_record(connection: sqlite3.Connection, item: object) -> int:
+            raise TypeError("corrupt internal record")
+
+        with mock.patch.object(
+            SqliteTelemetryPersistence, "_write", staticmethod(corrupt_record)
+        ):
+            store.record_history("gpu-01", history_point("2026-08-10T00:00:00Z", 10.0))
+            store._writer.join(10.0)
+        self.assertFalse(store._writer.is_alive())
+        cause = "history writer stopped unexpectedly"
+        self.assertEqual(store.status()["lastError"], cause)
+
+        for index in range(_QUEUE_CAPACITY + 1):
+            store.record_history(
+                "gpu-01", history_point(f"2026-08-10T00:{index}Z", 1.0)
+            )
+
+        status = store.status()
+        self.assertFalse(status["healthy"])
+        self.assertEqual(status["queuedWrites"], 0)
+        self.assertEqual(status["droppedWrites"], _QUEUE_CAPACITY + 1)
+        self.assertEqual(status["lastError"], cause)
+
+    def test_prune_failure_is_reported_and_contained(self) -> None:
+        # Retention runs in its own transaction: a failing prune marks the
+        # status and leaves the writer serving, and a size error whose
+        # recovery prune also fails drops only that batch.
+        now = datetime.now(timezone.utc)
+        interval = mock.patch("mocop.persistence._PRUNE_INTERVAL_SECONDS", 0.0)
+        interval.start()
+        self.addCleanup(interval.stop)
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+        with mock.patch.object(
+            SqliteTelemetryPersistence,
+            "_prune",
+            side_effect=sqlite3.OperationalError("disk I/O error"),
+        ):
+            store.record_history(
+                "gpu-01", history_point(utc_text(now - timedelta(minutes=3)), 10.0)
+            )
+            self.assertTrue(store.flush())
+            status = store.status()
+            self.assertEqual(status["lastError"], "history database prune failed")
+            self.assertTrue(store._writer.is_alive())
+
+            def full_disk(connection: sqlite3.Connection, item: object) -> int:
+                raise sqlite3.OperationalError("database or disk is full")
+
+            with mock.patch.object(
+                SqliteTelemetryPersistence, "_write", staticmethod(full_disk)
+            ):
+                store.record_history(
+                    "gpu-01", history_point("2026-08-10T00:00:05Z", 20.0)
+                )
+                self.assertFalse(store.flush())
+            status = store.status()
+            self.assertEqual(status["droppedWrites"], 1)
+            self.assertFalse(status["healthy"])
+            self.assertTrue(store._writer.is_alive())
+
+        store.record_history(
+            "gpu-01", history_point(utc_text(now - timedelta(minutes=1)), 30.0)
+        )
+        self.assertTrue(store.flush())
+        self.assertTrue(store.status()["healthy"])
+        self.assertEqual(len(store.load(10, 10).history["gpu-01"]), 2)
 
     def test_idle_writer_prunes_on_the_interval_not_on_every_wakeup(self) -> None:
         # The writer wakes every 100 ms to stay responsive to close(); it used
