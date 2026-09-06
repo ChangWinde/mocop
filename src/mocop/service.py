@@ -47,6 +47,11 @@ from .probe import (
     InventoryAwareResourceProbe,
     ResourceProbe,
 )
+from .process_transitions import (
+    process_transition,
+    reconcile_restored_processes,
+    same_process_instance,
+)
 from .telemetry_points import (
     GPU_HISTORY_VALUES,
     GpuHistoryPoint,
@@ -1167,7 +1172,7 @@ class StateStore:
                 if not previous:
                     continue
                 gpu_transitions = [
-                    self._process_transition(
+                    process_transition(
                         result.observed_at,
                         gpu_id,
                         gpu.index,
@@ -1194,7 +1199,7 @@ class StateStore:
             for process in gpu.processes:
                 process_key = (process.pid, process.name)
                 prior = previous.get(process_key)
-                if prior is not None and self._same_process_instance(prior, process):
+                if prior is not None and same_process_instance(prior, process):
                     first_seen_at = prior.first_seen_at or result.observed_at
                 else:
                     if prior is not None:
@@ -1215,7 +1220,7 @@ class StateStore:
                     self._process_reconciliation_pending.discard(key)
                 else:
                     initial_transitions = tuple(
-                        self._process_transition(
+                        process_transition(
                             result.observed_at,
                             gpu_id,
                             gpu.index,
@@ -1239,7 +1244,7 @@ class StateStore:
             gpu_transitions: list[GpuProcessTransition] = []
             for process_key in sorted(current.keys() - previous.keys()):
                 gpu_transitions.append(
-                    self._process_transition(
+                    process_transition(
                         result.observed_at,
                         gpu_id,
                         gpu.index,
@@ -1249,7 +1254,7 @@ class StateStore:
                 )
             for process_key in sorted(previous.keys() - current.keys()):
                 gpu_transitions.append(
-                    self._process_transition(
+                    process_transition(
                         result.observed_at,
                         gpu_id,
                         gpu.index,
@@ -1259,7 +1264,7 @@ class StateStore:
                 )
             for process_key in sorted(replaced_instances):
                 gpu_transitions.append(
-                    self._process_transition(
+                    process_transition(
                         result.observed_at,
                         gpu_id,
                         gpu.index,
@@ -1268,7 +1273,7 @@ class StateStore:
                     )
                 )
                 gpu_transitions.append(
-                    self._process_transition(
+                    process_transition(
                         result.observed_at,
                         gpu_id,
                         gpu.index,
@@ -1354,7 +1359,7 @@ class StateStore:
         if not previous or observed_at is None:
             return ()
         return tuple(
-            self._process_transition(
+            process_transition(
                 observed_at,
                 key[1],
                 gpu_index,
@@ -1372,45 +1377,14 @@ class StateStore:
         observed_at: str,
         previous_gpu_observed_at: str | None,
     ) -> tuple[GpuProcessTransition, ...]:
-        """Reconcile restored open transitions with the first live sample."""
-        open_events: dict[tuple[int, str], GpuProcessTransition] = {}
-        for event in self._process_events.get(key, ()):
-            process_key = (event.pid, event.name)
-            if event.event == "started":
-                open_events[process_key] = event
-            else:
-                open_events.pop(process_key, None)
-
-        transitions: list[GpuProcessTransition] = []
-        close_at = previous_gpu_observed_at or observed_at
-        for process_key, event in sorted(open_events.items()):
-            process = current.get(process_key)
-            if process is not None and self._transition_matches_process(event, process):
-                current[process_key] = replace(process, first_seen_at=event.observed_at)
-                continue
-            transitions.append(replace(event, observed_at=close_at, event="stopped"))
-        for process_key, process in sorted(current.items()):
-            event = open_events.get(process_key)
-            if event is not None and self._transition_matches_process(event, process):
-                continue
-            transitions.append(
-                self._process_transition(
-                    observed_at, key[1], gpu_index, "started", process
-                )
-            )
-        return tuple(transitions)
-
-    @staticmethod
-    def _transition_matches_process(
-        event: GpuProcessTransition, process: GpuProcess
-    ) -> bool:
-        event_start = (
-            event.workload.get("started_at")
-            if isinstance(event.workload, dict)
-            else None
+        return reconcile_restored_processes(
+            self._process_events.get(key, ()),
+            key[1],
+            gpu_index,
+            current,
+            observed_at,
+            previous_gpu_observed_at,
         )
-        process_start = process.workload.started_at if process.workload else None
-        return not event_start or not process_start or event_start == process_start
 
     def _first_seen_annotated_locked(self, result: ProbeResult) -> ProbeResult:
         """Return the result with processes carrying their first-seen stamp."""
@@ -1434,45 +1408,6 @@ class StateStore:
                 )
             )
         return replace(result, gpus=tuple(annotated_gpus))
-
-    @staticmethod
-    def _same_process_instance(previous: GpuProcess, current: GpuProcess) -> bool:
-        """False only when both samples carry workload start times that differ.
-
-        The workload's real start time (V7 protocol) distinguishes a new
-        process behind a reused PID from a continuously running one. When
-        either side lacks it (workloads disabled), the (pid, name) key alone
-        keeps identifying the process and first-seen stays a documented
-        lower bound.
-        """
-        previous_started = previous.workload.started_at if previous.workload else None
-        current_started = current.workload.started_at if current.workload else None
-        if previous_started is None or current_started is None:
-            return True
-        return previous_started == current_started
-
-    @staticmethod
-    def _process_transition(
-        observed_at: str,
-        gpu_id: str,
-        gpu_index: int,
-        event: str,
-        process: GpuProcess,
-        *,
-        visible: bool = True,
-    ) -> GpuProcessTransition:
-        return GpuProcessTransition(
-            observed_at=observed_at,
-            gpu_id=gpu_id,
-            index=gpu_index,
-            event=event,
-            pid=process.pid,
-            name=process.name,
-            used_memory_mib=process.used_memory_mib,
-            workload=process.workload.to_dict() if process.workload else None,
-            visible=visible,
-            first_seen_at=process.first_seen_at,
-        )
 
     @staticmethod
     def _history_point(result: ProbeResult) -> HostHistoryPoint:

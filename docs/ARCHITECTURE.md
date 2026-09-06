@@ -69,6 +69,7 @@ interfaces without a runtime plugin registry.
 | `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |
 | `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
+| `process_transitions.py` | lock-free arithmetic over GPU process transitions: building one transition, same-instance identity, the open starts of a ring, and reconciling restored open starts against the first live sample |
 | `telemetry_points.py` | compact in-memory history records: struct-packed host and GPU samples, process transitions |
 | `fleet_stats.py` | the snapshot's fleet-wide `stats` block: host, incident, GPU, and capacity totals over the serialized servers |
 | `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage`; a failing host's live processes count only up to its last confirmed sample |
