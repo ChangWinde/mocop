@@ -1,14 +1,15 @@
 // The attention panel's decision logic, extracted from app.js under the
 // ADR-0021 leaf pattern: which active conditions a host contributes, how the
-// fleet's conditions fold into issues (a configured shared path that several
-// unreachable hosts traverse, a shared storage device that several hosts
-// report, then one issue per remaining host), and how issues rank. Pure over
-// the snapshot and the incident payload: app.js injects the formatter, the
-// alias sanitizer, and the condition-message localizer, and owns rendering.
+// fleet's conditions fold into issues (shared-cause groups first, from
+// attention-groups.js, then one issue per remaining host), and how issues
+// rank. Pure over the snapshot and the incident payload: app.js injects the
+// formatter, the alias sanitizer, the condition-message localizer, and the
+// grouping leaf, and owns rendering.
 (() => {
   "use strict";
 
-  function create({ format, numeric, safeStoredHosts, conditionMessage }) {
+  function create({ format, numeric, safeStoredHosts, conditionMessage, groups }) {
+    const { sharedPathIssues, sharedStorageIssues } = groups;
     function conditionCategory(condition) {
       if (condition.kind === "connectivity") return "connection";
       if (condition.kind === "disk") return "storage";
@@ -67,78 +68,6 @@
         sortName: server.host,
         conditions,
       };
-    }
-
-    function sharedPathIssues(conditionsByHost, correlations, consumed) {
-      const issues = [];
-      correlations.forEach((correlation) => {
-        if (
-          correlation?.kind !== "configured_shared_path"
-          || correlation.confidence !== "possible"
-        ) return;
-        const anchor = safeStoredHosts([correlation.anchor])[0];
-        const hosts = safeStoredHosts(correlation.hosts).filter((host) =>
-          conditionsByHost.get(host)?.some((condition) => condition.kind === "connectivity"));
-        if (!anchor || hosts.length < 2) return;
-        hosts.forEach((host) => {
-          conditionsByHost.get(host)
-            .filter((condition) => condition.kind === "connectivity")
-            .forEach((condition) => consumed.add(`${host}|${condition.id}`));
-        });
-        issues.push({
-          shared: true,
-          sharedLabel: "可能的共享链路",
-          hosts,
-          severity: "critical",
-          priority: 3,
-          messages: [`${hosts.length} 台节点不可达 · 配置路径经过 ${anchor}`],
-          categories: ["connection"],
-          sortName: anchor,
-        });
-      });
-      return issues;
-    }
-
-    function sharedStorageIssues(conditionsByHost, consumed) {
-      const sharedGroups = new Map();
-      conditionsByHost.forEach((conditions, host) => {
-        conditions.filter((condition) => condition.sharedKey).forEach((condition) => {
-          const group = sharedGroups.get(condition.sharedKey) || [];
-          group.push({ host, condition });
-          sharedGroups.set(condition.sharedKey, group);
-        });
-      });
-      const issues = [];
-      sharedGroups.forEach((occurrences) => {
-        const byHost = new Map();
-        occurrences.forEach((occurrence) => {
-          const current = byHost.get(occurrence.host);
-          if (!current || occurrence.condition.usage > current.condition.usage) {
-            byHost.set(occurrence.host, occurrence);
-          }
-        });
-        if (byHost.size < 2) return;
-        occurrences.forEach(({ host, condition }) => consumed.add(`${host}|${condition.id}`));
-        const unique = [...byHost.values()];
-        const hottest = unique.reduce(
-          (current, candidate) => candidate.condition.usage > current.condition.usage ? candidate : current,
-        );
-        const hosts = unique.map(({ host }) => host).sort((a, b) => a.localeCompare(b));
-        issues.push({
-          shared: true,
-          sharedLabel: "共享存储",
-          hosts,
-          severity: unique.some(({ condition }) => condition.severity === "critical") ? "critical" : "warning",
-          priority: Math.max(...unique.map(({ condition }) => condition.priority)),
-          messages: [
-            `${hottest.condition.device} ${format(hottest.condition.usage)}%`
-            + `${hottest.condition.frozen ? "（离线前）" : ""} · 影响 ${hosts.length} 台`,
-          ],
-          categories: ["storage"],
-          sortName: hottest.condition.device,
-        });
-      });
-      return issues;
     }
 
     // Shared issues consume the conditions they explain so a host is not

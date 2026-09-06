@@ -157,6 +157,16 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- `GET /api/incidents` correlations gain a `simultaneous_connectivity_loss`
+  kind: when at least three hosts and half of the monitored fleet lose
+  connectivity within 120 seconds of each other, one fleet-wide correlation
+  (`anchor: null`) says the monitor's own uplink or a shared relay is the
+  likely cause, instead of leaving N unrelated-looking connectivity incidents.
+  It needs no topology configuration, subsumes configured-path groups inside
+  it, rides along in webhook payloads like the existing kind, and the
+  dashboard's attention panel lists it first as "疑似监控端链路故障". The
+  grouping logic moved from `attention.js` into an `attention-groups.js`
+  leaf.
 - Maintenance windows can recur daily: `recurrence: {daily: true, start,
   duration_minutes}` (duration strictly below one day) beside the existing
   weekly form. A fleet reached through a link that degrades at the same hour

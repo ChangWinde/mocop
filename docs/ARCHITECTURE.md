@@ -225,10 +225,14 @@ the rejected live-rebuild and tracker-snapshot alternatives.
 pause-collection and drop-incident alternatives; [ADR-0013](adr/0013-operational-diagnostics-and-gpu-history.md)
 records the condition-action, GPU-history, manual-probe, and diagnostic boundaries.
 
-The topology correlator consumes only actionable connectivity conditions. It may emit
-one possible shared-path projection for multiple descendants, but the raw active list
-and transition log remain unchanged. Webhook workers consume actionable transitions
-after this overlay and may include the current correlation context.
+The correlators consume only actionable connectivity conditions. The topology
+correlator may emit one possible shared-path projection for multiple descendants;
+the simultaneous-loss correlator emits one fleet-wide projection when at least three
+hosts and half of the fleet lost connectivity within 120 seconds of each other, which
+points at the monitor's own uplink or a shared relay rather than the nodes and
+subsumes the configured-path groups inside it. The raw active list and transition
+log remain unchanged. Webhook workers consume actionable transitions after this
+overlay and may include the current correlation context.
 
 ## Dashboard rendering
 
@@ -386,7 +390,8 @@ by `tests/<leaf>_test.mjs`:
 | `capacity-watch.js` | the durable watch, its armed/notified edge, cooldown, and presented text |
 | `csv-export.js` | CSV cell escaping (including formula-injection defense) and row building |
 | `update-pill.js` | release-currency polling cadence, pill state, and the fixed apply action |
-| `attention.js` | the attention panel's decisions: which active conditions a host contributes, shared-path and shared-storage grouping that consumes the conditions it explains, per-host issues, and ranking |
+| `attention-groups.js` | shared-cause grouping for the attention panel: configured-path and fleet-wide simultaneous-loss correlations, shared storage devices, each marking the conditions it explains |
+| `attention.js` | the attention panel's decisions: which active conditions a host contributes, per-host issues after the shared-cause groups, and ranking |
 | `background-asset.js` | the custom background: IndexedDB storage of one asset, container sniffing that refuses animated or mislabelled files, size and dimension caps, and the WebP quality bisection and shrink loop, over injected browser primitives |
 | `owner-usage.js` | the owners dialog's projections: the current per-owner aggregation over online hosts (offline hosts counted and excluded, one PID across a host's GPUs counted once, unknown VRAM disclosed), and the usage bill's wording: GPU-hours unit, retention and `partialGpus` caveats, kinds, idle share |
 

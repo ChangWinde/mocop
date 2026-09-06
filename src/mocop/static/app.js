@@ -178,6 +178,7 @@ const attention = globalThis.MocopAttention.create({
   numeric,
   safeStoredHosts,
   conditionMessage: (condition) => incidentConditionMessage(condition),
+  groups: globalThis.MocopAttentionGroups.create({ format, safeStoredHosts }),
 });
 const gpuTasks = globalThis.MocopGpuTasks.create({ durationSince });
 const ownerUsage = globalThis.MocopOwnerUsage.create({

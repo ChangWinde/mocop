@@ -753,11 +753,16 @@ Response fields:
 
 `events[]` carry the same condition fields plus `eventId` (monotonic int),
 `state` (`opened`, `resolved`, `escalated`, `deescalated`), and
-`observedAt`. `correlations[]` items are `{correlationKey, kind:
-"configured_shared_path", anchor, hosts[], severity, confidence:
-"possible", detail}` — they group **actionable connectivity** conditions
-whose hosts share a configured topology path, without changing the raw
-list.
+`observedAt`. `correlations[]` items are `{correlationKey, kind, anchor,
+hosts[], severity, confidence: "possible", detail}` and group **actionable
+connectivity** conditions without changing the raw list. Two kinds exist:
+`configured_shared_path` (the hosts share a configured topology path;
+`anchor` names the node they traverse) and `simultaneous_connectivity_loss`
+(at least three hosts and at least half of the monitored fleet lost
+connectivity within 120 seconds of each other — the monitor's own uplink or
+a shared relay is the likely cause, so `anchor` is `null`). A fleet-wide
+loss subsumes the configured-path groups inside it; a configured group with
+hosts outside the loss is still listed.
 
 Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_LIMIT`.
 
@@ -1152,7 +1157,8 @@ the transition time; `detail` for connectivity and GPU-availability conditions
 is one of the *Failure messages* strings; `value`/`threshold` are numbers or
 `null`; `groupKey` names a shared device group when the condition has one.
 `correlation` is present only when the transition belongs to a possible
-shared-path group (`GET /api/incidents` `correlations[]`). `POST
+shared-path or simultaneous-loss group (`GET /api/incidents`
+`correlations[]`; `anchor` is `null` for the latter). `POST
 /api/notifications/test` sends the same body with `"test": true` and
 `eventId` `0`, which receivers should acknowledge and discard.
 
