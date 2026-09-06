@@ -3275,6 +3275,30 @@ class UsageRollupTests(unittest.TestCase):
         owners = {item["owner"]: item["gpuSeconds"] for item in usage["owners"]}
         self.assertEqual(owners["alice"], 1800.0)
 
+    def test_restored_start_continues_into_the_live_process_after_a_restart(
+        self,
+    ) -> None:
+        # The resume promise itself: a process the restored start describes
+        # and the first live sample still lists is one run, so no transition
+        # is emitted, the live process inherits the restored first
+        # observation, and the rollup bills it from that observation to now.
+        store = self._store(
+            restored=self._restored_open_start("2026-08-14T01:00:00Z", pid=9)
+        )
+        live = GpuProcess(9, "train.py", 10.0, WorkloadMetadata("process", "alice"))
+        self._apply(store, "2026-08-14T01:59:00Z", (live,))
+
+        self.assertEqual(len(store._process_events[("gpu-1", "GPU-1")]), 1)
+        self.assertNotIn(("gpu-1", "GPU-1"), store._process_reconciliation_pending)
+        tracked = store._active_gpu_processes[("gpu-1", "GPU-1")][(9, "train.py")]
+        self.assertEqual(tracked.first_seen_at, "2026-08-14T01:00:00Z")
+        (server,) = store.snapshot()["servers"]
+        (gpu,) = server["gpus"]
+        self.assertEqual(gpu["processes"][0]["first_seen_at"], "2026-08-14T01:00:00Z")
+        usage = store.usage(1, 50)
+        (owner,) = usage["owners"]
+        self.assertEqual((owner["gpuSeconds"], usage["droppedRecords"]), (3600.0, 0))
+
     def test_restored_starts_stay_pending_while_the_gpu_skips_process_samples(
         self,
     ) -> None:
