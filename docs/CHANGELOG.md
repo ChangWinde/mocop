@@ -54,6 +54,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   file's size) the service starts anyway, reclaims what the bounded online
   path can, and leaves the condition to the persistence status it already
   reports, instead of refusing to start over it.
+- The README and the API reference no longer describe a `no_nvidia_smi` host
+  status: `servers[].status` is `pending`, `online`, `unreachable`, or
+  `error`, and a host without `nvidia-smi` is `online` with the message
+  `nvidia-smi is unavailable` and an empty `gpus` array, as the probe test
+  has always pinned. The Chinese README gains the same sentence.
 - The attention panel marks a resource condition whose host is not online
   with `（离线前）`: the service keeps such conditions open across failed
   probes, so their figures date from the last successful sample. On a live

@@ -451,7 +451,7 @@ Timestamp disambiguation (frequently confused):
 | Field | Type | Description |
 |---|---|---|
 | `host` | string | The configured SSH alias (collection identity). |
-| `status` | string | `pending`, `online`, `unreachable`, `no_nvidia_smi`, or `error`. |
+| `status` | string | `pending` (no probe yet), `online`, `unreachable`, or `error`. A host without `nvidia-smi` is `online` with the message `nvidia-smi is unavailable` and an empty `gpus` array. |
 | `polling` | bool | A probe is currently in flight for this host. |
 | `latencyMs` | int \| null | Duration of the most recent probe attempt. |
 | `message` | string \| null | Redacted failure classification or GPU-query warning; one of the stable strings under *Failure messages* below. |
@@ -500,7 +500,7 @@ this table aligned.
 | `Remote collection stalled after partial output` | Output started and then stopped before the timeout. |
 | `Resource collection cancelled` | The probe was cancelled by a shutdown or configuration change. |
 | `Unexpected collector error` | An internal collector failure; details are in the service journal. |
-| `nvidia-smi is unavailable` | The host is online (`no_nvidia_smi`) but has no `nvidia-smi`. |
+| `nvidia-smi is unavailable` | The host is `online` but has no `nvidia-smi`; system metrics remain valid. |
 | `nvidia-smi query failed` | `nvidia-smi` exited non-zero; system metrics remain valid. |
 | `nvidia-smi output was malformed` | `nvidia-smi` output did not parse; system metrics remain valid. |
 
