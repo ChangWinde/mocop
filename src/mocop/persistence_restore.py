@@ -342,17 +342,10 @@ def restore_telemetry(
             }
         )
 
-    restored_process_events = {}
-    for key, items in process_events.items():
-        items.sort(
-            key=lambda item: (
-                str(item["observedAt"]),
-                0 if item["event"] == "stopped" else 1,
-                int(item["pid"]),
-                str(item["name"]),
-            )
-        )
-        restored_process_events[key] = tuple(items[-incident_points:])
+    restored_process_events = {
+        key: tuple(_emission_order(items)[-incident_points:])
+        for key, items in process_events.items()
+    }
 
     return LoadedTelemetry(
         history={host: tuple(points) for host, points in history.items()},
@@ -361,6 +354,38 @@ def restore_telemetry(
         process_events=restored_process_events,
         open_incidents=open_incidents,
     )
+
+
+def _emission_order(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Order one device's transitions as the collector emitted them.
+
+    The table has no sequence column, so a ``started`` and a ``stopped`` of
+    one process in the same second are ambiguous. The collector emits
+    stop-then-start only for a PID reuse, which by construction carries two
+    different workload start times; every other such pair (a process seeded
+    and closed by the same sample) is a zero-length run emitted
+    start-then-stop, and restoring it stop-first left a phantom open start.
+    """
+
+    def workload_started_at(item: dict[str, object]) -> object:
+        workload = item.get("workload")
+        return workload.get("started_at") if isinstance(workload, dict) else None
+
+    def identity(item: dict[str, object], event: object) -> tuple[object, ...]:
+        return (item["observedAt"], item["pid"], item["name"], event)
+
+    started_at = {
+        identity(item, item["event"]): workload_started_at(item) for item in items
+    }
+
+    def rank(item: dict[str, object]) -> tuple[object, ...]:
+        stopped = item["event"] == "stopped"
+        own = workload_started_at(item)
+        twin = started_at.get(identity(item, "started" if stopped else "stopped"))
+        pid_reuse = bool(own and twin and own != twin)
+        return (item["observedAt"], item["pid"], item["name"], stopped != pid_reuse)
+
+    return sorted(items, key=rank)
 
 
 def _event_from_row(row: tuple[object, ...]) -> IncidentEvent | None:

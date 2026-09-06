@@ -72,6 +72,19 @@ All notable changes are documented here. This project follows Semantic Versionin
   is observed but skips a process sample still waits for its live table. The
   pure transition arithmetic (`process_transitions.py`) left `service.py` so
   this fits under the ratchet, and the ceiling dropped from 2175 to 2150.
+- A process seeded and closed in the same second no longer comes back from
+  the history file as an open start. The process table has no sequence
+  column, and the restore ordered every same-second `stopped` before the
+  `started`, which is right for a reused PID (the collector emits
+  stop-then-start) but inverted the zero-length run a host leaves when it
+  answers one sample and then goes stale. On a live deployment the two
+  unreachable hosts' "orphan" starts were all 28 such pairs, and on online
+  hosts a phantom start paired with the next re-seed of the same PID into a
+  run across the blind gap: replaying the live file through the store, a
+  48-hour rollup went from 698 dropped records and 1502 GPU-hours to 249 and
+  1394. The restore now uses the one distinction the collector guarantees —
+  a PID reuse carries two different workload start times — and orders every
+  other same-second pair start-then-stop.
 
 ### Changed
 

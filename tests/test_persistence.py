@@ -14,7 +14,13 @@ from unittest import mock
 
 from mocop.config import PersistenceConfig
 from mocop.incident_types import IncidentCondition, IncidentEvent
-from mocop.models import GpuMetrics, ProbeResult, SystemMetrics
+from mocop.models import (
+    GpuMetrics,
+    GpuProcess,
+    ProbeResult,
+    SystemMetrics,
+    WorkloadMetadata,
+)
 from mocop.persistence import SqliteTelemetryPersistence, user_state_path
 from mocop.persistence_restore import LoadedTelemetry
 from mocop.service import StateStore
@@ -440,25 +446,72 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         self.assertEqual(events[0]["workload"]["workload_id"], "7")
         self.assertEqual(store.status()["writtenRecords"], 4)
 
-    def test_preserves_same_timestamp_process_transition_order(self) -> None:
+    def _roundtrip_same_second_pair(
+        self,
+        stopped_workload: dict[str, object] | None,
+        started_workload: dict[str, object] | None,
+        case: int = 0,
+    ) -> list[str]:
         observed_at = utc_text(datetime.now(timezone.utc) - timedelta(minutes=5))
-        store = SqliteTelemetryPersistence(self.config, self.path)
+        path = self.path.with_name(f"history-{case}.sqlite3")
+        store = SqliteTelemetryPersistence(self.config, path)
         store.record_gpu_telemetry(
             "gpu-01",
             (),
             (
-                process_event(observed_at, "GPU-1", 42, "stopped"),
-                process_event(observed_at, "GPU-1", 42, "started"),
+                {
+                    **process_event(observed_at, "GPU-1", 42, "stopped"),
+                    "workload": stopped_workload,
+                },
+                {
+                    **process_event(observed_at, "GPU-1", 42, "started"),
+                    "workload": started_workload,
+                },
             ),
         )
         self.assertTrue(store.flush())
         store.close()
 
-        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        reopened = SqliteTelemetryPersistence(self.config, path)
         self.addCleanup(reopened.close)
         events = reopened.load(10, 10).process_events[("gpu-01", "GPU-1")]
+        return [event["event"] for event in events]
 
-        self.assertEqual([event["event"] for event in events], ["stopped", "started"])
+    def test_same_second_pid_reuse_restores_the_stop_before_the_start(self) -> None:
+        # A reused PID whose workload start time changed is emitted as
+        # stopped(old instance) then started(new instance) in one sample.
+        order = self._roundtrip_same_second_pair(
+            {"kind": "process", "started_at": "2026-08-10T00:00:00Z"},
+            {"kind": "process", "started_at": "2026-08-10T00:04:30Z"},
+        )
+
+        self.assertEqual(order, ["stopped", "started"])
+
+    def test_same_second_seed_and_close_restores_the_start_before_the_stop(
+        self,
+    ) -> None:
+        # Live evidence: a host that answered one sample and then went stale
+        # has its processes seeded and closed at the same second. The table
+        # has no sequence column and the restore used to put every stop
+        # before every start, so 28 of these zero-length runs came back as
+        # open starts after each restart, were dropped by the rollup, and
+        # would have been extended to hours by any closure that trusted them.
+        # Only a PID reuse (differing workload start times) is emitted
+        # stop-first; every other same-second pair is start-then-stop.
+        cases = (
+            (None, None),
+            (
+                {"kind": "process", "started_at": "2026-08-10T00:00:00Z"},
+                {"kind": "process", "started_at": "2026-08-10T00:00:00Z"},
+            ),
+            ({"kind": "process"}, {"kind": "process", "started_at": "x"}),
+        )
+        for case, (stopped_workload, started_workload) in enumerate(cases):
+            with self.subTest(stopped=stopped_workload, started=started_workload):
+                order = self._roundtrip_same_second_pair(
+                    stopped_workload, started_workload, case
+                )
+                self.assertEqual(order, ["started", "stopped"])
 
     def test_roundtrips_hidden_usage_anchors_without_exposing_physical_hosts(
         self,
@@ -519,7 +572,9 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         self.addCleanup(store.close)
         events = store.load(10, 10).process_events[("gpu-01", "GPU-1")]
 
-        self.assertEqual([event["event"] for event in events], ["stopped", "started"])
+        # Without workload start times the pair cannot be a PID reuse, so it
+        # restores as the zero-length run the collector emitted.
+        self.assertEqual([event["event"] for event in events], ["started", "stopped"])
         with closing(sqlite3.connect(self.path)) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             columns = {
@@ -1305,6 +1360,80 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
             restarted_state.incidents(20)["events"][0]["category"],
             "connectivity",
         )
+
+    def test_seed_and_close_pair_stays_closed_across_a_restart(self) -> None:
+        # The live kyzs-1 case end to end: one answered sample seeds the
+        # inventory, the host goes stale, the seed is closed at its own
+        # second. After a restart with the host still down, the pair must
+        # come back closed: no dropped record, no occupancy, and nothing for
+        # the staleness closure to extend.
+        now = datetime.now(timezone.utc)
+
+        def at(minutes_ago: int) -> str:
+            return utc_text(now - timedelta(minutes=minutes_ago))
+
+        gpu = GpuMetrics(
+            index=0,
+            uuid="GPU-1",
+            name="Test GPU",
+            driver_version="550",
+            pstate="P0",
+            temperature_c=60,
+            utilization_gpu_pct=50,
+            utilization_memory_pct=20,
+            memory_total_mib=1000,
+            memory_used_mib=250,
+            memory_free_mib=750,
+            power_draw_w=100,
+            power_limit_w=200,
+            processes=(
+                GpuProcess(
+                    7, "train.py", 250, WorkloadMetadata(kind="process", owner="eve")
+                ),
+            ),
+        )
+        persistence = SqliteTelemetryPersistence(self.config, self.path)
+        state = StateStore(5, persistence=persistence, collection_stale_cycles=3)
+        state.set_hosts(("gpu-01",))
+        state.apply(ProbeResult("gpu-01", "online", 1, (gpu,), observed_at=at(60)))
+        for minutes_ago in (59, 58, 57):
+            state.apply(
+                ProbeResult("gpu-01", "unreachable", 1, observed_at=at(minutes_ago))
+            )
+        self.assertEqual(
+            [
+                (e.event, e.observed_at)
+                for e in state._process_events[("gpu-01", "GPU-1")]
+            ],
+            [("started", at(60)), ("stopped", at(60))],
+        )
+        self.assertTrue(persistence.flush())
+        persistence.close()
+
+        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(reopened.close)
+        restarted = StateStore(
+            5,
+            persistence=reopened,
+            restored=reopened.load(20, 20),
+            collection_stale_cycles=3,
+            utc_clock=lambda: now,
+        )
+        restarted.set_hosts(("gpu-01",))
+        for minutes_ago in (3, 2, 1):
+            restarted.apply(
+                ProbeResult("gpu-01", "unreachable", 1, observed_at=at(minutes_ago))
+            )
+
+        self.assertEqual(
+            [
+                (e.event, e.observed_at)
+                for e in restarted._process_events[("gpu-01", "GPU-1")]
+            ],
+            [("started", at(60)), ("stopped", at(60))],
+        )
+        usage = restarted.usage(2, 10)
+        self.assertEqual((usage["droppedRecords"], usage["owners"]), (0, []))
 
     def test_state_store_discards_restored_history_for_unconfigured_hosts(self) -> None:
         gpu_point = {
