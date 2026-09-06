@@ -19,7 +19,6 @@ from .config import (
     MAINTENANCE_REASON_MAX_LENGTH,
 )
 from .metrics import OPENMETRICS_CONTENT_TYPE
-from .models import SERVER_MESSAGE_PREFIXES, SERVER_MESSAGES
 
 API_VERSION = "2"
 API_SCHEMA_VERSION = 1
@@ -36,6 +35,8 @@ API_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/events", "authenticated"),
     ("GET", "/api/history", "authenticated"),
     ("GET", "/api/usage", "authenticated"),
+    ("GET", "/api/reports/usage", "authenticated"),
+    ("GET", "/api/reports/utilization", "authenticated"),
     ("GET", "/api/capacity", "authenticated"),
     ("GET", "/api/incidents", "authenticated"),
     ("GET", "/api/meta", "public"),
@@ -112,6 +113,22 @@ QUERY_SCHEMAS: dict[str, QuerySchema] = {
         },
         "INVALID_QUERY",
         "invalid hours or limit",
+    ),
+    "/api/reports/usage": QuerySchema(
+        {
+            "hours": _integer(1, 720, 168, "INVALID_HOURS"),
+            "limit": _integer(1, 500, 50, "INVALID_LIMIT"),
+        },
+        "INVALID_QUERY",
+        "invalid hours or limit",
+    ),
+    "/api/reports/utilization": QuerySchema(
+        {
+            "hours": _integer(1, 2_160, 168, "INVALID_HOURS"),
+            "host": QueryParameter("alias"),
+        },
+        "INVALID_QUERY",
+        "invalid hours or host",
     ),
     "/api/gpu-history": QuerySchema(
         {
@@ -252,44 +269,6 @@ ERROR_CODES: tuple[tuple[str, int], ...] = (
     ("SERVICE_UNAVAILABLE", 503),
     ("METRICS_LIMIT_EXCEEDED", 503),
     ("NOTIFICATIONS_DISABLED", 503),
+    ("HISTORY_UNAVAILABLE", 503),
     ("CONNECTION_LIMIT", 503),
 )
-
-FIELD_CONVENTIONS = {
-    "envelope": "camelCase",
-    "telemetry": "snake_case",
-    "incidentActionWrite": "camelCase",
-    "incidentActionStored": "snake_case",
-}
-
-WRITE_REQUIREMENTS = {
-    "contentType": "application/json",
-    "authorization": "Bearer",
-    "sameOrigin": True,
-    "dashboardMarker": "X-Monitor-Request: dashboard",
-}
-
-
-def describe_error_codes() -> list[dict[str, object]]:
-    return [{"code": code, "status": status} for code, status in ERROR_CODES]
-
-
-def describe_server_messages() -> dict[str, list[str]]:
-    """The stable ``servers[].message`` vocabulary agents may branch on."""
-    return {"exact": list(SERVER_MESSAGES), "prefixes": list(SERVER_MESSAGE_PREFIXES)}
-
-
-def describe_endpoints() -> list[dict[str, object]]:
-    """The endpoint manifest ``/api/meta`` publishes."""
-    endpoints: list[dict[str, object]] = []
-    for method, path, access in API_ROUTES:
-        entry: dict[str, object] = {"method": method, "path": path, "access": access}
-        if method == "GET":
-            schema = QUERY_SCHEMAS.get(path)
-            entry["query"] = schema.describe() if schema is not None else {}
-        else:
-            entry["bodyLimitBytes"] = WRITE_BODY_LIMITS[path]
-            entry["body"] = WRITE_SCHEMAS[path].describe()
-        entry["responseType"] = RESPONSE_TYPES.get(path, "application/json")
-        endpoints.append(entry)
-    return endpoints

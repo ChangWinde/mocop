@@ -39,7 +39,7 @@ from .incidents import IncidentTracker, ThresholdIncidentPolicy
 from .maintenance import MaintenanceWindowConfig
 from .models import GpuProcess, ProbeResult, ServerState, utc_after, utc_now
 from .notifications import DisabledNotificationSink, IncidentNotificationSink
-from .persistence import DisabledPersistence, TelemetryPersistence
+from .persistence_api import DisabledPersistence, TelemetryPersistence
 from .persistence_restore import LoadedTelemetry
 from .probe import (
     AttendedAwareResourceProbe,
@@ -61,7 +61,12 @@ from .telemetry_points import (
     HostHistoryPoint,
     unpacked_optional_float,
 )
-from .usage import aggregate_usage
+from .usage_views import (
+    UsageInputs,
+    history_usage,
+    history_utilization,
+    memory_usage,
+)
 
 _MAX_FAILURE_BACKOFF_SECONDS = 60.0
 _MAX_PROBE_WORKERS = 64
@@ -732,54 +737,70 @@ class StateStore:
                 ],
             }
 
-    def usage(self, window_hours: int, owner_limit: int) -> dict[str, object]:
-        """Per-owner GPU occupancy over the window; see ``usage.aggregate_usage``.
+    def usage_inputs(self) -> UsageInputs:
+        """A consistent copy of everything the usage views aggregate.
 
-        Only the consistent copy of the timeline is taken under the lock; the
-        aggregation itself runs without it.
+        Only the copy is taken under the lock; aggregation runs without it. A
+        host that is failing its probes keeps its process table as a blind
+        spot until it is stale, so its processes occupy their devices only up
+        to the last confirmed sample, never through the gap.
         """
         with self._condition:
-            now = self._utc_clock()
-            events_by_gpu = {
-                key: list(events) for key, events in self._process_events.items()
-            }
-            active_by_gpu = {
-                key: dict(processes)
-                for key, processes in self._active_gpu_processes.items()
-            }
-            # A host that is failing its probes keeps its process table as a
-            # blind spot until it is stale; its processes occupy their devices
-            # only up to the last confirmed sample, never through the gap.
-            observed_until_by_gpu = {
-                key: observed_at
-                for key, observed_at in self._process_last_observed_at.items()
-                if (server := self._servers.get(key[0])) is not None
-                and server.status != "online"
-            }
-            utilization_by_gpu = {
-                key: [
-                    (
-                        point.observed_at,
-                        unpacked_optional_float(
-                            GPU_HISTORY_VALUES.unpack(point.values)[1]
-                        ),
-                    )
-                    for point in points
-                ]
-                for key, points in self._gpu_history.items()
-            }
-            busy_pct = self._thresholds.gpu_busy_pct
-        return aggregate_usage(
-            now=now,
-            window_hours=window_hours,
-            owner_limit=owner_limit,
-            busy_pct=busy_pct,
-            events_by_gpu=events_by_gpu,
-            active_by_gpu=active_by_gpu,
-            utilization_by_gpu=utilization_by_gpu,
-            event_cap=self._process_event_points,
-            observed_until_by_gpu=observed_until_by_gpu,
+            return UsageInputs(
+                now=self._utc_clock(),
+                busy_pct=self._thresholds.gpu_busy_pct,
+                event_cap=self._process_event_points,
+                events_by_gpu={
+                    key: list(events) for key, events in self._process_events.items()
+                },
+                active_by_gpu={
+                    key: dict(processes)
+                    for key, processes in self._active_gpu_processes.items()
+                },
+                observed_until_by_gpu={
+                    key: observed_at
+                    for key, observed_at in self._process_last_observed_at.items()
+                    if (server := self._servers.get(key[0])) is not None
+                    and server.status != "online"
+                },
+                utilization_by_gpu={
+                    key: [
+                        (
+                            point.observed_at,
+                            unpacked_optional_float(
+                                GPU_HISTORY_VALUES.unpack(point.values)[1]
+                            ),
+                        )
+                        for point in points
+                    ]
+                    for key, points in self._gpu_history.items()
+                },
+                monitored_hosts=frozenset(self._servers),
+            )
+
+    def usage(self, window_hours: int, owner_limit: int) -> dict[str, object]:
+        """Per-owner GPU occupancy from the in-memory timeline."""
+        return memory_usage(self.usage_inputs(), window_hours, owner_limit)
+
+    def usage_report(
+        self, window_hours: int, owner_limit: int
+    ) -> dict[str, object] | None:
+        """Per-owner GPU occupancy from the history database; None without
+        persistence."""
+        return history_usage(
+            self.usage_inputs(), self._persistence, window_hours, owner_limit
         )
+
+    def utilization_report(
+        self, window_hours: int, host: str | None
+    ) -> dict[str, object] | None:
+        """Hourly utilization per host, or per device of one host; None without
+        persistence. A host that is not monitored raises ``KeyError``."""
+        with self._condition:
+            if host is not None and host not in self._servers:
+                raise KeyError(host)
+            now = self._utc_clock()
+        return history_utilization(now, self._persistence, window_hours, host)
 
     def incidents(self, limit: int) -> dict[str, object]:
         with self._condition:

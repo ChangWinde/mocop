@@ -11,27 +11,33 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
 
 from .config import PersistenceConfig
 from .incident_types import IncidentEvent
-from .persistence_restore import (
-    FIRST_SEEN_KEY,
-    INTERNAL_USAGE_HOST,
-    INTERNAL_USAGE_KEY,
-    LoadedTelemetry,
-    restore_telemetry,
+from .persistence_api import (
+    DisabledPersistence,
+    PersistenceError,
+    TelemetryPersistence,
+)
+from .persistence_restore import LoadedTelemetry, restore_telemetry
+from .persistence_rollups import (
+    ensure_rollups,
+    load_report_inputs,
+    prune_rollups,
+    upsert_rollups,
 )
 from .persistence_schema import (
     CREATE_SCHEMA_STATEMENTS,
     GPU_TABLE_STATEMENTS,
     HISTORY_FIELDS,
-    ROLLUP_BACKFILL,
-    ROLLUP_RETENTION_HOURS,
-    ROLLUP_STATEMENTS,
-    ROLLUP_UPSERT,
     SCHEMA_VERSION,
 )
+from .persistence_transitions import (
+    FIRST_SEEN_KEY,
+    INTERNAL_USAGE_HOST,
+    INTERNAL_USAGE_KEY,
+)
+from .reports import ReportInputs
 
 # Keep the released v3 process_events table byte-for-byte compatible.  Older
 # writers use positional INSERTs, so even an appended nullable column would
@@ -101,67 +107,6 @@ def _is_size_error(exc: sqlite3.Error) -> bool:
     if getattr(exc, "sqlite_errorcode", None) == _SQLITE_FULL_ERRORCODE:
         return True
     return "full" in str(exc).lower()
-
-
-class PersistenceError(RuntimeError):
-    """Raised when explicitly enabled persistence cannot start safely."""
-
-
-class TelemetryPersistence(Protocol):
-    def is_enabled(self) -> bool: ...
-
-    def load(self, history_points: int, incident_points: int) -> LoadedTelemetry: ...
-
-    def record_history(self, host: str, point: dict[str, object]) -> None: ...
-
-    def record_incidents(self, events: tuple[IncidentEvent, ...]) -> None: ...
-
-    def record_gpu_telemetry(
-        self,
-        host: str,
-        points: tuple[dict[str, object], ...],
-        process_events: tuple[dict[str, object], ...],
-    ) -> None: ...
-
-    def status(self) -> dict[str, object]: ...
-
-    def close(self, timeout_seconds: float = 5.0) -> None: ...
-
-
-class DisabledPersistence:
-    def is_enabled(self) -> bool:
-        return False
-
-    def load(self, history_points: int, incident_points: int) -> LoadedTelemetry:
-        del history_points, incident_points
-        return LoadedTelemetry({}, ())
-
-    def record_history(self, host: str, point: dict[str, object]) -> None:
-        del host, point
-
-    def record_incidents(self, events: tuple[IncidentEvent, ...]) -> None:
-        del events
-
-    def record_gpu_telemetry(
-        self,
-        host: str,
-        points: tuple[dict[str, object], ...],
-        process_events: tuple[dict[str, object], ...],
-    ) -> None:
-        del host, points, process_events
-
-    def status(self) -> dict[str, object]:
-        return {
-            "enabled": False,
-            "backend": "memory",
-            "healthy": True,
-            "queuedWrites": 0,
-            "droppedWrites": 0,
-            "lastError": None,
-        }
-
-    def close(self, timeout_seconds: float = 5.0) -> None:
-        del timeout_seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +182,18 @@ class SqliteTelemetryPersistence:
         try:
             with closing(self._connect()) as connection:
                 return restore_telemetry(connection, history_points, incident_points)
+        except sqlite3.Error as exc:
+            raise PersistenceError("cannot read the SQLite history database") from exc
+
+    def report_inputs(self, since_hour: str) -> ReportInputs | None:
+        """Rows for a long-window report; None until the rollup table exists."""
+        if not self._rollups_enabled:
+            return None
+        try:
+            with closing(self._connect()) as connection:
+                return load_report_inputs(
+                    connection, self._config.retention_hours, since_hour
+                )
         except sqlite3.Error as exc:
             raise PersistenceError("cannot read the SQLite history database") from exc
 
@@ -374,7 +331,10 @@ class SqliteTelemetryPersistence:
                             "history database exceeds the configured size limit"
                         )
                     self._apply_size_limit(connection)
-                self._rollups_enabled = self._ensure_rollups(connection)
+                rollup_error = ensure_rollups(connection, self._busy_pct)
+                self._rollups_enabled = rollup_error is None
+                if rollup_error is not None:
+                    self._set_error(rollup_error)
             self._path.chmod(0o600)
         except PersistenceError:
             raise
@@ -398,30 +358,6 @@ class SqliteTelemetryPersistence:
     @classmethod
     def _migrate_v3(cls, connection: sqlite3.Connection) -> None:
         cls._apply_schema(connection, ())
-
-    def _ensure_rollups(self, connection: sqlite3.Connection) -> bool:
-        """Create the hourly rollup table and aggregate raw hours it lacks.
-
-        This runs after the size cap is applied, so a database already at its
-        cap keeps starting exactly as before: the rollups then wait for
-        retention to free pages and are retried at the next start, and the
-        writer skips them meanwhile. The whole retained raw table aggregates
-        in well under a second per million rows; later starts only read from
-        the last rolled-up hour onward.
-        """
-        try:
-            with connection:
-                for statement in ROLLUP_STATEMENTS:
-                    connection.execute(statement)
-                latest = connection.execute(
-                    "SELECT max(hour) FROM gpu_hourly"
-                ).fetchone()[0]
-                since = latest if isinstance(latest, str) else ""
-                connection.execute(ROLLUP_BACKFILL, (self._busy_pct, since))
-        except sqlite3.OperationalError:
-            self._set_error("hourly rollups wait for retention to free space")
-            return False
-        return True
 
     @staticmethod
     def _apply_schema(
@@ -671,14 +607,7 @@ class SqliteTelemetryPersistence:
     ) -> int:
         written_records = 0
         if item.points and busy_pct is not None:
-            connection.executemany(
-                ROLLUP_UPSERT,
-                (
-                    SqliteTelemetryPersistence._rollup_row(item.host, point, busy_pct)
-                    for point in item.points
-                    if isinstance(point.get("observedAt"), str)
-                ),
-            )
+            upsert_rollups(connection, item.host, item.points, busy_pct)
         if item.points:
             cursor = connection.executemany(
                 """
@@ -766,30 +695,6 @@ class SqliteTelemetryPersistence:
         return written_records
 
     @staticmethod
-    def _rollup_row(
-        host: str, point: dict[str, object], busy_pct: float
-    ) -> tuple[object, ...]:
-        utilization = point.get("utilizationGpuPct")
-        memory_used = point.get("memoryUsedMiB")
-        has_utilization = isinstance(utilization, int | float) and not isinstance(
-            utilization, bool
-        )
-        has_memory = isinstance(memory_used, int | float) and not isinstance(
-            memory_used, bool
-        )
-        return (
-            host,
-            point.get("gpuId"),
-            str(point["observedAt"])[:13] + ":00:00Z",
-            1 if has_utilization else 0,
-            1 if has_utilization and float(utilization) >= busy_pct else 0,  # type: ignore[arg-type]
-            float(utilization) if has_utilization else 0.0,  # type: ignore[arg-type]
-            1 if has_memory else 0,
-            float(memory_used) if has_memory else 0.0,  # type: ignore[arg-type]
-            point.get("memoryTotalMiB"),
-        )
-
-    @staticmethod
     def _internal_usage_gpu_key(host: str, event: dict[str, object]) -> str:
         identity = f"{host}\x00{event.get('gpuId')}".encode(
             "utf-8", errors="surrogatepass"
@@ -853,13 +758,7 @@ class SqliteTelemetryPersistence:
             "DELETE FROM process_events WHERE observed_at < ?", (cutoff_text,)
         )
         if self._rollups_enabled:
-            rollup_cutoff = datetime.now(timezone.utc) - timedelta(
-                hours=max(self._config.retention_hours, ROLLUP_RETENTION_HOURS)
-            )
-            connection.execute(
-                "DELETE FROM gpu_hourly WHERE hour < ?",
-                (rollup_cutoff.isoformat(timespec="seconds").replace("+00:00", "Z"),),
-            )
+            prune_rollups(connection, self._config.retention_hours)
         if reclaim_pages > 0:
             _reclaim_free_pages(connection, reclaim_pages)
 

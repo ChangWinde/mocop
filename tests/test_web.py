@@ -3,11 +3,15 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import tempfile
 import threading
 import time
 import unittest
 from contextlib import suppress
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import BaseHandler, Request, build_opener, install_opener, urlopen
@@ -22,6 +26,7 @@ from mocop.models import (
     GpuProcess,
     ProbeResult,
     SystemMetrics,
+    WorkloadMetadata,
 )
 from mocop.service import StateStore
 from mocop.web import MonitorHttpServer, MonitorRequestHandler
@@ -1120,6 +1125,112 @@ class WebTests(unittest.TestCase):
         self.assert_json_error(
             f"{self.base}/api/usage?scope=all", 400, "UNKNOWN_QUERY_PARAMETER"
         )
+
+    def test_report_endpoints_need_history_and_validate_their_queries(self) -> None:
+        # Without persistence the reports say so with a stable code rather
+        # than returning an empty rollup that looks like "nobody used a GPU".
+        self.assert_json_error(
+            f"{self.base}/api/reports/usage", 503, "HISTORY_UNAVAILABLE"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/reports/utilization", 503, "HISTORY_UNAVAILABLE"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/reports/usage?hours=0", 400, "INVALID_HOURS"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/reports/usage?hours=721", 400, "INVALID_HOURS"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/reports/utilization?hours=2161", 400, "INVALID_HOURS"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/reports/utilization?host=bad%20host", 400, "INVALID_QUERY"
+        )
+        self.assert_json_error(
+            f"{self.base}/api/reports/utilization?scope=all",
+            400,
+            "UNKNOWN_QUERY_PARAMETER",
+        )
+
+    def test_report_endpoints_serve_history_backed_reports(self) -> None:
+        from mocop.config import PersistenceConfig
+        from mocop.persistence import SqliteTelemetryPersistence
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        persistence = SqliteTelemetryPersistence(
+            PersistenceConfig(enabled=True, retention_hours=168, max_bytes=8_388_608),
+            Path(directory.name) / "history.sqlite3",
+            busy_pct=10.0,
+        )
+        self.addCleanup(persistence.close)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+
+        def at(minutes: int) -> str:
+            return (now - timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+        state = StateStore(5, persistence=persistence, utc_clock=lambda: now)
+        state.set_hosts(("gpu-1",))
+        gpu = GpuMetrics(
+            index=0,
+            uuid="GPU-1",
+            name="Test GPU",
+            driver_version="550",
+            pstate="P0",
+            temperature_c=60,
+            utilization_gpu_pct=90,
+            utilization_memory_pct=20,
+            memory_total_mib=1000,
+            memory_used_mib=250,
+            memory_free_mib=750,
+            power_draw_w=100,
+            power_limit_w=200,
+            processes=(
+                GpuProcess(
+                    10, "train.py", 250, WorkloadMetadata(kind="process", owner="alice")
+                ),
+            ),
+        )
+        state.apply(ProbeResult("gpu-1", "online", 1, (gpu,), observed_at=at(180)))
+        state.apply(ProbeResult("gpu-1", "online", 1, (gpu,), observed_at=at(120)))
+        state.apply(
+            ProbeResult(
+                "gpu-1", "online", 1, (replace(gpu, processes=()),), observed_at=at(60)
+            )
+        )
+        self.assertTrue(persistence.flush())
+        server, thread = serve_in_thread("127.0.0.1", 0, state, _Inventory())
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_port}"
+
+        with urlopen(f"{base}/api/reports/usage?hours=24", timeout=2) as response:
+            usage = json.load(response)
+        self.assertEqual(usage["source"], "history")
+        self.assertEqual(usage["resolution"], "hour")
+        self.assertEqual(usage["retentionHours"], 168)
+        (owner,) = usage["owners"]
+        self.assertEqual(owner["owner"], "alice")
+        # Seeded three hours ago, stopped one hour ago: two hours of occupancy.
+        self.assertEqual(owner["gpuSeconds"], 7200.0)
+        self.assertEqual(owner["idleShare"], 0.0)
+        self.assertEqual(sum(day["gpuSeconds"] for day in usage["days"]), 7200.0)
+
+        with urlopen(f"{base}/api/reports/utilization?hours=24", timeout=2) as response:
+            utilization = json.load(response)
+        self.assertEqual([entry["host"] for entry in utilization["hosts"]], ["gpu-1"])
+        self.assertTrue(all(hour["busyShare"] == 1.0 for hour in utilization["fleet"]))
+        with urlopen(
+            f"{base}/api/reports/utilization?hours=24&host=gpu-1", timeout=2
+        ) as response:
+            per_device = json.load(response)
+        self.assertEqual([entry["gpuId"] for entry in per_device["gpus"]], ["GPU-1"])
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(f"{base}/api/reports/utilization?host=gpu-9", timeout=2)
+        self.assertEqual(raised.exception.code, 404)
+        raised.exception.close()
 
     def test_api_errors_carry_stable_machine_readable_codes(self) -> None:
         self.assert_json_error(

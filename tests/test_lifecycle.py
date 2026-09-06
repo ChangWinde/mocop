@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from mocop.api_manifest import API_VERSION, describe_endpoints, describe_error_codes
+from mocop.api_describe import describe_endpoints, describe_error_codes
+from mocop.api_manifest import API_VERSION
 from mocop.lifecycle import (
     META_MAX_BYTES,
     LifecycleError,

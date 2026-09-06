@@ -33,11 +33,8 @@ from .notifications import (
     NotificationError,
     create_notification_sink,
 )
-from .persistence import (
-    DisabledPersistence,
-    PersistenceError,
-    create_persistence,
-)
+from .persistence import create_persistence
+from .persistence_api import DisabledPersistence, PersistenceError
 from .probe import OpenSshLinuxResourceProbe
 from .service import MonitorService, StateStore
 from .updates import UpdateManager

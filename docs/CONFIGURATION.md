@@ -197,7 +197,15 @@ with `VACUUM` before the cap is checked. That rebuild takes well under a second
 per hundred megabytes of live data and needs temporary disk space up to the
 file's size; when it cannot run (a full disk), the service still starts and
 reclaims what the online path can. Lowering `max_bytes` therefore takes effect
-at the next start as long as the live data fits. `identity` reads bounded UID/start/command metadata; `auto` additionally
+at the next start as long as the live data fits.
+
+`retention_hours` also bounds how far back `GET /api/reports/usage` can
+account owner occupancy exactly, because it pairs the retained process
+transitions; raise it (168 hours is a week) when weekly reports matter. The
+hourly GPU rollups behind `GET /api/reports/utilization` are small and are
+kept for 90 days or `retention_hours`, whichever is longer.
+
+`identity` reads bounded UID/start/command metadata; `auto` additionally
 classifies supported scheduler/container contexts. Neither mode executes a
 scheduler client.
 

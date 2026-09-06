@@ -246,6 +246,7 @@ any out-of-band knowledge; the capability value itself is never included.
 | `SERVICE_UNAVAILABLE` | 503 | The capability is not available (no config controller, restart not supervised, manual probing disabled, SSE slots exhausted, scan/persist failure). |
 | `METRICS_LIMIT_EXCEEDED` | 503 | Rendering would exceed the fixed 100,000-series OpenMetrics budget. |
 | `NOTIFICATIONS_DISABLED` | 503 | Notification test requested but no webhook is configured. |
+| `HISTORY_UNAVAILABLE` | 503 | A report was requested but history persistence is disabled or its rollup table is still waiting for space. |
 | `CONNECTION_LIMIT` | 503 | The process already has 64 concurrent HTTP connections. |
 
 ### Retries and idempotency
@@ -372,6 +373,8 @@ This table matches the server's route manifest exactly.
 | GET | `/api/events` | A | SSE stream of snapshots with named heartbeats. |
 | GET | `/api/history` | A | Per-host resource trend points. |
 | GET | `/api/usage` | A | Per-owner GPU occupancy and idle-occupancy rollup. |
+| GET | `/api/reports/usage` | A | Per-owner GPU occupancy over the retained history (no per-device cap), idle share at hourly resolution, per-day breakdown. |
+| GET | `/api/reports/utilization` | A | Hourly GPU utilization, busy share, and memory per host, or per device of one host, over up to 90 days of rollups. |
 | GET | `/api/capacity` | A | Ranked same-host, same-model GPU groups that can take a job. |
 | GET | `/api/incidents` | A | Active conditions, transition events, correlations. |
 | GET | `/api/meta` | P | API self-description: versions, capabilities, endpoints. |
@@ -664,6 +667,65 @@ and offline stretches are never counted as measured activity.
 
 Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_HOURS`,
 `INVALID_LIMIT`.
+
+### GET /api/reports/usage
+
+Per-owner GPU occupancy from the **history database**. Tier A. Where
+`GET /api/usage` aggregates the in-memory timeline (the last
+`incident_history_points` transitions per device, which a busy device fills
+in a day), this report pairs every retained process transition, so owner
+GPU-hours are exact over the raw retention (`persistence.retention_hours`),
+and classifies idle occupancy from the hourly rollups the writer maintains.
+Live processes extend open runs exactly as `GET /api/usage` does. Requires
+history persistence; otherwise `503 HISTORY_UNAVAILABLE`.
+
+Query parameters:
+
+| Parameter | Required | Bounds | Default |
+|---|---|---|---|
+| `hours` | no | integer 1–720 | 168 |
+| `limit` | no | integer 1–500 (owner rows) | 50 |
+
+The response has every field of `GET /api/usage` (`partialGpus` is always
+`0`: there is no per-device cap) plus:
+
+| Field | Type | Description |
+|---|---|---|
+| `source` | string | `history`. |
+| `resolution` | string | `hour`: idle classification applies each hour's busy share uniformly to the occupancy inside that hour (`GET /api/usage` reports `sample`). |
+| `retentionHours` | int | The raw retention the transitions come from. |
+| `coveredFromAt` | timestamp | `max(sinceAt, now − retentionHours)`: occupancy before this instant is outside the retained transitions. |
+| `days` | array | `[{day, gpuSeconds, owners: [{owner, gpuSeconds}]}]` — every owner's occupancy split at UTC midnights, ascending by day. |
+
+Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_HOURS`,
+`INVALID_LIMIT`, `503 HISTORY_UNAVAILABLE`.
+
+### GET /api/reports/utilization
+
+Hourly GPU utilization from the rollups. Tier A. Without `host`, one series
+per monitored host; with `host`, one series per device of that host. Rollups
+are kept for 90 days or the raw retention, whichever is longer, so this
+report reaches further back than `GET /api/reports/usage`. Requires history
+persistence; otherwise `503 HISTORY_UNAVAILABLE`.
+
+Query parameters:
+
+| Parameter | Required | Bounds | Default |
+|---|---|---|---|
+| `hours` | no | integer 1–2160 | 168 |
+| `host` | no | monitored alias (safe alias grammar) | — |
+
+Response: `{generatedAt, sinceAt, windowHours, resolution: "hour", host,
+fleet[], hosts[] | gpus[]}`. `fleet[]` and each series' `hours[]` are
+`{hour, gpus, samples, busyShare, utilizationAvgPct, memoryUsedAvgMiB,
+memoryTotalMiB}` per UTC hour that has data: `gpus` is the number of devices
+that contributed, `busyShare` the share of utilization samples at or above
+`gpu_busy_pct` (at the threshold in effect when written), averages are over
+the samples in that hour, and `memoryTotalMiB` sums the devices' capacity.
+Hours without samples are absent, not zero.
+
+Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_HOURS`,
+`404 UNKNOWN_HOST`, `503 HISTORY_UNAVAILABLE`.
 
 ### GET /api/capacity
 
@@ -1272,7 +1334,16 @@ authentication and without the marker header.
 ### 7. Account GPU usage per owner honestly
 
 `GET /api/usage` (A) reports what the monitor observed, never an
-extrapolation. Read its coverage fields before its totals.
+extrapolation. Read its coverage fields before its totals. For any window
+longer than a day prefer `GET /api/reports/usage` (A): it pairs every
+retained transition from the history database, so `partialGpus` is always
+`0`, coverage is `coveredFromAt`–`generatedAt` (bounded by
+`persistence.retention_hours`, not by a per-device cap), idle shares come
+from hourly rollups (`resolution: "hour"`), and `days[]` gives the per-day
+split. `GET /api/reports/utilization` answers "when is the cluster free"
+from the same rollups over up to 90 days. Both need history persistence
+(`503 HISTORY_UNAVAILABLE` otherwise). The points below apply to the
+in-memory rollup; steps 6 and 7 apply to both.
 
 1. Choose `hours` for the question, not the retention: the window is capped
    at 720 hours, but the data behind it is the retained transition timeline
