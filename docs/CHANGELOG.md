@@ -85,6 +85,13 @@ All notable changes are documented here. This project follows Semantic Versionin
   1394. The restore now uses the one distinction the collector guarantees —
   a PID reuse carries two different workload start times — and orders every
   other same-second pair start-then-stop.
+- The history writer prunes expired records once per minute while idle, as
+  documented, instead of on every 100 ms wake-up. The short queue timeout
+  exists so `close()` is answered promptly; treating it as the prune cadence
+  ran the four retention deletes and the bounded page reclaim about ten times
+  a second on an idle deployment (0.15 % of a core on a 386 MB file — cheap in
+  steady state, but 600 times the intended reclaim rate while a backlog
+  drained).
 
 ### Changed
 

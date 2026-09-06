@@ -487,9 +487,12 @@ class SqliteTelemetryPersistence:
                 except queue.Empty:
                     if self._stop_requested.is_set():
                         break
-                    # Retention must keep holding during idle periods too.
-                    self._prune_batch(connection)
-                    next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
+                    # Retention must keep holding during idle periods too,
+                    # on the same interval: the short get timeout exists for
+                    # stop responsiveness, not as the prune cadence.
+                    if time.monotonic() >= next_prune_at:
+                        self._prune_batch(connection)
+                        next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
                     continue
                 items = [first]
                 if isinstance(

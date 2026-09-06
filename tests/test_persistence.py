@@ -1088,6 +1088,27 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
                 time.sleep(0.1)
             self.assertEqual(store.load(10, 10).history, {})
 
+    def test_idle_writer_prunes_on_the_interval_not_on_every_wakeup(self) -> None:
+        # The writer wakes every 100 ms to stay responsive to close(); it used
+        # to prune on each of those wakeups (about ten times a second on an
+        # idle deployment) instead of once per _PRUNE_INTERVAL_SECONDS, which
+        # also multiplied the bounded page reclaim per prune by the same
+        # factor while a backlog drained.
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+        prunes: list[float] = []
+        real_prune = SqliteTelemetryPersistence._prune
+
+        def counting_prune(self_, connection, **kwargs):
+            prunes.append(time.monotonic())
+            return real_prune(self_, connection, **kwargs)
+
+        with mock.patch.object(SqliteTelemetryPersistence, "_prune", counting_prune):
+            self.assertTrue(store.flush())
+            time.sleep(0.8)
+
+        self.assertEqual(prunes, [])
+
     def test_flush_reports_batches_dropped_by_write_failures(self) -> None:
         store = SqliteTelemetryPersistence(self.config, self.path)
         self.addCleanup(store.close)
