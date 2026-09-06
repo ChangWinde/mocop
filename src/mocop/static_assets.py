@@ -31,6 +31,7 @@ STATIC_ROUTES: dict[str, tuple[str, str]] = {
     "/dashboard-auth.js": ("dashboard-auth.js", _JAVASCRIPT),
     "/background-asset.js": ("background-asset.js", _JAVASCRIPT),
     "/attention.js": ("attention.js", _JAVASCRIPT),
+    "/owner-usage.js": ("owner-usage.js", _JAVASCRIPT),
     "/app.js": ("app.js", _JAVASCRIPT),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),

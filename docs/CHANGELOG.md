@@ -106,6 +106,9 @@ All notable changes are documented here. This project follows Semantic Versionin
   ratchet (`persistence.py`, `doctor.py`, `__main__.py`, `incidents.py`, and
   `notifications.py` join it), so growth anywhere in the core has to come
   with an extraction.
+- The owners dialog's aggregation and the usage bill's wording left `app.js`
+  (seven lines under its ceiling) for the `owner-usage.js` leaf with a Node
+  contract test; `app.js`'s ceiling ratchets from 5850 to 5770 lines.
 
 ### Added
 

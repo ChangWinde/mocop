@@ -379,6 +379,7 @@ by `tests/<leaf>_test.mjs`:
 | `update-pill.js` | release-currency polling cadence, pill state, and the fixed apply action |
 | `attention.js` | the attention panel's decisions: which active conditions a host contributes, shared-path and shared-storage grouping that consumes the conditions it explains, per-host issues, and ranking |
 | `background-asset.js` | the custom background: IndexedDB storage of one asset, container sniffing that refuses animated or mislabelled files, size and dimension caps, and the WebP quality bisection and shrink loop, over injected browser primitives |
+| `owner-usage.js` | the owners dialog's projections: the current per-owner aggregation over online hosts (offline hosts counted and excluded, one PID across a host's GPUs counted once, unknown VRAM disclosed), and the usage bill's wording: GPU-hours unit, retention and `partialGpus` caveats, kinds, idle share |
 
 A repository test compares the leaf directory with the static route table, the
 `index.html` script order, and `tests/<leaf>_test.mjs`, so a new leaf cannot be
