@@ -22,6 +22,7 @@ uvx --from ruff==0.12.11 ruff format --check .
 for script in src/mocop/static/*.js; do node --check "$script"; done
 for test in tests/*_test.mjs; do node "$test"; done
 node --experimental-websocket tests/browser_smoke.mjs
+MOCOP_BROWSER_AUTHENTICATION=none node --experimental-websocket tests/browser_smoke.mjs
 ```
 
 Enable the repository-owned Git hooks once per clone:

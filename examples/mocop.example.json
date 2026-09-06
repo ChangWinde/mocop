@@ -81,6 +81,7 @@
   "max_workers": 8,
   "listen_host": "127.0.0.1",
   "listen_port": 8787,
+  "authentication": "bearer",
   "trusted_web_hosts": [],
   "history_points": 720,
   "incident_history_points": 500,

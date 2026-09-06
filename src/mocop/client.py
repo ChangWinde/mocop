@@ -10,6 +10,9 @@ for the dashboard, because their marker on a read switches the service to the
 attended collection cadence. Possession of the capability file is the whole
 authority here: the same principal can already edit the configuration, so the
 write path adds no trust the host did not have.
+
+With explicit ``authentication: "none"``, requests omit the capability;
+deployment reachability then admits callers under the same route schemas.
 """
 
 from __future__ import annotations
@@ -116,7 +119,7 @@ def request(
     except ConfigError as exc:
         raise ApiClientError(str(exc), exc.code) from exc
     headers = {"User-Agent": f"mocop-cli/{__version__}"}
-    if access != _PUBLIC:
+    if access != _PUBLIC and config.authentication == "bearer":
         try:
             token = read_access_token(token_file or access_token_path(resolved))
         except LifecycleError as exc:

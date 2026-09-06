@@ -50,6 +50,7 @@ The ten fields marked required must be present, even when empty.
 | `max_workers` | yes | integer | 1–64. |
 | `listen_host` | yes | hostname/IP | Plain DNS name, IPv4, or IPv6; no scheme, credentials, path, or query. |
 | `listen_port` | yes | integer | 1–65,535. |
+| `authentication` | no | `"bearer"` | `bearer` requires a per-install token; `none` allows direct dashboard and API access. Restart required. In `none`, every reachable client has operator access; Host, Origin, and request validation still apply. See [direct access](OPERATIONS.md#direct-access-without-a-token). |
 | `local_host` | no | `null` | Safe alias in the explicit active `hosts` list; runs the fixed probe locally. |
 | `trusted_web_hosts` | no | `[]` | At most 32 exact hostnames/IP literals or HTTPS-only origin suffixes such as `*.preview.example`; no scheme or port. Exact entries authorize browser Host/Origin, while suffix entries authorize Origin only. This is not authentication. |
 | `gpu_process_poll_interval_seconds` | no | `15` | Number 2–3,600; independent process-query cadence. |

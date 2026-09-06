@@ -17,6 +17,13 @@ telemetry. There are no application tenants, separate viewer identities, or
 role-based permissions. TCP loopback is shared by local Unix users and is not by
 itself an authorization boundary.
 
+The explicit local setting `authentication: "none"` grants that operator role
+to every client able to reach the service, including other local users and
+forwarded clients. No token is generated, read, or required in this mode.
+Deployment reachability becomes the caller-authorization boundary. The mode
+is never selected implicitly by a missing token and cannot be changed through
+the web API; changing it requires a service restart. Bearer remains the default.
+
 **Entry points and trust boundaries:** operator-owned JSON, OpenSSH files, and optional
 service environment variables enter the process; versioned tab-separated system,
 GPU, process, health, and workload records enter the collector; HTTP enters a fixed
@@ -62,7 +69,9 @@ servers, webhook receivers, and reverse proxies is **UNABLE TO DETERMINE** here.
 **Required properties:** never put credentials into source artifacts, configuration
 JSON, API payloads, persistent browser storage, or logs; keep resolved destinations and raw
 connection errors out of browser/support responses; authenticate every telemetry,
-metrics, SSE, and write request with exactly one Bearer capability; never accept
+metrics, SSE, and write request with exactly one Bearer capability in the default
+mode; in explicit `none` mode require a trusted Host and non-cross-site Fetch
+Metadata before private routing; never accept
 command construction or an outbound destination from HTTP; preserve host-key and TLS
 verification; reject webhook SSRF by default; bound probe time, output, concurrency,
 storage retention/size, background queues, retries, and remote metadata; keep
@@ -80,8 +89,10 @@ restarts, probes, or notification tests; a support bundle leaks aliases, GPU UUI
 command lines, or raw connection errors.
 
 **Enforcement:** static routes use an exact allowlist. `/api/meta`, `/healthz`, and
-`/readyz` are public; every other API-family route and `/metrics` first requires
-exactly one valid `Authorization: Bearer` header. Reader routes additionally require a
+`/readyz` are public; in the default mode every other API-family route and `/metrics`
+first requires exactly one valid `Authorization: Bearer` header. Explicit `none`
+mode instead checks the trusted Host and Fetch Metadata, including unknown API
+paths and unsupported methods. Reader routes additionally require a
 trusted `Host`, `X-Monitor-Request: dashboard`, and non-cross-site Fetch Metadata when
 present. Host and GPU history validate identity grammar, current telemetry membership,
 and a 300-point cap; the incident route accepts only one integer capped at 200. The
@@ -94,7 +105,7 @@ SSH connection. It retains only safe aliases, route kinds, and sanitized warning
 usernames, addresses, and raw proxy commands are discarded. Only the resulting
 `HostDiscoverySnapshot.hosts` authorizes a probe. A `host_groups` key alone is
 display metadata and never adds an alias to that set. All write routes require
-Bearer authentication, an exact queryless path, valid trusted HTTP(S) `Origin`, the
+the configured authentication policy, an exact queryless path, valid trusted HTTP(S) `Origin`, the
 dashboard marker, non-cross-site Fetch Metadata when present, exact JSON media type,
 unique keys, and a route-specific body cap, and every body is checked once in the
 dispatcher against the same manifest `GET /api/meta` publishes (key set, JSON
@@ -117,7 +128,8 @@ preflight is rejected with no `Access-Control-Allow-Origin`, forms cannot add th
 marker or required media type, and browser-supplied Fetch Metadata must not be
 cross-site. This preserves browser CSRF protection behind a same-origin Host-rewriting
 proxy without trusting client-supplied forwarding headers. Non-browser clients can
-forge these browser-defense headers but must still possess the Bearer capability.
+forge these browser-defense headers but must still possess the capability in
+Bearer mode. In explicit `none` mode, such clients have operator access.
 POST connections close so rejected unread
 bytes cannot be reused as another request. Configuration mutation serializes
 concurrent changes, reloads the current file, limits the file to 1 MiB, refuses the
@@ -128,7 +140,7 @@ then wakes the scheduler with the new immutable configuration. A no-op settings 
 does not rewrite the file. A partial temporary file never replaces the active
 configuration.
 
-`/metrics` is read-only and requires the same Bearer capability as JSON/SSE telemetry.
+`/metrics` is read-only and follows the same authentication policy as JSON/SSE telemetry.
 It does not accept a target, query, or collection control and never starts remote work.
 Operators who expose Mocop beyond loopback must apply authenticated TLS or private-VPN
 transport to this route as well.
@@ -196,7 +208,7 @@ tab ends that browser session. Webhook URLs and signing secrets are read from en
 for the generated service, place them in the optional private `environment` file next
 to `config.json`. They never enter the config API, snapshot, status, or logs.
 
-If the dashboard starts without a fragment or stored capability, it accepts the
+In Bearer mode, if the dashboard starts without a fragment or stored capability, it accepts the
 same token through a non-dismissible form and retains it only after successful
 authentication. Invalid tokens are cleared and are not retried. A reverse proxy
 that terminates TLS can observe subsequent Bearer headers and is therefore part of
@@ -216,7 +228,7 @@ multiplexed session, and doctor flags it.
 ## Deployment requirement
 
 Changing `listen_host` away from loopback is a security-sensitive deployment
-decision. Bearer authentication is still required but does not encrypt plain HTTP or
+decision. The default Bearer authentication does not encrypt plain HTTP or
 authenticate the server. Put the service behind TLS plus authenticated authorization
 (or a private VPN), restrict source networks, and do not forward `/api/events`
 anonymously. Capability rotation, viewer access review, proxy configuration, upgrade,

@@ -128,11 +128,12 @@ mocop doctor
 
 ### 4. Open the dashboard
 
-Open the exact `Dashboard:` capability URL printed by `mocop deploy`, for example `http://127.0.0.1:8787/#access_token=...`. The page keeps the capability in tab-scoped
-`sessionStorage`, so reloads stay authenticated; a new tab either needs the printed
-URL again or prompts for the contents of the `access-token` file beside the
-configuration (`~/.config/mocop/access-token` by default). The
-[API reference](docs/API.md#scope-and-compatibility) owns the capability rules.
+Open the printed `Dashboard:` URL, for example `http://127.0.0.1:8787/#access_token=...`.
+Reloads retain authentication; new tabs need this URL or the token beside the
+configuration. See the [capability rules](docs/API.md#scope-and-compatibility).
+
+For [direct access without a token](docs/OPERATIONS.md#direct-access-without-a-token),
+set `"authentication": "none"` and reinstall the service. Every reachable client gains operator access.
 
 Run `mocop` for a foreground process, or manage the service with:
 
@@ -177,7 +178,7 @@ and P/A/R/W access tiers. `GET /api/meta` names every route's tier, query
 bounds, POST body fields, error-code catalog, and documentation URL; a `403`
 says where the capability lives. On the monitor host, `mocop api PATH` performs
 any public or authenticated GET, and `--data JSON` any writer-tier POST, using
-the configured listener and capability. Only discovery and health are public; the
+the configured listener and authentication mode. Only discovery and health are public by default; the
 [API reference](docs/API.md) has curl examples and explains why non-viewer
 automation must not send `X-Monitor-Request: dashboard`.
 
@@ -203,7 +204,7 @@ codes, and [Performance](docs/PERFORMANCE.md) before changing cadence.
 Mocop accepts only explicit SSH aliases and runs one fixed, read-only probe. It enforces host-key checking, batch mode, timeouts, output limits, bounded concurrency, private atomic configuration writes, and safe rendering of remote text.
 
 The service has no user accounts and listens on `127.0.0.1` by default. A
-private per-install Bearer capability protects every private route from other
+private per-install Bearer capability protects every private route by default from other
 local users but grants one complete operator role. Expose Mocop remotely only
 behind authenticated TLS or a private VPN: Bearer over plain HTTP has no
 network confidentiality or server authentication.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -292,8 +293,10 @@ class DemoRequestHandler(MonitorRequestHandler):
         super()._respond_to_read_request()
 
     def _require_authentication(self, path: str) -> bool:
-        if path not in {"/healthz", "/readyz", "/api/meta"} and (
-            path.startswith("/api/") or path == "/metrics"
+        if (
+            self.monitor_server.authentication == "bearer"
+            and path not in {"/healthz", "/readyz", "/api/meta"}
+            and (path.startswith("/api/") or path == "/metrics")
         ):
             expected = f"Bearer {_BROWSER_ACCESS_TOKEN}"
             if self.headers.get("Authorization") != expected:
@@ -637,6 +640,7 @@ def main() -> int:
         state,
         DemoInventory(state),
         access_token=_BROWSER_ACCESS_TOKEN,
+        authentication=os.environ.get("MOCOP_BROWSER_AUTHENTICATION", "bearer"),
         updates=DemoUpdates(),
     )
     server.unmarked_dashboard_reads = 0

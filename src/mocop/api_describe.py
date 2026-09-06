@@ -68,6 +68,7 @@ def describe_meta(
     manual_probe_supported: bool,
     configuration_write_supported: bool,
     update_supported: bool,
+    authentication: str = "bearer",
 ) -> dict[str, object]:
     """The complete ``GET /api/meta`` document for one deployment."""
     return {
@@ -82,7 +83,11 @@ def describe_meta(
             "updateSupported": update_supported,
         },
         "conventions": FIELD_CONVENTIONS,
-        "write": WRITE_REQUIREMENTS,
+        "authentication": {"mode": authentication},
+        "write": {
+            **WRITE_REQUIREMENTS,
+            "authorization": "Bearer" if authentication == "bearer" else "none",
+        },
         "errorCodes": describe_error_codes(),
         "serverMessages": describe_server_messages(),
         "endpoints": describe_endpoints(),
