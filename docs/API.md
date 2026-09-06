@@ -1258,6 +1258,47 @@ authentication and without the marker header.
    after a generous window → the restart did not happen; only then submit
    again.
 
+### 7. Account GPU usage per owner honestly
+
+`GET /api/usage` (A) reports what the monitor observed, never an
+extrapolation. Read its coverage fields before its totals.
+
+1. Choose `hours` for the question, not the retention: the window is capped
+   at 720 hours, but the data behind it is the retained transition timeline
+   (at most `incident_history_points` records per device) plus the live
+   process table, so a long window is not a complete one.
+2. Compare `earliestDataAt` with `sinceAt`. `earliestDataAt` later than
+   `sinceAt` means no device has data for the start of the window; treat
+   the report as covering `earliestDataAt`–`generatedAt`.
+3. Read `partialGpus`. It counts devices whose retained timeline is full yet
+   begins inside the window; their occupancy before that point is missing
+   even when `earliestDataAt` looks complete, because that timestamp is the
+   earliest across all devices and a quiet card reaches back further than a
+   busy one. Any non-zero value means the busiest owners are undercounted
+   relative to the others.
+4. Read `droppedRecords`. Each is a timeline record without a trustworthy
+   start anchor (a `stopped` whose `firstSeenAt` is absent, typically
+   written before this monitor recorded first observations). They are
+   excluded, not estimated.
+5. Quote `idleShare` with its basis. It is `idleSeconds / sampledSeconds`,
+   and `sampledSeconds` covers only the occupancy that overlapped retained
+   utilization samples (`history_points` × the poll interval: 720 points at
+   a five-second cadence is one hour), so an owner with days of
+   `gpuSeconds` may have an `idleShare` computed from the last hour — on a
+   live deployment every owner showed about 3600 `sampledSeconds` against
+   up to 1.9 million `gpuSeconds`. Compare `sampledSeconds` with
+   `gpuSeconds` before drawing a conclusion; `null` means no classified
+   sample at all.
+6. Attribute only when identity is on. `owner` is non-null only with
+   `workloads.mode` `identity` or `auto`; with `disabled`, everything
+   aggregates under `owner: null`, and a null row next to named rows means
+   the owner was unresolvable for those processes, not that they were free.
+7. Remember that occupancy on a host that is failing its probes ends at the
+   host's last confirmed sample and, once the host is stale, is closed
+   there ([ADR-0029](adr/0029-process-inventory-observation-gaps.md)); a
+   node that was unreachable for the whole window contributes nothing, and
+   `GET /api/snapshot` says so through `status` and `lastSuccessAt`.
+
 ## OpenMetrics reference
 
 `GET /metrics` renders the current snapshot as OpenMetrics 1.0. Counter

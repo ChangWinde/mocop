@@ -133,6 +133,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   and `correlation` shapes, the test delivery marker, and the retry, throttle,
   and suppression rules — and a repository test keeps the documented example
   body's keys equal to what the delivery code sends.
+- An agent playbook for `/api/usage` in the API reference: how to bound
+  `hours`, read `earliestDataAt` against `sinceAt`, `partialGpus`, and
+  `droppedRecords`, quote `idleShare` with its `sampledSeconds` basis (on a
+  live deployment about one hour of samples against days of occupancy), and
+  when `owner` can be attributed at all; `AGENTS.md` points at it.
 - Three decision records for this round's architectural choices:
   [ADR-0027](adr/0027-restored-incident-generations.md) (incident generations
   resume from each condition's latest persisted transition, webhook workers
