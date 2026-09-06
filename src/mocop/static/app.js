@@ -166,7 +166,7 @@ const {
   maxResults: MAX_PROGRAM_SEARCH_RESULTS,
   maxQueryLength: MAX_SEARCH_QUERY_LENGTH,
   workloadLabels: WORKLOAD_KIND_LABELS,
-  processName: gpuProcessName,
+  processName: (process) => gpuTasks.processName(process),
   numeric,
 });
 
@@ -1943,10 +1943,16 @@ async function fetchOwnersUsage() {
   view.ownersUsageError = "";
   renderOwnersUsage();
   try {
-    const response = await fetch(
-      `/api/usage?hours=${encodeURIComponent(view.ownersUsageHours)}&limit=50`,
-    );
-    const usage = await response.json();
+    // The history report pairs every retained transition, so it is complete
+    // where the in-memory rollup is capped per device; without persistence
+    // the service says so and the in-memory rollup is the honest fallback.
+    const query = `hours=${encodeURIComponent(view.ownersUsageHours)}&limit=50`;
+    let response = await fetch(`/api/reports/usage?${query}`);
+    let usage = await response.json();
+    if (response.status === 503 && usage.code === "HISTORY_UNAVAILABLE") {
+      response = await fetch(`/api/usage?${query}`);
+      usage = await response.json();
+    }
     if (!response.ok) throw new Error(usage.error || "占用账单不可用");
     if (request !== view.ownersUsageRequest) return;
     view.ownersUsage = usage;
@@ -1984,6 +1990,13 @@ function renderOwnersUsage() {
     return;
   }
   elements.ownersUsageSummary.textContent = ownerUsage.usageSummary(usage);
+  const days = ownerUsage.usageDays(usage);
+  if (days.length) {
+    const strip = create("div", "owners-usage-days");
+    strip.setAttribute("aria-label", "按天占用");
+    strip.append(...days.map(({ day, label }) => create("span", "owner-day-chip", `${day} · ${label}`)));
+    elements.ownersUsageResults.append(strip);
+  }
   for (const entry of owners.slice(0, 50)) {
     const card = create(
       "article",
@@ -3846,21 +3859,6 @@ function gpuDetailMetric(label, value, title = "") {
   return metric;
 }
 
-// Function declarations: gpuProcessName is referenced above (process-search
-// wiring) before this point in the file, so these must hoist.
-function gpuProcessName(process) {
-  return gpuTasks.processName(process);
-}
-
-function gpuProcessStartMs(process) {
-  return gpuTasks.processStartMs(process);
-}
-
-// Display name: the extracted entry point when argv0 is a bare interpreter.
-function gpuTaskDisplayName(process) {
-  return gpuTasks.taskEntry(process) || gpuProcessName(process);
-}
-
 function gpuProcessSummary(gpu) {
   const cached = gpuProcessSummaryCache.get(gpu);
   if (cached) return cached;
@@ -3937,11 +3935,11 @@ function programSearchRow() {
 
 function updateProgramSearchRow(row, record) {
   const { server, gpu, process } = record;
-  const shortName = gpuProcessName(process);
+  const shortName = gpuTasks.processName(process);
   const fullName = String(process.name || "");
   const command = process.workload?.command
     || (fullName && fullName !== shortName ? fullName : "");
-  row.name.textContent = gpuTaskDisplayName(process);
+  row.name.textContent = gpuTasks.displayName(process);
   row.name.title = fullName || "unknown process";
   row.command.textContent = command || "命令行未采集";
   if (command) row.command.title = command;
@@ -4115,7 +4113,7 @@ function filterCurrentGpuTasks(value) {
 }
 
 function searchFleetForProcess(process) {
-  const query = gpuTaskDisplayName(process).slice(0, MAX_SEARCH_QUERY_LENGTH);
+  const query = gpuTasks.displayName(process).slice(0, MAX_SEARCH_QUERY_LENGTH);
   view.query = query;
   elements.search.value = query;
   elements.gpuDetailDialog.close();
@@ -4147,7 +4145,7 @@ async function copyGpuTaskText(value, successMessage) {
 }
 
 function updateGpuTaskRow(row, process, gpu) {
-  const shortName = gpuProcessName(process);
+  const shortName = gpuTasks.processName(process);
   // A bare interpreter name identifies nothing; lead with the actual entry
   // point (module or script) extracted from the command line when available.
   const entry = gpuTasks.taskEntry(process);
@@ -4407,10 +4405,10 @@ function renderGpuDetail() {
   const sortByDuration = preferences.gpuTaskSort === "duration";
   const sortByName = preferences.gpuTaskSort === "name";
   if (sortByDuration) {
-    matchingProcesses.sort((a, b) => gpuProcessStartMs(a) - gpuProcessStartMs(b)
+    matchingProcesses.sort((a, b) => gpuTasks.processStartMs(a) - gpuTasks.processStartMs(b)
       || processMemoryRank(a, b));
   } else if (sortByName) {
-    matchingProcesses.sort((a, b) => gpuTaskDisplayName(a).localeCompare(gpuTaskDisplayName(b))
+    matchingProcesses.sort((a, b) => gpuTasks.displayName(a).localeCompare(gpuTasks.displayName(b))
       || numeric(a.pid) - numeric(b.pid));
   } else {
     matchingProcesses.sort(processMemoryRank);
@@ -4624,7 +4622,7 @@ function gpuProcessCell(gpu) {
     cell.append(content);
     return cell;
   }
-  const topName = summary.topProcess ? gpuTaskDisplayName(summary.topProcess) : "未知程序";
+  const topName = summary.topProcess ? gpuTasks.displayName(summary.topProcess) : "未知程序";
   const sampleKind = gpu.processes_sampled === false ? "缓存" : "采样";
   const freshness = gpu.processes_observed_at ? age(gpu.processes_observed_at) : "时间未知";
   const memorySummary = summary.knownMemoryCount

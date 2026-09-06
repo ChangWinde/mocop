@@ -101,8 +101,13 @@ dispatcher against the same manifest `GET /api/meta` publishes (key set, JSON
 types, alias grammar, enumerations, bounds, text length) before a handler runs.
 The detailed route bounds and stable errors are the tested contract in
 [API.md](API.md). The local `mocop api` client never sends the dashboard marker
-and refuses reader and writer routes, so it cannot become a scripted path around
-these guards.
+on a read and refuses reader routes, so it cannot switch the collection cadence
+from a script. For writer routes it presents the listener's own loopback origin,
+the marker, and an explicit JSON body, passing through exactly the same guard as
+the dashboard; this adds no trust, because the principal holding the private
+capability file on the monitor host can already rewrite the configuration and
+restart the service. It does mean the capability file's `0600` mode and the
+monitor host's user boundary are what protect writes, not the browser.
 
 The write guard intentionally does not compare external Origin with a proxy-rewritten
 backend Host. Exact `trusted_web_hosts` entries authorize Host and Origin; a leading

@@ -95,7 +95,8 @@ interfaces without a runtime plugin registry.
 | `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query and body schemas, body caps, error catalog; `/api/meta` publishes it and every GET query and POST body is validated through it |
 | `api_describe.py` | how the manifest is published through `GET /api/meta`: the meta document, field conventions, write requirements |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
-| `client.py` | the local read-only client behind `mocop api`: listener from the configuration, capability from the private file, public and authenticated GETs only |
+| `client.py` | the local client behind `mocop api`: listener from the configuration, capability from the private file, public and authenticated GETs, and writer-tier POSTs presenting the listener's own origin |
+| `cli_arguments.py` | the `mocop` command line: every subcommand, flag, and help text, separate from the runtime that acts on them |
 | `static_assets.py` | static asset route table, strong ETags, and conditional-delivery validators |
 | `lifecycle.py` | private config creation and user-level systemd management |
 | `migration.py` | non-destructive cross-machine config transformation and private target creation |
@@ -399,7 +400,7 @@ by `tests/<leaf>_test.mjs`:
 | `attention-groups.js` | shared-cause grouping for the attention panel: configured-path and fleet-wide simultaneous-loss correlations, shared storage devices, each marking the conditions it explains |
 | `attention.js` | the attention panel's decisions: which active conditions a host contributes, per-host issues after the shared-cause groups, and ranking |
 | `background-asset.js` | the custom background: IndexedDB storage of one asset, container sniffing that refuses animated or mislabelled files, size and dimension caps, and the WebP quality bisection and shrink loop, over injected browser primitives |
-| `owner-usage.js` | the owners dialog's projections: the current per-owner aggregation over online hosts (offline hosts counted and excluded, one PID across a host's GPUs counted once, unknown VRAM disclosed), and the usage bill's wording: GPU-hours unit, retention and `partialGpus` caveats, kinds, idle share |
+| `owner-usage.js` | the owners dialog's projections: the current per-owner aggregation over online hosts (offline hosts counted and excluded, one PID across a host's GPUs counted once, unknown VRAM disclosed), and the usage bill's wording: GPU-hours unit, retention and `partialGpus` caveats, kinds, idle share; the usage summary names the history source, its coverage, and the per-day split |
 
 A repository test compares the leaf directory with the static route table, the
 `index.html` script order, and `tests/<leaf>_test.mjs`, so a new leaf cannot be

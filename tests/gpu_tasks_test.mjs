@@ -187,3 +187,10 @@ console.log("gpu-tasks contract: all assertions passed");
   assert.equal(globalThis.MocopGpuTasks.create().timelineSummary(stop), "退出 · python3.11 · PID 77");
 }
 
+// --- displayName: the entry point when there is one, else the process name --
+
+assert.equal(
+  tasks.displayName(process("/opt/conda/envs/llm/bin/python3.11", "python -m train.sft --config c.yaml")),
+  "train.sft",
+);
+assert.equal(tasks.displayName(process("/usr/bin/ollama", null)), "ollama");

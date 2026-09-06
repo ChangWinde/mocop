@@ -36,6 +36,11 @@
       return `${verb} · ${processName(event)} · PID ${event.pid}${ran}`;
     }
 
+    // Display name: the extracted entry point when argv0 is a bare interpreter.
+    function displayName(process) {
+      return taskEntry(process) || processName(process);
+    }
+
     function processStartMs(process) {
       const timestamp = process.workload?.started_at || process.first_seen_at;
       const parsed = timestamp ? Date.parse(timestamp) : NaN;
@@ -142,6 +147,7 @@
 
     return Object.freeze({
       processName,
+      displayName,
       processStartMs,
       timelineSummary,
       taskEntry,

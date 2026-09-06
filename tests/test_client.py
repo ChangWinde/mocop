@@ -107,16 +107,47 @@ class ApiClientTests(unittest.TestCase):
             if method == "GET" and access == "reader"
         ]
         self.assertIn("/api/inventory", dashboard_routes)
-        for path in dashboard_routes + ["/api/probe"]:
+        for path in dashboard_routes:
             with self.subTest(path=path):
                 code, body = self.run_api(path)
                 self.assertEqual(code, 2)
                 self.assertEqual(json.loads(body)["code"], "DASHBOARD_ONLY")
+        # A writer route needs an explicit body, so a bare path can never
+        # trigger a restart or an update by accident; a read route takes none.
+        code, body = self.run_api("/api/service/restart")
+        self.assertEqual((code, json.loads(body)["code"]), (2, "BODY_REQUIRED"))
+        code, body = self.run_api("/api/snapshot", "--data", "{}")
+        self.assertEqual((code, json.loads(body)["code"]), (2, "METHOD_NOT_ALLOWED"))
         for target in ("api/meta", "http://127.0.0.1/api/meta", "/api/meta#x"):
             with self.subTest(target=target):
                 code, body = self.run_api(target)
                 self.assertEqual(code, 2)
                 self.assertEqual(json.loads(body)["code"], "INVALID_TARGET")
+
+    def test_writer_routes_take_a_json_body_and_reach_the_handler(self) -> None:
+        # The CLI presents the listener's own origin and the same-origin
+        # marker, so the request clears the write guard and the handler
+        # answers; here the probe controller queues it and reports back.
+        control = _ProbeControl()
+        self.server.probe_control = control
+        code, body = self.run_api("/api/probe", "--data", '{"host": "gpu-1"}')
+        self.assertEqual(code, 0, body)
+        self.assertEqual(json.loads(body)["status"], "queued")
+        self.assertEqual(control.hosts, ["gpu-1"])
+        # The body can come from a file; the server still validates it.
+        request_file = self.root / "body.json"
+        request_file.write_text('{"host": "gpu-1"}', encoding="utf-8")
+        code, body = self.run_api("/api/probe", "--data", f"@{request_file}")
+        self.assertEqual(code, 0, body)
+        code, body = self.run_api("/api/probe", "--data", '{"host": "bad host"}')
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(body)["code"], "INVALID_SETTINGS")
+        code, body = self.run_api("/api/probe", "--data", "not json")
+        self.assertEqual((code, json.loads(body)["code"]), (1, "INVALID_JSON"))
+        code, body = self.run_api("/api/probe", "--data", "@/nonexistent/body.json")
+        self.assertEqual((code, json.loads(body)["code"]), (2, "INVALID_TARGET"))
+        # A write never counts as an attended dashboard viewer.
+        self.assertIsNone(self.state._dashboard_last_seen)
 
     def test_missing_capability_and_unreachable_service_are_reported(self) -> None:
         (self.root / "access-token").unlink()
@@ -183,3 +214,12 @@ class ApiClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _ProbeControl:
+    def __init__(self) -> None:
+        self.hosts: list[str] = []
+
+    def request_probe(self, host: str) -> dict[str, object]:
+        self.hosts.append(host)
+        return {"status": "queued", "host": host}

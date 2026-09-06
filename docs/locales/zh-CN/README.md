@@ -178,7 +178,8 @@ code 与 P/A/R/W 访问分级。公开的 `GET /api/meta` 清单列出每个路�
 版本对应的文档链接；`403` 响应会说明能力令牌存放在哪里——AI 代理无需任何
 额外知识即可驾驭一个部署。在监控主机本地，`mocop api PATH` 会从配置读取监听
 地址与能力令牌，直接完成任意公开或已认证的 GET（如
-`mocop api '/api/capacity?gpus=2'`）。只有 API 发现与健康检查公开；带认证的
+`mocop api '/api/capacity?gpus=2'`），加 `--data JSON` 则完成写路由的 POST
+（维护窗口、告警确认/静默、增删主机、手动探测等）。只有 API 发现与健康检查公开；带认证的
 curl 示例，以及非观众型自动化不应发送 `X-Monitor-Request: dashboard` 标记头的
 原因见 [API 参考](../../API.md)。
 

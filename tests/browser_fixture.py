@@ -28,6 +28,7 @@ _TRACKED_DASHBOARD_PATHS = frozenset(
         "/api/gpu-history",
         "/api/incidents",
         "/api/usage",
+        "/api/reports/usage",
     }
 )
 _BROWSER_ACCESS_TOKEN = "B" * 43

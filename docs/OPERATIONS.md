@@ -254,7 +254,7 @@ to the default monitor command.
 | `mocop deploy` | Create a private config and install the verified user service on a fresh host | `--host ALIAS` (repeatable), `--local-host ALIAS` / `--no-local`, `--display-name`, `--ssh-config`, `--auto-discover` / `--no-auto-discover`, `--json` |
 | `mocop init` | Create a private config only, never overwriting one | `--host ALIAS` (repeatable), `--json` |
 | `mocop migrate` | Generate a new private config from another installation's config | `--from-config PATH` (required), the same identity flags as `deploy`, `--drop-local-host`, `--json` |
-| `mocop api PATH` | GET one public or authenticated route from the running service and write the body to stdout; reader/writer routes are refused (`DASHBOARD_ONLY`) | `--token-file PATH` (default: the access-token file beside the config), `--timeout SECONDS` |
+| `mocop api PATH` | GET one public or authenticated route from the running service, or POST `--data` to a writer route, and write the body to stdout; reader routes are refused (`DASHBOARD_ONLY`), a writer route without a body with `BODY_REQUIRED` | `--data JSON` (`@FILE`, `@-` for stdin), `--token-file PATH` (default: the access-token file beside the config), `--timeout SECONDS` |
 | `mocop config check` | Validate the configuration without a web server or SSH | `--json` (one JSON document on stdout, also for a rejected configuration) |
 | `mocop doctor` | Read-only SSH reachability and connection-reuse diagnosis | `--host ALIAS` (repeatable filter), `--no-connect`, `--probe` (one production collection per alias), `--profile` (latency breakdown), `--json` |
 | `mocop service install` | Generate, enable, start, and verify the unit; print the capability URL | `--json` |
@@ -276,8 +276,8 @@ refusals (`ok: false` plus a stable `code`). `config check`, `doctor`, `init`,
 `mocop --once` writes a snapshot document. `mocop api` is always
 machine-readable: stdout is the server's response body, and a non-zero exit
 leaves the server's or the client's `{error, code}` envelope there
-(`INVALID_TARGET`, `DASHBOARD_ONLY`, `TOKEN_UNAVAILABLE`, `CONNECTION_FAILED`,
-or the configuration code). Text-mode diagnostics stay on stderr.
+(`INVALID_TARGET`, `DASHBOARD_ONLY`, `BODY_REQUIRED`, `METHOD_NOT_ALLOWED`,
+`TOKEN_UNAVAILABLE`, `CONNECTION_FAILED`, or the configuration code). Text-mode diagnostics stay on stderr.
 
 ## Related references
 

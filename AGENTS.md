@@ -64,7 +64,10 @@ enforce it. Record every user-visible change under `[Unreleased]` in
   [Webhook deliveries](docs/API.md#webhook-deliveries): signed JSON per
   actionable incident transition, `eventId` as the idempotency key.
 - On the monitor host, `mocop api PATH` performs any public or authenticated
-  GET with the listener and capability taken from the configuration.
+  GET, and `mocop api PATH --data JSON` any writer-tier POST (maintenance
+  windows, incident actions, hosts, collector settings, probes, restart,
+  update), with the listener and capability taken from the configuration —
+  every playbook step is one command there.
 - `GET /api/usage` reports observed occupancy, not a bill: read
   `earliestDataAt`, `partialGpus`, `droppedRecords`, and each owner's
   `sampledSeconds` before comparing owners, as the
