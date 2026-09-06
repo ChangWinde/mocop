@@ -400,7 +400,7 @@ by `tests/<leaf>_test.mjs`:
 | `attention-groups.js` | shared-cause grouping for the attention panel: configured-path and fleet-wide simultaneous-loss correlations, shared storage devices, each marking the conditions it explains |
 | `attention.js` | the attention panel's decisions: which active conditions a host contributes, per-host issues after the shared-cause groups, and ranking |
 | `background-asset.js` | the custom background: IndexedDB storage of one asset, container sniffing that refuses animated or mislabelled files, size and dimension caps, and the WebP quality bisection and shrink loop, over injected browser primitives |
-| `owner-usage.js` | the owners dialog's projections: the current per-owner aggregation over online hosts (offline hosts counted and excluded, one PID across a host's GPUs counted once, unknown VRAM disclosed), and the usage bill's wording: GPU-hours unit, retention and `partialGpus` caveats, kinds, idle share |
+| `owner-usage.js` | the owners dialog's projections: the current per-owner aggregation over online hosts (offline hosts counted and excluded, one PID across a host's GPUs counted once, unknown VRAM disclosed), and the usage bill's wording: GPU-hours unit, retention and `partialGpus` caveats, kinds, idle share; the usage summary names the history source, its coverage, and the per-day split |
 
 A repository test compares the leaf directory with the static route table, the
 `index.html` script order, and `tests/<leaf>_test.mjs`, so a new leaf cannot be

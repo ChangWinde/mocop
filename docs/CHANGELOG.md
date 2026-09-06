@@ -157,6 +157,11 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- The dashboard's owners dialog bills usage from `GET /api/reports/usage`
+  when history persistence is on — complete over the retained window instead
+  of capped per device — and falls back to the in-memory rollup only when the
+  service answers `HISTORY_UNAVAILABLE`. The summary names the source and its
+  coverage, and a per-day strip shows the split the report carries.
 - `mocop api PATH --data JSON` performs writer-tier POSTs from the monitor
   host — maintenance windows, incident acknowledgements and silences, host
   add/remove, collector settings, manual probes, restart, and update — so an

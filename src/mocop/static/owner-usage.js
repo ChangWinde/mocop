@@ -95,11 +95,25 @@
     // devices whose full timeline begins inside it are both caveats the
     // reader needs before comparing owners.
     function usageSummary(usage) {
-      const coverageGap = usage.earliestDataAt && usage.sinceAt
-        && Date.parse(usage.earliestDataAt) > Date.parse(usage.sinceAt) + 60_000;
+      const history = usage.source === "history";
+      // The history report's coverage is bounded by retention and stated as
+      // coveredFromAt; the in-memory rollup's by the earliest retained record.
+      const coverageFrom = history ? usage.coveredFromAt : usage.earliestDataAt;
+      const coverageGap = coverageFrom && usage.sinceAt
+        && Date.parse(coverageFrom) > Date.parse(usage.sinceAt) + 60_000;
       return `${numeric(usage.totalOwners)} 个归属方 · 共 ${gpuHoursLabel(usage.totalGpuSeconds)}`
-        + (coverageGap ? ` · 数据自 ${age(usage.earliestDataAt)}起` : "")
+        + (history ? " · 历史库统计" : "")
+        + (coverageGap ? ` · 数据自 ${age(coverageFrom)}起` : "")
         + (usage.partialGpus > 0 ? ` · ${usage.partialGpus} 张卡的时间线不完整` : "");
+    }
+
+    // The history report's per-day split, oldest first, as chip labels; the
+    // in-memory rollup has none.
+    function usageDays(usage) {
+      if (!Array.isArray(usage.days)) return [];
+      return usage.days
+        .filter((entry) => entry && typeof entry.day === "string" && Number.isFinite(entry.gpuSeconds))
+        .map((entry) => ({ day: entry.day.slice(5), label: gpuHoursLabel(entry.gpuSeconds) }));
     }
 
     function usageKinds(entry) {
@@ -119,6 +133,7 @@
       currentSummary,
       gpuHoursLabel,
       usageSummary,
+      usageDays,
       usageKinds,
       idleShare,
     });

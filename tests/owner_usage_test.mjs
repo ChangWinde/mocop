@@ -116,6 +116,36 @@ const snapshot = {
     "1 个归属方 · 共 30 卡·秒",
     "a report without earliestDataAt or partialGpus carries no caveat",
   );
+  // The history report names its source and states coverage through
+  // coveredFromAt (bounded by retention), not the earliest record.
+  assert.equal(
+    ownerUsage.usageSummary({
+      ...base, source: "history", resolution: "hour",
+      coveredFromAt: "2026-09-05T08:00:00Z", earliestDataAt: "2026-09-06T02:00:00Z",
+    }),
+    "2 个归属方 · 共 40 卡·时 · 历史库统计",
+  );
+  assert.equal(
+    ownerUsage.usageSummary({ ...base, source: "history", coveredFromAt: "2026-09-06T02:00:00Z" }),
+    "2 个归属方 · 共 40 卡·时 · 历史库统计 · 数据自 age(360m)起",
+  );
+}
+
+{
+  // Per-day chips come from the history report only, oldest first, with the
+  // month-day and the GPU-hours label; malformed entries are skipped.
+  assert.deepEqual(ownerUsage.usageDays({ owners: [] }), []);
+  assert.deepEqual(
+    ownerUsage.usageDays({
+      days: [
+        { day: "2026-09-05", gpuSeconds: 7200 },
+        { day: "2026-09-06", gpuSeconds: 90 },
+        { day: 7, gpuSeconds: 1 },
+        { day: "2026-09-07" },
+      ],
+    }),
+    [{ day: "09-05", label: "2 卡·时" }, { day: "09-06", label: "2 卡·分" }],
+  );
 }
 
 {
