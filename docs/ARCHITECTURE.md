@@ -69,6 +69,7 @@ interfaces without a runtime plugin registry.
 | `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |
 | `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
 | `service.py` | concurrent scheduling, failure backoff, state publication |
+| `process_transitions.py` | lock-free arithmetic over GPU process transitions: building one transition, same-instance identity, the open starts of a ring, and closing or reconciling restored open starts against the first live sample |
 | `telemetry_points.py` | compact in-memory history records: struct-packed host and GPU samples, process transitions |
 | `fleet_stats.py` | the snapshot's fleet-wide `stats` block: host, incident, GPU, and capacity totals over the serialized servers |
 | `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage`; a failing host's live processes count only up to its last confirmed sample |
@@ -178,7 +179,13 @@ slotted records internally and materializes API dictionaries only when read or q
 for enabled persistence. Process transitions require two consecutive samples with
 available and actually sampled process telemetry. An intentional skip preserves the
 comparison baseline; a failed probe, unavailable task query, or missing GPU
-invalidates the comparison baseline instead of inventing starts and stops. Persistence
+invalidates the comparison baseline instead of inventing starts and stops. A
+failing host keeps its process inventory as a blind spot until it has failed
+for `collection_stale_cycles`, then its confirmed occupancy closes at the last
+successful sample; every transition carries the monitor's first observation of
+the process, so a stop whose start left the retained window still anchors a
+complete run, and `/api/usage` names the devices whose retained timeline begins
+inside the window ([ADR-0029](adr/0029-process-inventory-observation-gaps.md)). Persistence
 is disabled by default. When enabled, a dedicated writer stores successful trend points, GPU
 samples, process transitions, and incident transitions in SQLite; collection threads
 only attempt bounded, non-blocking queue insertions.
@@ -193,7 +200,7 @@ trusted Origin. Deployments with ephemeral Host-rewriting preview names may auth
 a bounded `*.example` HTTPS Origin suffix; suffix entries never authorize Host and no
 `X-Forwarded-*` header participates in the trust decision.
 
-`IncidentPolicy` is the sole authority for connectivity, CPU, memory, swap, filesystem, GPU availability, pressure, temperature, and hardware-health conditions. `IncidentTracker` applies bounded activation and recovery cycles plus a wall-clock duration floor for resource conditions (`incidents.resource_open_seconds`) while preserving previous resource conditions across failed probes, so transient samples, cadence-dependent spikes, and missing telemetry are not mistaken for stable failure or recovery.
+`IncidentPolicy` is the sole authority for connectivity, CPU, memory, swap, filesystem, GPU availability, pressure, temperature, and hardware-health conditions. `IncidentTracker` applies bounded activation and recovery cycles plus a wall-clock duration floor for resource conditions (`incidents.resource_open_seconds`) while preserving previous resource conditions across failed probes, so transient samples, cadence-dependent spikes, and missing telemetry are not mistaken for stable failure or recovery. [ADR-0028](adr/0028-duration-floor-for-resource-conditions.md) records why the floor is a wall-clock span alongside the cycle count rather than a per-deployment cycle tuning or a smoothed value.
 
 Time-bounded maintenance and condition-level actions are overlays on that authority,
 never inputs to collection or condition state. Acknowledgement records ownership while
@@ -212,6 +219,8 @@ Without persistence, active conditions are rebuilt from live post-start probes,
 and a durable generation-bound action gets one startup rebinding opportunity for
 a matching condition; a healthy observation or subsequent recovery consumes it,
 preventing the action from suppressing a later recurrence.
+[ADR-0027](adr/0027-restored-incident-generations.md) records this restore and
+the rejected live-rebuild and tracker-snapshot alternatives.
 [ADR-0007](adr/0007-time-bounded-maintenance-overlay.md) records the rejected
 pause-collection and drop-incident alternatives; [ADR-0013](adr/0013-operational-diagnostics-and-gpu-history.md)
 records the condition-action, GPU-history, manual-probe, and diagnostic boundaries.
@@ -379,6 +388,7 @@ by `tests/<leaf>_test.mjs`:
 | `update-pill.js` | release-currency polling cadence, pill state, and the fixed apply action |
 | `attention.js` | the attention panel's decisions: which active conditions a host contributes, shared-path and shared-storage grouping that consumes the conditions it explains, per-host issues, and ranking |
 | `background-asset.js` | the custom background: IndexedDB storage of one asset, container sniffing that refuses animated or mislabelled files, size and dimension caps, and the WebP quality bisection and shrink loop, over injected browser primitives |
+| `owner-usage.js` | the owners dialog's projections: the current per-owner aggregation over online hosts (offline hosts counted and excluded, one PID across a host's GPUs counted once, unknown VRAM disclosed), and the usage bill's wording: GPU-hours unit, retention and `partialGpus` caveats, kinds, idle share |
 
 A repository test compares the leaf directory with the static route table, the
 `index.html` script order, and `tests/<leaf>_test.mjs`, so a new leaf cannot be

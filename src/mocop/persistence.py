@@ -305,6 +305,11 @@ class SqliteTelemetryPersistence:
                     self._dropped_writes += 1
                     self._last_error = "history persistence is closed"
                     return
+                if not self._writer.is_alive():
+                    # The writer recorded why it stopped; queueing behind it
+                    # would only replace that cause with "queue is full".
+                    self._dropped_writes += 1
+                    return
             try:
                 self._queue.put_nowait(item)
             except queue.Full:
@@ -487,9 +492,12 @@ class SqliteTelemetryPersistence:
                 except queue.Empty:
                     if self._stop_requested.is_set():
                         break
-                    # Retention must keep holding during idle periods too.
-                    self._prune_batch(connection)
-                    next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
+                    # Retention must keep holding during idle periods too,
+                    # on the same interval: the short get timeout exists for
+                    # stop responsiveness, not as the prune cadence.
+                    if time.monotonic() >= next_prune_at:
+                        self._prune_batch(connection)
+                        next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
                     continue
                 items = [first]
                 if isinstance(

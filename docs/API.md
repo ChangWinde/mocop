@@ -451,7 +451,7 @@ Timestamp disambiguation (frequently confused):
 | Field | Type | Description |
 |---|---|---|
 | `host` | string | The configured SSH alias (collection identity). |
-| `status` | string | `pending`, `online`, `unreachable`, `no_nvidia_smi`, or `error`. |
+| `status` | string | `pending` (no probe yet), `online`, `unreachable`, or `error`. A host without `nvidia-smi` is `online` with the message `nvidia-smi is unavailable` and an empty `gpus` array. |
 | `polling` | bool | A probe is currently in flight for this host. |
 | `latencyMs` | int \| null | Duration of the most recent probe attempt. |
 | `message` | string \| null | Redacted failure classification or GPU-query warning; one of the stable strings under *Failure messages* below. |
@@ -500,7 +500,7 @@ this table aligned.
 | `Remote collection stalled after partial output` | Output started and then stopped before the timeout. |
 | `Resource collection cancelled` | The probe was cancelled by a shutdown or configuration change. |
 | `Unexpected collector error` | An internal collector failure; details are in the service journal. |
-| `nvidia-smi is unavailable` | The host is online (`no_nvidia_smi`) but has no `nvidia-smi`. |
+| `nvidia-smi is unavailable` | The host is `online` but has no `nvidia-smi`; system metrics remain valid. |
 | `nvidia-smi query failed` | `nvidia-smi` exited non-zero; system metrics remain valid. |
 | `nvidia-smi output was malformed` | `nvidia-smi` output did not parse; system metrics remain valid. |
 
@@ -613,7 +613,12 @@ response says so explicitly instead of extrapolating. A process the live
 table still lists occupies its device up to the host's last confirmed sample
 while the host is failing its probes, never through the blind gap to now;
 once the host has failed for `collection_stale_cycles` cycles its inventory
-is closed at that last sample.
+is closed at that last sample. Starts restored from the history file follow
+the same rule: the first live process sample of their device reconciles
+them, and a host that goes stale before delivering one — or comes back
+without that device — closes them at the device's last GPU sample, so a run
+that ended in a blind spot counts up to the last observation instead of
+being dropped.
 
 Query parameters:
 
@@ -1257,6 +1262,47 @@ authentication and without the marker header.
    snapshot: `startedAt` changed → restart done. `startedAt` unchanged
    after a generous window → the restart did not happen; only then submit
    again.
+
+### 7. Account GPU usage per owner honestly
+
+`GET /api/usage` (A) reports what the monitor observed, never an
+extrapolation. Read its coverage fields before its totals.
+
+1. Choose `hours` for the question, not the retention: the window is capped
+   at 720 hours, but the data behind it is the retained transition timeline
+   (at most `incident_history_points` records per device) plus the live
+   process table, so a long window is not a complete one.
+2. Compare `earliestDataAt` with `sinceAt`. `earliestDataAt` later than
+   `sinceAt` means no device has data for the start of the window; treat
+   the report as covering `earliestDataAt`–`generatedAt`.
+3. Read `partialGpus`. It counts devices whose retained timeline is full yet
+   begins inside the window; their occupancy before that point is missing
+   even when `earliestDataAt` looks complete, because that timestamp is the
+   earliest across all devices and a quiet card reaches back further than a
+   busy one. Any non-zero value means the busiest owners are undercounted
+   relative to the others.
+4. Read `droppedRecords`. Each is a timeline record without a trustworthy
+   start anchor (a `stopped` whose `firstSeenAt` is absent, typically
+   written before this monitor recorded first observations). They are
+   excluded, not estimated.
+5. Quote `idleShare` with its basis. It is `idleSeconds / sampledSeconds`,
+   and `sampledSeconds` covers only the occupancy that overlapped retained
+   utilization samples (`history_points` × the poll interval: 720 points at
+   a five-second cadence is one hour), so an owner with days of
+   `gpuSeconds` may have an `idleShare` computed from the last hour — on a
+   live deployment every owner showed about 3600 `sampledSeconds` against
+   up to 1.9 million `gpuSeconds`. Compare `sampledSeconds` with
+   `gpuSeconds` before drawing a conclusion; `null` means no classified
+   sample at all.
+6. Attribute only when identity is on. `owner` is non-null only with
+   `workloads.mode` `identity` or `auto`; with `disabled`, everything
+   aggregates under `owner: null`, and a null row next to named rows means
+   the owner was unresolvable for those processes, not that they were free.
+7. Remember that occupancy on a host that is failing its probes ends at the
+   host's last confirmed sample and, once the host is stale, is closed
+   there ([ADR-0029](adr/0029-process-inventory-observation-gaps.md)); a
+   node that was unreachable for the whole window contributes nothing, and
+   `GET /api/snapshot` says so through `status` and `lastSuccessAt`.
 
 ## OpenMetrics reference
 

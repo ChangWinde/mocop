@@ -14,8 +14,18 @@ from unittest import mock
 
 from mocop.config import PersistenceConfig
 from mocop.incident_types import IncidentCondition, IncidentEvent
-from mocop.models import GpuMetrics, ProbeResult, SystemMetrics
-from mocop.persistence import SqliteTelemetryPersistence, user_state_path
+from mocop.models import (
+    GpuMetrics,
+    GpuProcess,
+    ProbeResult,
+    SystemMetrics,
+    WorkloadMetadata,
+)
+from mocop.persistence import (
+    _QUEUE_CAPACITY,
+    SqliteTelemetryPersistence,
+    user_state_path,
+)
 from mocop.persistence_restore import LoadedTelemetry
 from mocop.service import StateStore
 
@@ -440,25 +450,72 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         self.assertEqual(events[0]["workload"]["workload_id"], "7")
         self.assertEqual(store.status()["writtenRecords"], 4)
 
-    def test_preserves_same_timestamp_process_transition_order(self) -> None:
+    def _roundtrip_same_second_pair(
+        self,
+        stopped_workload: dict[str, object] | None,
+        started_workload: dict[str, object] | None,
+        case: int = 0,
+    ) -> list[str]:
         observed_at = utc_text(datetime.now(timezone.utc) - timedelta(minutes=5))
-        store = SqliteTelemetryPersistence(self.config, self.path)
+        path = self.path.with_name(f"history-{case}.sqlite3")
+        store = SqliteTelemetryPersistence(self.config, path)
         store.record_gpu_telemetry(
             "gpu-01",
             (),
             (
-                process_event(observed_at, "GPU-1", 42, "stopped"),
-                process_event(observed_at, "GPU-1", 42, "started"),
+                {
+                    **process_event(observed_at, "GPU-1", 42, "stopped"),
+                    "workload": stopped_workload,
+                },
+                {
+                    **process_event(observed_at, "GPU-1", 42, "started"),
+                    "workload": started_workload,
+                },
             ),
         )
         self.assertTrue(store.flush())
         store.close()
 
-        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        reopened = SqliteTelemetryPersistence(self.config, path)
         self.addCleanup(reopened.close)
         events = reopened.load(10, 10).process_events[("gpu-01", "GPU-1")]
+        return [event["event"] for event in events]
 
-        self.assertEqual([event["event"] for event in events], ["stopped", "started"])
+    def test_same_second_pid_reuse_restores_the_stop_before_the_start(self) -> None:
+        # A reused PID whose workload start time changed is emitted as
+        # stopped(old instance) then started(new instance) in one sample.
+        order = self._roundtrip_same_second_pair(
+            {"kind": "process", "started_at": "2026-08-10T00:00:00Z"},
+            {"kind": "process", "started_at": "2026-08-10T00:04:30Z"},
+        )
+
+        self.assertEqual(order, ["stopped", "started"])
+
+    def test_same_second_seed_and_close_restores_the_start_before_the_stop(
+        self,
+    ) -> None:
+        # Live evidence: a host that answered one sample and then went stale
+        # has its processes seeded and closed at the same second. The table
+        # has no sequence column and the restore used to put every stop
+        # before every start, so 28 of these zero-length runs came back as
+        # open starts after each restart, were dropped by the rollup, and
+        # would have been extended to hours by any closure that trusted them.
+        # Only a PID reuse (differing workload start times) is emitted
+        # stop-first; every other same-second pair is start-then-stop.
+        cases = (
+            (None, None),
+            (
+                {"kind": "process", "started_at": "2026-08-10T00:00:00Z"},
+                {"kind": "process", "started_at": "2026-08-10T00:00:00Z"},
+            ),
+            ({"kind": "process"}, {"kind": "process", "started_at": "x"}),
+        )
+        for case, (stopped_workload, started_workload) in enumerate(cases):
+            with self.subTest(stopped=stopped_workload, started=started_workload):
+                order = self._roundtrip_same_second_pair(
+                    stopped_workload, started_workload, case
+                )
+                self.assertEqual(order, ["started", "stopped"])
 
     def test_roundtrips_hidden_usage_anchors_without_exposing_physical_hosts(
         self,
@@ -519,7 +576,9 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         self.addCleanup(store.close)
         events = store.load(10, 10).process_events[("gpu-01", "GPU-1")]
 
-        self.assertEqual([event["event"] for event in events], ["stopped", "started"])
+        # Without workload start times the pair cannot be a PID reuse, so it
+        # restores as the zero-length run the collector emitted.
+        self.assertEqual([event["event"] for event in events], ["started", "stopped"])
         with closing(sqlite3.connect(self.path)) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             columns = {
@@ -1033,6 +1092,127 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
                 time.sleep(0.1)
             self.assertEqual(store.load(10, 10).history, {})
 
+    def test_writer_that_cannot_open_the_database_keeps_that_as_the_cause(
+        self,
+    ) -> None:
+        with mock.patch.object(
+            SqliteTelemetryPersistence,
+            "_connect",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            store = SqliteTelemetryPersistence(self.config, self.path)
+            self.addCleanup(store.close)
+            store._writer.join(10.0)
+        self.assertFalse(store._writer.is_alive())
+        cause = "history writer could not open the database"
+        self.assertEqual(store.status()["lastError"], cause)
+
+        store.record_history("gpu-01", history_point("2026-08-10T00:00:00Z", 10.0))
+
+        status = store.status()
+        self.assertFalse(status["healthy"])
+        self.assertEqual(
+            (status["queuedWrites"], status["droppedWrites"], status["lastError"]),
+            (0, 1, cause),
+        )
+
+    def test_writer_crash_is_not_masked_by_the_queue_filling_behind_it(self) -> None:
+        # Once the writer has died, every later write used to sit in the queue
+        # until its 4096 slots ran out and then replace the recorded cause
+        # with "history write queue is full", so an operator saw back-pressure
+        # where the writer had in fact stopped.
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+
+        def corrupt_record(connection: sqlite3.Connection, item: object) -> int:
+            raise TypeError("corrupt internal record")
+
+        with mock.patch.object(
+            SqliteTelemetryPersistence, "_write", staticmethod(corrupt_record)
+        ):
+            store.record_history("gpu-01", history_point("2026-08-10T00:00:00Z", 10.0))
+            store._writer.join(10.0)
+        self.assertFalse(store._writer.is_alive())
+        cause = "history writer stopped unexpectedly"
+        self.assertEqual(store.status()["lastError"], cause)
+
+        for index in range(_QUEUE_CAPACITY + 1):
+            store.record_history(
+                "gpu-01", history_point(f"2026-08-10T00:{index}Z", 1.0)
+            )
+
+        status = store.status()
+        self.assertFalse(status["healthy"])
+        self.assertEqual(status["queuedWrites"], 0)
+        self.assertEqual(status["droppedWrites"], _QUEUE_CAPACITY + 1)
+        self.assertEqual(status["lastError"], cause)
+
+    def test_prune_failure_is_reported_and_contained(self) -> None:
+        # Retention runs in its own transaction: a failing prune marks the
+        # status and leaves the writer serving, and a size error whose
+        # recovery prune also fails drops only that batch.
+        now = datetime.now(timezone.utc)
+        interval = mock.patch("mocop.persistence._PRUNE_INTERVAL_SECONDS", 0.0)
+        interval.start()
+        self.addCleanup(interval.stop)
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+        with mock.patch.object(
+            SqliteTelemetryPersistence,
+            "_prune",
+            side_effect=sqlite3.OperationalError("disk I/O error"),
+        ):
+            store.record_history(
+                "gpu-01", history_point(utc_text(now - timedelta(minutes=3)), 10.0)
+            )
+            self.assertTrue(store.flush())
+            status = store.status()
+            self.assertEqual(status["lastError"], "history database prune failed")
+            self.assertTrue(store._writer.is_alive())
+
+            def full_disk(connection: sqlite3.Connection, item: object) -> int:
+                raise sqlite3.OperationalError("database or disk is full")
+
+            with mock.patch.object(
+                SqliteTelemetryPersistence, "_write", staticmethod(full_disk)
+            ):
+                store.record_history(
+                    "gpu-01", history_point("2026-08-10T00:00:05Z", 20.0)
+                )
+                self.assertFalse(store.flush())
+            status = store.status()
+            self.assertEqual(status["droppedWrites"], 1)
+            self.assertFalse(status["healthy"])
+            self.assertTrue(store._writer.is_alive())
+
+        store.record_history(
+            "gpu-01", history_point(utc_text(now - timedelta(minutes=1)), 30.0)
+        )
+        self.assertTrue(store.flush())
+        self.assertTrue(store.status()["healthy"])
+        self.assertEqual(len(store.load(10, 10).history["gpu-01"]), 2)
+
+    def test_idle_writer_prunes_on_the_interval_not_on_every_wakeup(self) -> None:
+        # The writer wakes every 100 ms to stay responsive to close(); it used
+        # to prune on each of those wakeups (about ten times a second on an
+        # idle deployment) instead of once per _PRUNE_INTERVAL_SECONDS, which
+        # also multiplied the bounded page reclaim per prune by the same
+        # factor while a backlog drained.
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(store.close)
+        prunes: list[float] = []
+        real_prune = SqliteTelemetryPersistence._prune
+
+        def counting_prune(self_, connection, **kwargs):
+            prunes.append(time.monotonic())
+            return real_prune(self_, connection, **kwargs)
+
+        with mock.patch.object(SqliteTelemetryPersistence, "_prune", counting_prune):
+            self.assertTrue(store.flush())
+            time.sleep(0.8)
+
+        self.assertEqual(prunes, [])
+
     def test_flush_reports_batches_dropped_by_write_failures(self) -> None:
         store = SqliteTelemetryPersistence(self.config, self.path)
         self.addCleanup(store.close)
@@ -1305,6 +1485,80 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
             restarted_state.incidents(20)["events"][0]["category"],
             "connectivity",
         )
+
+    def test_seed_and_close_pair_stays_closed_across_a_restart(self) -> None:
+        # The live kyzs-1 case end to end: one answered sample seeds the
+        # inventory, the host goes stale, the seed is closed at its own
+        # second. After a restart with the host still down, the pair must
+        # come back closed: no dropped record, no occupancy, and nothing for
+        # the staleness closure to extend.
+        now = datetime.now(timezone.utc)
+
+        def at(minutes_ago: int) -> str:
+            return utc_text(now - timedelta(minutes=minutes_ago))
+
+        gpu = GpuMetrics(
+            index=0,
+            uuid="GPU-1",
+            name="Test GPU",
+            driver_version="550",
+            pstate="P0",
+            temperature_c=60,
+            utilization_gpu_pct=50,
+            utilization_memory_pct=20,
+            memory_total_mib=1000,
+            memory_used_mib=250,
+            memory_free_mib=750,
+            power_draw_w=100,
+            power_limit_w=200,
+            processes=(
+                GpuProcess(
+                    7, "train.py", 250, WorkloadMetadata(kind="process", owner="eve")
+                ),
+            ),
+        )
+        persistence = SqliteTelemetryPersistence(self.config, self.path)
+        state = StateStore(5, persistence=persistence, collection_stale_cycles=3)
+        state.set_hosts(("gpu-01",))
+        state.apply(ProbeResult("gpu-01", "online", 1, (gpu,), observed_at=at(60)))
+        for minutes_ago in (59, 58, 57):
+            state.apply(
+                ProbeResult("gpu-01", "unreachable", 1, observed_at=at(minutes_ago))
+            )
+        self.assertEqual(
+            [
+                (e.event, e.observed_at)
+                for e in state._process_events[("gpu-01", "GPU-1")]
+            ],
+            [("started", at(60)), ("stopped", at(60))],
+        )
+        self.assertTrue(persistence.flush())
+        persistence.close()
+
+        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        self.addCleanup(reopened.close)
+        restarted = StateStore(
+            5,
+            persistence=reopened,
+            restored=reopened.load(20, 20),
+            collection_stale_cycles=3,
+            utc_clock=lambda: now,
+        )
+        restarted.set_hosts(("gpu-01",))
+        for minutes_ago in (3, 2, 1):
+            restarted.apply(
+                ProbeResult("gpu-01", "unreachable", 1, observed_at=at(minutes_ago))
+            )
+
+        self.assertEqual(
+            [
+                (e.event, e.observed_at)
+                for e in restarted._process_events[("gpu-01", "GPU-1")]
+            ],
+            [("started", at(60)), ("stopped", at(60))],
+        )
+        usage = restarted.usage(2, 10)
+        self.assertEqual((usage["droppedRecords"], usage["owners"]), (0, []))
 
     def test_state_store_discards_restored_history_for_unconfigured_hosts(self) -> None:
         gpu_point = {

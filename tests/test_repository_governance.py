@@ -30,7 +30,8 @@ TRACKED_ROOT_ENTRIES = {
 # These ceilings are a ratchet over the reviewed tree, not a general style
 # rule. Extract a coherent leaf and lower the budget instead of raising it.
 CORE_MODULE_LINE_BUDGETS = {
-    "src/mocop/static/app.js": 5_850,
+    "src/mocop/static/app.js": 5_770,
+    "src/mocop/static/owner-usage.js": 150,
     "src/mocop/static/incident-text.js": 150,
     "src/mocop/static/diagnosis-text.js": 110,
     "src/mocop/static/attention.js": 175,
@@ -45,7 +46,8 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/static/gpu-tasks.js": 175,
     "src/mocop/static/process-search.js": 225,
     "src/mocop/static/update-pill.js": 175,
-    "src/mocop/service.py": 2_175,
+    "src/mocop/service.py": 2_150,
+    "src/mocop/process_transitions.py": 150,
     "src/mocop/fleet_stats.py": 125,
     "src/mocop/telemetry_points.py": 250,
     "src/mocop/usage.py": 250,

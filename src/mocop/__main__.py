@@ -553,17 +553,25 @@ def _run_monitor(args: argparse.Namespace) -> int:
     return 1 if collector_failed or shutdown_failed else 0
 
 
-def _run_doctor(args: argparse.Namespace) -> int:
+def _load_validated_config(
+    config_argument: Path | None, *, as_json: bool
+) -> tuple[Path, MonitorConfig] | None:
+    """Load a read-only command's configuration; ``None`` once a rejection is reported."""
     try:
-        config_path = resolve_config_path(args.config)
-        config = load_config(config_path)
+        config_path = resolve_config_path(config_argument)
+        return config_path, load_config(config_path)
     except ConfigError as exc:
-        return _cli_failure(
-            str(exc),
-            as_json=args.json,
-            code=exc.code,
-            prefix="Configuration error",
+        _cli_failure(
+            str(exc), as_json=as_json, code=exc.code, prefix="Configuration error"
         )
+        return None
+
+
+def _run_doctor(args: argparse.Namespace) -> int:
+    loaded = _load_validated_config(args.config, as_json=args.json)
+    if loaded is None:
+        return 2
+    _config_path, config = loaded
     return run_doctor(
         config,
         host_filter=tuple(args.hosts),
@@ -686,17 +694,10 @@ def _run_api(args: argparse.Namespace) -> int:
 
 def _run_config_check(args: argparse.Namespace) -> int:
     """Parse and validate only: no web server, no SSH connections."""
-    try:
-        config_path = resolve_config_path(args.config)
-        config = load_config(config_path)
-    except ConfigError as exc:
-        return _cli_failure(
-            str(exc),
-            as_json=args.json,
-            code=exc.code,
-            prefix="Configuration error",
-        )
-    report = _config_check_report(config_path, config)
+    loaded = _load_validated_config(args.config, as_json=args.json)
+    if loaded is None:
+        return 2
+    report = _config_check_report(*loaded)
     if args.json:
         _emit_json({"ok": True, **report})
     else:

@@ -180,6 +180,9 @@ const attention = globalThis.MocopAttention.create({
   conditionMessage: (condition) => incidentConditionMessage(condition),
 });
 const gpuTasks = globalThis.MocopGpuTasks.create({ durationSince });
+const ownerUsage = globalThis.MocopOwnerUsage.create({
+  format, numeric, memory, age, workloadLabels: WORKLOAD_KIND_LABELS,
+});
 const capacityWatch = globalThis.MocopCapacityWatch.create({ storage: localStorage });
 
 const view = {
@@ -1847,66 +1850,8 @@ function renderOwners() {
     return;
   }
   elements.ownersUpdated.textContent = age(view.snapshot.lastPollCompletedAt);
-  const owners = new Map();
-  const hostLabels = new Map();
-  let excludedOfflineHosts = 0;
-  let oldestObservedAt = "";
-  let oldestObservedMs = Infinity;
-  for (const server of view.snapshot.servers) {
-    hostLabels.set(server.host, server.displayName || server.host);
-    if (server.status !== "online") {
-      // Last-success processes on unreachable nodes may already be gone;
-      // counting them as "current" owners would misattribute the fleet.
-      if (server.gpus.some((gpu) => (gpu.processes || []).length > 0)) {
-        excludedOfflineHosts += 1;
-      }
-      continue;
-    }
-    for (const gpu of server.gpus) {
-      const processes = gpu.processes || [];
-      const observedMs = processes.length && gpu.processes_observed_at
-        ? Date.parse(gpu.processes_observed_at) : NaN;
-      if (observedMs < oldestObservedMs) {
-        oldestObservedMs = observedMs;
-        oldestObservedAt = gpu.processes_observed_at;
-      }
-      for (const process of processes) {
-        const owner = process.workload?.owner;
-        const key = owner || "\u0000unattributed";
-        let entry = owners.get(key);
-        if (!entry) {
-          entry = {
-            label: owner || "未归属",
-            attributed: Boolean(owner),
-            vramMiB: 0,
-            unknownVramKeys: new Set(),
-            processKeys: new Set(),
-            gpus: new Set(),
-            hosts: new Set(),
-            kinds: new Set(),
-          };
-          owners.set(key, entry);
-        }
-        // VRAM stays a per-card sum; the process count dedupes one PID
-        // spanning several GPUs of the same host.
-        const processKey = `${server.host}\u0000${process.pid}`;
-        const usedMemory = process.used_memory_mib == null
-          ? NaN : numeric(process.used_memory_mib, NaN);
-        if (Number.isFinite(usedMemory)) entry.vramMiB += usedMemory;
-        else entry.unknownVramKeys.add(processKey);
-        entry.processKeys.add(processKey);
-        entry.gpus.add(`${server.host}\u0000${gpu.uuid || gpu.index}`);
-        entry.hosts.add(server.host);
-        const kind = process.workload?.kind;
-        if (kind && kind !== "process") entry.kinds.add(kind);
-      }
-    }
-  }
-  const ranked = [...owners.values()].sort(
-    (first, second) => second.vramMiB - first.vramMiB
-      || second.gpus.size - first.gpus.size
-      || first.label.localeCompare(second.label),
-  );
+  const { ranked, excludedOfflineHosts, oldestObservedAt, hostLabels } =
+    ownerUsage.currentOwners(view.snapshot);
   const offlineNote = excludedOfflineHosts
     ? create(
       "div",
@@ -1924,15 +1869,9 @@ function renderOwners() {
     return;
   }
   const visible = ranked.slice(0, 50);
-  const totalVram = ranked.reduce((sum, entry) => sum + entry.vramMiB, 0);
-  const hasUnknownVram = ranked.some((entry) => entry.unknownVramKeys.size > 0);
-  const attributedCount = ranked.filter((entry) => entry.attributed).length;
-  elements.ownersSummary.textContent =
-    `${ranked.length} 个归属方 · 共占用${hasUnknownVram ? "至少 " : " "}${memory(totalVram)}`
-    + (attributedCount < ranked.length ? " · 含未归属进程" : "")
-    + (hasUnknownVram ? " · 部分进程显存未知" : "")
-    + (ranked.length > visible.length ? ` · 仅展示前 ${visible.length} 项` : "")
-    + (oldestObservedAt ? ` · 数据截至 ${age(oldestObservedAt)}` : "");
+  elements.ownersSummary.textContent = ownerUsage.currentSummary({
+    ranked, visibleCount: visible.length, oldestObservedAt,
+  });
   // The summary above is cheap text; the cards are rebuilt only when what
   // they show changes, so an open dialog does not churn on every snapshot.
   const key = JSON.stringify([excludedOfflineHosts, visible.map((entry) => [
@@ -1996,13 +1935,6 @@ function renderOwners() {
   if (offlineNote) elements.ownersResults.append(offlineNote);
 }
 
-function gpuHoursLabel(seconds) {
-  const value = numeric(seconds);
-  if (value < 60) return `${Math.round(value)} 卡·秒`;
-  if (value < 5400) return `${Math.round(value / 60)} 卡·分`;
-  return `${format(value / 3600, 1)} 卡·时`;
-}
-
 async function fetchOwnersUsage() {
   const request = ++view.ownersUsageRequest;
   view.ownersUsageLoading = true;
@@ -2049,12 +1981,7 @@ function renderOwnersUsage() {
     elements.ownersUsageSummary.textContent = "窗口内没有观测到 GPU 进程";
     return;
   }
-  const coverageGap = usage.earliestDataAt && usage.sinceAt
-    && Date.parse(usage.earliestDataAt) > Date.parse(usage.sinceAt) + 60_000;
-  elements.ownersUsageSummary.textContent =
-    `${numeric(usage.totalOwners)} 个归属方 · 共 ${gpuHoursLabel(usage.totalGpuSeconds)}`
-    + (coverageGap ? ` · 数据自 ${age(usage.earliestDataAt)}起` : "")
-    + (usage.partialGpus > 0 ? ` · ${usage.partialGpus} 张卡的时间线不完整` : "");
+  elements.ownersUsageSummary.textContent = ownerUsage.usageSummary(usage);
   for (const entry of owners.slice(0, 50)) {
     const card = create(
       "article",
@@ -2064,15 +1991,11 @@ function renderOwnersUsage() {
     const identity = create("span", "capacity-candidate-identity");
     const ownerName = create("strong", "", entry.owner || "未归属");
     ownerName.title = entry.owner || "启用 workloads.mode=identity 可区分用户";
-    const kinds = entry.kinds && typeof entry.kinds === "object"
-      ? Object.keys(entry.kinds)
-        .filter((kind) => kind !== "process")
-        .map((kind) => WORKLOAD_KIND_LABELS[kind] || kind)
-      : [];
+    const kinds = ownerUsage.usageKinds(entry);
     identity.append(ownerName, create("small", "", kinds.length ? kinds.join(" · ") : "进程"));
-    heading.append(identity, create("em", "", gpuHoursLabel(entry.gpuSeconds)));
+    heading.append(identity, create("em", "", ownerUsage.gpuHoursLabel(entry.gpuSeconds)));
     const metrics = create("div", "capacity-candidate-metrics");
-    const idleShare = entry.idleShare == null ? NaN : numeric(entry.idleShare, NaN);
+    const idleShare = ownerUsage.idleShare(entry);
     metrics.append(
       create("span", "", `${numeric(entry.gpus)} 张 GPU`),
       create(
