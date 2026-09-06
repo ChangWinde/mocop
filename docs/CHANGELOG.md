@@ -18,7 +18,6 @@ All notable changes are documented here. This project follows Semantic Versionin
   to the first sample after it. The usage rollup counts a failing host's live
   processes only up to that last confirmed sample, so a blind gap is never
   billed as occupancy.
-
 - `/api/usage` no longer loses the occupancy of runs whose `started` edge has
   left the retained event window. On a live deployment a 24-hour report
   dropped 644 records, 592 of them orphan `stopped` events from GPUs that
@@ -36,7 +35,6 @@ All notable changes are documented here. This project follows Semantic Versionin
   not show this because it is the earliest record across all devices, and a
   quiet device made a report look complete while a busy one's timeline
   reached back only an hour; the dashboard's owner summary names the count.
-
 - Incidents that were open when the service stopped resume their generation
   at startup instead of opening again. A live deployment had re-emitted
   `opened` for every persisting condition after each restart — 17 per restart
