@@ -544,6 +544,58 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIn("Configuration error", stderr.getvalue())
 
+    def test_doctor_rejects_invalid_configuration_like_config_check(self) -> None:
+        # Both read-only commands share one loader, so a broken configuration
+        # yields the same exit code and the same JSON envelope from either.
+        broken = self.root / "broken.json"
+        broken.write_text('{"hosts": []}', encoding="utf-8")
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), patch("mocop.__main__.run_doctor") as doctor:
+            self.assertEqual(main(["doctor", "--config", str(broken)]), 2)
+        doctor.assert_not_called()
+        self.assertIn("Configuration error", stderr.getvalue())
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(main(["doctor", "--json", "--config", str(broken)]), 2)
+        failure = json.loads(stdout.getvalue())
+        self.assertEqual((failure["ok"], failure["code"]), (False, "INVALID_CONFIG"))
+        self.assertIn("missing config keys", failure["error"])
+
+    @patch("mocop.__main__.run_doctor", return_value=3)
+    def test_doctor_forwards_its_options_and_exit_code(self, doctor) -> None:
+        config_path = write_config(self.root / "config.json")
+
+        result = main(
+            [
+                "doctor",
+                "--config",
+                str(config_path),
+                "--json",
+                "--probe",
+                "--no-connect",
+                "--profile",
+                "--host",
+                "gpu-1",
+            ]
+        )
+
+        self.assertEqual(result, 3)
+        doctor.assert_called_once()
+        config = doctor.call_args.args[0]
+        self.assertEqual(tuple(sorted(config.hosts)), ("gpu-1", "gpu-2"))
+        self.assertEqual(
+            doctor.call_args.kwargs,
+            {
+                "host_filter": ("gpu-1",),
+                "probe_connection": False,
+                "profile": True,
+                "collect": True,
+                "as_json": True,
+            },
+        )
+
     def test_config_check_json_mirrors_the_text_report_without_secrets(self) -> None:
         config_path = write_config(
             self.root / "config.json",
