@@ -2412,9 +2412,16 @@ try {
     renderGpuHistory();
     const failureText = document.querySelector("#gpu-history-grid")?.textContent || "";
     const timelineText = document.querySelector("#gpu-process-timeline")?.textContent || "";
-    document.querySelector("#gpu-detail-dialog").close();
-    // The dialog close event is dispatched from a queued task.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const dialog = document.querySelector("#gpu-detail-dialog");
+    // Cleanup runs in the queued close event, not synchronously in close().
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("GPU dialog close event timed out")), 10_000);
+      dialog.addEventListener("close", () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+      dialog.close();
+    });
     const cleanedUp = gpuHistoryLoader.state.retryTimer == null
       && view.gpuTaskRowCache.size === 0
       && document.querySelector("#gpu-task-list").children.length === 0
