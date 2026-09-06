@@ -403,7 +403,9 @@ def _run_monitor(args: argparse.Namespace) -> int:
     restored = persistence.load(config.history_points, config.incident_history_points)
     if not args.once:
         try:
-            persistence = create_persistence(config.persistence)
+            persistence = create_persistence(
+                config.persistence, busy_pct=config.thresholds.gpu_busy_pct
+            )
             restored = persistence.load(
                 config.history_points, config.incident_history_points
             )

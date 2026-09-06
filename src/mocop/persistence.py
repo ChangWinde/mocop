@@ -7,7 +7,6 @@ import queue
 import sqlite3
 import threading
 import time
-from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -27,6 +26,10 @@ from .persistence_schema import (
     CREATE_SCHEMA_STATEMENTS,
     GPU_TABLE_STATEMENTS,
     HISTORY_FIELDS,
+    ROLLUP_BACKFILL,
+    ROLLUP_RETENTION_HOURS,
+    ROLLUP_STATEMENTS,
+    ROLLUP_UPSERT,
     SCHEMA_VERSION,
 )
 
@@ -198,11 +201,15 @@ class SqliteTelemetryPersistence:
     writer owns its SQLite connection, batches commits, and contains disk failures.
     """
 
-    def __init__(self, config: PersistenceConfig, path: Path) -> None:
+    def __init__(
+        self, config: PersistenceConfig, path: Path, *, busy_pct: float = 10.0
+    ) -> None:
         if not config.enabled:
             raise ValueError("SQLite persistence requires enabled configuration")
         self._config = config
         self._path = path.expanduser().absolute()
+        self._busy_pct = float(busy_pct)
+        self._rollups_enabled = False
         self._queue: queue.Queue[_QueueItem] = queue.Queue(_QUEUE_CAPACITY)
         # Serializes producer admission with close.  Without this boundary a
         # producer could observe ``_closed == False``, lose the CPU to close,
@@ -367,6 +374,7 @@ class SqliteTelemetryPersistence:
                             "history database exceeds the configured size limit"
                         )
                     self._apply_size_limit(connection)
+                self._rollups_enabled = self._ensure_rollups(connection)
             self._path.chmod(0o600)
         except PersistenceError:
             raise
@@ -390,6 +398,30 @@ class SqliteTelemetryPersistence:
     @classmethod
     def _migrate_v3(cls, connection: sqlite3.Connection) -> None:
         cls._apply_schema(connection, ())
+
+    def _ensure_rollups(self, connection: sqlite3.Connection) -> bool:
+        """Create the hourly rollup table and aggregate raw hours it lacks.
+
+        This runs after the size cap is applied, so a database already at its
+        cap keeps starting exactly as before: the rollups then wait for
+        retention to free pages and are retried at the next start, and the
+        writer skips them meanwhile. The whole retained raw table aggregates
+        in well under a second per million rows; later starts only read from
+        the last rolled-up hour onward.
+        """
+        try:
+            with connection:
+                for statement in ROLLUP_STATEMENTS:
+                    connection.execute(statement)
+                latest = connection.execute(
+                    "SELECT max(hour) FROM gpu_hourly"
+                ).fetchone()[0]
+                since = latest if isinstance(latest, str) else ""
+                connection.execute(ROLLUP_BACKFILL, (self._busy_pct, since))
+        except sqlite3.OperationalError:
+            self._set_error("hourly rollups wait for retention to free space")
+            return False
+        return True
 
     @staticmethod
     def _apply_schema(
@@ -544,7 +576,11 @@ class SqliteTelemetryPersistence:
                 written_records = 0
                 with connection:
                     for item in writes:
-                        written_records += self._write(connection, item)
+                        written_records += self._write(
+                            connection,
+                            item,
+                            self._busy_pct if self._rollups_enabled else None,
+                        )
             except sqlite3.Error as exc:
                 if not pruned and _is_size_error(exc):
                     # Expired records may free enough space; retry this batch
@@ -572,7 +608,9 @@ class SqliteTelemetryPersistence:
         return True
 
     @staticmethod
-    def _write(connection: sqlite3.Connection, item: _Write) -> int:
+    def _write(
+        connection: sqlite3.Connection, item: _Write, busy_pct: float | None
+    ) -> int:
         if isinstance(item, _HistoryWrite):
             point = item.point
             cursor = connection.execute(
@@ -591,7 +629,9 @@ class SqliteTelemetryPersistence:
             return max(0, cursor.rowcount)
 
         if isinstance(item, _GpuTelemetryWrite):
-            return SqliteTelemetryPersistence._write_gpu_telemetry(connection, item)
+            return SqliteTelemetryPersistence._write_gpu_telemetry(
+                connection, item, busy_pct
+            )
 
         assert isinstance(item, _IncidentWrite)
         event = item.event
@@ -625,9 +665,20 @@ class SqliteTelemetryPersistence:
 
     @staticmethod
     def _write_gpu_telemetry(
-        connection: sqlite3.Connection, item: _GpuTelemetryWrite
+        connection: sqlite3.Connection,
+        item: _GpuTelemetryWrite,
+        busy_pct: float | None,
     ) -> int:
         written_records = 0
+        if item.points and busy_pct is not None:
+            connection.executemany(
+                ROLLUP_UPSERT,
+                (
+                    SqliteTelemetryPersistence._rollup_row(item.host, point, busy_pct)
+                    for point in item.points
+                    if isinstance(point.get("observedAt"), str)
+                ),
+            )
         if item.points:
             cursor = connection.executemany(
                 """
@@ -715,6 +766,30 @@ class SqliteTelemetryPersistence:
         return written_records
 
     @staticmethod
+    def _rollup_row(
+        host: str, point: dict[str, object], busy_pct: float
+    ) -> tuple[object, ...]:
+        utilization = point.get("utilizationGpuPct")
+        memory_used = point.get("memoryUsedMiB")
+        has_utilization = isinstance(utilization, int | float) and not isinstance(
+            utilization, bool
+        )
+        has_memory = isinstance(memory_used, int | float) and not isinstance(
+            memory_used, bool
+        )
+        return (
+            host,
+            point.get("gpuId"),
+            str(point["observedAt"])[:13] + ":00:00Z",
+            1 if has_utilization else 0,
+            1 if has_utilization and float(utilization) >= busy_pct else 0,  # type: ignore[arg-type]
+            float(utilization) if has_utilization else 0.0,  # type: ignore[arg-type]
+            1 if has_memory else 0,
+            float(memory_used) if has_memory else 0.0,  # type: ignore[arg-type]
+            point.get("memoryTotalMiB"),
+        )
+
+    @staticmethod
     def _internal_usage_gpu_key(host: str, event: dict[str, object]) -> str:
         identity = f"{host}\x00{event.get('gpuId')}".encode(
             "utf-8", errors="surrogatepass"
@@ -777,15 +852,20 @@ class SqliteTelemetryPersistence:
         connection.execute(
             "DELETE FROM process_events WHERE observed_at < ?", (cutoff_text,)
         )
+        if self._rollups_enabled:
+            rollup_cutoff = datetime.now(timezone.utc) - timedelta(
+                hours=max(self._config.retention_hours, ROLLUP_RETENTION_HOURS)
+            )
+            connection.execute(
+                "DELETE FROM gpu_hourly WHERE hour < ?",
+                (rollup_cutoff.isoformat(timespec="seconds").replace("+00:00", "Z"),),
+            )
         if reclaim_pages > 0:
             _reclaim_free_pages(connection, reclaim_pages)
 
     def _set_error(self, message: str) -> None:
         with self._status_lock:
             self._last_error = message
-
-
-PersistenceFactory = Callable[[PersistenceConfig, Path], TelemetryPersistence]
 
 
 def user_state_path(environ: dict[str, str] | None = None) -> Path:
@@ -798,19 +878,14 @@ def user_state_path(environ: dict[str, str] | None = None) -> Path:
     return (root / "mocop" / "history.sqlite3").absolute()
 
 
-def _disabled_factory(_config: PersistenceConfig, _path: Path) -> TelemetryPersistence:
-    return DisabledPersistence()
-
-
-_PERSISTENCE_FACTORIES: dict[str, PersistenceFactory] = {
-    "memory": _disabled_factory,
-    "sqlite": SqliteTelemetryPersistence,
-}
-
-
 def create_persistence(
     config: PersistenceConfig,
     path: Path | None = None,
+    *,
+    busy_pct: float = 10.0,
 ) -> TelemetryPersistence:
-    backend = "sqlite" if config.enabled else "memory"
-    return _PERSISTENCE_FACTORIES[backend](config, path or user_state_path())
+    if not config.enabled:
+        return DisabledPersistence()
+    return SqliteTelemetryPersistence(
+        config, path or user_state_path(), busy_pct=busy_pct
+    )
