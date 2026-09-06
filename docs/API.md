@@ -463,7 +463,7 @@ Timestamp disambiguation (frequently confused):
 | `transportRetried` | bool | The most recent probe retried once over a fresh connection after a stale multiplexed SSH transport. |
 | `system` | object \| null | Last-known system metrics (snake_case; see below). |
 | `gpus` | array | Last-known GPU metrics (snake_case; see below). |
-| `maintenance` | object \| null | Active window as `{until, reason}` (+ `recurring: true` for weekly windows), else `null`. |
+| `maintenance` | object \| null | Active window as `{until, reason}` (+ `recurring: true` and `cadence: "weekly"|"daily"` for recurring windows), else `null`. |
 | `group` | string \| null | Configured host group. |
 | `displayName` | string \| null | Optional human-readable label; `host` remains the identity. |
 | `incidents` | object | `{active, critical, actionable, actionableCritical}` counts for this host. |
@@ -927,7 +927,7 @@ Configuration projection. Tier R. Query: rejected.
 | `ignoredCodeHostCount` | int | Scanned aliases skipped as Git/GitHub/GitLab hosts. |
 | `excludedHostCount` | int | Scanned aliases skipped by `exclude_hosts`. |
 | `collectorSettings` | object | `{pollIntervalSeconds, probeTimeoutSeconds, connectTimeoutSeconds, maxWorkers}`. **`connectTimeoutSeconds` is read-only context** (the probe timeout must exceed it); the write route rejects it. |
-| `maintenanceWindows` | object | **Every configured window**, keyed by alias: `{until, reason, active}` plus `recurring: true` for weekly windows. `active` says whether the window is silencing the host right now; for recurring windows `until` is the end of the current or next instance. |
+| `maintenanceWindows` | object | **Every configured window**, keyed by alias: `{until, reason, active}` plus `recurring: true` and `cadence` (`weekly` or `daily`) for recurring windows. `active` says whether the window is silencing the host right now; for recurring windows `until` is the end of the current or next instance. |
 | `incidentActions` | array | Currently active actions: `{host, condition_key, action, until, reason, incident_started_at}` (snake_case keys); the last field binds the action to one incident generation. |
 | `hostGroups` | object | Alias → group name. |
 | `sshDiscoveryMode` | string | `aliases` or `topology`. |

@@ -1234,17 +1234,18 @@ function inventoryHostRow(host, action) {
   // The "维护至" badge stays reserved for live windows; planned recurring
   // windows get their own badge so an off-period plan reads as schedule, not
   // as an active silence.
+  const cadenceLabel = maintenance?.cadence === "daily" ? "每日" : "每周";
   if (maintenance?.active) {
     const badge = create("small", "maintenance-badge", `维护至 ${shortTime(maintenance.until)}`);
     badge.title = maintenance.recurring
-      ? `${maintenance.reason}（每周重复）` : maintenance.reason;
+      ? `${maintenance.reason}（${cadenceLabel}重复）` : maintenance.reason;
     identity.append(badge);
   }
   if (maintenance?.recurring) {
     const plan = create(
       "small",
       `maintenance-plan-badge${maintenance.active ? "" : " inactive"}`,
-      "每周维护计划",
+      `${cadenceLabel}维护计划`,
     );
     plan.title = `下次窗口至 ${shortTime(maintenance.until)} · ${maintenance.reason}`;
     identity.append(plan);

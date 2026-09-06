@@ -157,6 +157,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Maintenance windows can recur daily: `recurrence: {daily: true, start,
+  duration_minutes}` (duration strictly below one day) beside the existing
+  weekly form. A fleet reached through a link that degrades at the same hour
+  every evening — a home uplink whose relay reconnects nightly — can silence
+  the hosts behind it for that span instead of alerting every night. Window
+  objects in `/api/snapshot` and `/api/inventory` carry `cadence`
+  (`weekly` or `daily`) beside `recurring`, the dashboard labels the plan
+  badge accordingly, and the dashboard's inventory contract accepts the key.
 - Two SSH failures that a fleet behind a bastion sees often now have their own
   sanitized classification instead of the generic `SSH connection failed`:
   `SSH jump host could not reach the target` (the `ProxyJump`/`ProxyCommand`

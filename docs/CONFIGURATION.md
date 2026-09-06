@@ -125,9 +125,15 @@ A maintenance window contains optional `reason` (at most 120 visible
 characters) and exactly one of:
 
 - `until`: strict UTC `YYYY-MM-DDTHH:MM:SSZ` timestamp.
-- `recurrence`: exactly `{weekday, start, duration_minutes}`, where weekday is
-  integer 0–6 (Monday–Sunday), start is `HH:MM` UTC, and duration is integer
-  1–10,079 minutes (strictly less than one week).
+- `recurrence`: `{weekday, start, duration_minutes}` for a weekly window or
+  `{daily: true, start, duration_minutes}` for one that repeats every day
+  (exactly one of `weekday` and `daily`). `weekday` is integer 0–6
+  (Monday–Sunday), `start` is `HH:MM` UTC, and `duration_minutes` is an
+  integer strictly below the period: 1–10,079 for weekly, 1–1,439 for daily,
+  so an instance always ends before the next begins. A daily window is the
+  tool for a link that degrades at the same hour every day — for example a
+  home uplink whose relay drops nightly — so the hosts behind it are silenced
+  for that span instead of alerting every evening.
 
 An `incident_actions` item has `host`, `condition_key`, `action`, `until`, and
 `reason`, plus optional `incident_started_at`; no other shape is accepted. The

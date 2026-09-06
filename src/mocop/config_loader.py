@@ -122,7 +122,7 @@ _INCIDENT_KEYS = {
 }
 _HOST_OVERRIDE_KEYS = {"poll_interval_seconds", "probe_timeout_seconds", "display_name"}
 _MAINTENANCE_WINDOW_KEYS = {"until", "reason", "recurrence"}
-_MAINTENANCE_RECURRENCE_KEYS = {"weekday", "start", "duration_minutes"}
+_MAINTENANCE_RECURRENCE_KEYS = {"weekday", "daily", "start", "duration_minutes"}
 _RECURRENCE_START = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 _INCIDENT_ACTION_KEYS = {"host", "condition_key", "action", "until", "reason"}
 _INCIDENT_ACTION_V2_KEYS = _INCIDENT_ACTION_KEYS | {"incident_started_at"}
@@ -708,8 +708,13 @@ def _maintenance_window(alias: str, raw_window: object) -> MaintenanceWindowConf
     unknown_recurrence = sorted(recurrence.keys() - _MAINTENANCE_RECURRENCE_KEYS)
     if unknown_recurrence:
         raise ConfigError(f"unknown {label} keys: {', '.join(unknown_recurrence)}")
+    daily = recurrence.get("daily", False)
+    if not isinstance(daily, bool):
+        raise ConfigError(f"{label}.daily must be true or false")
     weekday = recurrence.get("weekday")
-    if (
+    if daily == ("weekday" in recurrence):
+        raise ConfigError(f"{label} must define exactly one of 'weekday' or 'daily'")
+    if not daily and (
         not isinstance(weekday, int)
         or isinstance(weekday, bool)
         or not (0 <= weekday <= 6)
@@ -724,17 +729,22 @@ def _maintenance_window(alias: str, raw_window: object) -> MaintenanceWindowConf
     if start_match is None:
         raise ConfigError(f"{label}.start must be 'HH:MM' in UTC")
     duration = recurrence.get("duration_minutes")
+    # An instance must end before the next one starts, so the duration stays
+    # strictly below the period: a day for daily windows, a week for weekly.
+    longest = 1_439 if daily else 10_079
     if (
         not isinstance(duration, int)
         or isinstance(duration, bool)
-        or not (1 <= duration <= 10_079)
+        or not (1 <= duration <= longest)
     ):
         raise ConfigError(
-            f"{label}.duration_minutes must be 1 to 10079 (less than one week)"
+            f"{label}.duration_minutes must be 1 to {longest} "
+            f"(less than one {'day' if daily else 'week'})"
         )
     return MaintenanceWindowConfig(
         reason=reason,
-        weekday=weekday,
+        weekday=None if daily else weekday,
+        daily=daily,
         start_minutes=int(start_match.group(1)) * 60 + int(start_match.group(2)),
         duration_minutes=duration,
     )
