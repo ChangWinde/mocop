@@ -281,12 +281,23 @@ without this plumbing: it reads the listener from the configuration and the
 capability from the private file beside it, writes the response body to
 stdout unchanged, and exits `0` on a 2xx, `1` on any other status (the
 server's error envelope is the output) or an unreachable service, and `2`
-for usage or configuration problems. R- and W-tier paths are refused with
-`DASHBOARD_ONLY` because they belong to the same-origin dashboard.
+for usage or configuration problems. With `--data JSON` (or `@FILE`, `@-` for
+stdin) it POSTs to a W-tier route, presenting the listener's own origin and
+the same-origin marker exactly as the dashboard does, so every write in the
+playbooks below is one command on the monitor host; the body is validated
+against the manifest server-side, a writer route without `--data` is refused
+with `BODY_REQUIRED` (nothing restarts or updates by accident), and `--data`
+on a read route with `METHOD_NOT_ALLOWED`. R-tier paths stay refused with
+`DASHBOARD_ONLY`: their marker on a *read* switches the service to the
+attended cadence. Possession of the capability file on the monitor host is
+the whole authority: the same principal can already edit the configuration.
 
 ```bash
 mocop api '/api/capacity?gpus=4&min_vram_gib=40' | jq '.candidates[] | select(.satisfies) | .host'
 mocop api /api/events        # streams until interrupted
+mocop api /api/settings/maintenance --data '{"host": "gpu-node-02", "durationSeconds": 14400, "reason": "driver upgrade"}'
+mocop api /api/settings/incident-action --data @ack.json   # {"host", "conditionKey", "incidentStartedAt", "action": "acknowledged", "durationSeconds", "reason"}
+mocop api /api/probe --data '{"host": "gpu-node-01"}'
 ```
 
 The remaining examples are copy-paste `curl` calls for any other host. The

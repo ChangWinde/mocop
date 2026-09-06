@@ -1,12 +1,15 @@
-"""Local read-only HTTP client behind ``mocop api``.
+"""Local HTTP client behind ``mocop api``.
 
 An agent on the monitor's own host should not have to discover the listen
 address, locate the private capability file, or spell the Bearer header to
-ask the running service a question. This module does exactly that plumbing
-for the public and authenticated GET routes and nothing more: the reader and
-writer tiers stay reserved for the same-origin dashboard, because their
-marker header changes the collection cadence and their writes are protected
-by the browser's origin checks.
+ask the running service a question — or to act on the answer. This module
+does exactly that plumbing: GET for the public and authenticated routes, and
+POST with an explicit JSON body for the writer routes, presenting the
+listener's own origin the way the dashboard does. Reader routes stay reserved
+for the dashboard, because their marker on a read switches the service to the
+attended collection cadence. Possession of the capability file is the whole
+authority here: the same principal can already edit the configuration, so the
+write path adds no trust the host did not have.
 """
 
 from __future__ import annotations
@@ -32,7 +35,8 @@ _STREAM_SILENCE_SECONDS = 60.0
 # No path is routed for both methods, so one tier per path is exact.
 _ROUTE_ACCESS = {path: access for _method, path, access in API_ROUTES}
 _PUBLIC = "public"
-_DASHBOARD_TIERS = frozenset({"reader", "writer"})
+_READER = "reader"
+_WRITER = "writer"
 
 
 class ApiClientError(Exception):
@@ -72,8 +76,10 @@ def request(
     config_path: Path | str | None,
     token_file: Path | None = None,
     timeout: float = 10.0,
+    data: bytes | None = None,
 ) -> ApiResponse:
-    """GET ``target`` (an absolute API path with optional query) from the service.
+    """GET ``target`` (an absolute API path with optional query), or POST
+    ``data`` to it when the route is a writer route.
 
     Raises :class:`ApiClientError` for anything that never reached the
     server; HTTP error statuses come back as a normal :class:`ApiResponse`
@@ -86,13 +92,23 @@ def request(
             "INVALID_TARGET",
         )
     access = route_access(parsed.path)
-    if access in _DASHBOARD_TIERS:
+    if access == _READER:
         raise ApiClientError(
-            f"{parsed.path} is a dashboard-only route: reader routes carry the "
-            "marker that switches the service to the attended collection "
-            "cadence and writes are protected by the browser's same-origin "
-            "checks; open the dashboard instead",
+            f"{parsed.path} is a dashboard-only route: its marker on a read "
+            "switches the service to the attended collection cadence; open the "
+            "dashboard instead",
             "DASHBOARD_ONLY",
+        )
+    if access == _WRITER and data is None:
+        raise ApiClientError(
+            f"{parsed.path} is a write route: pass --data with the JSON body "
+            "the manifest describes ('{}' for routes whose body is empty)",
+            "BODY_REQUIRED",
+        )
+    if access != _WRITER and data is not None:
+        raise ApiClientError(
+            f"{parsed.path} accepts GET only; --data applies to writer routes",
+            "METHOD_NOT_ALLOWED",
         )
     try:
         resolved = resolve_config_path(config_path)
@@ -111,14 +127,31 @@ def request(
                 "TOKEN_UNAVAILABLE",
             ) from exc
         headers["Authorization"] = f"Bearer {token}"
-    url = f"{service_url(config)}{target}"
+    base = service_url(config)
+    url = f"{base}{target}"
+    if data is not None:
+        # The writer tier is the dashboard's: a JSON body, the same-origin
+        # marker the browser attaches, and an Origin naming the listener
+        # itself. Nothing else in this process ever sends the marker, so the
+        # attended cadence is untouched.
+        headers["Content-Type"] = "application/json"
+        headers["Origin"] = base
+        headers["X-Monitor-Request"] = "dashboard"
     streaming = RESPONSE_TYPES.get(parsed.path) == EVENT_STREAM_RESPONSE_TYPE
     if streaming:
         # The socket timeout bounds each read; a quiet stream still carries a
         # heartbeat every 15 s, so silence beyond this means the service is gone.
         timeout = max(timeout, _STREAM_SILENCE_SECONDS)
     try:
-        response = urlopen(Request(url, headers=headers), timeout=timeout)
+        response = urlopen(
+            Request(
+                url,
+                data=data,
+                headers=headers,
+                method="POST" if data is not None else "GET",
+            ),
+            timeout=timeout,
+        )
     except HTTPError as error:
         with error:
             return ApiResponse(

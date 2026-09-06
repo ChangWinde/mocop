@@ -95,7 +95,8 @@ interfaces without a runtime plugin registry.
 | `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query and body schemas, body caps, error catalog; `/api/meta` publishes it and every GET query and POST body is validated through it |
 | `api_describe.py` | how the manifest is published through `GET /api/meta`: the meta document, field conventions, write requirements |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
-| `client.py` | the local read-only client behind `mocop api`: listener from the configuration, capability from the private file, public and authenticated GETs only |
+| `client.py` | the local client behind `mocop api`: listener from the configuration, capability from the private file, public and authenticated GETs, and writer-tier POSTs presenting the listener's own origin |
+| `cli_arguments.py` | the `mocop` command line: every subcommand, flag, and help text, separate from the runtime that acts on them |
 | `static_assets.py` | static asset route table, strong ETags, and conditional-delivery validators |
 | `lifecycle.py` | private config creation and user-level systemd management |
 | `migration.py` | non-destructive cross-machine config transformation and private target creation |

@@ -176,8 +176,8 @@ Everything the dashboard shows is also a small JSON API with stable error codes
 and P/A/R/W access tiers. `GET /api/meta` names every route's tier, query
 bounds, POST body fields, error-code catalog, and documentation URL; a `403`
 says where the capability lives. On the monitor host, `mocop api PATH` performs
-any public or authenticated GET with the listener and capability taken from the
-configuration. Only discovery and health are public; the
+any public or authenticated GET, and `--data JSON` any writer-tier POST, using
+the configured listener and capability. Only discovery and health are public; the
 [API reference](docs/API.md) has curl examples and explains why non-viewer
 automation must not send `X-Monitor-Request: dashboard`.
 

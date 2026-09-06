@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mocop import __version__
-from mocop.__main__ import _arguments, main
+from mocop.__main__ import main
+from mocop.cli_arguments import parse_arguments
 from mocop.config_loader import load_config
 from mocop.lifecycle import LifecycleError
 from mocop.migration import MigrationResult
@@ -53,14 +54,14 @@ class CliTests(unittest.TestCase):
         self.root = Path(directory.name)
 
     def test_monitor_mode_remains_the_default(self) -> None:
-        args = _arguments(["--config", "/tmp/config.json", "--once"])
+        args = parse_arguments(["--config", "/tmp/config.json", "--once"])
 
         self.assertIsNone(args.command)
         self.assertEqual(args.config, Path("/tmp/config.json"))
         self.assertTrue(args.once)
 
     def test_managed_service_mode_is_explicit(self) -> None:
-        args = _arguments(["--managed-service"])
+        args = parse_arguments(["--managed-service"])
 
         self.assertTrue(args.managed_service)
 
@@ -99,8 +100,8 @@ class CliTests(unittest.TestCase):
         self.assertGreaterEqual(len(token), 32)
 
     def test_global_config_is_not_overwritten_by_subcommand_defaults(self) -> None:
-        before = _arguments(["--config", "/tmp/global.json", "doctor"])
-        after = _arguments(["doctor", "--config", "/tmp/local.json"])
+        before = parse_arguments(["--config", "/tmp/global.json", "doctor"])
+        after = parse_arguments(["doctor", "--config", "/tmp/local.json"])
 
         self.assertEqual(before.config, Path("/tmp/global.json"))
         self.assertEqual(after.config, Path("/tmp/local.json"))
@@ -120,7 +121,7 @@ class CliTests(unittest.TestCase):
     def test_version_flag_prints_the_package_version(self) -> None:
         stdout = io.StringIO()
         with redirect_stdout(stdout), self.assertRaises(SystemExit) as caught:
-            _arguments(["--version"])
+            parse_arguments(["--version"])
         self.assertEqual(caught.exception.code, 0)
         self.assertIn(__version__, stdout.getvalue())
         self.assertIn("mocop", stdout.getvalue())
@@ -163,8 +164,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(statuses, {"online"})
 
     def test_init_and_service_commands_are_unambiguous(self) -> None:
-        init_args = _arguments(["init", "--host", "gpu-01", "--host", "gpu-02"])
-        install_args = _arguments(["service", "install", "--config", "/tmp/c.json"])
+        init_args = parse_arguments(["init", "--host", "gpu-01", "--host", "gpu-02"])
+        install_args = parse_arguments(
+            ["service", "install", "--config", "/tmp/c.json"]
+        )
 
         self.assertEqual(init_args.command, "init")
         self.assertEqual(init_args.hosts, ["gpu-01", "gpu-02"])
@@ -172,7 +175,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(install_args.action, "install")
 
     def test_deploy_defaults_to_local_topology_discovery(self) -> None:
-        args = _arguments(["deploy", "--display-name", "console-0"])
+        args = parse_arguments(["deploy", "--display-name", "console-0"])
 
         self.assertEqual(args.command, "deploy")
         self.assertEqual(args.hosts, [])
@@ -182,7 +185,7 @@ class CliTests(unittest.TestCase):
         self.assertTrue(args.auto_discover)
         self.assertEqual(args.ssh_config, "~/.ssh/config")
 
-        opted_out = _arguments(
+        opted_out = parse_arguments(
             ["deploy", "--no-local", "--no-auto-discover", "--host", "gpu-01"]
         )
         self.assertTrue(opted_out.no_local)
@@ -190,7 +193,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(opted_out.hosts, ["gpu-01"])
 
     def test_migrate_command_parses_identity_and_admission_policy(self) -> None:
-        args = _arguments(
+        args = parse_arguments(
             [
                 "migrate",
                 "--from-config",
@@ -213,18 +216,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.display_name, "console-0")
         self.assertTrue(args.auto_discover)
 
-        preserved = _arguments(["migrate", "--from-config", "/backup/config.json"])
+        preserved = parse_arguments(["migrate", "--from-config", "/backup/config.json"])
         self.assertIsNone(preserved.auto_discover)
 
     def test_config_check_and_doctor_probe_are_parsed(self) -> None:
-        check_args = _arguments(["config", "check", "--config", "/tmp/c.json"])
-        doctor_args = _arguments(["doctor", "--probe"])
+        check_args = parse_arguments(["config", "check", "--config", "/tmp/c.json"])
+        doctor_args = parse_arguments(["doctor", "--probe"])
 
         self.assertEqual(check_args.command, "config")
         self.assertEqual(check_args.action, "check")
         self.assertEqual(check_args.config, Path("/tmp/c.json"))
         self.assertTrue(doctor_args.probe)
-        self.assertFalse(_arguments(["doctor"]).probe)
+        self.assertFalse(parse_arguments(["doctor"]).probe)
 
     def test_service_status_and_uninstall_reject_config_argument(self) -> None:
         for action in ("status", "uninstall"):
@@ -233,7 +236,7 @@ class CliTests(unittest.TestCase):
                 redirect_stderr(io.StringIO()),
                 self.assertRaises(SystemExit),
             ):
-                _arguments(["service", action, "--config", "/tmp/c.json"])
+                parse_arguments(["service", action, "--config", "/tmp/c.json"])
 
     @patch("mocop.__main__.initialize_config")
     def test_init_reports_the_created_path(self, initialize) -> None:

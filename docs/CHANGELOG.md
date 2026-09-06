@@ -157,6 +157,17 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- `mocop api PATH --data JSON` performs writer-tier POSTs from the monitor
+  host — maintenance windows, incident acknowledgements and silences, host
+  add/remove, collector settings, manual probes, restart, and update — so an
+  agent or operator can act on what the read routes show without a browser.
+  The client presents the listener's own loopback origin and the same-origin
+  marker exactly as the dashboard does, the server validates the body against
+  the manifest as always, a writer route without `--data` is refused
+  (`BODY_REQUIRED`, so nothing restarts by accident), `--data` on a read route
+  is refused (`METHOD_NOT_ALLOWED`), and reader routes stay `DASHBOARD_ONLY`
+  because their marker on a read changes the collection cadence. Possession
+  of the private capability file is the authority, as it already was.
 - Long-window reports from the history database. `GET /api/reports/usage`
   pairs every retained process transition (no per-device cap, so
   `partialGpus` is always zero and owner GPU-hours are exact over the raw
