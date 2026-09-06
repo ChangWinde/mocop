@@ -302,6 +302,7 @@ def gpu(
     train_started_at: str | None = None,
     processes_observed_at: str | None = None,
     processes_available: bool = True,
+    extra_processes: tuple[GpuProcess, ...] = (),
 ) -> GpuMetrics:
     processes = (
         (
@@ -341,6 +342,7 @@ def gpu(
                 used_memory_mib=None,
             ),
         )
+    processes = processes + extra_processes
     return GpuMetrics(
         index=index,
         uuid=f"GPU-DEMO-{host}-{index:02d}",
@@ -417,6 +419,25 @@ def demo_state() -> StateStore:
     # Older than the 90-second freshness warning threshold, by a wide margin
     # so slow smoke runs stay deterministic.
     stale_processes_at = _iso(now - timedelta(minutes=30))
+    # Present in the first round only: the second round records its
+    # `stopped` transition, anchored by the monitor's first observation, so
+    # the GPU timeline of atlas-01 GPU 3 states how long the run held the
+    # device. The owner is the fixture's Slurm researcher so the usage
+    # bill's owner order is unchanged.
+    finished_evaluation = GpuProcess(
+        pid=15_003,
+        name="/opt/conda/envs/llm/bin/python3.11",
+        used_memory_mib=20_480,
+        workload=WorkloadMetadata(
+            kind="slurm",
+            workload_id="4790",
+            name="llm-eval",
+            owner="researcher",
+            queue="gpu-short",
+            command="python -m eval.harness --suite mmlu",
+            started_at=_iso(now - timedelta(hours=6)),
+        ),
+    )
     state = StateStore(
         5,
         host_groups=(
@@ -468,6 +489,9 @@ def demo_state() -> StateStore:
                         2_048,
                         35,
                         processes_observed_at=round_observed_at,
+                        extra_processes=(finished_evaluation,)
+                        if round_observed_at == first_observed_at
+                        else (),
                     ),
                 ),
                 observed_at=round_observed_at,

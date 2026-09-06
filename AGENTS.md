@@ -65,6 +65,11 @@ enforce it. Record every user-visible change under `[Unreleased]` in
   actionable incident transition, `eventId` as the idempotency key.
 - On the monitor host, `mocop api PATH` performs any public or authenticated
   GET with the listener and capability taken from the configuration.
+- `GET /api/usage` reports observed occupancy, not a bill: read
+  `earliestDataAt`, `partialGpus`, `droppedRecords`, and each owner's
+  `sampledSeconds` before comparing owners, as the
+  [usage playbook](docs/API.md#7-account-gpu-usage-per-owner-honestly)
+  describes.
 - `mocop config check --json`, `mocop doctor --json`, and every lifecycle
   command with `--json` write one `{ok, ...}` document; exit codes are
   documented in [`docs/OPERATIONS.md`](docs/OPERATIONS.md#command-reference-and-exit-codes).

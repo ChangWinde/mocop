@@ -46,8 +46,40 @@ const condition = (conditionKey, category, overrides = {}) => ({
   assert.equal(conditions[0].source.conditionKey, "connectivity");
   const offline = attention.serverConditions(server("gpu-02", "unreachable"), [
     condition("connectivity", "connectivity"),
+    condition("gpu_memory:GPU-1", "gpu_memory", { resource: "GPU 1 VRAM", value: 95.3 }),
   ]);
   assert.equal(offline[0].message, "msg:connectivity");
+  assert.equal(offline[0].frozen, false);
+  assert.equal(offline[1].frozen, true);
+  assert.equal(offline[1].message, "msg:gpu_memory:GPU-1");
+  assert.equal(conditions.every((item) => item.frozen === false), true);
+}
+
+{
+  // A host that is not online keeps its resource conditions frozen at the
+  // last successful sample (a live deployment showed a node unreachable for
+  // 533 probes with two-day-old VRAM figures); the issue says so per
+  // condition, while the connectivity failure itself is current.
+  const host = server("gpu-04", "unreachable");
+  const conditions = attention.serverConditions(host, [
+    condition("connectivity", "connectivity", { severity: "critical" }),
+    condition("gpu_memory:GPU-5", "gpu_memory", { severity: "critical", value: 95.3 }),
+    condition("disk:/data", "disk", { resource: "/data", value: 98 }),
+    condition("disk:/", "disk", { resource: "/", value: 90 }),
+  ]);
+  const issue = attention.issueFromConditions(host, conditions);
+  assert.deepEqual(issue.messages, [
+    "msg:disk:/data（离线前） +1",
+    "msg:connectivity",
+    "msg:gpu_memory:GPU-5（离线前）",
+  ]);
+  const online = attention.issueFromConditions(
+    server("gpu-05"),
+    attention.serverConditions(server("gpu-05"), [
+      condition("gpu_memory:GPU-5", "gpu_memory", { severity: "critical", value: 95.3 }),
+    ]),
+  );
+  assert.deepEqual(online.messages, ["msg:gpu_memory:GPU-5"]);
 }
 
 {
@@ -128,8 +160,33 @@ function fleet() {
   assert.deepEqual(issues[0].categories, ["connection"]);
   assert.deepEqual(issues[1].hosts, ["b-01", "b-02"]);
   assert.deepEqual(issues[1].messages, ["/nfs 96% · 影响 2 台"]);
-  assert.deepEqual(issues[2].messages, ["msg:disk:/"]);
+  assert.deepEqual(issues[2].messages, ["msg:disk:/（离线前）"]);
   assert.equal(issues[2].conditions.length, 1);
+}
+
+{
+  // A shared storage group whose hottest reading comes from an offline host
+  // carries the same marker; an online hottest host does not.
+  const servers = [server("s-01", "unreachable"), server("s-02")];
+  const shared = (usage) => condition("disk:/nfs", "disk", { resource: "/nfs", value: usage, groupKey: "nfs:volume" });
+  const frozenHottest = attention.issues({
+    servers,
+    conditionsByHost: new Map([
+      ["s-01", attention.serverConditions(servers[0], [shared(97)])],
+      ["s-02", attention.serverConditions(servers[1], [shared(90)])],
+    ]),
+    correlations: [],
+  });
+  assert.deepEqual(frozenHottest[0].messages, ["/nfs 97%（离线前） · 影响 2 台"]);
+  const liveHottest = attention.issues({
+    servers,
+    conditionsByHost: new Map([
+      ["s-01", attention.serverConditions(servers[0], [shared(90)])],
+      ["s-02", attention.serverConditions(servers[1], [shared(97)])],
+    ]),
+    correlations: [],
+  });
+  assert.deepEqual(liveHottest[0].messages, ["/nfs 97% · 影响 2 台"]);
 }
 
 {

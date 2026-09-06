@@ -54,6 +54,16 @@ All notable changes are documented here. This project follows Semantic Versionin
   file's size) the service starts anyway, reclaims what the bounded online
   path can, and leaves the condition to the persistence status it already
   reports, instead of refusing to start over it.
+- The README and the API reference no longer describe a `no_nvidia_smi` host
+  status: `servers[].status` is `pending`, `online`, `unreachable`, or
+  `error`, and a host without `nvidia-smi` is `online` with the message
+  `nvidia-smi is unavailable` and an empty `gpus` array, as the probe test
+  has always pinned. The Chinese README gains the same sentence.
+- The attention panel marks a resource condition whose host is not online
+  with `（离线前）`: the service keeps such conditions open across failed
+  probes, so their figures date from the last successful sample. On a live
+  deployment a node unreachable for 533 consecutive probes was listed with
+  three VRAM figures that were two days old and read as current.
 - A GPU that vanishes from an online host (an XID fault or a bus drop takes
   the device out of `nvidia-smi`) now closes its confirmed process occupancy
   at the last process sample, the way a failed process query already did.
@@ -143,6 +153,9 @@ All notable changes are documented here. This project follows Semantic Versionin
   ratchet (`persistence.py`, `doctor.py`, `__main__.py`, `incidents.py`, and
   `notifications.py` join it), so growth anywhere in the core has to come
   with an extraction.
+- The owners dialog's aggregation and the usage bill's wording left `app.js`
+  (seven lines under its ceiling) for the `owner-usage.js` leaf with a Node
+  contract test; `app.js`'s ceiling ratchets from 5850 to 5770 lines.
 
 ### Added
 
@@ -167,6 +180,20 @@ All notable changes are documented here. This project follows Semantic Versionin
   and `correlation` shapes, the test delivery marker, and the retry, throttle,
   and suppression rules — and a repository test keeps the documented example
   body's keys equal to what the delivery code sends.
+- An agent playbook for `/api/usage` in the API reference: how to bound
+  `hours`, read `earliestDataAt` against `sinceAt`, `partialGpus`, and
+  `droppedRecords`, quote `idleShare` with its `sampledSeconds` basis (on a
+  live deployment about one hour of samples against days of occupancy), and
+  when `owner` can be attributed at all; `AGENTS.md` points at it.
+- Three decision records for this round's architectural choices:
+  [ADR-0027](adr/0027-restored-incident-generations.md) (incident generations
+  resume from each condition's latest persisted transition, webhook workers
+  primed with the restored keys), [ADR-0028](adr/0028-duration-floor-for-resource-conditions.md)
+  (the wall-clock confirmation floor beside the cycle count), and
+  [ADR-0029](adr/0029-process-inventory-observation-gaps.md) (the process
+  inventory as a blind spot until `collection_stale_cycles`, self-anchored
+  stops through `firstSeenAt`, `partialGpus`), each with the rejected
+  alternatives and the live figures that motivated them.
 - The self-update worker's `uv` install path — the one a `uv tool install`
   deployment takes, since those environments have no `pip` — and every
   refusal of the update state machine are under test (`updates.py` coverage
