@@ -2223,6 +2223,20 @@ try {
     openGpuDetail(server2, server2.gpus.find((item) => item.index === 2));
     const unavailableCount = document.querySelector("#gpu-task-count").textContent;
     const unavailableText = document.querySelector("#gpu-task-list").textContent;
+    // atlas-01 GPU 3 is idle now but ran the fixture's evaluation job in the
+    // earlier probe round: its timeline holds one stopped transition whose
+    // firstSeenAt lets the entry state how long the run held the device.
+    openGpuDetail(server1, server1.gpus.find((item) => item.index === 3));
+    const timeline = document.querySelector("#gpu-process-timeline");
+    for (let attempt = 0; attempt < 80 && !timeline.querySelector(".gpu-timeline-item"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const timelineItems = [...timeline.querySelectorAll(".gpu-timeline-item")].map((item) => ({
+      className: item.className,
+      text: item.querySelector("span").textContent,
+      ageAt: item.querySelector(".age-relative").dataset.ageAt,
+    }));
+    const timelineTaskCount = document.querySelector("#gpu-task-count").textContent;
     taskDialog.close();
     selectHost("all");
     return {
@@ -2236,7 +2250,7 @@ try {
       trainName, trainChips, trainFootprint, commandExpanded, commandCollapsed,
       ownerSearchOrder, ownerSearchCount, nameOrder, nameButtonActive,
       durationOrder, durationButtonActive, savedTaskSort, taskNote,
-      staleNote, unavailableCount, unavailableText,
+      staleNote, unavailableCount, unavailableText, timelineItems, timelineTaskCount,
     };
   })()`, true);
   assert.match(gpuTasks.inventoryProcessText, /2/);
@@ -2299,6 +2313,17 @@ try {
   assert.equal(gpuTasks.unavailableCount, "\u2014");
   // "\u4efb\u52a1\u6570\u636e\u6682\u4e0d\u53ef\u7528" = tasks unavailable notice.
   assert.match(gpuTasks.unavailableText, /\u4efb\u52a1\u6570\u636e\u6682\u4e0d\u53ef\u7528/);
+  // The finished evaluation job left GPU 3 empty, so the current task list
+  // is at zero while the timeline states the run's length from firstSeenAt
+  // to the stop: "退出 · python3.11 · PID 15003 · 运行 5 小时 0 分".
+  assert.equal(gpuTasks.timelineTaskCount, "0");
+  assert.equal(gpuTasks.timelineItems.length, 1);
+  assert.equal(gpuTasks.timelineItems[0].className, "gpu-timeline-item stopped");
+  assert.equal(
+    gpuTasks.timelineItems[0].text,
+    "退出 · python3.11 · PID 15003 · 运行 5 小时 0 分",
+  );
+  assert.match(gpuTasks.timelineItems[0].ageAt, /^\d{4}-\d{2}-\d{2}T/);
 
   const gpuTaskFleetSearch = await cdp.evaluate(`(async () => {
     const server = view.snapshot.servers.find((item) => item.host === "atlas-01");
