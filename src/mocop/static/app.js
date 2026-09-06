@@ -5064,8 +5064,12 @@ async function fetchSnapshot() {
     try {
       const response = await fetch("/api/snapshot");
       if (response.status === 403) {
+        const error = await response.json();
+        if (error.code !== "AUTHENTICATION_REQUIRED") throw new Error(error.code);
+        const message = dashboardAuthentication.token
+          ? "访问令牌不正确或已失效，请重新输入" : "请输入此 Mocop 实例的访问令牌";
         dashboardAuthentication.forget();
-        requestDashboardAuthentication("访问令牌不正确或已失效，请重新输入");
+        requestDashboardAuthentication(message);
         return false;
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -5743,15 +5747,8 @@ async function startDashboard() {
   loadStoredBackground();
   if (dashboardAuthentication.consumeInvalidFragment()) {
     dashboardAuthentication.forget();
-    requestDashboardAuthentication("URL 中的访问令牌格式无效，请重新输入");
-    return false;
   }
-  // Every private route requires the capability, so a document without one
-  // prompts immediately instead of spending a round trip to confirm that.
-  if (!dashboardAuthentication.token) {
-    requestDashboardAuthentication("请输入此 Mocop 实例的访问令牌");
-    return false;
-  }
+  // Let the server decide whether this deployment requires a capability.
   view.dashboardStarted = true;
   const snapshotLoaded = await fetchSnapshot();
   if (view.authenticationFailed || !snapshotLoaded) return false;

@@ -26,10 +26,12 @@ DOCUMENTATION_URL = (
     f"https://github.com/ChangWinde/mocop/blob/v{__version__}/docs/API.md"
 )
 EVENT_STREAM_RESPONSE_TYPE = "text/event-stream"
+AUTHENTICATION_MODES = ("bearer", "none")
 
 # Access levels: public = unauthenticated discovery/health, authenticated =
 # Bearer read, reader = Bearer plus dashboard marker, writer = Bearer
-# same-origin write.
+# same-origin write. Explicit authentication="none" waives Bearer checks;
+# trusted Host/Fetch Metadata checks then apply to all non-public tiers.
 API_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/snapshot", "authenticated"),
     ("GET", "/api/events", "authenticated"),

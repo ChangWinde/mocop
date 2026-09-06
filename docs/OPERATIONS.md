@@ -50,7 +50,7 @@ journalctl --user -u mocop --since today
 
 `/healthz` proves the process is serving. `/readyz` is `503` until there is at
 least one target and one successful collection. Both are intentionally public.
-Telemetry and `/metrics` require the Bearer capability:
+With the default `authentication: "bearer"`, telemetry and `/metrics` require the Bearer capability:
 
 ```bash
 MOCOP_TOKEN="$(<"${XDG_CONFIG_HOME:-$HOME/.config}/mocop/access-token")"
@@ -64,6 +64,29 @@ Do not export the token globally, paste it into tickets, or enable shell tracing
 around these commands. A command-line header may be briefly visible to same-user
 process inspection; prefer a same-user, locked-down scraper configuration for
 continuous automation.
+
+## Direct access without a token
+
+Set `"authentication": "none"` in the local configuration, then run
+`mocop service install`. Open the printed dashboard URL directly; new tabs,
+reloads, SSE updates, settings, and `mocop api` require no token. The service
+installer verifies both the advertised mode and an anonymous snapshot request.
+Foreground launches use the same setting.
+
+Every client that can reach the listener gains the existing operator role,
+including configuration changes and supervised restart/update actions. This
+includes other local users and clients of any SSH tunnel or port forward.
+Use this mode only when deployment access controls admit the intended users.
+Host/Origin checks limit browser attacks; they do not identify a person.
+The listener address and `trusted_web_hosts` rules stay independent of this mode.
+
+Mocop neither creates nor reads a token in `none` mode; an existing token file
+is retained. Generated units may still name its reserved path. To restore
+authentication, set `"authentication": "bearer"` and run `mocop service install`;
+the installer validates or creates the token and prints a capability URL.
+The default remains `bearer`; missing tokens or invalid mode values never
+enable anonymous access. Configuration changes take effect after restart and
+cannot be made through the dashboard.
 
 ## Backup before upgrade
 

@@ -76,6 +76,7 @@ _REQUIRED_KEYS = {
     "listen_port",
 }
 _OPTIONAL_KEYS = {
+    "authentication",
     "local_host",
     "trusted_web_hosts",
     "history_points",
@@ -977,6 +978,9 @@ def _parse_config_bytes(content: bytes, config_path: Path) -> MonitorConfig:
     max_workers = _bounded_integer(data, "max_workers", 1, 64)
     listen_port = _bounded_integer(data, "listen_port", 1, 65535)
     trusted_web_hosts = _trusted_web_hosts(data)
+    authentication = data.get("authentication", "bearer")
+    if authentication not in ("bearer", "none"):
+        raise ConfigError('authentication must be "bearer" or "none"')
     history_points = _bounded_optional_int(data, "history_points", 720, 12, 8640)
     incident_history_points = _bounded_optional_int(
         data, "incident_history_points", 500, 20, 5000
@@ -1026,6 +1030,7 @@ def _parse_config_bytes(content: bytes, config_path: Path) -> MonitorConfig:
         max_workers=max_workers,
         listen_host=data["listen_host"].strip(),
         listen_port=listen_port,
+        authentication=authentication,
         ssh_discovery=ssh_discovery,
         updates=updates,
         trusted_web_hosts=trusted_web_hosts,

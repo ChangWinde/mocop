@@ -60,10 +60,7 @@ def _cli_failure(
 
 
 def _run_monitor(args: argparse.Namespace) -> int:
-    if args.managed_service and (args.config is None or args.access_token_file is None):
-        # The generated unit always passes both. A unit predating the
-        # capability (0.8.x) must be regenerated with `mocop service install`
-        # rather than silently minting a token nobody was shown.
+    if args.managed_service and args.config is None:
         print(
             "Configuration error: --managed-service requires --config and "
             "--access-token-file; re-run `mocop service install`",
@@ -85,7 +82,20 @@ def _run_monitor(args: argparse.Namespace) -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
     access_token = ""
-    if args.access_token_file is not None:
+    if config.authentication == "none":
+        if not args.once:
+            print(
+                "Authentication disabled: all reachable clients have operator access.",
+                file=sys.stderr,
+            )
+    elif args.managed_service and args.access_token_file is None:
+        print(
+            "Configuration error: --managed-service requires --access-token-file; "
+            "re-run `mocop service install`",
+            file=sys.stderr,
+        )
+        return 2
+    elif args.access_token_file is not None:
         try:
             access_token = read_access_token(args.access_token_file)
         except LifecycleError as exc:
@@ -188,6 +198,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
             monitor,
             trusted_hosts=config.trusted_web_hosts,
             access_token=access_token,
+            authentication=config.authentication,
             updates=updates,
         )
     except (OSError, ValueError, UnicodeError) as exc:
@@ -217,7 +228,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
         updates.start()
         print(f"Configuration: {config_path}")
         dashboard_url = _http_url(config.listen_host, config.listen_port)
-        if not args.managed_service:
+        if not args.managed_service and access_token:
             dashboard_url += f"#access_token={access_token}"
         print(f"Mocop: {dashboard_url}")
         while not stop_event.is_set() and not restart_event.is_set():
@@ -431,13 +442,18 @@ def _install_service(config_path: Path, *, as_json: bool) -> int:
     config = manager.install()
     try:
         active = manager.wait_until_active()
-        token = read_access_token(manager.access_token_path) if active else None
+        token = (
+            read_access_token(manager.access_token_path)
+            if active and config.authentication == "bearer"
+            else ""
+        )
         healthy = (
             manager.wait_until_healthy(
                 config.listen_host,
                 config.listen_port,
+                authentication=config.authentication,
             )
-            if token is not None
+            if active
             else False
         )
     except BaseException as verification_error:
@@ -467,11 +483,10 @@ def _install_service(config_path: Path, *, as_json: bool) -> int:
             print("Inspect it with: systemctl --user status mocop")
             print("Logs: journalctl --user -u mocop -f")
         return 1
-    assert token is not None
     manager.commit_install()
-    dashboard_url = (
-        f"{_http_url(config.listen_host, config.listen_port)}#access_token={token}"
-    )
+    dashboard_url = _http_url(config.listen_host, config.listen_port)
+    if token:
+        dashboard_url += f"#access_token={token}"
     if as_json:
         _emit_json(
             {

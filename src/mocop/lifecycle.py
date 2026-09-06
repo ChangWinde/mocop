@@ -378,7 +378,8 @@ class UserServiceManager:
                 raise LifecycleError(
                     f"configuration is not ready: {self.config_path}: {exc}"
                 ) from exc
-            ensure_access_token(self.config_path)
+            if config.authentication == "bearer":
+                ensure_access_token(self.config_path)
 
             environment_path = self.config_path.with_name("environment")
             if environment_path.exists() or environment_path.is_symlink():
@@ -567,12 +568,13 @@ class UserServiceManager:
         host: str,
         port: int,
         *,
+        authentication: str = "bearer",
         timeout_seconds: float = HEALTH_WAIT_SECONDS,
         poll_interval_seconds: float = 0.2,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> bool:
-        """Verify that the newly installed authenticated Mocop API is live.
+        """Verify liveness and the installation's selected authentication mode.
 
         The capability is never sent here. ``wait_until_active`` already
         confirmed this exact user unit is running, and its generated
@@ -581,9 +583,8 @@ class UserServiceManager:
         would instead expose it to whatever process holds the loopback port
         if our own unit crash-loops (a Type=simple unit reports active on
         fork, before a bind failure). Confirming liveness with an
-        unauthenticated request that must be rejected proves the listener is a
-        Mocop instance enforcing authentication and also catches a service
-        that started without a readable token (which would answer 200).
+        unauthenticated request must be rejected in Bearer mode. Explicit
+        ``none`` mode must advertise that policy and accept the snapshot read.
 
         The service restores its retained history before it binds, so the
         listener may appear well after the unit is active; the default window
@@ -613,7 +614,13 @@ class UserServiceManager:
                         connection.request("GET", "/api/snapshot")
                         protected = connection.getresponse()
                         protected.read()
-                        if protected.status == 403:
+                        policy = meta.get("authentication", {"mode": "bearer"})
+                        mode = policy.get("mode") if isinstance(policy, dict) else None
+                        expected_status = 200 if authentication == "none" else 403
+                        if (
+                            mode == authentication
+                            and protected.status == expected_status
+                        ):
                             return True
             except (
                 OSError,

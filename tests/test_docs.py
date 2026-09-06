@@ -91,7 +91,7 @@ class ApiReferenceDriftTests(unittest.TestCase):
         }
         self.assertEqual(documented, dict(ERROR_CODES))
         emitted: set[str] = set()
-        for module in ("web.py", "api_manifest.py", "api_schema.py"):
+        for module in ("web.py", "web_auth.py", "api_manifest.py", "api_schema.py"):
             source = (ROOT / "src" / "mocop" / module).read_text(encoding="utf-8")
             emitted.update(
                 node.value

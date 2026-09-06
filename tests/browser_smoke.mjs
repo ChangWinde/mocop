@@ -183,6 +183,7 @@ class CdpClient {
 
 const temporary = await mkdtemp(path.join(os.tmpdir(), "mocop-browser-"));
 const browserAccessToken = "B".repeat(43);
+const anonymousMode = process.env.MOCOP_BROWSER_AUTHENTICATION === "none";
 let monitor;
 let chrome;
 let monitorOutput = () => "";
@@ -258,71 +259,91 @@ try {
   });
   await loaded;
 
-  // A bare forwarded URL cannot inherit a capability from another tab. It
-  // must present an explicit, non-dismissible authentication flow instead of
-  // leaving the dashboard as an unexplained collection of empty placeholders.
-  await waitForEvaluation(cdp, "document.querySelector('#authentication-dialog')?.open");
-  const missingAuthentication = await cdp.evaluate(`({
-    open: document.querySelector("#authentication-dialog")?.open,
-    focused: document.activeElement?.id,
-    connection: document.querySelector("#connection-text")?.textContent,
-    stored: window.sessionStorage.getItem("mocop.dashboardAccessToken.v1"),
-  })`);
-  assert.deepEqual(missingAuthentication, {
-    open: true,
-    focused: "authentication-token",
-    connection: "需要访问令牌",
-    stored: null,
-  });
-
-  const invalidAuthentication = await cdp.evaluate(`(async () => {
-    const input = document.querySelector("#authentication-token");
-    input.value = "short";
-    document.querySelector("#authentication-form").requestSubmit();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    return {
-      open: document.querySelector("#authentication-dialog").open,
-      status: document.querySelector("#authentication-status").textContent,
+  if (anonymousMode) {
+    await waitForEvaluation(cdp, "document.querySelector('#server-ratio')?.textContent !== '— / —'");
+    assert.equal(await cdp.evaluate("document.querySelector('#authentication-dialog').open"), false);
+    assert.equal(await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"), null);
+    const writeStatus = await cdp.evaluate(`(async () => {
+      const response = await fetch('/api/settings/collector', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({pollIntervalSeconds: 5}),
+      });
+      return response.status;
+    })()`, true);
+    assert.equal(writeStatus, 200, "bare-URL viewer can save settings without a token");
+    const reloaded = cdp.waitFor("Page.loadEventFired", 30_000);
+    await cdp.send("Page.reload", { ignoreCache: true });
+    await reloaded;
+    await waitForEvaluation(cdp, "document.querySelector('#server-ratio')?.textContent !== '— / —'");
+    assert.equal(await cdp.evaluate("document.querySelector('#authentication-dialog').open"), false);
+    assert.equal(await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"), null);
+  } else {
+    // A bare forwarded URL cannot inherit a capability from another tab. It
+    // must present an explicit, non-dismissible authentication flow instead of
+    // leaving the dashboard as an unexplained collection of empty placeholders.
+    await waitForEvaluation(cdp, "document.querySelector('#authentication-dialog')?.open");
+    const missingAuthentication = await cdp.evaluate(`({
+      open: document.querySelector("#authentication-dialog")?.open,
+      focused: document.activeElement?.id,
+      connection: document.querySelector("#connection-text")?.textContent,
       stored: window.sessionStorage.getItem("mocop.dashboardAccessToken.v1"),
-    };
-  })()`, true);
-  assert.equal(invalidAuthentication.open, true);
-  assert.match(invalidAuthentication.status, /格式/);
-  assert.equal(invalidAuthentication.stored, null);
+    })`);
+    assert.deepEqual(missingAuthentication, {
+      open: true,
+      focused: "authentication-token",
+      connection: "需要访问令牌",
+      stored: null,
+    });
 
-  const wrongToken = "C".repeat(43);
-  await cdp.evaluate(`(() => {
-    const input = document.querySelector("#authentication-token");
-    input.value = ${JSON.stringify(wrongToken)};
-    document.querySelector("#authentication-form").requestSubmit();
-  })()`);
-  await waitForEvaluation(
-    cdp,
-    "document.querySelector('#authentication-status')?.textContent.includes('不正确')",
-  );
-  assert.equal(
-    await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"),
-    null,
-  );
+    const invalidAuthentication = await cdp.evaluate(`(async () => {
+      const input = document.querySelector("#authentication-token");
+      input.value = "short";
+      document.querySelector("#authentication-form").requestSubmit();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return {
+        open: document.querySelector("#authentication-dialog").open,
+        status: document.querySelector("#authentication-status").textContent,
+        stored: window.sessionStorage.getItem("mocop.dashboardAccessToken.v1"),
+      };
+    })()`, true);
+    assert.equal(invalidAuthentication.open, true);
+    assert.match(invalidAuthentication.status, /格式/);
+    assert.equal(invalidAuthentication.stored, null);
 
-  await cdp.evaluate(`(() => {
-    const input = document.querySelector("#authentication-token");
-    input.value = ${JSON.stringify(browserAccessToken)};
-    document.querySelector("#authentication-form").requestSubmit();
-  })()`);
-  await waitForEvaluation(
-    cdp,
-    "!document.querySelector('#authentication-dialog')?.open && Boolean(window.sessionStorage.getItem('mocop.dashboardAccessToken.v1'))",
-  );
-  const authenticatedReload = cdp.waitFor("Page.loadEventFired", 30_000);
-  await cdp.send("Page.reload", { ignoreCache: true });
-  await authenticatedReload;
-  await waitForEvaluation(cdp, "document.querySelector('#server-ratio')?.textContent !== '— / —'");
-  assert.equal(
-    await cdp.evaluate("document.querySelector('#authentication-dialog')?.open"),
-    false,
-  );
+    const wrongToken = "C".repeat(43);
+    await cdp.evaluate(`(() => {
+      const input = document.querySelector("#authentication-token");
+      input.value = ${JSON.stringify(wrongToken)};
+      document.querySelector("#authentication-form").requestSubmit();
+    })()`);
+    await waitForEvaluation(
+      cdp,
+      "document.querySelector('#authentication-status')?.textContent.includes('不正确')",
+    );
+    assert.equal(
+      await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"),
+      null,
+    );
 
+    await cdp.evaluate(`(() => {
+      const input = document.querySelector("#authentication-token");
+      input.value = ${JSON.stringify(browserAccessToken)};
+      document.querySelector("#authentication-form").requestSubmit();
+    })()`);
+    await waitForEvaluation(
+      cdp,
+      "!document.querySelector('#authentication-dialog')?.open && Boolean(window.sessionStorage.getItem('mocop.dashboardAccessToken.v1'))",
+    );
+    const authenticatedReload = cdp.waitFor("Page.loadEventFired", 30_000);
+    await cdp.send("Page.reload", { ignoreCache: true });
+    await authenticatedReload;
+    await waitForEvaluation(cdp, "document.querySelector('#server-ratio')?.textContent !== '— / —'");
+    assert.equal(
+      await cdp.evaluate("document.querySelector('#authentication-dialog')?.open"),
+      false,
+    );
+
+  }
   // Keep the original capability-link path covered independently: a fragment
   // still auto-authenticates, is scrubbed immediately, and can perform the
   // pre-snapshot collector update without an unauthenticated request.
@@ -2697,8 +2718,8 @@ try {
   );
   assert.equal(
     audit.unauthenticatedPrivateRequests,
-    1,
-    "only the explicit wrong-token submission reaches a private route unauthenticated",
+    anonymousMode ? 0 : 2,
+    "the bare-URL bootstrap and explicit wrong-token submission are rejected",
   );
   assert.deepEqual(await cdp.send("Network.getAllCookies"), { cookies: [] });
   assert.deepEqual(cdp.errors, []);

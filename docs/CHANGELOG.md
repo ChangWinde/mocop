@@ -4,6 +4,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Added
+
+- Optional `authentication: "none"` for direct dashboard and API access without
+  a token. New tabs and reloads open immediately; CLI and service lifecycle
+  commands support the same mode. Bearer authentication remains the default.
+  Direct access grants the operator role to every reachable client while
+  retaining Host, Origin, Fetch Metadata, and request validation.
+
 ### Fixed
 
 - A single failed probe no longer closes a host's whole GPU process

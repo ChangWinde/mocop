@@ -95,6 +95,7 @@ interfaces without a runtime plugin registry.
 | `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query and body schemas, body caps, error catalog; `/api/meta` publishes it and every GET query and POST body is validated through it |
 | `api_describe.py` | how the manifest is published through `GET /api/meta`: the meta document, field conventions, write requirements |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
+| `web_auth.py` | non-public request authentication: default Bearer validation or explicit direct access with trusted Host and Fetch Metadata checks |
 | `client.py` | the local client behind `mocop api`: listener from the configuration, capability from the private file, public and authenticated GETs, and writer-tier POSTs presenting the listener's own origin |
 | `cli_arguments.py` | the `mocop` command line: every subcommand, flag, and help text, separate from the runtime that acts on them |
 | `static_assets.py` | static asset route table, strong ETags, and conditional-delivery validators |
@@ -202,7 +203,11 @@ inventory initialization. Retention and database page limits are configuration b
 OpenMetrics remains current-state only.
 
 The HTTP boundary authenticates every private route with the per-install Bearer
-capability. Browser writes additionally require an exact trusted backend Host and a
+capability by default. Explicit `authentication: "none"` transfers caller authorization
+to deployment reachability and checks Host/Fetch Metadata for all non-public requests.
+`web_auth.py` owns both checks; `/api/meta` advertises the selected mode.
+[ADR-0030](adr/0030-optional-dashboard-authentication.md) records the trade-off.
+Browser writes additionally require an exact trusted backend Host and a
 trusted Origin. Deployments with ephemeral Host-rewriting preview names may authorize
 a bounded `*.example` HTTPS Origin suffix; suffix entries never authorize Host and no
 `X-Forwarded-*` header participates in the trust decision.
@@ -283,9 +288,9 @@ Package installation remains separate from local service deployment. On a fresh 
 uses the current hostname as the local target, enables resolved SSH discovery by default,
 and refuses existing configuration or capability state. `mocop init` remains the
 non-overwriting lower-level configuration command. `mocop service install` validates a
-configuration, creates or validates the sibling private Bearer token, generates a unit
+configuration, creates or validates the sibling private token in Bearer mode, generates a unit
 for the active Python environment, enables the user service, starts it, verifies active
-state, and prints a fragment-bearing capability URL. [ADR-0024](adr/0024-fresh-host-fast-deployment.md)
+state, and prints a dashboard URL (with a capability fragment in Bearer mode). [ADR-0024](adr/0024-fresh-host-fast-deployment.md)
 records the composition and rejected remote-script alternative.
 
 The user service is intentional because OpenSSH configuration, `known_hosts`, keys,
@@ -331,7 +336,7 @@ rejected notification-only and bootstrap-script alternatives.
 - Failed hosts keep their last successful data, marked stale and excluded from current totals.
 - SSE sends a named heartbeat every 15 seconds. The dashboard consumes it through
   fetch streaming because native `EventSource` cannot attach the Bearer capability;
-  the server has no unauthenticated mode.
+  the same parser serves the explicit `authentication: "none"` mode without a header.
 - `/healthz` reports process liveness; `/readyz` requires a discovered target and one successful sample.
 - The default listener is loopback. Remote access requires external TLS and authenticated authorization.
 - A fatal collector scheduler failure exits the process non-zero so the user service restarts it.

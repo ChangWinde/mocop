@@ -59,7 +59,7 @@ the tier its handler enforces. Field-level examples are maintained by hand.
   route fallback, so an unauthenticated request under a protected family may
   receive `403 AUTHENTICATION_REQUIRED` without revealing whether that route
   exists.
-- **Authentication:** every API and OpenMetrics route except `/api/meta`,
+- **Authentication:** by default (`authentication: "bearer"`), every API and OpenMetrics route except `/api/meta`,
   `/healthz`, and `/readyz` requires exactly one `Authorization: Bearer
   <capability>` header.
   `mocop service install` creates the capability as a private `0600` file
@@ -75,10 +75,22 @@ the tier its handler enforces. Field-level examples are maintained by hand.
   a submitted token only after an authenticated snapshot succeeds; malformed or
   rejected tokens remain unstored and do not enter a reconnect loop.
 
+With the explicit configuration `authentication: "none"`, the dashboard opens
+from a bare URL and non-public routes do not require a Bearer header. The
+public meta document reports `authentication: {"mode": "none"}` and
+`write.authorization: "none"` (`"bearer"` and `"Bearer"` respectively in the
+default mode). Route tiers remain stable: in `none` mode, A requires a trusted
+Host and non-cross-site Fetch Metadata, R additionally requires the dashboard
+marker, and W still requires Origin, JSON, and body validation. An invalid
+Host or cross-site request receives `403 UNTRUSTED_ORIGIN` even without a token.
+Every reachable client has operator access; this is not a read-only mode.
+See [direct access](OPERATIONS.md#direct-access-without-a-token).
+
 ## Access tiers
 
 Every endpoint belongs to one of four tiers (the `access` value in
-`GET /api/meta`):
+`GET /api/meta`). The table describes the default Bearer mode; the explicit
+`none` exception above changes authentication, not route or body schemas:
 
 | Tier | `access` | Requirements |
 |---|---|---|
@@ -852,6 +864,7 @@ document lives for the running release.
   "apiVersion": "2",
   "appVersion": "<release>",
   "schemaVersion": 1,
+  "authentication": {"mode": "bearer"},
   "documentation": "https://github.com/ChangWinde/mocop/blob/v<release>/docs/API.md",
   "capabilities": {
     "restartSupported": true,

@@ -136,6 +136,10 @@ mocop doctor
 `~/.config/mocop/access-token`）的内容。能力的完整规则由
 [API 参考](../../API.md#scope-and-compatibility)负责说明。
 
+希望打开链接即可访问，可设置 `"authentication": "none"` 后重新安装服务。
+此时所有能连接到服务的客户端均可查看数据和操作设置，具体见
+[免 token 访问](../../OPERATIONS.md#direct-access-without-a-token)。
+
 直接运行 `mocop` 可使用前台模式。后台服务可通过以下命令管理：
 
 ```bash

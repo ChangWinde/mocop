@@ -37,3 +37,4 @@ for status and superseding rules.
 | [0027](0027-restored-incident-generations.md) | Accepted | Incident generations survive a service restart |
 | [0028](0028-duration-floor-for-resource-conditions.md) | Accepted | Wall-clock duration floor for resource conditions |
 | [0029](0029-process-inventory-observation-gaps.md) | Accepted | Observation-gap semantics for the GPU process inventory |
+| [0030](0030-optional-dashboard-authentication.md) | Accepted | Optional dashboard authentication |

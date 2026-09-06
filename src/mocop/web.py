@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 import json
 import math
 import socket
@@ -16,7 +15,7 @@ from urllib.parse import SplitResult, urlsplit
 from . import __version__
 from .api_describe import describe_meta
 from .api_manifest import (
-    DOCUMENTATION_URL,
+    AUTHENTICATION_MODES,
     QUERY_SCHEMAS,
     ROUTE_METHODS,
     WRITE_BODY_LIMITS,
@@ -56,6 +55,7 @@ from .static_assets import (
     strong_etag,
 )
 from .updates import UpdateStatusSource
+from .web_auth import authentication_error
 
 _SSE_HEARTBEAT_SECONDS = 15.0
 # SSE loops wake at this cadence to notice the server shutdown event.
@@ -124,13 +124,15 @@ class MonitorHttpServer(ThreadingHTTPServer):
         probe_control: ProbeControl | None = None,
         *,
         access_token: str,
+        authentication: str = "bearer",
         trusted_hosts: Iterable[str] | None = None,
         updates: UpdateStatusSource | None = None,
     ) -> None:
-        # Every private route is Bearer-protected; there is no unauthenticated
-        # server mode, so an empty capability is a programming error.
-        if not access_token:
+        if authentication not in AUTHENTICATION_MODES:
+            raise ValueError("invalid HTTP authentication mode")
+        if authentication == "bearer" and not access_token:
             raise ValueError("the HTTP server requires a non-empty access token")
+        self.authentication = authentication
         try:
             socket.inet_pton(socket.AF_INET6, address[0].split("%", 1)[0])
         except OSError:
@@ -354,45 +356,22 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             )
             return None
 
-    def _has_bearer_token(self) -> bool:
-        """Authenticate a bootstrap request without accepting ambiguity."""
-        expected = self.monitor_server.access_token
-        values = self.headers.get_all("Authorization") or []
-        if len(values) != 1 or not values[0].startswith("Bearer "):
-            return False
-        candidate = values[0][len("Bearer ") :]
-        try:
-            return hmac.compare_digest(candidate, expected)
-        except TypeError:
-            # Header values are latin-1 and may carry non-ASCII bytes, which
-            # compare_digest refuses; such a credential is simply wrong and
-            # must produce the documented 403, not a reset connection.
-            return False
-
     def _require_authentication(self, path: str) -> bool:
-        """Protect every non-health API surface from other local users."""
+        """Apply the configured policy before routing any non-public API request."""
         if path in {"/healthz", "/readyz", "/api/meta"}:
             return True
         if not (_is_api_family_path(path) or path == "/metrics"):
             return True
-        if self._has_bearer_token():
-            return True
-        # An agent that reaches this cold learns where the capability lives
-        # and where the contract is documented without leaving the response.
-        self._send_json(
-            {
-                "error": "dashboard authentication required",
-                "code": "AUTHENTICATION_REQUIRED",
-                "hint": (
-                    "Send 'Authorization: Bearer <capability>'. A managed "
-                    "service stores it in the private access-token file beside "
-                    "its configuration (~/.config/mocop/access-token by default); "
-                    "a foreground run prints it once as the URL fragment."
-                ),
-                "documentation": DOCUMENTATION_URL,
-            },
-            HTTPStatus.FORBIDDEN,
+        server = self.monitor_server
+        error = authentication_error(
+            self.headers,
+            server.authentication,
+            server.access_token,
+            server.trusted_hostnames,
         )
+        if error is None:
+            return True
+        self._send_json(error, HTTPStatus.FORBIDDEN)
         return False
 
     def _refuse_request_body(self) -> bool:
@@ -528,6 +507,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 manual_probe_supported=server.probe_control is not None,
                 configuration_write_supported=self._configuration_write_supported(),
                 update_supported=server.updates is not None,
+                authentication=server.authentication,
             )
         )
 

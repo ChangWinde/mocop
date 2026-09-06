@@ -80,6 +80,8 @@ jobs:
           python -c 'import json; data=json.load(open("/tmp/snapshot.json")); assert data["stats"]["servers"] == 0'
       - name: Browser smoke test
         run: MOCOP_BROWSER_WARMUP_MS=8000 node --experimental-websocket tests/browser_smoke.mjs
+      - name: Browser smoke test without a token
+        run: MOCOP_BROWSER_AUTHENTICATION=none MOCOP_BROWSER_WARMUP_MS=8000 node --experimental-websocket tests/browser_smoke.mjs
 
   coverage:
     runs-on: ubuntu-latest

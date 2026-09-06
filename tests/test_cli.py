@@ -69,6 +69,7 @@ class CliTests(unittest.TestCase):
         # A unit that predates the capability must be regenerated instead of
         # the service silently minting a token that nobody was shown.
         config_path = write_config(self.root / "config.json")
+        config_path.chmod(0o600)
         for argv in (
             ["--managed-service"],
             ["--managed-service", "--config", str(config_path)],

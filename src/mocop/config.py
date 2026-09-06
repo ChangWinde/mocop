@@ -184,6 +184,7 @@ class MonitorConfig:
     max_workers: int
     listen_host: str
     listen_port: int
+    authentication: str = "bearer"
     ssh_discovery: SshDiscoveryConfig = field(default_factory=SshDiscoveryConfig)
     updates: UpdatesConfig = field(default_factory=UpdatesConfig)
     trusted_web_hosts: tuple[str, ...] = ()

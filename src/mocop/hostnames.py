@@ -84,13 +84,20 @@ def has_trusted_host(headers: _Headers, trusted_hostnames: frozenset[str]) -> bo
     return hostname is not None and hostname in trusted_hostnames
 
 
-def is_dashboard_read(headers: _Headers, trusted_hostnames: frozenset[str]) -> bool:
-    """A marked read from a trusted Host that Fetch Metadata does not call cross-site."""
+def is_trusted_request(headers: _Headers, trusted_hostnames: frozenset[str]) -> bool:
+    """A trusted Host that Fetch Metadata does not identify as cross-site."""
     fetch_site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
     return (
         has_trusted_host(headers, trusted_hostnames)
-        and headers.get("X-Monitor-Request") == "dashboard"
         and fetch_site in _SAME_ORIGIN_FETCH_SITES
+    )
+
+
+def is_dashboard_read(headers: _Headers, trusted_hostnames: frozenset[str]) -> bool:
+    """A marked read from a trusted Host that Fetch Metadata does not call cross-site."""
+    return (
+        is_trusted_request(headers, trusted_hostnames)
+        and headers.get("X-Monitor-Request") == "dashboard"
     )
 
 
