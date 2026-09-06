@@ -59,6 +59,27 @@ async function waitForEvaluation(client, expression, timeoutMs = 10_000) {
   throw new Error(`Timed out waiting for browser expression: ${expression}; last=${value}`);
 }
 
+// Serialized into browser evaluations: never reopen until the application's
+// queued close handler has finished clearing the previous selection.
+function waitForDialogClose(dialog, action = () => dialog.close()) {
+  return new Promise((resolve, reject) => {
+    if (!dialog.open) {
+      reject(new Error(`Expected an open dialog: ${dialog.id}`));
+      return;
+    }
+    const onClose = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      dialog.removeEventListener("close", onClose);
+      reject(new Error(`Dialog close event timed out: ${dialog.id}`));
+    }, 10_000);
+    dialog.addEventListener("close", onClose, { once: true });
+    action();
+  });
+}
+
 function capture(process) {
   let output = "";
   for (const stream of [process.stdout, process.stderr]) {
@@ -1501,6 +1522,7 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 200));
 
   const personalization = await cdp.evaluate(`(async () => {
+    const waitForDialogClose = ${waitForDialogClose};
     const serverItems = [...document.querySelectorAll(".server-item[data-host]:not([data-host='all'])")];
     const utilizationVisible = serverItems.every(
       (item) => item.textContent.includes("GPU") && item.textContent.includes("CPU"),
@@ -1970,7 +1992,7 @@ try {
     taskSearch.dispatchEvent(new Event("input", { bubbles: true }));
     selectedRecord.server.gpus[gpuSlot] = originalGpu;
     render();
-    taskDialog.close();
+    await waitForDialogClose(taskDialog);
     return result;
   })()`, true);
   assert.equal(personalization.utilizationVisible, true);
@@ -2121,6 +2143,7 @@ try {
   assert.match(personalization.restartStatus, /不支持网页重启/);
 
   const gpuTasks = await cdp.evaluate(`(async () => {
+    const waitForDialogClose = ${waitForDialogClose};
     const server1 = view.snapshot.servers.find((item) => item.host === "atlas-01");
     const gpu1 = server1.gpus.find((item) => item.index === 0);
     selectHost("atlas-01");
@@ -2139,8 +2162,7 @@ try {
     const identityFilters = [...document.querySelectorAll("[data-gpu-task-filter]")]
       .map((button) => button.dataset.gpuTaskFilter);
     const processCsv = buildCsv([{ server: server1, gpu: gpu1 }]);
-    taskDialog.close();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForDialogClose(taskDialog);
     selectHost("all");
     const processSortControl = document.querySelector("#gpu-sort");
     processSortControl.value = "processes";
@@ -2267,7 +2289,7 @@ try {
       ageAt: item.querySelector(".age-relative").dataset.ageAt,
     }));
     const timelineTaskCount = document.querySelector("#gpu-task-count").textContent;
-    taskDialog.close();
+    await waitForDialogClose(taskDialog);
     selectHost("all");
     return {
       inventoryProcessText, processFirst, insightText, identityFilters,
@@ -2356,12 +2378,14 @@ try {
   assert.match(gpuTasks.timelineItems[0].ageAt, /^\d{4}-\d{2}-\d{2}T/);
 
   const gpuTaskFleetSearch = await cdp.evaluate(`(async () => {
+    const waitForDialogClose = ${waitForDialogClose};
     const server = view.snapshot.servers.find((item) => item.host === "atlas-01");
     openGpuDetail(server, server.gpus.find((item) => item.index === 0));
-    document.querySelector(
-      '#gpu-task-list .gpu-task[data-process-key^="10000|"] .gpu-task-action',
-    ).click();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForDialogClose(document.querySelector("#gpu-detail-dialog"), () => {
+      document.querySelector(
+        '#gpu-task-list .gpu-task[data-process-key^="10000|"] .gpu-task-action',
+      ).click();
+    });
     const result = {
       dialogOpen: document.querySelector("#gpu-detail-dialog").open,
       selectedHost: view.selectedHost,
@@ -2380,10 +2404,7 @@ try {
   assert.equal(gpuTaskFleetSearch.searchFocused, true);
 
   const resilience = await cdp.evaluate(`(async () => {
-    // Dialog close events fire from queued tasks; flush any close pending
-    // from earlier steps before reopening, or it would wipe this test state.
-    document.querySelector("#gpu-detail-dialog").close();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const waitForDialogClose = ${waitForDialogClose};
     const server = view.snapshot.servers.find((item) => item.host === "atlas-01");
     const gpu = server.gpus.find((item) => item.index === 0);
     openGpuDetail(server, gpu);
@@ -2412,16 +2433,7 @@ try {
     renderGpuHistory();
     const failureText = document.querySelector("#gpu-history-grid")?.textContent || "";
     const timelineText = document.querySelector("#gpu-process-timeline")?.textContent || "";
-    const dialog = document.querySelector("#gpu-detail-dialog");
-    // Cleanup runs in the queued close event, not synchronously in close().
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("GPU dialog close event timed out")), 10_000);
-      dialog.addEventListener("close", () => {
-        clearTimeout(timer);
-        resolve();
-      }, { once: true });
-      dialog.close();
-    });
+    await waitForDialogClose(document.querySelector("#gpu-detail-dialog"));
     const cleanedUp = gpuHistoryLoader.state.retryTimer == null
       && view.gpuTaskRowCache.size === 0
       && document.querySelector("#gpu-task-list").children.length === 0
