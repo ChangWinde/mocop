@@ -7,21 +7,24 @@ import queue
 import sqlite3
 import threading
 import time
-from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
 
 from .config import PersistenceConfig
 from .incident_types import IncidentEvent
-from .persistence_restore import (
-    FIRST_SEEN_KEY,
-    INTERNAL_USAGE_HOST,
-    INTERNAL_USAGE_KEY,
-    LoadedTelemetry,
-    restore_telemetry,
+from .persistence_api import (
+    DisabledPersistence,
+    PersistenceError,
+    TelemetryPersistence,
+)
+from .persistence_restore import LoadedTelemetry, restore_telemetry
+from .persistence_rollups import (
+    ensure_rollups,
+    load_report_inputs,
+    prune_rollups,
+    upsert_rollups,
 )
 from .persistence_schema import (
     CREATE_SCHEMA_STATEMENTS,
@@ -29,6 +32,12 @@ from .persistence_schema import (
     HISTORY_FIELDS,
     SCHEMA_VERSION,
 )
+from .persistence_transitions import (
+    FIRST_SEEN_KEY,
+    INTERNAL_USAGE_HOST,
+    INTERNAL_USAGE_KEY,
+)
+from .reports import ReportInputs
 
 # Keep the released v3 process_events table byte-for-byte compatible.  Older
 # writers use positional INSERTs, so even an appended nullable column would
@@ -100,67 +109,6 @@ def _is_size_error(exc: sqlite3.Error) -> bool:
     return "full" in str(exc).lower()
 
 
-class PersistenceError(RuntimeError):
-    """Raised when explicitly enabled persistence cannot start safely."""
-
-
-class TelemetryPersistence(Protocol):
-    def is_enabled(self) -> bool: ...
-
-    def load(self, history_points: int, incident_points: int) -> LoadedTelemetry: ...
-
-    def record_history(self, host: str, point: dict[str, object]) -> None: ...
-
-    def record_incidents(self, events: tuple[IncidentEvent, ...]) -> None: ...
-
-    def record_gpu_telemetry(
-        self,
-        host: str,
-        points: tuple[dict[str, object], ...],
-        process_events: tuple[dict[str, object], ...],
-    ) -> None: ...
-
-    def status(self) -> dict[str, object]: ...
-
-    def close(self, timeout_seconds: float = 5.0) -> None: ...
-
-
-class DisabledPersistence:
-    def is_enabled(self) -> bool:
-        return False
-
-    def load(self, history_points: int, incident_points: int) -> LoadedTelemetry:
-        del history_points, incident_points
-        return LoadedTelemetry({}, ())
-
-    def record_history(self, host: str, point: dict[str, object]) -> None:
-        del host, point
-
-    def record_incidents(self, events: tuple[IncidentEvent, ...]) -> None:
-        del events
-
-    def record_gpu_telemetry(
-        self,
-        host: str,
-        points: tuple[dict[str, object], ...],
-        process_events: tuple[dict[str, object], ...],
-    ) -> None:
-        del host, points, process_events
-
-    def status(self) -> dict[str, object]:
-        return {
-            "enabled": False,
-            "backend": "memory",
-            "healthy": True,
-            "queuedWrites": 0,
-            "droppedWrites": 0,
-            "lastError": None,
-        }
-
-    def close(self, timeout_seconds: float = 5.0) -> None:
-        del timeout_seconds
-
-
 @dataclass(frozen=True, slots=True)
 class _HistoryWrite:
     host: str
@@ -198,11 +146,15 @@ class SqliteTelemetryPersistence:
     writer owns its SQLite connection, batches commits, and contains disk failures.
     """
 
-    def __init__(self, config: PersistenceConfig, path: Path) -> None:
+    def __init__(
+        self, config: PersistenceConfig, path: Path, *, busy_pct: float = 10.0
+    ) -> None:
         if not config.enabled:
             raise ValueError("SQLite persistence requires enabled configuration")
         self._config = config
         self._path = path.expanduser().absolute()
+        self._busy_pct = float(busy_pct)
+        self._rollups_enabled = False
         self._queue: queue.Queue[_QueueItem] = queue.Queue(_QUEUE_CAPACITY)
         # Serializes producer admission with close.  Without this boundary a
         # producer could observe ``_closed == False``, lose the CPU to close,
@@ -230,6 +182,18 @@ class SqliteTelemetryPersistence:
         try:
             with closing(self._connect()) as connection:
                 return restore_telemetry(connection, history_points, incident_points)
+        except sqlite3.Error as exc:
+            raise PersistenceError("cannot read the SQLite history database") from exc
+
+    def report_inputs(self, since_hour: str) -> ReportInputs | None:
+        """Rows for a long-window report; None until the rollup table exists."""
+        if not self._rollups_enabled:
+            return None
+        try:
+            with closing(self._connect()) as connection:
+                return load_report_inputs(
+                    connection, self._config.retention_hours, since_hour
+                )
         except sqlite3.Error as exc:
             raise PersistenceError("cannot read the SQLite history database") from exc
 
@@ -367,6 +331,10 @@ class SqliteTelemetryPersistence:
                             "history database exceeds the configured size limit"
                         )
                     self._apply_size_limit(connection)
+                rollup_error = ensure_rollups(connection, self._busy_pct)
+                self._rollups_enabled = rollup_error is None
+                if rollup_error is not None:
+                    self._set_error(rollup_error)
             self._path.chmod(0o600)
         except PersistenceError:
             raise
@@ -544,7 +512,11 @@ class SqliteTelemetryPersistence:
                 written_records = 0
                 with connection:
                     for item in writes:
-                        written_records += self._write(connection, item)
+                        written_records += self._write(
+                            connection,
+                            item,
+                            self._busy_pct if self._rollups_enabled else None,
+                        )
             except sqlite3.Error as exc:
                 if not pruned and _is_size_error(exc):
                     # Expired records may free enough space; retry this batch
@@ -572,7 +544,9 @@ class SqliteTelemetryPersistence:
         return True
 
     @staticmethod
-    def _write(connection: sqlite3.Connection, item: _Write) -> int:
+    def _write(
+        connection: sqlite3.Connection, item: _Write, busy_pct: float | None
+    ) -> int:
         if isinstance(item, _HistoryWrite):
             point = item.point
             cursor = connection.execute(
@@ -591,7 +565,9 @@ class SqliteTelemetryPersistence:
             return max(0, cursor.rowcount)
 
         if isinstance(item, _GpuTelemetryWrite):
-            return SqliteTelemetryPersistence._write_gpu_telemetry(connection, item)
+            return SqliteTelemetryPersistence._write_gpu_telemetry(
+                connection, item, busy_pct
+            )
 
         assert isinstance(item, _IncidentWrite)
         event = item.event
@@ -625,9 +601,13 @@ class SqliteTelemetryPersistence:
 
     @staticmethod
     def _write_gpu_telemetry(
-        connection: sqlite3.Connection, item: _GpuTelemetryWrite
+        connection: sqlite3.Connection,
+        item: _GpuTelemetryWrite,
+        busy_pct: float | None,
     ) -> int:
         written_records = 0
+        if item.points and busy_pct is not None:
+            upsert_rollups(connection, item.host, item.points, busy_pct)
         if item.points:
             cursor = connection.executemany(
                 """
@@ -777,15 +757,14 @@ class SqliteTelemetryPersistence:
         connection.execute(
             "DELETE FROM process_events WHERE observed_at < ?", (cutoff_text,)
         )
+        if self._rollups_enabled:
+            prune_rollups(connection, self._config.retention_hours)
         if reclaim_pages > 0:
             _reclaim_free_pages(connection, reclaim_pages)
 
     def _set_error(self, message: str) -> None:
         with self._status_lock:
             self._last_error = message
-
-
-PersistenceFactory = Callable[[PersistenceConfig, Path], TelemetryPersistence]
 
 
 def user_state_path(environ: dict[str, str] | None = None) -> Path:
@@ -798,19 +777,14 @@ def user_state_path(environ: dict[str, str] | None = None) -> Path:
     return (root / "mocop" / "history.sqlite3").absolute()
 
 
-def _disabled_factory(_config: PersistenceConfig, _path: Path) -> TelemetryPersistence:
-    return DisabledPersistence()
-
-
-_PERSISTENCE_FACTORIES: dict[str, PersistenceFactory] = {
-    "memory": _disabled_factory,
-    "sqlite": SqliteTelemetryPersistence,
-}
-
-
 def create_persistence(
     config: PersistenceConfig,
     path: Path | None = None,
+    *,
+    busy_pct: float = 10.0,
 ) -> TelemetryPersistence:
-    backend = "sqlite" if config.enabled else "memory"
-    return _PERSISTENCE_FACTORIES[backend](config, path or user_state_path())
+    if not config.enabled:
+        return DisabledPersistence()
+    return SqliteTelemetryPersistence(
+        config, path or user_state_path(), busy_pct=busy_pct
+    )

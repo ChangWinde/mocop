@@ -104,6 +104,7 @@ class InventoryTests(unittest.TestCase):
                 "until": "2026-01-05T01:00:00Z",
                 "reason": "Weekly patching",
                 "recurring": True,
+                "cadence": "weekly",
                 "active": True,
             },
         )
@@ -144,6 +145,7 @@ class InventoryTests(unittest.TestCase):
                     "until": "2026-01-12T01:00:00Z",
                     "reason": "Weekly patching",
                     "recurring": True,
+                    "cadence": "weekly",
                     "active": False,
                 },
                 "gpu-02": {

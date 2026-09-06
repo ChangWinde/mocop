@@ -14,38 +14,49 @@ from datetime import datetime, timedelta, timezone
 
 @dataclass(frozen=True, slots=True)
 class MaintenanceWindowConfig:
-    """One-shot (absolute `until`) or weekly recurring silence window.
+    """One-shot (absolute `until`), weekly, or daily recurring silence window.
 
     Recurring windows are defined in UTC: `weekday` follows Python's Monday=0
-    convention, `start_minutes` counts from UTC midnight, and the duration is
-    bounded below one week so instances can never overlap themselves.
+    convention (``None`` with ``daily`` set means every day), `start_minutes`
+    counts from UTC midnight, and the duration is bounded below the period
+    (one week, or one day) so instances can never overlap themselves.
     """
 
     reason: str
     until: datetime | None = None
     weekday: int | None = None
+    daily: bool = False
     start_minutes: int | None = None
     duration_minutes: int | None = None
 
     @property
     def recurring(self) -> bool:
-        return self.weekday is not None
+        return self.daily or self.weekday is not None
+
+    @property
+    def cadence(self) -> str | None:
+        if self.daily:
+            return "daily"
+        return "weekly" if self.weekday is not None else None
+
+    @property
+    def _period(self) -> timedelta:
+        return timedelta(days=1 if self.daily else 7)
 
     def _instance_end(self, now: datetime) -> datetime:
         """Return the end of the active instance, or of the next one."""
-        assert self.weekday is not None
         assert self.start_minutes is not None
         assert self.duration_minutes is not None
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        days_back = (now.weekday() - self.weekday) % 7
+        days_back = 0 if self.daily else (now.weekday() - self.weekday) % 7  # type: ignore[operator]
         start = (
             midnight - timedelta(days=days_back) + timedelta(minutes=self.start_minutes)
         )
         if start > now:
-            start -= timedelta(days=7)
+            start -= self._period
         end = start + timedelta(minutes=self.duration_minutes)
         if end <= now:
-            end = start + timedelta(days=7, minutes=self.duration_minutes)
+            end = start + self._period + timedelta(minutes=self.duration_minutes)
         return end
 
     def is_active(self, at: datetime | None = None) -> bool:
@@ -72,4 +83,5 @@ class MaintenanceWindowConfig:
             "until": end.isoformat(timespec="seconds").replace("+00:00", "Z"),
             "reason": self.reason,
             "recurring": True,
+            "cadence": self.cadence,
         }

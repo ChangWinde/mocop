@@ -125,9 +125,15 @@ A maintenance window contains optional `reason` (at most 120 visible
 characters) and exactly one of:
 
 - `until`: strict UTC `YYYY-MM-DDTHH:MM:SSZ` timestamp.
-- `recurrence`: exactly `{weekday, start, duration_minutes}`, where weekday is
-  integer 0–6 (Monday–Sunday), start is `HH:MM` UTC, and duration is integer
-  1–10,079 minutes (strictly less than one week).
+- `recurrence`: `{weekday, start, duration_minutes}` for a weekly window or
+  `{daily: true, start, duration_minutes}` for one that repeats every day
+  (exactly one of `weekday` and `daily`). `weekday` is integer 0–6
+  (Monday–Sunday), `start` is `HH:MM` UTC, and `duration_minutes` is an
+  integer strictly below the period: 1–10,079 for weekly, 1–1,439 for daily,
+  so an instance always ends before the next begins. A daily window is the
+  tool for a link that degrades at the same hour every day — for example a
+  home uplink whose relay drops nightly — so the hosts behind it are silenced
+  for that span instead of alerting every evening.
 
 An `incident_actions` item has `host`, `condition_key`, `action`, `until`, and
 `reason`, plus optional `incident_started_at`; no other shape is accepted. The
@@ -191,7 +197,15 @@ with `VACUUM` before the cap is checked. That rebuild takes well under a second
 per hundred megabytes of live data and needs temporary disk space up to the
 file's size; when it cannot run (a full disk), the service still starts and
 reclaims what the online path can. Lowering `max_bytes` therefore takes effect
-at the next start as long as the live data fits. `identity` reads bounded UID/start/command metadata; `auto` additionally
+at the next start as long as the live data fits.
+
+`retention_hours` also bounds how far back `GET /api/reports/usage` can
+account owner occupancy exactly, because it pairs the retained process
+transitions; raise it (168 hours is a week) when weekly reports matter. The
+hourly GPU rollups behind `GET /api/reports/utilization` are small and are
+kept for 90 days or `retention_hours`, whichever is longer.
+
+`identity` reads bounded UID/start/command metadata; `auto` additionally
 classifies supported scheduler/container contexts. Neither mode executes a
 scheduler client.
 

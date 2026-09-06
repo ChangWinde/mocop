@@ -157,6 +157,40 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Long-window reports from the history database. `GET /api/reports/usage`
+  pairs every retained process transition (no per-device cap, so
+  `partialGpus` is always zero and owner GPU-hours are exact over the raw
+  retention), classifies idle occupancy from hourly rollups, and adds a
+  per-day split; `GET /api/reports/utilization` gives hourly busy share,
+  utilization and memory per host or per device over up to 90 days. The
+  rollups (`gpu_hourly`) are maintained by the writer in the same
+  transaction as the raw samples and backfilled at startup from the raw
+  table in well under a second per million rows; a database at its size cap
+  keeps starting as before and the rollups wait for retention to free space.
+  Both endpoints answer `503 HISTORY_UNAVAILABLE` without persistence, and
+  the usage-accounting playbook points long windows at them. The work split
+  six modules along existing seams to stay under their ceilings:
+  `api_describe.py`, `persistence_api.py`, `persistence_rollups.py`,
+  `persistence_transitions.py`, `usage_views.py`, and `reports.py`; the
+  GET dispatcher in `web.py` became a table.
+- `GET /api/incidents` correlations gain a `simultaneous_connectivity_loss`
+  kind: when at least three hosts and half of the monitored fleet lose
+  connectivity within 120 seconds of each other, one fleet-wide correlation
+  (`anchor: null`) says the monitor's own uplink or a shared relay is the
+  likely cause, instead of leaving N unrelated-looking connectivity incidents.
+  It needs no topology configuration, subsumes configured-path groups inside
+  it, rides along in webhook payloads like the existing kind, and the
+  dashboard's attention panel lists it first as "疑似监控端链路故障". The
+  grouping logic moved from `attention.js` into an `attention-groups.js`
+  leaf.
+- Maintenance windows can recur daily: `recurrence: {daily: true, start,
+  duration_minutes}` (duration strictly below one day) beside the existing
+  weekly form. A fleet reached through a link that degrades at the same hour
+  every evening — a home uplink whose relay reconnects nightly — can silence
+  the hosts behind it for that span instead of alerting every night. Window
+  objects in `/api/snapshot` and `/api/inventory` carry `cadence`
+  (`weekly` or `daily`) beside `recurring`, the dashboard labels the plan
+  badge accordingly, and the dashboard's inventory contract accepts the key.
 - Two SSH failures that a fleet behind a bastion sees often now have their own
   sanitized classification instead of the generic `SSH connection failed`:
   `SSH jump host could not reach the target` (the `ProxyJump`/`ProxyCommand`

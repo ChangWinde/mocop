@@ -111,7 +111,8 @@
         throw new TypeError("Invalid maintenance windows response");
       }
       const configured = new Set(configuredHosts);
-      const allowedKeys = new Set(["until", "reason", "recurring", "active"]);
+      const allowedKeys = new Set(["until", "reason", "recurring", "cadence", "active"]);
+      const cadences = new Set(["weekly", "daily"]);
       const windows = {};
       Object.entries(payload).forEach(([host, window]) => {
         const keys = window && typeof window === "object" && !Array.isArray(window)
@@ -122,8 +123,11 @@
           || !keys.includes("until")
           || !keys.includes("reason")
           || keys.some((key) => !allowedKeys.has(key))
-          // recurring is only emitted for recurring windows; active always is.
+          // recurring and its cadence are only emitted for recurring windows;
+          // active always is.
           || (keys.includes("recurring") && typeof window.recurring !== "boolean")
+          || (keys.includes("cadence")
+            && (window.recurring !== true || !cadences.has(window.cadence)))
           || typeof window.active !== "boolean"
           || typeof window.until !== "string"
           || !Number.isFinite(Date.parse(window.until))
@@ -137,6 +141,7 @@
           until: window.until,
           reason: window.reason,
           recurring: window.recurring === true,
+          cadence: window.recurring === true ? window.cadence ?? null : null,
           active: window.active,
         };
       });

@@ -73,6 +73,8 @@ interfaces without a runtime plugin registry.
 | `telemetry_points.py` | compact in-memory history records: struct-packed host and GPU samples, process transitions |
 | `fleet_stats.py` | the snapshot's fleet-wide `stats` block: host, incident, GPU, and capacity totals over the serialized servers |
 | `usage.py` | pure per-owner GPU occupancy rollup over a copied process timeline, behind `GET /api/usage`; a failing host's live processes count only up to its last confirmed sample |
+| `usage_views.py` | the store's usage views over one consistent copy of its state: the in-memory rollup and the history-backed reports |
+| `reports.py` | long-window reports from the history database: owner occupancy over the retained transitions with hourly idle classification and a per-day split, and hourly utilization per host or device |
 | `occupancy.py` | pairing a device's process transitions into runs: start/stop pairing, first-observation anchors, owner attribution, same-owner merging |
 | `models.py` | immutable resource result types |
 | `incident_types.py` | the incident vocabulary: conditions, transition events, restored open incidents, the policy protocol |
@@ -80,7 +82,10 @@ interfaces without a runtime plugin registry.
 | `incident_domains.py` | which telemetry domains a condition's recovery needs and when a sample is blind to them |
 | `correlation.py` | possible shared-path grouping without changing incident truth |
 | `diagnostics.py` | deterministic incident guidance and redacted support bundles |
-| `persistence.py` | optional bounded asynchronous SQLite history: the writer thread, retention, and the size cap |
+| `persistence.py` | optional bounded asynchronous SQLite history: the writer thread, hourly GPU rollups kept beside the raw samples, retention, and the size cap |
+| `persistence_api.py` | the persistence contract the store programs against, and the in-memory answer when history is off |
+| `persistence_rollups.py` | the hourly GPU rollup table: creation after the size cap, backfill, upserts, retention, and the reads behind the reports |
+| `persistence_transitions.py` | persisted process transitions: hidden rows, the first-observation sidecar, and emission order |
 | `persistence_restore.py` | restore of the retained window per host and device, and of the incidents open at shutdown |
 | `persistence_schema.py` | the history database's DDL, column contracts, and row validity filters |
 | `notifications.py` | webhook endpoint validation, deduplication, throttling, pairing, and retry policy |
@@ -88,6 +93,7 @@ interfaces without a runtime plugin registry.
 | `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
 | `api_schema.py` | query-parameter and body-field types with their JSON descriptions, and the two validators that turn a raw query or parsed body into accepted values with stable codes and the rejected field |
 | `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query and body schemas, body caps, error catalog; `/api/meta` publishes it and every GET query and POST body is validated through it |
+| `api_describe.py` | how the manifest is published through `GET /api/meta`: the meta document, field conventions, write requirements |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
 | `client.py` | the local read-only client behind `mocop api`: listener from the configuration, capability from the private file, public and authenticated GETs only |
 | `static_assets.py` | static asset route table, strong ETags, and conditional-delivery validators |
@@ -225,10 +231,14 @@ the rejected live-rebuild and tracker-snapshot alternatives.
 pause-collection and drop-incident alternatives; [ADR-0013](adr/0013-operational-diagnostics-and-gpu-history.md)
 records the condition-action, GPU-history, manual-probe, and diagnostic boundaries.
 
-The topology correlator consumes only actionable connectivity conditions. It may emit
-one possible shared-path projection for multiple descendants, but the raw active list
-and transition log remain unchanged. Webhook workers consume actionable transitions
-after this overlay and may include the current correlation context.
+The correlators consume only actionable connectivity conditions. The topology
+correlator may emit one possible shared-path projection for multiple descendants;
+the simultaneous-loss correlator emits one fleet-wide projection when at least three
+hosts and half of the fleet lost connectivity within 120 seconds of each other, which
+points at the monitor's own uplink or a shared relay rather than the nodes and
+subsumes the configured-path groups inside it. The raw active list and transition
+log remain unchanged. Webhook workers consume actionable transitions after this
+overlay and may include the current correlation context.
 
 ## Dashboard rendering
 
@@ -386,7 +396,8 @@ by `tests/<leaf>_test.mjs`:
 | `capacity-watch.js` | the durable watch, its armed/notified edge, cooldown, and presented text |
 | `csv-export.js` | CSV cell escaping (including formula-injection defense) and row building |
 | `update-pill.js` | release-currency polling cadence, pill state, and the fixed apply action |
-| `attention.js` | the attention panel's decisions: which active conditions a host contributes, shared-path and shared-storage grouping that consumes the conditions it explains, per-host issues, and ranking |
+| `attention-groups.js` | shared-cause grouping for the attention panel: configured-path and fleet-wide simultaneous-loss correlations, shared storage devices, each marking the conditions it explains |
+| `attention.js` | the attention panel's decisions: which active conditions a host contributes, per-host issues after the shared-cause groups, and ranking |
 | `background-asset.js` | the custom background: IndexedDB storage of one asset, container sniffing that refuses animated or mislabelled files, size and dimension caps, and the WebP quality bisection and shrink loop, over injected browser primitives |
 | `owner-usage.js` | the owners dialog's projections: the current per-owner aggregation over online hosts (offline hosts counted and excluded, one PID across a host's GPUs counted once, unknown VRAM disclosed), and the usage bill's wording: GPU-hours unit, retention and `partialGpus` caveats, kinds, idle share |
 

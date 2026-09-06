@@ -14,19 +14,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import SplitResult, urlsplit
 
 from . import __version__
+from .api_describe import describe_meta
 from .api_manifest import (
-    API_SCHEMA_VERSION,
-    API_VERSION,
     DOCUMENTATION_URL,
-    FIELD_CONVENTIONS,
     QUERY_SCHEMAS,
     ROUTE_METHODS,
     WRITE_BODY_LIMITS,
-    WRITE_REQUIREMENTS,
     WRITE_SCHEMAS,
-    describe_endpoints,
-    describe_error_codes,
-    describe_server_messages,
 )
 from .api_schema import BodyError, QueryError, parse_query, validate_body
 from .capacity import CapacityRequest, match_capacity
@@ -475,38 +469,13 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_events()
             return
-        if path == "/api/history":
-            self._send_history(request_url.query)
+        query_read = _QUERY_READS.get(path)
+        if query_read is not None:
+            query_read(self, request_url.query)
             return
-        if path == "/api/usage":
-            self._send_usage(request_url.query)
-            return
-        if path == "/api/capacity":
-            self._send_capacity(request_url.query)
-            return
-        if path == "/api/gpu-history":
-            self._send_gpu_history(request_url.query)
-            return
-        if path == "/api/incidents":
-            self._send_incidents(request_url.query)
-            return
-        if path == "/api/inventory":
-            self._send_inventory()
-            return
-        if path == "/api/topology":
-            self._send_topology()
-            return
-        if path == "/api/update":
-            self._send_update_status()
-            return
-        if path == "/api/diagnostics":
-            self._send_diagnostics(request_url.query)
-            return
-        if path == "/api/meta":
-            self._send_meta()
-            return
-        if path == "/metrics":
-            self._send_openmetrics()
+        plain_read = _PLAIN_READS.get(path)
+        if plain_read is not None:
+            plain_read(self)
             return
         if path == "/healthz":
             health = self.monitor_server.state.health()
@@ -554,25 +523,12 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def _send_meta(self) -> None:
         server = self.monitor_server
         self._send_json(
-            {
-                "apiVersion": API_VERSION,
-                "appVersion": __version__,
-                "schemaVersion": API_SCHEMA_VERSION,
-                "documentation": DOCUMENTATION_URL,
-                "capabilities": {
-                    "restartSupported": server.restart is not None,
-                    "manualProbeSupported": server.probe_control is not None,
-                    "configurationWriteSupported": (
-                        self._configuration_write_supported()
-                    ),
-                    "updateSupported": server.updates is not None,
-                },
-                "conventions": FIELD_CONVENTIONS,
-                "write": WRITE_REQUIREMENTS,
-                "errorCodes": describe_error_codes(),
-                "serverMessages": describe_server_messages(),
-                "endpoints": describe_endpoints(),
-            }
+            describe_meta(
+                restart_supported=server.restart is not None,
+                manual_probe_supported=server.probe_control is not None,
+                configuration_write_supported=self._configuration_write_supported(),
+                update_supported=server.updates is not None,
+            )
         )
 
     def _configuration_write_supported(self) -> bool:
@@ -1064,6 +1020,40 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             self.monitor_server.state.usage(values["hours"], values["limit"])
         )
 
+    def _send_usage_report(self, query: str) -> None:
+        values = self._parse_query("/api/reports/usage", query)
+        if values is None:
+            return
+        report = self.monitor_server.state.usage_report(
+            values["hours"], values["limit"]
+        )
+        self._send_report(report)
+
+    def _send_utilization_report(self, query: str) -> None:
+        values = self._parse_query("/api/reports/utilization", query)
+        if values is None:
+            return
+        try:
+            report = self.monitor_server.state.utilization_report(
+                values["hours"], values.get("host")
+            )
+        except KeyError:
+            self._send_error(
+                "unknown monitoring target", HTTPStatus.NOT_FOUND, code="UNKNOWN_HOST"
+            )
+            return
+        self._send_report(report)
+
+    def _send_report(self, report: dict[str, object] | None) -> None:
+        if report is None:
+            self._send_error(
+                "reports need history persistence",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                code="HISTORY_UNAVAILABLE",
+            )
+            return
+        self._send_json(report)
+
     def _send_capacity(self, query: str) -> None:
         """Rank idle GPU groups against a demand; observations, never reservations."""
         values = self._parse_query("/api/capacity", query)
@@ -1278,3 +1268,24 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         # Avoid putting URL query strings or browser-controlled values in logs.
         return
+
+
+# Authenticated reads dispatched by path once the shared checks passed: routes
+# with a query schema receive the raw query string, the others nothing.
+_QUERY_READS: dict[str, Callable[[MonitorRequestHandler, str], None]] = {
+    "/api/history": MonitorRequestHandler._send_history,
+    "/api/usage": MonitorRequestHandler._send_usage,
+    "/api/reports/usage": MonitorRequestHandler._send_usage_report,
+    "/api/reports/utilization": MonitorRequestHandler._send_utilization_report,
+    "/api/capacity": MonitorRequestHandler._send_capacity,
+    "/api/gpu-history": MonitorRequestHandler._send_gpu_history,
+    "/api/incidents": MonitorRequestHandler._send_incidents,
+    "/api/diagnostics": MonitorRequestHandler._send_diagnostics,
+}
+_PLAIN_READS: dict[str, Callable[[MonitorRequestHandler], None]] = {
+    "/api/inventory": MonitorRequestHandler._send_inventory,
+    "/api/topology": MonitorRequestHandler._send_topology,
+    "/api/update": MonitorRequestHandler._send_update_status,
+    "/api/meta": MonitorRequestHandler._send_meta,
+    "/metrics": MonitorRequestHandler._send_openmetrics,
+}

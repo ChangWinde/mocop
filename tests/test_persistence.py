@@ -386,6 +386,142 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         self.assertIsNone(by_pid[5]["firstSeenAt"])
         self.assertEqual(by_pid[5]["workload"], {"kind": "process"})
 
+    def test_hourly_rollups_accumulate_with_the_raw_points(self) -> None:
+        # Long-window reports read hourly rollups instead of scanning the raw
+        # table, so the writer keeps them in the same transaction as the raw
+        # points: samples, utilization and busy counts at the threshold in
+        # effect, and memory, per (host, device, UTC hour).
+        store = SqliteTelemetryPersistence(self.config, self.path, busy_pct=20.0)
+        self.addCleanup(store.close)
+        now = datetime.now(timezone.utc).replace(minute=10, second=0, microsecond=0)
+
+        def point(offset_seconds: int, utilization: float | None, memory: float | None):
+            return {
+                "observedAt": utc_text(now + timedelta(seconds=offset_seconds)),
+                "gpuId": "GPU-1",
+                "index": 0,
+                "utilizationGpuPct": utilization,
+                "memoryUsedMiB": memory,
+                "memoryTotalMiB": 8192,
+                "temperatureC": 60,
+                "powerDrawW": 120,
+            }
+
+        store.record_gpu_telemetry(
+            "gpu-01",
+            (point(0, 50.0, 1024.0), point(5, 10.0, 2048.0), point(10, None, None)),
+            (),
+        )
+        store.record_gpu_telemetry("gpu-01", (point(3600, 90.0, 4096.0),), ())
+        self.assertTrue(store.flush())
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            rows = connection.execute(
+                "SELECT hour, samples, utilization_samples, busy_samples,"
+                " utilization_sum, memory_samples, memory_used_sum, memory_total_max"
+                " FROM gpu_hourly WHERE host = 'gpu-01' ORDER BY hour"
+            ).fetchall()
+        first_hour = utc_text(now.replace(minute=0))
+        second_hour = utc_text((now + timedelta(hours=1)).replace(minute=0))
+        self.assertEqual(
+            rows,
+            [
+                (first_hour, 3, 2, 1, 60.0, 2, 3072.0, 8192.0),
+                (second_hour, 1, 1, 1, 90.0, 1, 4096.0, 8192.0),
+            ],
+        )
+
+    def test_startup_backfills_rollups_from_raw_history_exactly_once(self) -> None:
+        # A database written before rollups existed gets its retained hours
+        # aggregated at startup; a later start does not count them again.
+        create_legacy_database(self.path, 3)
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        with closing(sqlite3.connect(self.path)) as connection:
+            for offset in range(0, 600, 60):
+                connection.execute(
+                    "INSERT INTO gpu_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "gpu-01",
+                        "GPU-1",
+                        0,
+                        utc_text(now - timedelta(hours=2) + timedelta(seconds=offset)),
+                        5.0 if offset < 300 else 95.0,
+                        1000.0,
+                        8000.0,
+                        50.0,
+                        100.0,
+                    ),
+                )
+            connection.commit()
+
+        store = SqliteTelemetryPersistence(self.config, self.path)
+        store.close()
+        with closing(sqlite3.connect(self.path)) as connection:
+            (row,) = connection.execute(
+                "SELECT samples, busy_samples, utilization_sum FROM gpu_hourly"
+            ).fetchall()
+        self.assertEqual(row, (10, 5, 500.0))
+
+        reopened = SqliteTelemetryPersistence(self.config, self.path)
+        reopened.close()
+        with closing(sqlite3.connect(self.path)) as connection:
+            (row,) = connection.execute(
+                "SELECT samples, busy_samples FROM gpu_hourly"
+            ).fetchall()
+        self.assertEqual(row, (10, 5))
+
+    def test_rollups_wait_for_space_when_the_database_is_at_its_cap(self) -> None:
+        # The rollup table is created after the size cap applies, so a
+        # database already at its cap starts exactly as before, reports the
+        # rollups as waiting, and the writer skips them.
+        config = PersistenceConfig(enabled=True, retention_hours=24, max_bytes=131_072)
+        create_legacy_database(self.path, 3)
+        with closing(sqlite3.connect(self.path)) as connection:
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+            connection.execute(
+                f"PRAGMA max_page_count = {config.max_bytes // page_size}"
+            )
+            index = 0
+            while True:
+                try:
+                    connection.execute(
+                        "INSERT INTO process_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            "gpu-01",
+                            "GPU-1",
+                            0,
+                            utc_text(
+                                datetime.now(timezone.utc) + timedelta(seconds=index)
+                            ),
+                            "started",
+                            index,
+                            f"process-{index}",
+                            1,
+                            json.dumps({"padding": "x" * 1024}),
+                        ),
+                    )
+                    connection.commit()
+                    index += 1
+                except sqlite3.OperationalError:
+                    connection.rollback()
+                    break
+
+        store = SqliteTelemetryPersistence(config, self.path)
+        self.addCleanup(store.close)
+        self.assertFalse(store._rollups_enabled)
+        self.assertEqual(
+            store.status()["lastError"],
+            "hourly rollups wait for retention to free space",
+        )
+        with closing(sqlite3.connect(self.path)) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        self.assertNotIn("gpu_hourly", tables)
+
     def test_roundtrips_gpu_samples_and_process_transitions_as_one_batch(self) -> None:
         store = SqliteTelemetryPersistence(self.config, self.path)
         self.addCleanup(store.close)
@@ -1055,11 +1191,13 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         original_write = SqliteTelemetryPersistence._write
         failed_once = []
 
-        def full_once(connection: sqlite3.Connection, item: object) -> int:
+        def full_once(
+            connection: sqlite3.Connection, item: object, busy_pct: object = None
+        ) -> int:
             if not failed_once:
                 failed_once.append(True)
                 raise sqlite3.OperationalError("database or disk is full")
-            return original_write(connection, item)
+            return original_write(connection, item, busy_pct)
 
         with mock.patch.object(
             SqliteTelemetryPersistence, "_write", staticmethod(full_once)
@@ -1124,7 +1262,9 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         store = SqliteTelemetryPersistence(self.config, self.path)
         self.addCleanup(store.close)
 
-        def corrupt_record(connection: sqlite3.Connection, item: object) -> int:
+        def corrupt_record(
+            connection: sqlite3.Connection, item: object, busy_pct: object = None
+        ) -> int:
             raise TypeError("corrupt internal record")
 
         with mock.patch.object(
@@ -1170,7 +1310,9 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
             self.assertEqual(status["lastError"], "history database prune failed")
             self.assertTrue(store._writer.is_alive())
 
-            def full_disk(connection: sqlite3.Connection, item: object) -> int:
+            def full_disk(
+                connection: sqlite3.Connection, item: object, busy_pct: object = None
+            ) -> int:
                 raise sqlite3.OperationalError("database or disk is full")
 
             with mock.patch.object(
@@ -1219,7 +1361,9 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         entered = threading.Event()
         release = threading.Event()
 
-        def failing_write(connection: sqlite3.Connection, item: object) -> int:
+        def failing_write(
+            connection: sqlite3.Connection, item: object, busy_pct: object = None
+        ) -> int:
             entered.set()
             release.wait(30.0)
             raise sqlite3.OperationalError("no such table: injected")

@@ -1801,6 +1801,8 @@ try {
     const planBadge = planBadgeNode?.textContent || "";
     const planBadgeInactive = Boolean(planBadgeNode?.classList.contains("inactive"));
     const planBadgeTitle = planBadgeNode?.title || "";
+    const planBadges = [...document.querySelectorAll("#configured-host-list .maintenance-plan-badge")]
+      .map((node) => node.textContent);
     const endpointsHidden = document.querySelector("#notification-endpoints").hidden;
     const endpointRows = [...document.querySelectorAll(
       "#notification-endpoints .notification-endpoint",
@@ -1885,6 +1887,7 @@ try {
       maintenanceWindows: persistedCollector.maintenanceWindows,
       hostGroups: persistedCollector.hostGroups,
       maintenanceBadge,
+      planBadges,
       planBadge,
       planBadgeInactive,
       planBadgeTitle,
@@ -2038,6 +2041,12 @@ try {
   assert.match(personalization.planBadgeTitle, /Weekly firmware inspection/);
   // "\u4e0b\u6b21\u7a97\u53e3\u81f3" = next-window-until prefix.
   assert.match(personalization.planBadgeTitle, /\u4E0B\u6B21\u7A97\u53E3\u81F3/);
+  // atlas-03 carries a daily window: its plan badge says "每日维护计划"
+  // while the weekly one keeps "每周维护计划".
+  assert.deepEqual(
+    personalization.planBadges.sort(),
+    ["\u6BCF\u5468\u7EF4\u62A4\u8BA1\u5212", "\u6BCF\u65E5\u7EF4\u62A4\u8BA1\u5212"].sort(),
+  );
   // Per-endpoint webhook state from snapshot.notifications.endpoints.
   assert.equal(personalization.endpointsHidden, false);
   assert.equal(personalization.endpointRows.length, 2);

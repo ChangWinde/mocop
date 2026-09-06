@@ -9,7 +9,7 @@ window is aggregated.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -115,6 +115,9 @@ def aggregate_usage(
     utilization_by_gpu: Mapping[GpuKey, Sequence[UtilizationSample]],
     event_cap: int | None = None,
     observed_until_by_gpu: Mapping[GpuKey, str] | None = None,
+    classifier: Callable[[list[Interval], GpuKey], None] | None = None,
+    interval_sink: Callable[[str | None, list[Interval]], None] | None = None,
+    resolution: str = "sample",
 ) -> dict[str, object]:
     """Aggregate per-owner GPU occupancy over the requested window.
 
@@ -183,7 +186,12 @@ def aggregate_usage(
         # one device-occupancy interval, not multiple billable GPU-hours.
         for owner, owner_intervals in by_owner.items():
             merged = merge_intervals(owner_intervals)
-            _classify(merged, point_epochs, point_idle)
+            if classifier is not None:
+                classifier(merged, key)
+            else:
+                _classify(merged, point_epochs, point_idle)
+            if interval_sink is not None:
+                interval_sink(owner, merged)
             usage = owners[owner]
             usage.gpu_seconds += sum(item.end - item.start for item in merged)
             usage.sampled_seconds += sum(item.sampled_seconds for item in merged)
@@ -198,6 +206,7 @@ def aggregate_usage(
         "sinceAt": _iso(now - timedelta(hours=window_hours)),
         "windowHours": window_hours,
         "gpuBusyPct": busy_pct,
+        "resolution": resolution,
         "owners": [
             {
                 "owner": owner,

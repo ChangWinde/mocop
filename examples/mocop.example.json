@@ -36,6 +36,14 @@
         "start": "02:00",
         "duration_minutes": 120
       }
+    },
+    "gpu-node-01": {
+      "reason": "Evening relay degradation",
+      "recurrence": {
+        "daily": true,
+        "start": "11:59",
+        "duration_minutes": 231
+      }
     }
   },
   "host_groups": {

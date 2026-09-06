@@ -57,8 +57,16 @@ class DemoInventory:
                 "until": "2030-06-15T02:00:00Z",
                 "reason": "Weekly firmware inspection",
                 "recurring": True,
+                "cadence": "weekly",
                 "active": False,
-            }
+            },
+            "atlas-03": {
+                "until": "2030-06-15T15:50:00Z",
+                "reason": "Evening relay degradation",
+                "recurring": True,
+                "cadence": "daily",
+                "active": False,
+            },
         }
         self.host_groups = {
             "atlas-01": "Training",

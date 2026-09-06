@@ -888,6 +888,73 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaises(ConfigError):
                     load_config(self.write(value))
 
+    def test_validates_daily_recurring_maintenance_windows(self) -> None:
+        # A fleet reached through a home uplink that degrades every evening
+        # needs the same window every day; weekly recurrence cannot express it.
+        value = valid_config()
+        value["auto_discover"] = False
+        value["hosts"] = ["gpu-1"]
+        value["maintenance_windows"] = {
+            "gpu-1": {
+                "reason": "Evening uplink degradation",
+                "recurrence": {
+                    "daily": True,
+                    "start": "11:59",
+                    "duration_minutes": 231,
+                },
+            }
+        }
+
+        window = dict(load_config(self.write(value)).maintenance_windows)["gpu-1"]
+
+        self.assertTrue(window.recurring)
+        self.assertEqual(window.cadence, "daily")
+        self.assertIsNone(window.weekday)
+        inside = datetime(2030, 6, 19, 13, 0, tzinfo=timezone.utc)
+        before = datetime(2030, 6, 19, 11, 58, tzinfo=timezone.utc)
+        after = datetime(2030, 6, 19, 15, 50, tzinfo=timezone.utc)
+        tomorrow = datetime(2030, 6, 20, 12, 30, tzinfo=timezone.utc)
+        self.assertTrue(window.is_active(inside))
+        self.assertFalse(window.is_active(before))
+        self.assertFalse(window.is_active(after))
+        self.assertTrue(window.is_active(tomorrow))
+        rendered = window.to_dict(inside)
+        self.assertEqual(rendered["until"], "2030-06-19T15:50:00Z")
+        self.assertEqual((rendered["recurring"], rendered["cadence"]), (True, "daily"))
+        self.assertEqual(window.to_dict(before)["until"], "2030-06-19T15:50:00Z")
+        self.assertEqual(window.to_dict(after)["until"], "2030-06-20T15:50:00Z")
+
+        # A daily window crossing midnight stays active into the next day and
+        # is bounded strictly below one day so instances never overlap.
+        value["maintenance_windows"]["gpu-1"]["recurrence"] = {
+            "daily": True,
+            "start": "23:30",
+            "duration_minutes": 90,
+        }
+        overnight = dict(load_config(self.write(value)).maintenance_windows)["gpu-1"]
+        self.assertTrue(
+            overnight.is_active(datetime(2030, 6, 20, 0, 30, tzinfo=timezone.utc))
+        )
+        self.assertFalse(
+            overnight.is_active(datetime(2030, 6, 20, 1, 30, tzinfo=timezone.utc))
+        )
+        self.assertEqual(
+            overnight.to_dict(datetime(2030, 6, 20, 0, 30, tzinfo=timezone.utc))[
+                "until"
+            ],
+            "2030-06-20T01:00:00Z",
+        )
+        for invalid in (
+            {"daily": True, "start": "23:30", "duration_minutes": 1440},
+            {"daily": "yes", "start": "23:30", "duration_minutes": 60},
+            {"daily": True, "weekday": 2, "start": "23:30", "duration_minutes": 60},
+            {"daily": False, "start": "23:30", "duration_minutes": 60},
+        ):
+            with self.subTest(invalid=invalid):
+                value["maintenance_windows"]["gpu-1"]["recurrence"] = invalid
+                with self.assertRaisesRegex(ConfigError, "recurrence"):
+                    load_config(self.write(value))
+
     def test_validates_recurring_maintenance_windows(self) -> None:
         value = valid_config()
         value["auto_discover"] = False

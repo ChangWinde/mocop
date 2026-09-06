@@ -28,7 +28,8 @@ from mocop.models import (
     SystemMetrics,
     WorkloadMetadata,
 )
-from mocop.persistence import DisabledPersistence, SqliteTelemetryPersistence
+from mocop.persistence import SqliteTelemetryPersistence
+from mocop.persistence_api import DisabledPersistence
 from mocop.persistence_restore import LoadedTelemetry
 from mocop.service import _MAX_GPU_IDENTITIES_PER_HOST, MonitorService, StateStore
 

@@ -33,11 +33,8 @@ from .notifications import (
     NotificationError,
     create_notification_sink,
 )
-from .persistence import (
-    DisabledPersistence,
-    PersistenceError,
-    create_persistence,
-)
+from .persistence import create_persistence
+from .persistence_api import DisabledPersistence, PersistenceError
 from .probe import OpenSshLinuxResourceProbe
 from .service import MonitorService, StateStore
 from .updates import UpdateManager
@@ -403,7 +400,9 @@ def _run_monitor(args: argparse.Namespace) -> int:
     restored = persistence.load(config.history_points, config.incident_history_points)
     if not args.once:
         try:
-            persistence = create_persistence(config.persistence)
+            persistence = create_persistence(
+                config.persistence, busy_pct=config.thresholds.gpu_busy_pct
+            )
             restored = persistence.load(
                 config.history_points, config.incident_history_points
             )

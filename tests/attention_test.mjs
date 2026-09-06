@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
 
 await import("../src/mocop/static/format.js");
+await import("../src/mocop/static/attention-groups.js");
 await import("../src/mocop/static/attention.js");
 
 const { format, numeric } = globalThis.MocopFormat.create();
 const SAFE_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/;
+const safeStoredHosts = (hosts) => (Array.isArray(hosts) ? hosts : [])
+  .filter((host) => typeof host === "string" && SAFE_ALIAS.test(host));
 const attention = globalThis.MocopAttention.create({
   format,
   numeric,
-  safeStoredHosts: (hosts) => (Array.isArray(hosts) ? hosts : [])
-    .filter((host) => typeof host === "string" && SAFE_ALIAS.test(host)),
+  safeStoredHosts,
   conditionMessage: (condition) => `msg:${condition.conditionKey}`,
+  groups: globalThis.MocopAttentionGroups.create({ format, safeStoredHosts }),
 });
 
 const server = (host, status = "online") => ({ host, status });
@@ -158,6 +161,25 @@ function fleet() {
   assert.deepEqual(issues[0].hosts, ["a-01", "a-02"]);
   assert.deepEqual(issues[0].messages, ["2 台节点不可达 · 配置路径经过 gateway"]);
   assert.deepEqual(issues[0].categories, ["connection"]);
+
+  // A fleet-wide simultaneous loss outranks path groups, names no anchor,
+  // and consumes the connectivity conditions of every listed host; a
+  // configured-path group whose hosts it already explains is not listed again.
+  const fleetWide = attention.issues({
+    servers,
+    conditionsByHost,
+    correlations: [
+      { kind: "simultaneous_connectivity_loss", confidence: "possible", anchor: null, hosts: ["a-01", "a-02", "c-01"] },
+      { kind: "configured_shared_path", confidence: "possible", anchor: "gateway", hosts: ["a-01", "a-02"] },
+    ],
+  });
+  assert.deepEqual(
+    fleetWide.map((issue) => [issue.shared ? issue.sharedLabel : issue.server.host, issue.priority]),
+    [["疑似监控端链路故障", 4], ["共享存储", 2], ["a-02", 1], ["c-01", 1]],
+  );
+  assert.deepEqual(fleetWide[0].hosts, ["a-01", "a-02"]);
+  assert.deepEqual(fleetWide[0].messages, ["2 台节点在同一采集周期内失联 · 先检查监控端上行或共享中继"]);
+  assert.equal(fleetWide[0].sortName, "");
   assert.deepEqual(issues[1].hosts, ["b-01", "b-02"]);
   assert.deepEqual(issues[1].messages, ["/nfs 96% · 影响 2 台"]);
   assert.deepEqual(issues[2].messages, ["msg:disk:/（离线前）"]);

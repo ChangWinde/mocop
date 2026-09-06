@@ -91,7 +91,7 @@ for (const [label, payload] of [
 const window = { until: "2030-06-15T02:00:00Z", reason: "Firmware", active: false };
 assert.deepEqual(
   contracts.normalizeMaintenanceWindows({ "gpu-2": window }, configured),
-  { "gpu-2": { ...window, recurring: false } },
+  { "gpu-2": { ...window, recurring: false, cadence: null } },
 );
 assert.equal(
   contracts.normalizeMaintenanceWindows(
@@ -100,6 +100,16 @@ assert.equal(
   )["gpu-2"].recurring,
   true,
 );
+// The cadence names the recurrence period and is only meaningful with it.
+for (const cadence of ["weekly", "daily"]) {
+  assert.equal(
+    contracts.normalizeMaintenanceWindows(
+      { "gpu-2": { ...window, recurring: true, cadence } },
+      configured,
+    )["gpu-2"].cadence,
+    cadence,
+  );
+}
 for (const [label, patch] of [
   ["active missing", { active: undefined }],
   ["active as string", { active: "yes" }],
@@ -107,6 +117,8 @@ for (const [label, patch] of [
   ["unparseable until", { until: "tomorrow" }],
   ["long reason", { reason: "r".repeat(121) }],
   ["recurring as string", { recurring: "true" }],
+  ["cadence without recurrence", { cadence: "daily" }],
+  ["unknown cadence", { recurring: true, cadence: "hourly" }],
 ]) {
   rejects(
     () => contracts.normalizeMaintenanceWindows({ "gpu-2": { ...window, ...patch } }, configured),
