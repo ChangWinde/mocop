@@ -4,8 +4,8 @@ The ``StateStore`` owns the process rings and the live process tables under
 its lock; this module holds the lock-free pieces it applies to them: building
 one transition, deciding whether two samples or a restored transition and a
 live sample describe the same process instance, listing the ``started``
-transitions a ring leaves open, and reconciling those restored open
-transitions against the first live observation after a restart.
+transitions a ring leaves open, and closing or reconciling those restored
+open transitions against the first live observation after a restart.
 """
 
 from __future__ import annotations
@@ -82,6 +82,25 @@ def open_transitions(
     return open_events
 
 
+def close_restored_start(
+    event: GpuProcessTransition, close_at: str, *, visible: bool | None = None
+) -> GpuProcessTransition:
+    """The ``stopped`` transition that ends a restored open start at ``close_at``.
+
+    A start is by construction the monitor's first observation of the
+    process, so it anchors the stop even when the start predates first-seen
+    stamps; the stop then still describes the whole run once the start has
+    left the retained window.
+    """
+    return replace(
+        event,
+        observed_at=close_at,
+        event="stopped",
+        first_seen_at=event.first_seen_at or event.observed_at,
+        visible=event.visible if visible is None else visible,
+    )
+
+
 def reconcile_restored_processes(
     events: Iterable[GpuProcessTransition],
     gpu_id: str,
@@ -106,7 +125,7 @@ def reconcile_restored_processes(
         if process is not None and transition_matches_process(event, process):
             current[process_key] = replace(process, first_seen_at=event.observed_at)
             continue
-        transitions.append(replace(event, observed_at=close_at, event="stopped"))
+        transitions.append(close_restored_start(event, close_at))
     for process_key, process in sorted(current.items()):
         event = open_events.get(process_key)
         if event is not None and transition_matches_process(event, process):

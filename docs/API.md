@@ -613,7 +613,12 @@ response says so explicitly instead of extrapolating. A process the live
 table still lists occupies its device up to the host's last confirmed sample
 while the host is failing its probes, never through the blind gap to now;
 once the host has failed for `collection_stale_cycles` cycles its inventory
-is closed at that last sample.
+is closed at that last sample. Starts restored from the history file follow
+the same rule: the first live process sample of their device reconciles
+them, and a host that goes stale before delivering one — or comes back
+without that device — closes them at the device's last GPU sample, so a run
+that ended in a blind spot counts up to the last observation instead of
+being dropped.
 
 Query parameters:
 

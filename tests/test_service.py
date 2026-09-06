@@ -3148,6 +3148,149 @@ class UsageRollupTests(unittest.TestCase):
         self.assertEqual(usage["totalGpuSeconds"], 0)
         self.assertEqual(usage["droppedRecords"], 1)
 
+    @staticmethod
+    def _restored_open_start(
+        observed_at: str, owner: str = "alice", pid: int = 9
+    ) -> LoadedTelemetry:
+        return LoadedTelemetry(
+            history={},
+            incident_events=(),
+            gpu_history={
+                ("gpu-1", "GPU-1"): (
+                    {"observedAt": "2026-08-14T01:00:00Z", "index": 0},
+                    {"observedAt": "2026-08-14T01:30:00Z", "index": 0},
+                )
+            },
+            process_events={
+                ("gpu-1", "GPU-1"): (
+                    {
+                        "observedAt": observed_at,
+                        "gpuId": "GPU-1",
+                        "index": 0,
+                        "event": "started",
+                        "pid": pid,
+                        "name": "train.py",
+                        "usedMemoryMiB": 10.0,
+                        "workload": {"kind": "process", "owner": owner},
+                    },
+                )
+            },
+        )
+
+    def test_stale_host_closes_restored_starts_at_the_last_restored_sample(
+        self,
+    ) -> None:
+        # A host that is down when the service restarts never gets the first
+        # online sample that reconciles its restored transitions, so a run
+        # confirmed up to the shutdown stayed open: dropped from the rollup as
+        # an unanchorable start and lingering until it fell out of the ring.
+        # Staleness now ends it where observation ended, exactly as it closes
+        # a live inventory.
+        persistence = Mock()
+        persistence.is_enabled.return_value = True
+        persistence.status.return_value = DisabledPersistence().status()
+        store = self._store(
+            restored=self._restored_open_start("2026-08-14T01:00:00Z"),
+            collection_stale_cycles=3,
+            persistence=persistence,
+        )
+        key = ("gpu-1", "GPU-1")
+
+        def fail(second: int) -> None:
+            store.apply(
+                ProbeResult(
+                    "gpu-1",
+                    "unreachable",
+                    1,
+                    (),
+                    message="SSH failed",
+                    observed_at=f"2026-08-14T01:59:{second:02d}Z",
+                )
+            )
+
+        fail(0)
+        fail(5)
+        self.assertIn(key, store._process_reconciliation_pending)
+        self.assertEqual(store.usage(1, 50)["droppedRecords"], 1)
+        persistence.record_gpu_telemetry.assert_not_called()
+
+        fail(10)
+
+        self.assertNotIn(key, store._process_reconciliation_pending)
+        closure = store._process_events[key][-1]
+        self.assertEqual(
+            (closure.event, closure.observed_at, closure.visible, closure.pid),
+            ("stopped", "2026-08-14T01:30:00Z", False, 9),
+        )
+        self.assertEqual(closure.first_seen_at, "2026-08-14T01:00:00Z")
+        usage = store.usage(1, 50)
+        self.assertEqual(usage["droppedRecords"], 0)
+        (owner,) = usage["owners"]
+        self.assertEqual((owner["owner"], owner["gpuSeconds"]), ("alice", 1800.0))
+        # Nothing was observed to stop, so the dashboard's event list keeps
+        # only the restored start; the closure reaches the history file as a
+        # hidden transition, like every other unobservable closure.
+        self.assertEqual(
+            [
+                e["event"]
+                for e in store.gpu_history("gpu-1", "GPU-1", 10)["processEvents"]
+            ],
+            ["started"],
+        )
+        persistence.record_gpu_telemetry.assert_called_once()
+        _host, points, transitions = persistence.record_gpu_telemetry.call_args.args
+        self.assertEqual(points, ())
+        self.assertEqual(
+            [(t["event"], t["observedAt"], t["_visible"]) for t in transitions],
+            [("stopped", "2026-08-14T01:30:00Z", False)],
+        )
+        # Staleness settles the restored state once; later failures add nothing.
+        fail(15)
+        self.assertEqual(len(store._process_events[key]), 2)
+        persistence.record_gpu_telemetry.assert_called_once()
+
+    def test_restored_starts_of_a_vanished_gpu_close_at_the_first_online_sample(
+        self,
+    ) -> None:
+        # The same leak without a stale host: the restored device never appears
+        # in the live host's GPU list (identity churn, driver loss), so the
+        # key would stay pending forever. An online sample that lacks the
+        # device is the same evidence that closes a live inventory.
+        store = self._store(restored=self._restored_open_start("2026-08-14T01:00:00Z"))
+        other = replace(self._gpu((GpuProcess(3, "other.py", 1),)), uuid="GPU-2")
+        store.apply(
+            ProbeResult(
+                "gpu-1", "online", 1, (other,), observed_at="2026-08-14T01:59:00Z"
+            )
+        )
+
+        self.assertNotIn(("gpu-1", "GPU-1"), store._process_reconciliation_pending)
+        closure = store._process_events[("gpu-1", "GPU-1")][-1]
+        self.assertEqual(
+            (closure.event, closure.observed_at, closure.visible),
+            ("stopped", "2026-08-14T01:30:00Z", False),
+        )
+        usage = store.usage(1, 50)
+        self.assertEqual(usage["droppedRecords"], 0)
+        owners = {item["owner"]: item["gpuSeconds"] for item in usage["owners"]}
+        self.assertEqual(owners["alice"], 1800.0)
+
+    def test_restored_starts_stay_pending_while_the_gpu_skips_process_samples(
+        self,
+    ) -> None:
+        # A device that is observed but whose process query was paced out
+        # still has a live table coming: the restored context waits for it.
+        store = self._store(restored=self._restored_open_start("2026-08-14T01:00:00Z"))
+        skipped = replace(self._gpu(()), processes_sampled=False)
+        store.apply(
+            ProbeResult(
+                "gpu-1", "online", 1, (skipped,), observed_at="2026-08-14T01:59:00Z"
+            )
+        )
+
+        self.assertIn(("gpu-1", "GPU-1"), store._process_reconciliation_pending)
+        self.assertEqual(len(store._process_events[("gpu-1", "GPU-1")]), 1)
+
     def test_usage_uses_the_store_clock_for_generated_timestamp(self) -> None:
         usage = self._store().usage(1, 50)
 

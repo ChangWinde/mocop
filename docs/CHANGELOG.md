@@ -59,6 +59,19 @@ All notable changes are documented here. This project follows Semantic Versionin
   at the last process sample, the way a failed process query already did.
   The rollup previously had to drop that occupancy as an unanchorable start,
   undercounting the owner and raising `droppedRecords`.
+- Restored process starts on a host that is unreachable across a restart are
+  closed once that host turns stale. Reconciliation of the transitions read
+  from the history file waited for the device's first live process sample; a
+  host that was already down when the service restarted and stayed down never
+  delivered one, so a run confirmed up to the shutdown was dropped from
+  `/api/usage` as an unanchorable start and its `started` lingered in the
+  timeline until it fell out of the ring. Staleness — `collection_stale_cycles`
+  consecutive failures — now closes such starts hidden at the device's last
+  restored GPU sample, where observation ended, and an online host whose GPU
+  list no longer contains the device closes them the same way; a device that
+  is observed but skips a process sample still waits for its live table. The
+  pure transition arithmetic (`process_transitions.py`) left `service.py` so
+  this fits under the ratchet, and the ceiling dropped from 2175 to 2150.
 
 ### Changed
 

@@ -48,6 +48,8 @@ from .probe import (
     ResourceProbe,
 )
 from .process_transitions import (
+    close_restored_start,
+    open_transitions,
     process_transition,
     reconcile_restored_processes,
     same_process_instance,
@@ -1305,6 +1307,11 @@ class StateStore:
             closed = self._close_unobservable_inventory_locked((result.host, gpu_id))
             if captured_transitions is not None:
                 captured_transitions.extend(closed)
+        restored_closed = self._close_restored_inventory_locked(
+            result.host, frozenset(observed_gpu_ids)
+        )
+        if captured_transitions is not None:
+            captured_transitions.extend(restored_closed)
         initialized_gpu_ids.intersection_update(observed_gpu_ids)
         if not initialized_gpu_ids:
             self._process_inventory_initialized.pop(result.host, None)
@@ -1321,7 +1328,39 @@ class StateStore:
             transitions.extend(
                 self._close_unobservable_inventory_locked((host, gpu_id))
             )
+        transitions.extend(self._close_restored_inventory_locked(host))
         return tuple(transitions)
+
+    def _close_restored_inventory_locked(
+        self, host: str, observed_gpu_ids: frozenset[str] = frozenset()
+    ) -> tuple[GpuProcessTransition, ...]:
+        """Close restored open transitions no live sample will reconcile.
+
+        Reconciliation needs the device's first live process table after a
+        restart. A host that turns stale before delivering one, or an online
+        host whose GPU list no longer contains the device, will not deliver
+        it, so the restored runs end where observation ended: at the last GPU
+        sample. The closures stay hidden, as for any unobserved stop.
+        """
+        closed: list[GpuProcessTransition] = []
+        for key in sorted(
+            key
+            for key in self._process_reconciliation_pending
+            if key[0] == host and key[1] not in observed_gpu_ids
+        ):
+            self._process_reconciliation_pending.discard(key)
+            events = self._process_events.get(key)
+            if not events:
+                continue
+            history = self._gpu_history.get(key)
+            close_at = history[-1].observed_at if history else events[-1].observed_at
+            transitions = tuple(
+                close_restored_start(event, close_at, visible=False)
+                for _process_key, event in sorted(open_transitions(events).items())
+            )
+            events.extend(transitions)
+            closed.extend(transitions)
+        return tuple(closed)
 
     def _close_unobservable_inventory_locked(
         self, key: tuple[str, str], gpu_index: int | None = None
