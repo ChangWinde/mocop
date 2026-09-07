@@ -146,6 +146,19 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Dashboard design pass against published dark-UI practice (Linear's
+  luminance-stacked system, WCAG 2.2 AA, the data-dense dashboard
+  guidance): every corner radius comes from one eight-step scale
+  (`--radius-2xs` … `--radius-pill`) instead of twenty distinct values, so
+  controls of one height share a corner; the two secondary text tiers pass
+  4.5:1 on every static surface of all six visual styles (the default
+  `--muted-2` sat at 2.6:1, studio at 2.8:1), which a repository test now
+  computes from the tokens, resolving `color-mix` and translucent surfaces;
+  keyboard focus wears a two-layer ring (2 px at 55 % plus 5 px at 22 %)
+  that reads on dark surfaces where the former 3 px 18 % ring did not, and
+  the browser smoke presses a real Tab to check it; the network card's two
+  rates stack instead of colliding when a reading is wide. No dependency,
+  build step, or new style.
 - Dashboard legibility and small-screen layout. Secondary text no longer
   uses 7, 8, or 9 px sizes (146 declarations, below what CJK text needs at
   desk distance): it goes through a `--text-2xs/--text-xs/--text-sm` scale of
