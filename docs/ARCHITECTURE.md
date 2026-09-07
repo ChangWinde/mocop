@@ -63,6 +63,7 @@ interfaces without a runtime plugin registry.
 | `inventory.py` | typed dashboard configuration projection and private atomic mutation |
 | `metrics.py` | deterministic OpenMetrics 1.0 snapshot exposition |
 | `capacity.py` | server-side twin of the browser capacity matcher behind `GET /api/capacity` |
+| `brief.py` | the situation brief behind `GET /api/brief` and `mocop brief`: fleet status, actionable conditions with shared filesystems collapsed, changes and recurring conditions over a window, idle capacity, per-owner usage with idle share, composed from the projections the dashboard already shows, plus its text rendering |
 | `ssh_failures.py` | sanitized classification of OpenSSH client failures into the published `servers[].message` vocabulary, and the stale-multiplex retry decision |
 | `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
 | `remote_script.py` | the fixed `MONITOR_V8` collection script: protocol constants, template, rendering |
@@ -98,6 +99,8 @@ interfaces without a runtime plugin registry.
 | `web_auth.py` | non-public request authentication: default Bearer validation or explicit direct access with trusted Host and Fetch Metadata checks |
 | `client.py` | the local client behind `mocop api`: listener from the configuration, capability from the private file, public and authenticated GETs, and writer-tier POSTs presenting the listener's own origin |
 | `cli_arguments.py` | the `mocop` command line: every subcommand, flag, and help text, separate from the runtime that acts on them |
+| `cli_client_arguments.py` | the subcommands that talk to a running service, `api` and `brief`, and the listener/capability options they share |
+| `config_report.py` | the `mocop config check` report and its two renderers; names environment variables, never their values |
 | `static_assets.py` | static asset route table, strong ETags, and conditional-delivery validators |
 | `lifecycle.py` | private config creation and user-level systemd management |
 | `migration.py` | non-destructive cross-machine config transformation and private target creation |

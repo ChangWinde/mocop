@@ -22,6 +22,7 @@ from .api_manifest import (
     WRITE_SCHEMAS,
 )
 from .api_schema import BodyError, QueryError, parse_query, validate_body
+from .brief import brief_from_state
 from .capacity import CapacityRequest, match_capacity
 from .config import (
     is_valid_host_group,
@@ -1094,49 +1095,51 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(self.monitor_server.state.incidents(values["limit"]))
 
+    def _send_brief(self, query: str) -> None:
+        """What needs a person, what changed, where capacity is: one document."""
+        values = self._parse_query("/api/brief", query)
+        if values is None:
+            return
+        self._send_json(brief_from_state(self.monitor_server.state, values["hours"]))
+
     def _send_inventory(self) -> None:
-        if not self._require_dashboard_read():
-            return
-        inventory = self.monitor_server.inventory
-        if inventory is None:
-            self._send_error(
-                "inventory management is unavailable",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
-            )
-            return
-        try:
-            snapshot = inventory.snapshot()
-        except InventoryError:
-            self._send_error(
-                "inventory scan failed",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
-            )
-            return
-        self._send_json(snapshot)
+        self._send_inventory_view(
+            lambda inventory: inventory.snapshot(),
+            unavailable="inventory management is unavailable",
+            failed="inventory scan failed",
+        )
 
     def _send_topology(self) -> None:
+        self._send_inventory_view(
+            lambda inventory: inventory.topology(),
+            unavailable="connection topology is unavailable",
+            failed="connection topology could not be loaded",
+        )
+
+    def _send_inventory_view(
+        self,
+        load: Callable[[DashboardConfigController], dict[str, object]],
+        *,
+        unavailable: str,
+        failed: str,
+    ) -> None:
+        """Reader-tier projections of the inventory fail the same two ways."""
         if not self._require_dashboard_read():
             return
         inventory = self.monitor_server.inventory
         if inventory is None:
             self._send_error(
-                "connection topology is unavailable",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
+                unavailable, HTTPStatus.SERVICE_UNAVAILABLE, code="SERVICE_UNAVAILABLE"
             )
             return
         try:
-            topology = inventory.topology()
+            payload = load(inventory)
         except InventoryError:
             self._send_error(
-                "connection topology could not be loaded",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                code="SERVICE_UNAVAILABLE",
+                failed, HTTPStatus.SERVICE_UNAVAILABLE, code="SERVICE_UNAVAILABLE"
             )
             return
-        self._send_json(topology)
+        self._send_json(payload)
 
     def _send_error(
         self,
@@ -1257,6 +1260,7 @@ _QUERY_READS: dict[str, Callable[[MonitorRequestHandler, str], None]] = {
     "/api/usage": MonitorRequestHandler._send_usage,
     "/api/reports/usage": MonitorRequestHandler._send_usage_report,
     "/api/reports/utilization": MonitorRequestHandler._send_utilization_report,
+    "/api/brief": MonitorRequestHandler._send_brief,
     "/api/capacity": MonitorRequestHandler._send_capacity,
     "/api/gpu-history": MonitorRequestHandler._send_gpu_history,
     "/api/incidents": MonitorRequestHandler._send_incidents,

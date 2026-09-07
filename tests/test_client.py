@@ -15,6 +15,7 @@ from mocop import client
 from mocop.__main__ import main
 from mocop.api_manifest import API_ROUTES
 from mocop.config_loader import load_config
+from mocop.models import ProbeResult
 from mocop.service import StateStore
 from mocop.web import MonitorHttpServer
 
@@ -90,6 +91,42 @@ class ApiClientTests(unittest.TestCase):
         code, body = self.run_api("/api/capacity?gpus=2&min_vram_gib=40")
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(body)["request"]["gpuCount"], 2)
+
+    def test_brief_renders_text_or_passes_the_json_through(self) -> None:
+        def run_brief(*argv: str) -> tuple[int, bytes]:
+            stdout = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+            with redirect_stdout(stdout):
+                code = main(["brief", *argv, "--config", str(self.config_path)])
+            stdout.flush()
+            return code, stdout.buffer.getvalue()
+
+        self.state.set_hosts(("gpu-1",))
+        self.state.apply(
+            ProbeResult("gpu-1", "unreachable", 1, message="SSH connection timed out")
+        )
+        code, body = run_brief("--hours", "6")
+        self.assertEqual(code, 0)
+        text = body.decode("utf-8")
+        self.assertIn("· last 6h · fleet CRITICAL\n", text)
+        self.assertIn("hosts 0/1 online, offline: gpu-1", text)
+        self.assertIn(
+            "  !! gpu-1 connectivity SSH · 0m · SSH connection timed out", text
+        )
+        self.assertIn("changes since ", text)
+        self.assertIn("usage (memory): 0 GPU-hours", text)
+
+        code, body = run_brief("--json")
+        self.assertEqual(code, 0)
+        brief = json.loads(body)
+        self.assertEqual(brief["windowHours"], 24)
+        self.assertEqual(brief["attention"]["items"][0]["hosts"], ["gpu-1"])
+
+        # A service error keeps the JSON envelope and the `mocop api` exit code.
+        self.server.shutdown()
+        self.server.server_close()
+        code, body = run_brief()
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(body)["code"], "CONNECTION_FAILED")
 
     def test_server_errors_keep_the_envelope_and_exit_one(self) -> None:
         code, body = self.run_api("/api/history?host=gpu-1&limit=1")

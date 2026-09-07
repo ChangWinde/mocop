@@ -1393,6 +1393,75 @@ class WebTests(unittest.TestCase):
             f"{self.base}/api/capacity?vram=1", 400, "UNKNOWN_QUERY_PARAMETER"
         )
 
+    def test_brief_composes_the_operator_scan_from_live_projections(self) -> None:
+        def gpu(index: int, utilization: float) -> GpuMetrics:
+            return GpuMetrics(
+                index=index,
+                uuid=f"GPU-{index}",
+                name="NVIDIA H100 80GB HBM3",
+                driver_version="550",
+                pstate="P0",
+                temperature_c=45,
+                utilization_gpu_pct=utilization,
+                utilization_memory_pct=0,
+                memory_total_mib=81_920,
+                memory_used_mib=1_920,
+                memory_free_mib=80_000,
+                power_draw_w=70,
+                power_limit_w=700,
+            )
+
+        self.state.set_hosts(("gpu-01", "gpu-02"))
+        self.state.apply(ProbeResult("gpu-01", "online", 1, (gpu(0, 2), gpu(1, 95))))
+        self.state.apply(
+            ProbeResult("gpu-02", "unreachable", 1, message="SSH connection timed out")
+        )
+
+        with urlopen(f"{self.base}/api/brief?hours=6", timeout=2) as response:
+            brief = json.load(response)
+        self.assertEqual(
+            list(brief),
+            [
+                "generatedAt",
+                "sinceAt",
+                "windowHours",
+                "status",
+                "fleet",
+                "attention",
+                "changes",
+                "capacity",
+                "usage",
+                "maintenance",
+            ],
+        )
+        self.assertEqual(brief["windowHours"], 6)
+        self.assertEqual(brief["status"], "critical")
+        self.assertEqual(brief["fleet"]["hosts"], 2)
+        self.assertEqual(brief["fleet"]["offline"], ["gpu-02"])
+        self.assertEqual(brief["fleet"]["gpus"], 2)
+        self.assertEqual(brief["fleet"]["idleGpus"], 1)
+        self.assertEqual(brief["attention"]["byCategory"], {"connectivity": 1})
+        self.assertEqual(brief["attention"]["items"][0]["hosts"], ["gpu-02"])
+        self.assertEqual(
+            brief["attention"]["items"][0]["title"], "Collection path unavailable"
+        )
+        self.assertEqual(brief["changes"]["coveredFromAt"], brief["sinceAt"])
+        self.assertEqual(brief["changes"]["opened"], 1)
+        self.assertEqual(brief["capacity"]["idleGpus"], 1)
+        self.assertEqual(brief["capacity"]["topHosts"][0]["host"], "gpu-01")
+        # Without a history database the usage section comes from the timeline.
+        self.assertEqual(brief["usage"]["source"], "memory")
+        self.assertIsNone(brief["usage"]["busySharePct"])
+        self.assertEqual(brief["maintenance"], [])
+
+        with urlopen(f"{self.base}/api/brief", timeout=2) as response:
+            self.assertEqual(json.load(response)["windowHours"], 24)
+        self.assert_json_error(f"{self.base}/api/brief?hours=0", 400, "INVALID_HOURS")
+        self.assert_json_error(f"{self.base}/api/brief?hours=169", 400, "INVALID_HOURS")
+        self.assert_json_error(
+            f"{self.base}/api/brief?limit=5", 400, "UNKNOWN_QUERY_PARAMETER"
+        )
+
     def test_gpu_history_and_sanitized_diagnostics_require_dashboard_reads(
         self,
     ) -> None:

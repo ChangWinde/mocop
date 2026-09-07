@@ -11,6 +11,7 @@ import argparse
 from pathlib import Path
 
 from . import __version__
+from .cli_client_arguments import add_client_commands
 
 
 def _add_target_identity_arguments(
@@ -269,58 +270,5 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     )
     _add_json_flag(doctor_parser)
 
-    api_parser = commands.add_parser(
-        "api",
-        help=(
-            "GET one public or authenticated route from the running service, "
-            "or POST a JSON body to a writer route, and write the response to "
-            "stdout"
-        ),
-        description=(
-            "Talk to the running monitor without spelling the listen address or "
-            "the Bearer header: the listener comes from the configuration and "
-            "the capability from the private access-token file beside it. "
-            "Writer routes (maintenance windows, incident actions, hosts, "
-            "collector settings, probes, restart, update) take --data with the "
-            "JSON body the manifest describes; reader routes are refused with "
-            "DASHBOARD_ONLY because their marker changes the collection "
-            "cadence. /api/events streams until interrupted. Exit 0 on a 2xx, "
-            "1 on any other HTTP status or an unreachable service, 2 on a usage "
-            "or configuration problem; a non-zero exit always leaves a JSON "
-            "error envelope on stdout."
-        ),
-    )
-    api_parser.add_argument(
-        "--data",
-        metavar="JSON",
-        default=None,
-        help=(
-            "JSON body to POST to a writer route; @FILE reads the body from a "
-            "file and @- from stdin ('{}' for routes whose body is empty)"
-        ),
-    )
-    api_parser.add_argument(
-        "path",
-        metavar="PATH",
-        help="absolute API path with optional query, e.g. /api/capacity?gpus=2",
-    )
-    api_parser.add_argument(
-        "--config",
-        type=Path,
-        default=argparse.SUPPRESS,
-        help="configuration naming the listener and the access-token location",
-    )
-    api_parser.add_argument(
-        "--token-file",
-        type=Path,
-        default=None,
-        help="capability file (default: the access-token file beside the config)",
-    )
-    api_parser.add_argument(
-        "--timeout",
-        type=float,
-        default=10.0,
-        metavar="SECONDS",
-        help="socket timeout for the request (default: 10)",
-    )
+    add_client_commands(commands, json_flag=_add_json_flag)
     return parser.parse_args(argv)

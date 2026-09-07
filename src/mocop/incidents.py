@@ -726,6 +726,7 @@ class IncidentTracker:
             "version": self._version,
             "active": active,
             "events": [event.to_dict() for event in reversed(events[-limit:])],
+            "eventCapacity": self._events.maxlen,
         }
 
     def has_active_condition(self, host: str, condition_key: str) -> bool:

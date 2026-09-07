@@ -12,9 +12,11 @@ import threading
 from pathlib import Path
 
 from . import client as api_client
+from .brief import render_brief
 from .cli_arguments import parse_arguments
 from .config import ConfigError, MonitorConfig
 from .config_loader import load_config, load_private_config, resolve_config_path
+from .config_report import config_check_report, print_config_check_report
 from .discovery import OpenSshConfigHostSource
 from .doctor import run_doctor
 from .inventory import ConfigInventory
@@ -292,90 +294,6 @@ def _run_doctor(args: argparse.Namespace) -> int:
     )
 
 
-def _environment_state(name: str) -> str:
-    """Report whether a referenced environment variable is set, never its value."""
-    return "set" if os.environ.get(name) else "unset"
-
-
-def _config_check_report(config_path: Path, config: MonitorConfig) -> dict[str, object]:
-    """One report feeds both renderers; it names environment variables, never values."""
-    if config.topology is not None:
-        topology: dict[str, object] = {
-            "source": "configured",
-            "links": len(config.topology.links),
-        }
-    elif config.ssh_discovery.mode == "topology":
-        topology = {"source": "resolved", "links": None}
-    else:
-        topology = {"source": "none", "links": None}
-    return {
-        "configPath": str(config_path),
-        "hosts": len(config.hosts),
-        "localHost": config.local_host,
-        "sshDiscovery": {
-            "mode": config.ssh_discovery.mode,
-            "refreshSeconds": config.ssh_discovery.refresh_seconds,
-            "resolveTimeoutSeconds": config.ssh_discovery.resolve_timeout_seconds,
-        },
-        "persistence": config.persistence.enabled,
-        "workloads": config.workloads.mode,
-        "topology": topology,
-        "updates": config.updates.mode,
-        "listen": {"host": config.listen_host, "port": config.listen_port},
-        "webhooks": [
-            {
-                "name": webhook.name,
-                "urlEnv": webhook.url_env,
-                "urlEnvState": _environment_state(webhook.url_env),
-                "secretEnv": webhook.secret_env,
-                "secretEnvState": (
-                    _environment_state(webhook.secret_env)
-                    if webhook.secret_env is not None
-                    else None
-                ),
-            }
-            for webhook in config.webhooks
-        ],
-    }
-
-
-def _print_config_check_report(report: dict[str, object]) -> None:
-    print(f"configuration OK: {report['configPath']}")
-    local_note = f" (local: {report['localHost']})" if report["localHost"] else ""
-    print(f"hosts: {report['hosts']}{local_note}")
-    discovery = report["sshDiscovery"]
-    assert isinstance(discovery, dict)
-    print(
-        f"ssh discovery: {discovery['mode']} "
-        f"(refresh {discovery['refreshSeconds']}s, "
-        f"resolve timeout {discovery['resolveTimeoutSeconds']:g}s)"
-    )
-    print(f"persistence: {'enabled' if report['persistence'] else 'disabled'}")
-    print(f"workloads: {report['workloads']}")
-    print(f"updates: {report['updates']}")
-    topology = report["topology"]
-    assert isinstance(topology, dict)
-    if topology["source"] == "configured":
-        print(f"topology: configured ({topology['links']} links)")
-    elif topology["source"] == "resolved":
-        print("topology: resolved from SSH at runtime")
-    else:
-        print("topology: none")
-    webhooks = report["webhooks"]
-    assert isinstance(webhooks, list)
-    if not webhooks:
-        print("webhooks: none")
-        return
-    print(f"webhooks: {len(webhooks)}")
-    for webhook in webhooks:
-        references = [f"url_env {webhook['urlEnv']} ({webhook['urlEnvState']})"]
-        if webhook["secretEnv"] is not None:
-            references.append(
-                f"secret_env {webhook['secretEnv']} ({webhook['secretEnvState']})"
-            )
-        print(f"  {webhook['name']}: {', '.join(references)}")
-
-
 def _request_body(data: str | None) -> bytes | None:
     """Resolve ``--data``: inline JSON, ``@FILE``, or ``@-`` for stdin."""
     if data is None:
@@ -420,16 +338,37 @@ def _run_api(args: argparse.Namespace) -> int:
     return 0 if 200 <= response.status < 300 else 1
 
 
+def _run_brief(args: argparse.Namespace) -> int:
+    """Render the situation brief the running service composes."""
+    try:
+        response = api_client.request(
+            f"/api/brief?hours={args.hours}",
+            config_path=args.config,
+            token_file=args.token_file,
+            timeout=args.timeout,
+        )
+    except api_client.ApiClientError as exc:
+        _emit_json({"error": str(exc), "code": exc.code})
+        return exc.exit_code
+    succeeded = 200 <= response.status < 300
+    if args.json or not succeeded:
+        # The service's own body: the brief as JSON, or its error envelope.
+        api_client.write_response(response, sys.stdout.buffer)
+        return 0 if succeeded else 1
+    sys.stdout.write(render_brief(json.loads(response.body)))
+    return 0
+
+
 def _run_config_check(args: argparse.Namespace) -> int:
     """Parse and validate only: no web server, no SSH connections."""
     loaded = _load_validated_config(args.config, as_json=args.json)
     if loaded is None:
         return 2
-    report = _config_check_report(*loaded)
+    report = config_check_report(*loaded)
     if args.json:
         _emit_json({"ok": True, **report})
     else:
-        _print_config_check_report(report)
+        print_config_check_report(report)
     return 0
 
 
@@ -652,6 +591,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_monitor(args)
     if args.command == "api":
         return _run_api(args)
+    if args.command == "brief":
+        return _run_brief(args)
     if args.command == "config":
         return _run_config_check(args)
     if args.command == "doctor":

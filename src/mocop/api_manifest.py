@@ -39,6 +39,7 @@ API_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/usage", "authenticated"),
     ("GET", "/api/reports/usage", "authenticated"),
     ("GET", "/api/reports/utilization", "authenticated"),
+    ("GET", "/api/brief", "authenticated"),
     ("GET", "/api/capacity", "authenticated"),
     ("GET", "/api/incidents", "authenticated"),
     ("GET", "/api/meta", "public"),
@@ -131,6 +132,11 @@ QUERY_SCHEMAS: dict[str, QuerySchema] = {
         },
         "INVALID_QUERY",
         "invalid hours or host",
+    ),
+    "/api/brief": QuerySchema(
+        {"hours": _integer(1, 168, 24, "INVALID_HOURS")},
+        "INVALID_HOURS",
+        "invalid hours",
     ),
     "/api/gpu-history": QuerySchema(
         {

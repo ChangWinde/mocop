@@ -54,20 +54,20 @@ English README, API, operations, and engineering references remain maintained.
 - GPU capacity matching in the dashboard and as `GET /api/capacity` for
   agents, plus a capacity watch whose banner and opt-in notification fire when
   idle GPUs satisfy it; scheduling heatmap, connection map, program search,
-  process and attribution filters, `ssh` copy, and CSV export
+  process and attribution filters, `ssh` copy, CSV export
 - CPU, load, memory, swap, disk capacity and I/O, network rate, uptime, and kernel pressure stall (PSI) telemetry
 - Incidents with diagnosis, acknowledgement/silence, scoped thresholds, anti-flap handling, timed maintenance
-- Independent per-host scheduling, shared-path grouping, optional HTTPS webhooks
+- Independent per-host scheduling, shared-path grouping, HTTPS webhooks
 - Config-backed host inventory, expected GPU counts, local-host collection, and host groups
 - Per-GPU trends and process timelines, optional bounded SQLite retention, read-only Slurm/Kubernetes/Docker/Podman context
-- Per-owner GPU occupancy and idle-share rollups over a selectable window
-- Six visual styles, six accents, compact mode, saved ordering, validated local backgrounds
-- Opt-in release checks and one-click verified self-update
+- Per-owner GPU occupancy and idle-share rollups, and a situation brief
+- Six visual styles, six accents, compact mode, saved ordering, local backgrounds
+- Opt-in release checks and verified one-click self-update
 - OpenMetrics 1.0 endpoint for Prometheus and Grafana
 
 ## Quick start
 
-Mocop requires Linux, Python 3.10 or newer, OpenSSH, and non-interactive SSH access to each remote node. Verify host fingerprints manually before enabling unattended collection.
+Mocop requires Linux, Python 3.10 or newer, OpenSSH, and non-interactive SSH access to each remote node. Verify host fingerprints before enabling unattended collection.
 
 The steps below install Mocop with [uv](https://docs.astral.sh/uv/). If uv is not installed yet:
 
@@ -177,10 +177,11 @@ Everything the dashboard shows is also a small JSON API with stable error codes
 and P/A/R/W access tiers. `GET /api/meta` names every route's tier, query
 bounds, POST body fields, error-code catalog, and documentation URL; a `403`
 says where the capability lives. On the monitor host, `mocop api PATH` performs
-any public or authenticated GET, and `--data JSON` any writer-tier POST, using
-the configured listener and authentication mode. Only discovery and health are public by default; the
-[API reference](docs/API.md) has curl examples and explains why non-viewer
-automation must not send `X-Monitor-Request: dashboard`.
+any public or authenticated GET and, with `--data JSON`, any writer POST;
+`mocop brief` prints `GET /api/brief` (what needs a person, what changed, idle
+capacity, idle reservations) as one screen of text. Only discovery and health
+are public; the [API reference](docs/API.md) has curl examples and explains why
+non-viewer automation must not send `X-Monitor-Request: dashboard`.
 
 ## Metrics and troubleshooting
 
@@ -197,14 +198,14 @@ mocop doctor --probe                       # one bounded production probe per al
 
 Hosts are scheduled independently; failed samples stay visibly stale and retry
 with bounded backoff. See [Operations](docs/OPERATIONS.md) for recovery and exit
-codes, and [Performance](docs/PERFORMANCE.md) before changing cadence.
+codes and [Performance](docs/PERFORMANCE.md) before changing cadence.
 
 ## Security
 
 Mocop accepts only explicit SSH aliases and runs one fixed, read-only probe. It enforces host-key checking, batch mode, timeouts, output limits, bounded concurrency, private atomic configuration writes, and safe rendering of remote text.
 
 The service has no user accounts and listens on `127.0.0.1` by default. A
-private per-install Bearer capability protects every private route by default from other
+private per-install Bearer capability protects every private route from other
 local users but grants one complete operator role. Expose Mocop remotely only
 behind authenticated TLS or a private VPN: Bearer over plain HTTP has no
 network confidentiality or server authentication.
