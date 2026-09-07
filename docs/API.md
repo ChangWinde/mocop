@@ -398,6 +398,7 @@ This table matches the server's route manifest exactly.
 | GET | `/api/usage` | A | Per-owner GPU occupancy and idle-occupancy rollup. |
 | GET | `/api/reports/usage` | A | Per-owner GPU occupancy over the retained history (no per-device cap), idle share at hourly resolution, per-day breakdown. |
 | GET | `/api/reports/utilization` | A | Hourly GPU utilization, busy share, and memory per host, or per device of one host, over up to 90 days of rollups. |
+| GET | `/api/brief` | A | The operator's scan as one document: fleet status, actionable conditions worst first, changes and recurring conditions over a window, idle capacity, per-owner usage with idle share. |
 | GET | `/api/capacity` | A | Ranked same-host, same-model GPU groups that can take a job. |
 | GET | `/api/incidents` | A | Active conditions, transition events, correlations. |
 | GET | `/api/meta` | P | API self-description: versions, capabilities, endpoints. |
@@ -750,6 +751,44 @@ Hours without samples are absent, not zero.
 Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_QUERY`, `INVALID_HOURS`,
 `404 UNKNOWN_HOST`, `503 HISTORY_UNAVAILABLE`.
 
+### GET /api/brief
+
+The operator's morning scan as one document. Tier A. Answers, in reading
+order, what needs a person now, what changed over the window, where free
+capacity is, and whose GPUs sit idle: the questions otherwise answered by
+reading the attention panel, the incident log, the heatmap, and the usage
+report in turn. Every number comes from a projection this API already serves
+(`/api/snapshot`, `/api/incidents`, `/api/capacity` for one GPU of any model,
+`/api/reports/usage` and `/api/reports/utilization`, or `/api/usage` without
+history persistence), so the brief cannot disagree with them; what it adds is
+the ordering and two judgments people otherwise make by eye: which conditions
+keep coming back, and whose reservation sits idle. `mocop brief` renders the
+same document as text.
+
+Query parameters:
+
+| Parameter | Required | Bounds | Default |
+|---|---|---|---|
+| `hours` | no | integer 1–168 | 24 |
+
+Response fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `generatedAt`, `sinceAt`, `windowHours` | timestamp, timestamp, int | The window `changes` and `usage` cover. |
+| `status` | string | The summary card's badge by the dashboard's rule: `unconfigured` (no hosts), `critical` (an actionable critical condition), `attention` (a host with an actionable issue), `maintenance` (only maintained hosts), else `healthy`. |
+| `fleet` | object | `{hosts, online, offline[], stale, maintenance, gpus, busyGpus, idleGpus, gpuMemoryUsedPct}` from the snapshot `stats`; `offline[]` names every host that is not `online`. |
+| `attention` | object | `{active, critical, actionable, actionableCritical, silenced, hosts, byCategory, correlations[], entries, items[]}`. Counts are over active conditions; `silenced` is `active − actionable`; `hosts` counts hosts with an actionable condition; `byCategory` maps category to actionable count, most first. |
+| `attention.correlations[]` | array | `{kind, anchor, hosts[], detail}` from `/api/incidents`. |
+| `attention.items[]` | array | The first 10 of `entries` in the feed's order (actionable first, then critical). Each is `{hosts[], conditionKey, groupKey, category, resource, severity, value, threshold, detail, firstObservedAt, title}`; `title` is the diagnosis title. Conditions that share a `groupKey` (one network filesystem mounted on several hosts) collapse into one entry with every host in `hosts[]`, `conditionKey` and `detail` `null`, the highest `value`, and the earliest `firstObservedAt`. |
+| `changes` | object | `{coveredFromAt, opened, resolved, escalated, recurring[]}` counted over the transition feed inside the window. The feed is a bounded ring: `coveredFromAt` is `sinceAt` when the ring still has room or reaches back past the window, otherwise the oldest retained transition. |
+| `changes.recurring[]` | array | `{host, conditionKey, category, resource, openings, lastState}` for conditions that opened at least three times inside the covered window, most openings first, at most 10. |
+| `capacity` | object | `{idleGpus, hosts, excludedMaintenance, excludedHealth, topHosts[]}` from the capacity matcher for one GPU of any model; `topHosts[]` is `{host, model, available, total, minFreeVramGiB}` for up to 5 hosts with the most available devices. |
+| `usage` | object | `{source, coveredFromAt, busySharePct, totalGpuHours, owners[], idleHeavyOwners[]}`. `source` is `history` or `memory`; `busySharePct` is the sample-weighted fleet busy share from the utilization rollups, `null` without history persistence. `owners[]` is `{owner, gpuHours, idleSharePct, gpus, hosts, idleHeavy}` for up to 10 owners by GPU-hours; `idleHeavy` marks a reservation that sat idle at least half the window across at least 8 GPU-hours, and `idleHeavyOwners[]` lists those owners. |
+| `maintenance` | array | `{host, reason, until}` for hosts inside a maintenance window, by host. |
+
+Errors: `UNKNOWN_QUERY_PARAMETER`, `INVALID_HOURS`.
+
 ### GET /api/capacity
 
 Answer the placement question directly: which hosts can take a job that needs
@@ -811,6 +850,7 @@ Response fields:
 | `version` | int | Incident-view revision (same meaning as snapshot `incidentVersion`). |
 | `active` | array | Every currently active condition, decorated and sorted (actionable first, then critical, then host/key). |
 | `events` | array | The most recent `limit` transitions, newest first. |
+| `eventCapacity` | int | Size of the transition ring (`incident_history_points`); when `events` holds this many, older transitions have been dropped. |
 | `correlations` | array | Possible shared-path groupings; see below. |
 
 `active[]` fields:
@@ -1279,6 +1319,15 @@ shared-path or simultaneous-loss group (`GET /api/incidents`
 Recommended request sequences for common automation tasks. All of them
 honor the viewer semantics: pure diagnostics stay at the A tier with Bearer
 authentication and without the marker header.
+
+### 0. Orient first
+
+`GET /api/brief` (A) is the one read to start a session with: `status`, then
+`attention.items[]` worst first (a shared filesystem appears once, with every
+host in `hosts[]`), `changes.recurring[]` for conditions that keep reopening,
+`capacity.topHosts[]` for where a job fits, and `usage.idleHeavyOwners[]` for
+reservations sitting idle. Follow up on individual items with the routes
+below; the brief is composed from them and never disagrees with them.
 
 ### 1. Read-only diagnosis (no viewer side effect)
 

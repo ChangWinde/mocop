@@ -6,6 +6,21 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- A situation brief: `GET /api/brief?hours=N` and `mocop brief [--hours N]
+  [--json]`. The operator's morning scan as one document, in reading order:
+  fleet status by the dashboard's badge rule; the actionable conditions worst
+  first with their correlations, conditions on one network filesystem
+  collapsed into a single entry across its hosts; openings, recoveries, and
+  escalations over the window with the conditions that opened three or more
+  times (on the live fleet this named one VRAM alert that had flapped 39
+  times in a day); idle GPUs by host from the capacity matcher; per-owner
+  GPU-hours with the share their reservation sat idle, flagging owners idle
+  at least half the window across a working day of GPU-hours; and the hosts
+  inside maintenance windows. Every number comes from a projection the
+  dashboard already shows, so the brief cannot disagree with the screen, and
+  the transition feed's coverage is reported (`coveredFromAt`) rather than a
+  partial count being presented as a total. `GET /api/incidents` now carries
+  `eventCapacity`, the size of its transition ring.
 - Optional `authentication: "none"` for direct dashboard and API access without
   a token. New tabs and reloads open immediately; CLI and service lifecycle
   commands support the same mode. Bearer authentication remains the default.
