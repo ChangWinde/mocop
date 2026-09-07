@@ -807,6 +807,20 @@ class ConfigTests(unittest.TestCase):
             load_config(self.write(value))
         del value["incidents"]["gpu_idle_memory_seconds"]
 
+        self.assertEqual(load_config(self.write(value)).incidents.recovery_margin, 5)
+        value["incidents"]["recovery_margin"] = 0
+        self.assertEqual(load_config(self.write(value)).incidents.recovery_margin, 0)
+        value["incidents"]["recovery_margin"] = 2.5
+        self.assertEqual(load_config(self.write(value)).incidents.recovery_margin, 2.5)
+        for invalid in (-1, 51, True, "5", float("inf")):
+            with self.subTest(invalid=invalid):
+                value["incidents"]["recovery_margin"] = invalid
+                with self.assertRaisesRegex(
+                    ConfigError, "incidents.recovery_margin must be"
+                ):
+                    load_config(self.write(value))
+        del value["incidents"]["recovery_margin"]
+
         for invalid in (0, 61, 2.5, True):
             with self.subTest(invalid=invalid):
                 value["incidents"]["recovery_cycles"] = invalid

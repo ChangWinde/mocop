@@ -285,6 +285,7 @@ class BuildBriefTests(unittest.TestCase):
                 "value": 97.0,
                 "threshold": 85.0,
                 "detail": None,
+                "belowThreshold": False,
                 "firstObservedAt": "2026-09-07T06:00:00Z",
                 "title": "disk:/dev/sda1:/data needs attention",
             },
@@ -449,6 +450,29 @@ class BuildBriefTests(unittest.TestCase):
         self.assertEqual(usage["coveredFromAt"], "2026-09-06T09:00:00Z")
         self.assertIsNone(usage["busySharePct"])
         self.assertEqual(usage["totalGpuHours"], 40.0)
+
+    def test_readings_inside_the_recovery_margin_are_marked(self) -> None:
+        incidents = _incidents()
+        incidents["active"] = [
+            {
+                **_condition("gpu-01", "gpu_memory:GPU-6", value=88.1, threshold=90.0),
+                "belowThreshold": True,
+            },
+            {
+                **_condition("gpu-02", "gpu_memory:GPU-0", value=93.0, threshold=90.0),
+                "belowThreshold": False,
+            },
+        ]
+        brief = _brief(incidents=incidents)
+        self.assertEqual(
+            [item["belowThreshold"] for item in brief["attention"]["items"]],
+            [True, False],
+        )
+        text = render_brief(brief)
+        self.assertIn(
+            "  !! gpu-01 gpu_memory GPU-6 88.1/90 · 3h · below threshold\n", text
+        )
+        self.assertIn("  !! gpu-02 gpu_memory GPU-0 93/90 · 3h\n", text)
 
     def test_short_idle_reservations_are_not_flagged(self) -> None:
         usage = _usage()

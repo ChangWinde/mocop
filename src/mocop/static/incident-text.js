@@ -70,7 +70,15 @@
       return message || "采集失败";
     }
 
+    // An open condition whose reading has dipped under its threshold but not
+    // past the recovery margin says so, otherwise "GPU 6 VRAM 88%" under a
+    // 90% threshold looks like a stale entry.
     function incidentConditionMessage(condition) {
+      const text = conditionReading(condition);
+      return condition.belowThreshold ? `${text} · 回落中` : text;
+    }
+
+    function conditionReading(condition) {
       const value = condition.value == null ? null : numeric(condition.value);
       const expected = condition.threshold == null ? null : numeric(condition.threshold);
       const resource = condition.resource || "资源";

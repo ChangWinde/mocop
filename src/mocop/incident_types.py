@@ -34,6 +34,13 @@ class IncidentCondition:
     # Seconds the condition must have been observed for, on top of the cycle
     # count, before it opens or changes severity; 0 confirms by cycles alone.
     open_after_seconds: float = 0.0
+    # Hysteresis. A numeric condition is derived down to ``recovery_margin``
+    # below its threshold: inside that band ``below_threshold`` is set, and the
+    # sample keeps an open condition open but cannot open or confirm one. The
+    # same margin below ``critical_at`` keeps a critical condition critical.
+    below_threshold: bool = False
+    critical_at: float | None = None
+    recovery_margin: float = 0.0
 
     def active_dict(self, host: str) -> dict[str, object]:
         return {
@@ -47,6 +54,7 @@ class IncidentCondition:
             "observedAt": self.observed_at,
             "detail": self.detail,
             "groupKey": self.group_key,
+            "belowThreshold": self.below_threshold,
         }
 
 

@@ -6,6 +6,17 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Hysteresis for numeric conditions: `incidents.recovery_margin` (default 5).
+  An open condition stays open until its reading falls the margin below the
+  threshold that opened it, and a critical one stays critical until it falls
+  the margin below the critical line; readings inside the band carry
+  `belowThreshold: true` in `GET /api/incidents` and webhook events and read
+  回落中 on the dashboard. They hold an open condition but never open or
+  confirm one, so a dip also breaks a confirmation streak. On the live fleet
+  one GPU's VRAM at 90% ± 5 crossed the line 216 times in six hours without
+  ever falling under 85%, and `gpu_memory` alone produced 241 of the day's
+  352 openings; each such reading is now one incident. The idle-VRAM
+  condition applies the margin to both sides of its claim.
 - A situation brief: `GET /api/brief?hours=N` and `mocop brief [--hours N]
   [--json]`. The operator's morning scan as one document, in reading order:
   fleet status by the dashboard's badge rule; the actionable conditions worst

@@ -105,6 +105,17 @@ conditions open immediately regardless. `0` confirms by sample count alone.
 floor for the idle-VRAM condition, which also needs `gpu_idle_memory_cycles`
 samples: checkpoint and evaluation pauses idle a GPU for a minute or two and
 should not read as a held-but-unused device.
+`incidents.recovery_margin` (5, a number from 0 through 50) is hysteresis for
+every numeric condition: once open, a condition stays open until its value
+falls this far below the threshold that opened it (percentage points, or
+degrees Celsius for GPU temperature), and a critical condition stays critical
+until it falls this far below the critical line. Readings inside the margin
+are marked `belowThreshold` in the API and 回落中 on the dashboard; they hold
+an open condition but never open or confirm one. For the idle-VRAM condition
+the margin covers both sides of the claim (VRAM just under
+`gpu_idle_memory_pct`, utilization just over `gpu_busy_pct`). A reading that
+hovers around a threshold is one incident and one webhook, not one per
+crossing; `0` restores closing on the first sample under the line.
 
 `incident_overrides` may contain only `hosts` and `groups`, each with at most
 256 entries. A scope object is non-empty and may contain `thresholds` and/or

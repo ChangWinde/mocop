@@ -780,7 +780,7 @@ Response fields:
 | `fleet` | object | `{hosts, online, offline[], stale, maintenance, gpus, busyGpus, idleGpus, gpuMemoryUsedPct}` from the snapshot `stats`; `offline[]` names every host that is not `online`. |
 | `attention` | object | `{active, critical, actionable, actionableCritical, silenced, hosts, byCategory, correlations[], entries, items[]}`. Counts are over active conditions; `silenced` is `active − actionable`; `hosts` counts hosts with an actionable condition; `byCategory` maps category to actionable count, most first. |
 | `attention.correlations[]` | array | `{kind, anchor, hosts[], detail}` from `/api/incidents`. |
-| `attention.items[]` | array | The first 10 of `entries` in the feed's order (actionable first, then critical). Each is `{hosts[], conditionKey, groupKey, category, resource, severity, value, threshold, detail, firstObservedAt, title}`; `title` is the diagnosis title. Conditions that share a `groupKey` (one network filesystem mounted on several hosts) collapse into one entry with every host in `hosts[]`, `conditionKey` and `detail` `null`, the highest `value`, and the earliest `firstObservedAt`. |
+| `attention.items[]` | array | The first 10 of `entries` in the feed's order (actionable first, then critical). Each is `{hosts[], conditionKey, groupKey, category, resource, severity, value, threshold, detail, belowThreshold, firstObservedAt, title}`; `title` is the diagnosis title and `belowThreshold` marks a reading held open inside the recovery margin. Conditions that share a `groupKey` (one network filesystem mounted on several hosts) collapse into one entry with every host in `hosts[]`, `conditionKey` and `detail` `null`, the highest `value`, and the earliest `firstObservedAt`. |
 | `changes` | object | `{coveredFromAt, opened, resolved, escalated, recurring[]}` counted over the transition feed inside the window. The feed is a bounded ring: `coveredFromAt` is `sinceAt` when the ring still has room or reaches back past the window, otherwise the oldest retained transition. |
 | `changes.recurring[]` | array | `{host, conditionKey, category, resource, openings, lastState}` for conditions that opened at least three times inside the covered window, most openings first, at most 10. |
 | `capacity` | object | `{idleGpus, hosts, excludedMaintenance, excludedHealth, topHosts[]}` from the capacity matcher for one GPU of any model; `topHosts[]` is `{host, model, available, total, minFreeVramGiB}` for up to 5 hosts with the most available devices. |
@@ -866,6 +866,7 @@ Response fields:
 | `observedAt` | timestamp | Sample that produced the current state. |
 | `detail` | string \| null | Bounded extra context. |
 | `groupKey` | string \| null | Set for shared network filesystems so one backend outage groups visually. |
+| `belowThreshold` | bool | The latest reading is under the threshold but inside `incidents.recovery_margin`, so the condition stays open (and a critical one stays critical) instead of closing on every dip; the dashboard shows such readings as 回落中. Always `false` for non-numeric conditions. |
 | `firstObservedAt`, `lastObservedAt` | timestamp | When the condition opened / was last confirmed. With history persistence, `firstObservedAt` survives service restarts (the condition resumes its generation rather than opening again). |
 | `maintenanceSilenced` | bool | Host is inside an active maintenance window. |
 | `silenced` | bool | `maintenanceSilenced` **or** an active `silenced` action on this condition. |
@@ -1263,6 +1264,7 @@ object does not reproduce it.
     "observedAt": "2026-09-05T10:00:05Z",
     "detail": "SSH connection timed out",
     "groupKey": null,
+    "belowThreshold": false,
     "state": "opened"
   },
   "correlation": {
@@ -1281,7 +1283,8 @@ object does not reproduce it.
 `state` is `opened`, `resolved`, `escalated`, or `deescalated`; `observedAt` is
 the transition time; `detail` for connectivity and GPU-availability conditions
 is one of the *Failure messages* strings; `value`/`threshold` are numbers or
-`null`; `groupKey` names a shared device group when the condition has one.
+`null`; `groupKey` names a shared device group when the condition has one;
+`belowThreshold` is described under `GET /api/incidents`.
 `correlation` is present only when the transition belongs to a possible
 shared-path or simultaneous-loss group (`GET /api/incidents`
 `correlations[]`; `anchor` is `null` for the latter). `POST

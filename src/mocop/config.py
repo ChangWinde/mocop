@@ -76,6 +76,12 @@ class IncidentConfig:
     # evaluation pauses idle a GPU for a minute or two, so the idle-memory
     # condition has its own, longer floor.
     gpu_idle_memory_seconds: float = 300
+    # Hysteresis: an open numeric condition stays open until its value falls
+    # this far below the threshold that opened it (percentage points, or
+    # degrees for GPU temperature), and a critical one stays critical until it
+    # falls this far below the critical line. A reading that hovers around a
+    # threshold is one incident, not one per crossing.
+    recovery_margin: float = 5
 
 
 @dataclass(frozen=True, slots=True)

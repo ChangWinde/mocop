@@ -81,6 +81,7 @@ interfaces without a runtime plugin registry.
 | `incident_types.py` | the incident vocabulary: conditions, transition events, restored open incidents, the policy protocol |
 | `incidents.py` | condition evaluation, bounded transition history, restored generations, and raw/actionable counts |
 | `incident_domains.py` | which telemetry domains a condition's recovery needs and when a sample is blind to them |
+| `incident_health.py` | GPU hardware-health conditions (ECC, pending memory repair, slowdown) derived per device from a sample's health block |
 | `correlation.py` | possible shared-path grouping without changing incident truth |
 | `diagnostics.py` | deterministic incident guidance and redacted support bundles |
 | `persistence.py` | optional bounded asynchronous SQLite history: the writer thread, hourly GPU rollups kept beside the raw samples, retention, and the size cap |

@@ -45,6 +45,12 @@ const NOW = Date.parse("2026-08-14T03:00:00Z");
   assert.equal(message("cpu", { resource: null }), "资源 87.5%");
   assert.equal(message("custom", { value: null, detail: "something" }), "something");
   assert.equal(message("custom", { value: null, detail: null, resource: null }), "资源");
+  // A reading held open inside the recovery margin says so.
+  assert.equal(
+    message("gpu_memory", { resource: "GPU 6 VRAM", value: 88.1, threshold: 90, belowThreshold: true }),
+    "GPU 6 VRAM 88.1% · 回落中",
+  );
+  assert.equal(message("gpu_memory", { resource: "GPU 6 VRAM", value: 91, belowThreshold: false }), "GPU 6 VRAM 91%");
 }
 
 {

@@ -154,10 +154,16 @@ class IncidentTrackerTests(unittest.TestCase):
         self.assertNotIn("pressure:memory", conditions_for(None))
 
         quiet = conditions_for(
-            PressureStallMetrics(memory=stall(19.99), io=stall(29.99))
+            PressureStallMetrics(memory=stall(14.99), io=stall(24.99))
         )
         self.assertNotIn("pressure:memory", quiet)
         self.assertNotIn("pressure:io", quiet)
+        # Just under the line is derived, but only to hold an open condition.
+        near = conditions_for(
+            PressureStallMetrics(memory=stall(19.99), io=stall(29.99))
+        )
+        self.assertTrue(near["pressure:memory"].below_threshold)
+        self.assertTrue(near["pressure:io"].below_threshold)
 
         elevated = conditions_for(PressureStallMetrics(memory=stall(25), io=stall(35)))
         self.assertEqual(elevated["pressure:memory"].severity, "warning")
@@ -237,11 +243,15 @@ class IncidentTrackerTests(unittest.TestCase):
         )
 
         conditions = policy.conditions(
-            ProbeResult("node-a", "online", 1, system=system(90, 99))
+            ProbeResult("node-a", "online", 1, system=system(89, 99))
         )
 
         self.assertNotIn("cpu", conditions)
         self.assertFalse(any(key.startswith("disk:") for key in conditions))
+        held = policy.conditions(
+            ProbeResult("node-a", "online", 1, system=system(90, 99))
+        )["cpu"]
+        self.assertEqual((held.threshold, held.below_threshold), (95.0, True))
 
     def test_restores_transition_context_and_continues_event_ids(self) -> None:
         historical = IncidentEvent(
@@ -1117,11 +1127,120 @@ class IncidentTrackerTests(unittest.TestCase):
         self.assertEqual(escalated["events"][0]["state"], "escalated")
         self.assertEqual(escalated["active"][0]["severity"], "critical")
 
+        # 90% is inside the recovery margin below the 95% critical line: the
+        # established severity holds, exactly as an open condition would.
         self.tracker.update(warning)
         self.tracker.update(warning)
+        held = self.tracker.snapshot(20)
+        self.assertEqual(held["events"][0]["state"], "escalated")
+        self.assertEqual(held["active"][0]["severity"], "critical")
+
+        eased = ProbeResult("node-a", "online", 1, system=system(89, 20))
+        self.tracker.update(eased)
+        self.tracker.update(eased)
         deescalated = self.tracker.snapshot(20)
         self.assertEqual(deescalated["events"][0]["state"], "deescalated")
         self.assertEqual(deescalated["active"][0]["severity"], "warning")
+
+    def test_recovery_margin_holds_a_reading_that_hovers_around_the_threshold(
+        self,
+    ) -> None:
+        # The live pattern: VRAM at 90% ± 5 crossed the line 216 times in six
+        # hours and never fell below 85%. One incident, not one per crossing.
+        def vram(pct: float) -> ProbeResult:
+            return ProbeResult(
+                "node-a",
+                "online",
+                1,
+                (gpu(70, memory_used=pct),),
+                system=system(20, 20),
+            )
+
+        self.tracker.update(vram(50))
+        self.tracker.update(vram(91))
+        self.tracker.update(vram(91))
+        active = self.tracker.snapshot(20)["active"]
+        self.assertEqual([item["category"] for item in active], ["gpu_memory"])
+        self.assertFalse(active[0]["belowThreshold"])
+
+        for pct in (88, 86, 92, 85.5, 89, 93, 87):
+            self.tracker.update(vram(pct))
+        snapshot = self.tracker.snapshot(20)
+        self.assertEqual([event["state"] for event in snapshot["events"]], ["opened"])
+        self.assertEqual(snapshot["active"][0]["value"], 87.0)
+        self.assertTrue(snapshot["active"][0]["belowThreshold"])
+
+        # Below the margin, the usual recovery confirmation resolves it.
+        self.tracker.update(vram(84))
+        self.assertEqual(len(self.tracker.snapshot(20)["active"]), 1)
+        self.tracker.update(vram(84))
+        resolved = self.tracker.snapshot(20)
+        self.assertEqual(resolved["active"], [])
+        self.assertEqual(resolved["events"][0]["state"], "resolved")
+
+        # Readings inside the margin are not evidence for opening: a streak of
+        # 88s never opens, and an 88 between two 91s breaks the confirmation.
+        for _ in range(4):
+            self.tracker.update(vram(88))
+        self.assertEqual(self.tracker.snapshot(20)["active"], [])
+        self.tracker.update(vram(91))
+        self.tracker.update(vram(88))
+        self.tracker.update(vram(91))
+        self.assertEqual(self.tracker.snapshot(20)["active"], [])
+        self.tracker.update(vram(91))
+        self.assertEqual(len(self.tracker.snapshot(20)["active"]), 1)
+
+    def test_idle_memory_margin_covers_both_sides_of_the_claim(self) -> None:
+        def sample(memory_used: float, utilization: float) -> ProbeResult:
+            return ProbeResult(
+                "node-a",
+                "online",
+                1,
+                (gpu(70, utilization=utilization, memory_used=memory_used),),
+                system=system(20, 20),
+            )
+
+        for _ in range(3):
+            self.tracker.update(sample(40, 2))
+        self.assertIn(
+            "gpu_idle_memory",
+            [item["category"] for item in self.tracker.snapshot(20)["active"]],
+        )
+        # A utilization blip to 12% (busy line 10) or VRAM easing to 17%
+        # (idle line 20) holds the condition; beyond the margin it recovers.
+        self.tracker.update(sample(40, 12))
+        self.tracker.update(sample(17, 2))
+        active = self.tracker.snapshot(20)["active"]
+        self.assertEqual([item["category"] for item in active], ["gpu_idle_memory"])
+        self.assertTrue(active[0]["belowThreshold"])
+        self.tracker.update(sample(40, 16))
+        self.tracker.update(sample(40, 16))
+        self.assertEqual(self.tracker.snapshot(20)["active"], [])
+
+    def test_starved_disk_deescalates_once_headroom_returns(self) -> None:
+        # Critical for lack of absolute headroom is a different criterion from
+        # critical by percentage, so the severity hold does not bridge them.
+        def disk(total_gib: float, used_pct: float) -> ProbeResult:
+            total = total_gib * 1024
+            used = total * used_pct / 100
+            metrics = replace(
+                system(10, 10),
+                disks=(
+                    DiskMetrics(
+                        "/dev/a", "ext4", "/", total, used, total - used, used_pct
+                    ),
+                ),
+            )
+            return ProbeResult("node-a", "online", 1, (), system=metrics)
+
+        for _ in range(3):
+            self.tracker.update(disk(50, 92))
+        self.assertEqual(self.tracker.snapshot(20)["active"][0]["severity"], "critical")
+        self.tracker.update(disk(500, 92))
+        self.tracker.update(disk(500, 92))
+        snapshot = self.tracker.snapshot(20)
+        self.assertEqual(snapshot["active"][0]["severity"], "warning")
+        self.assertEqual(snapshot["events"][0]["state"], "deescalated")
 
 
 if __name__ == "__main__":
