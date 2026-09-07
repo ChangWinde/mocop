@@ -78,12 +78,31 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/config_report.py": 100,
     "src/mocop/cli_arguments.py": 290,
     "src/mocop/cli_client_arguments.py": 125,
-    "src/mocop/incidents.py": 790,
+    "src/mocop/incidents.py": 770,
+    "src/mocop/incident_health.py": 90,
     "src/mocop/incident_types.py": 125,
     "src/mocop/incident_domains.py": 100,
     "src/mocop/notifications.py": 560,
     "src/mocop/webhook_transport.py": 375,
 }
+
+
+def _contrast(
+    text: tuple[float, float, float], surface: tuple[float, float, float]
+) -> float:
+    """WCAG 2 contrast ratio of two sRGB colors given as 0-255 channels."""
+
+    def luminance(rgb: tuple[float, float, float]) -> float:
+        channels = []
+        for channel in rgb:
+            share = channel / 255
+            channels.append(
+                share / 12.92 if share <= 0.03928 else ((share + 0.055) / 1.055) ** 2.4
+            )
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+    first, second = luminance(text), luminance(surface)
+    return (max(first, second) + 0.05) / (min(first, second) + 0.05)
 
 
 class RepositoryGovernanceTests(unittest.TestCase):
@@ -161,6 +180,77 @@ class RepositoryGovernanceTests(unittest.TestCase):
         self.assertGreaterEqual(min(literals), 9.0, sorted(literals)[:5])
         for variable in ("--text-2xs", "--text-xs", "--text-sm"):
             self.assertIn(f"{variable}:", stylesheet)
+
+    def test_stylesheet_radii_come_from_the_scale(self) -> None:
+        # Twenty distinct corner radii (2 to 17 px) sat side by side before the
+        # scale; controls of one height now share one step, and a new literal
+        # would reintroduce the drift.
+        stylesheet = (ROOT / "src" / "mocop" / "static" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+        literal = re.findall(r"border-radius:[^;}]*\d+px", stylesheet)
+        self.assertEqual(literal, [])
+        for step in ("2xs", "xs", "sm", "md", "lg", "xl", "2xl", "pill"):
+            self.assertIn(f"--radius-{step}:", stylesheet)
+
+    def test_muted_text_passes_contrast_on_every_style_surface(self) -> None:
+        # WCAG AA for body-size text is 4.5:1. The two secondary text tiers are
+        # checked against each visual style's static surfaces (bg, surface,
+        # panel-solid), resolving the `color-mix(in srgb, var(--x) N%, #hex)`
+        # form the tokens use; the default --muted-2 sat at 2.6:1 before.
+        stylesheet = (ROOT / "src" / "mocop" / "static" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+        root_block = re.search(r":root \{(.*?)\n\}", stylesheet, re.S)
+        assert root_block is not None
+        root = self._tokens(root_block.group(1))
+        styles = {"precision": root}
+        for match in re.finditer(
+            r'html\[data-style="(\w+)"\] \{(.*?)\n\}', stylesheet, re.S
+        ):
+            styles[match.group(1)] = {**root, **self._tokens(match.group(2))}
+        self.assertEqual(len(styles), 6)
+        for name, tokens in styles.items():
+            surfaces = [
+                self._rgb(tokens[surface], tokens)
+                for surface in ("bg", "surface", "panel-solid")
+            ]
+            for tier in ("muted", "muted-2"):
+                text = self._rgb(tokens[tier], tokens)
+                for surface, rgb in zip(
+                    ("bg", "surface", "panel-solid"), surfaces, strict=False
+                ):
+                    with self.subTest(style=name, tier=tier, surface=surface):
+                        self.assertGreaterEqual(_contrast(text, rgb), 4.5)
+
+    @staticmethod
+    def _tokens(block: str) -> dict[str, str]:
+        return dict(re.findall(r"--([a-z0-9-]+):\s*([^;]+);", block))
+
+    @classmethod
+    def _rgb(cls, value: str, tokens: dict[str, str]) -> tuple[float, float, float]:
+        value = value.strip()
+        mixed = re.fullmatch(
+            r"color-mix\(in srgb, var\(--([a-z0-9-]+)\) (\d+)%, (.+)\)", value
+        )
+        if mixed:
+            share = int(mixed.group(2)) / 100
+            first = cls._rgb(tokens[mixed.group(1)], tokens)
+            second = cls._rgb(mixed.group(3), tokens)
+            return tuple(
+                a * share + b * (1 - share) for a, b in zip(first, second, strict=False)
+            )
+        rgba = re.fullmatch(r"rgba\((\d+), ?(\d+), ?(\d+), ?([\d.]+)\)", value)
+        if rgba:
+            # A translucent surface is read over the style's page background.
+            alpha = float(rgba.group(4))
+            backdrop = cls._rgb(tokens["bg"], tokens)
+            return tuple(
+                float(rgba.group(index)) * alpha + under * (1 - alpha)
+                for index, under in zip((1, 2, 3), backdrop, strict=True)
+            )
+        assert re.fullmatch(r"#[0-9a-fA-F]{6}", value), value
+        return tuple(int(value[index : index + 2], 16) for index in (1, 3, 5))
 
     def test_core_module_line_budgets_do_not_regress(self) -> None:
         for relative, budget in CORE_MODULE_LINE_BUDGETS.items():

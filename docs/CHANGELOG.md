@@ -6,6 +6,17 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Hysteresis for numeric conditions: `incidents.recovery_margin` (default 5).
+  An open condition stays open until its reading falls the margin below the
+  threshold that opened it, and a critical one stays critical until it falls
+  the margin below the critical line; readings inside the band carry
+  `belowThreshold: true` in `GET /api/incidents` and webhook events and read
+  回落中 on the dashboard. They hold an open condition but never open or
+  confirm one, so a dip also breaks a confirmation streak. On the live fleet
+  one GPU's VRAM at 90% ± 5 crossed the line 216 times in six hours without
+  ever falling under 85%, and `gpu_memory` alone produced 241 of the day's
+  352 openings; each such reading is now one incident. The idle-VRAM
+  condition applies the margin to both sides of its claim.
 - A situation brief: `GET /api/brief?hours=N` and `mocop brief [--hours N]
   [--json]`. The operator's morning scan as one document, in reading order:
   fleet status by the dashboard's badge rule; the actionable conditions worst
@@ -29,6 +40,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- `flush()` on the history writer reports a dropped write even when the
+  write and the flush barrier landed in different batches. The writer
+  batches whatever is queued when it wakes, so a write could be processed
+  (and dropped) alone and the barrier that followed it committed trivially;
+  the barrier now answers from the drop counter. This was the intermittent
+  CI failure of the prune-failure test on Python 3.10.
 - A single failed probe no longer closes a host's whole GPU process
   inventory. On a live deployment behind an SSH relay, every transient
   failure emitted a hidden `stopped` for each process, re-seeded them all a
@@ -135,6 +152,19 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Dashboard design pass against published dark-UI practice (Linear's
+  luminance-stacked system, WCAG 2.2 AA, the data-dense dashboard
+  guidance): every corner radius comes from one eight-step scale
+  (`--radius-2xs` … `--radius-pill`) instead of twenty distinct values, so
+  controls of one height share a corner; the two secondary text tiers pass
+  4.5:1 on every static surface of all six visual styles (the default
+  `--muted-2` sat at 2.6:1, studio at 2.8:1), which a repository test now
+  computes from the tokens, resolving `color-mix` and translucent surfaces;
+  keyboard focus wears a two-layer ring (2 px at 55 % plus 5 px at 22 %)
+  that reads on dark surfaces where the former 3 px 18 % ring did not, and
+  the browser smoke presses a real Tab to check it; the network card's two
+  rates stack instead of colliding when a reading is wide. No dependency,
+  build step, or new style.
 - Dashboard legibility and small-screen layout. Secondary text no longer
   uses 7, 8, or 9 px sizes (146 declarations, below what CJK text needs at
   desk distance): it goes through a `--text-2xs/--text-xs/--text-sm` scale of

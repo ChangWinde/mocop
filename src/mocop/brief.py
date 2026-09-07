@@ -193,6 +193,7 @@ def _attention_entries(actionable: list[dict[str, Any]]) -> list[dict[str, Any]]
         group["hosts"] = sorted({*group["hosts"], str(item["host"])})
         group["conditionKey"] = None
         group["detail"] = None
+        group["belowThreshold"] = group["belowThreshold"] and entry["belowThreshold"]
         value = item["value"]
         if isinstance(value, int | float) and (
             group["value"] is None or value > group["value"]
@@ -216,6 +217,7 @@ def _attention_item(item: dict[str, Any]) -> dict[str, Any]:
         "value": item["value"],
         "threshold": item["threshold"],
         "detail": item["detail"],
+        "belowThreshold": bool(item.get("belowThreshold", False)),
         "firstObservedAt": item["firstObservedAt"],
         "title": diagnosis["title"] if isinstance(diagnosis, dict) else None,
     }
@@ -432,6 +434,7 @@ def render_brief(brief: dict[str, Any]) -> str:
             f"  {'!!' if item['severity'] == 'critical' else ' !'} "
             f"{where} {item['category']} {item['resource']}{measure}"
             f" · {_age(brief['generatedAt'], item['firstObservedAt'])}"
+            + (" · below threshold" if item["belowThreshold"] else "")
             + (f" · {item['detail']}" if item["detail"] else "")
         )
     hidden = attention["entries"] - len(attention["items"])

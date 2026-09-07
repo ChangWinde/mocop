@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from .config import IncidentConfig, IncidentScopeOverrideConfig, ThresholdConfig
 from .incident_domains import condition_domains, telemetry_unknown
+from .incident_health import gpu_health_conditions
 from .incident_types import (
     IncidentCondition,
     IncidentEvent,
@@ -285,24 +286,20 @@ class ThresholdIncidentPolicy:
                 recovery_cycles=self._incidents.recovery_cycles,
             )
 
+        margin = self._incidents.recovery_margin
         for gpu in result.gpus:
             identity = gpu.uuid or str(gpu.index)
-            temperature = gpu.temperature_c
             temperature_threshold = threshold("gpu_temperature_warning_c")
-            if temperature is not None and temperature >= temperature_threshold:
-                conditions[f"gpu_temperature:{identity}"] = IncidentCondition(
-                    key=f"gpu_temperature:{identity}",
-                    category="gpu_temperature",
-                    resource=f"GPU {gpu.index}",
-                    severity=self._severity(temperature, temperature_threshold + 5),
-                    value=round(float(temperature), 2),
-                    threshold=temperature_threshold,
-                    observed_at=result.observed_at,
-                    open_after_cycles=self._incidents.resource_open_cycles,
-                    open_after_seconds=self._incidents.resource_open_seconds,
-                    recovery_cycles=self._incidents.recovery_cycles,
-                )
-
+            self._add_percentage(
+                conditions,
+                key=f"gpu_temperature:{identity}",
+                category="gpu_temperature",
+                resource=f"GPU {gpu.index}",
+                value=gpu.temperature_c,
+                threshold=temperature_threshold,
+                observed_at=result.observed_at,
+                critical_at=temperature_threshold + 5,
+            )
             memory_pct = (
                 self._percentage(gpu.memory_used_mib, gpu.memory_total_mib)
                 if gpu.memory_used_mib is not None
@@ -310,27 +307,26 @@ class ThresholdIncidentPolicy:
                 and gpu.memory_total_mib > 0
                 else None
             )
-            memory_threshold = threshold("gpu_memory_warning_pct")
-            if memory_pct is not None and memory_pct >= memory_threshold:
-                key = f"gpu_memory:{identity}"
-                conditions[key] = IncidentCondition(
-                    key=key,
-                    category="gpu_memory",
-                    resource=f"GPU {gpu.index} VRAM",
-                    severity=self._severity(memory_pct),
-                    value=memory_pct,
-                    threshold=memory_threshold,
-                    observed_at=result.observed_at,
-                    open_after_cycles=self._incidents.resource_open_cycles,
-                    open_after_seconds=self._incidents.resource_open_seconds,
-                    recovery_cycles=self._incidents.recovery_cycles,
-                )
+            self._add_percentage(
+                conditions,
+                key=f"gpu_memory:{identity}",
+                category="gpu_memory",
+                resource=f"GPU {gpu.index} VRAM",
+                value=memory_pct,
+                threshold=threshold("gpu_memory_warning_pct"),
+                observed_at=result.observed_at,
+            )
             utilization = gpu.utilization_gpu_pct
+            idle_threshold = threshold("gpu_idle_memory_pct")
+            # Both sides of the idle-memory claim carry the margin: held VRAM
+            # that dips just under the line, or utilization that blips just
+            # over the busy line, keeps an open condition rather than closing
+            # it, and neither can open one.
             if (
                 memory_pct is not None
-                and memory_pct >= threshold("gpu_idle_memory_pct")
+                and memory_pct >= idle_threshold - margin
                 and utilization is not None
-                and utilization < threshold("gpu_busy_pct")
+                and utilization < threshold("gpu_busy_pct") + margin
                 and (gpu.memory_used_mib or 0) > 0
             ):
                 key = f"gpu_idle_memory:{identity}"
@@ -340,66 +336,23 @@ class ThresholdIncidentPolicy:
                     resource=f"GPU {gpu.index} VRAM",
                     severity="warning",
                     value=memory_pct,
-                    threshold=threshold("gpu_idle_memory_pct"),
+                    threshold=idle_threshold,
                     observed_at=result.observed_at,
                     detail=f"GPU utilization is {round(utilization, 2)}%",
                     open_after_cycles=self._incidents.gpu_idle_memory_cycles,
                     open_after_seconds=self._incidents.gpu_idle_memory_seconds,
                     recovery_cycles=self._incidents.recovery_cycles,
+                    below_threshold=(
+                        memory_pct < idle_threshold
+                        or utilization >= threshold("gpu_busy_pct")
+                    ),
+                    recovery_margin=margin,
                 )
-            health = gpu.health
-            if health is None:
-                continue
-            if (health.ecc_uncorrected_volatile or 0) > 0:
-                key = f"gpu_ecc:{identity}"
-                conditions[key] = IncidentCondition(
-                    key=key,
-                    category="gpu_ecc",
-                    resource=f"GPU {gpu.index} ECC",
-                    severity="critical",
-                    value=float(health.ecc_uncorrected_volatile or 0),
-                    threshold=0,
-                    observed_at=result.observed_at,
-                    detail="Volatile uncorrected ECC errors detected",
-                    open_after_cycles=self._incidents.resource_open_cycles,
-                    open_after_seconds=self._incidents.resource_open_seconds,
-                    recovery_cycles=self._incidents.recovery_cycles,
+            conditions.update(
+                gpu_health_conditions(
+                    gpu, identity, result.observed_at, self._incidents
                 )
-            if health.retired_pages_pending or health.remapped_rows_pending:
-                key = f"gpu_memory_repair:{identity}"
-                conditions[key] = IncidentCondition(
-                    key=key,
-                    category="gpu_memory_repair",
-                    resource=f"GPU {gpu.index} memory",
-                    severity="critical",
-                    value=None,
-                    threshold=None,
-                    observed_at=result.observed_at,
-                    detail="GPU memory repair is pending",
-                    open_after_cycles=self._incidents.resource_open_cycles,
-                    open_after_seconds=self._incidents.resource_open_seconds,
-                    recovery_cycles=self._incidents.recovery_cycles,
-                )
-            if health.thermal_slowdown or health.power_brake_slowdown:
-                key = f"gpu_slowdown:{identity}"
-                causes = []
-                if health.thermal_slowdown:
-                    causes.append("thermal")
-                if health.power_brake_slowdown:
-                    causes.append("power brake")
-                conditions[key] = IncidentCondition(
-                    key=key,
-                    category="gpu_slowdown",
-                    resource=f"GPU {gpu.index}",
-                    severity="critical" if health.thermal_slowdown else "warning",
-                    value=None,
-                    threshold=None,
-                    observed_at=result.observed_at,
-                    detail=f"Hardware slowdown active: {', '.join(causes)}",
-                    open_after_cycles=self._incidents.resource_open_cycles,
-                    open_after_seconds=self._incidents.resource_open_seconds,
-                    recovery_cycles=self._incidents.recovery_cycles,
-                )
+            )
         return conditions
 
     def recovery_cycles(self) -> int:
@@ -469,7 +422,10 @@ class ThresholdIncidentPolicy:
         group_key: str | None = None,
         detail: str | None = None,
     ) -> None:
-        if value is None or value < threshold:
+        """Derive a numeric condition, down to the recovery margin below its
+        threshold so the tracker can hold an open condition through a dip."""
+        margin = self._incidents.recovery_margin
+        if value is None or value < threshold - margin:
             return
         rounded = round(float(value), 2)
         conditions[key] = IncidentCondition(
@@ -485,7 +441,28 @@ class ThresholdIncidentPolicy:
             open_after_seconds=self._incidents.resource_open_seconds,
             recovery_cycles=self._incidents.recovery_cycles,
             group_key=group_key,
+            below_threshold=rounded < threshold,
+            critical_at=critical_at,
+            recovery_margin=margin,
         )
+
+
+def _holds_severity(new: IncidentCondition, previous: IncidentCondition) -> bool:
+    """Whether an established critical severity survives a warning reading.
+
+    The reading must sit inside the recovery margin below the critical line,
+    and the escalation criterion must be unchanged: a filesystem that was
+    critical for lack of absolute headroom, not percentage, de-escalates by
+    the usual confirmation once headroom returns.
+    """
+    return (
+        previous.severity == "critical"
+        and new.severity == "warning"
+        and new.value is not None
+        and new.critical_at is not None
+        and previous.critical_at == new.critical_at
+        and new.value >= new.critical_at - new.recovery_margin
+    )
 
 
 def _sustained(since: str, condition: IncidentCondition) -> bool:
@@ -577,19 +554,27 @@ class IncidentTracker:
         created: list[IncidentEvent] = []
         previous = self._active.get(result.host, {})
         observed = self._policy.conditions(result)
+        # A reading inside the recovery margin keeps an open condition open
+        # (it stays in ``observed``) but is not evidence for opening one: it
+        # neither starts nor continues a confirmation streak.
+        confirming = {
+            key: condition
+            for key, condition in observed.items()
+            if not condition.below_threshold
+        }
 
         initialized = result.host in self._initialized
         if not initialized:
             self._initialized.add(result.host)
             immediate = {
                 key: condition
-                for key, condition in observed.items()
+                for key, condition in confirming.items()
                 if condition.open_after_cycles == 1
             }
             self._active[result.host] = immediate
             self._candidates[result.host] = {
                 key: (condition, 1, condition.observed_at)
-                for key, condition in observed.items()
+                for key, condition in confirming.items()
                 if condition.open_after_cycles > 1
             }
             self._recoveries[result.host] = {}
@@ -623,7 +608,7 @@ class IncidentTracker:
         # by an arbitrarily long blind gap can never add up to an opened
         # incident. Active conditions keep their documented freeze semantics
         # in the recovery loop below.
-        for key in set(candidates) - set(observed):
+        for key in set(candidates) - set(confirming):
             del candidates[key]
         # A pending severity escalation is a confirmation requirement too: a
         # sample that does not re-observe the condition (recovery or a blind
@@ -638,6 +623,8 @@ class IncidentTracker:
             if old is not None:
                 candidates.pop(key, None)
                 last_observed_at[key] = new.observed_at
+                if _holds_severity(new, old):
+                    new = replace(new, severity=old.severity)
                 if old.severity == new.severity:
                     severity_changes.pop(key, None)
                     current[key] = new
@@ -650,9 +637,13 @@ class IncidentTracker:
                 count += 1
                 if count < new.open_after_cycles or not _sustained(since, new):
                     # Debounce severity flapping: keep the confirmed severity
-                    # until the change is sustained, mirroring open cycles.
+                    # until the change is sustained, mirroring open cycles. The
+                    # criterion it was established under travels with it, so
+                    # the severity hold cannot bridge a changed criterion.
                     severity_changes[key] = (new.severity, count, since)
-                    current[key] = replace(new, severity=old.severity)
+                    current[key] = replace(
+                        new, severity=old.severity, critical_at=old.critical_at
+                    )
                     continue
                 severity_changes.pop(key, None)
                 current[key] = new
@@ -664,6 +655,8 @@ class IncidentTracker:
                 )
                 continue
 
+            if new.below_threshold:
+                continue
             candidate, count, since = candidates.get(key, (new, 0, new.observed_at))
             if candidate.severity != new.severity:
                 count, since = 0, new.observed_at

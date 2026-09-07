@@ -2040,7 +2040,7 @@ try {
   assert.equal(personalization.terminalStyle.shadow, "none");
   assert.match(personalization.terminalStyle.font, /Mono/);
   assert.equal(personalization.ledgerStyle.borderLeft, "3px");
-  assert.equal(personalization.ledgerStyle.radius, "14px");
+  assert.equal(personalization.ledgerStyle.radius, "12px");
   assert.match(personalization.ledgerStyle.headingFont, /Serif|Georgia|Songti/);
   assert.equal(personalization.ledgerStyle.columns, 3);
   assert.equal(personalization.ledgerStyle.scheme, "light");
@@ -2599,6 +2599,38 @@ try {
       document.documentElement.dataset.background = ${JSON.stringify(screenshotPreviousAppearance.background)};
     })()`);
   }
+
+  // Keyboard focus must be visible on dark surfaces: a real Tab key (not a
+  // programmatic focus(), which Chrome may not treat as focus-visible) has to
+  // land on a control wearing the two-layer ring.
+  await cdp.evaluate(`(() => {
+    for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
+    document.activeElement?.blur();
+    window.scrollTo(0, 0);
+    return true;
+  })()`);
+  let keyboardRing = { tag: "BODY", visible: false, boxShadow: "" };
+  for (let press = 0; press < 3 && keyboardRing.tag === "BODY"; press += 1) {
+    for (const type of ["keyDown", "keyUp"]) {
+      await cdp.send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    keyboardRing = await cdp.evaluate(`(() => {
+      const element = document.activeElement;
+      return {
+        tag: element?.tagName || "",
+        visible: element?.matches(":focus-visible") || false,
+        boxShadow: element ? getComputedStyle(element).boxShadow : "",
+      };
+    })()`);
+  }
+  assert.notEqual(keyboardRing.tag, "BODY", "Tab must reach a control");
+  assert(keyboardRing.visible, `keyboard focus is not :focus-visible on ${keyboardRing.tag}`);
+  assert.equal(
+    (keyboardRing.boxShadow.match(/0px 0px 0px \d+px/g) || []).length,
+    2,
+    `two-layer focus ring expected, got ${keyboardRing.boxShadow}`,
+  );
 
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 390,
