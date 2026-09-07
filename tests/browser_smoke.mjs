@@ -2621,8 +2621,14 @@ try {
     search.dispatchEvent(new Event("input", { bubbles: true }));
     document.querySelector("#settings-toggle").click();
     const rect = document.querySelector("#settings-dialog").getBoundingClientRect();
+    const header = document.querySelector(".app-header").getBoundingClientRect();
+    const title = document.querySelector("h1").getBoundingClientRect();
+    const kicker = document.querySelector(".product-line").getBoundingClientRect();
     const result = {
       overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      headerHeight: header.height,
+      titleHeight: title.height,
+      kickerHeight: kicker.height,
       programSearchColumns,
       programSearchDocumentOverflow,
       gpuMemoryWidth: document.querySelector("#gpu-memory-card")?.getBoundingClientRect().width,
@@ -2676,6 +2682,12 @@ try {
     return result;
   })()`);
   assert.equal(mobile.overflow, false);
+  // A 390 px header is two rows at most: a one-line title and kicker, with
+  // the controls wrapped beneath them. Before this held, the kicker ran to
+  // four lines and the title to three (135 px of header).
+  assert(mobile.headerHeight < 110, `mobile header ${mobile.headerHeight}px`);
+  assert(mobile.titleHeight < 30, `mobile title ${mobile.titleHeight}px`);
+  assert(mobile.kickerHeight < 18, `mobile kicker ${mobile.kickerHeight}px`);
   assert.equal(mobile.programSearchColumns, 1);
   assert.equal(mobile.programSearchDocumentOverflow, false);
   assert(mobile.gpuMemoryWidth > mobile.gridWidth * 0.9);
