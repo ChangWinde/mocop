@@ -143,6 +143,22 @@ class RepositoryGovernanceTests(unittest.TestCase):
                     f"{filename} is routed but no package-data glob ships it",
                 )
 
+    def test_stylesheet_keeps_secondary_text_legible(self) -> None:
+        # 146 of the stylesheet's font sizes were 7, 8, or 9 px — below what
+        # CJK text needs at desk distance. Secondary text now goes through
+        # the --text-* scale (the compact density alone dials it down), and
+        # no literal size below 9 px may come back.
+        stylesheet = (ROOT / "src" / "mocop" / "static" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+        literals = [
+            float(size) for size in re.findall(r"font-size:\s*([0-9.]+)px", stylesheet)
+        ]
+        self.assertTrue(literals)
+        self.assertGreaterEqual(min(literals), 9.0, sorted(literals)[:5])
+        for variable in ("--text-2xs", "--text-xs", "--text-sm"):
+            self.assertIn(f"{variable}:", stylesheet)
+
     def test_core_module_line_budgets_do_not_regress(self) -> None:
         for relative, budget in CORE_MODULE_LINE_BUDGETS.items():
             with self.subTest(path=relative):

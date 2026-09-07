@@ -120,6 +120,20 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Dashboard legibility and small-screen layout. Secondary text no longer
+  uses 7, 8, or 9 px sizes (146 declarations, below what CJK text needs at
+  desk distance): it goes through a `--text-2xs/--text-xs/--text-sm` scale of
+  9/10/10.5 px, and the compact density alone dials the scale back down. On
+  narrow screens the header wraps its controls beneath a one-line title and
+  a truncated one-line kicker instead of squeezing the title into three
+  lines (135 px → 94 px of header at 390 px). Summary cards place their
+  progress bar in normal flow beneath the footnote, so no visual style can
+  push the footnote under the bar (the glass style did). The first card is
+  titled 节点健康 rather than 节点可用性, because its badge reports fleet
+  health, not availability. Attention items carry their severity as a left
+  bar and dot, with the text badge kept for assistive technology, freeing
+  the line for the message. A repository test keeps literal font sizes at
+  or above 9 px, and the browser smoke pins the mobile header geometry.
 - Resource conditions must now be sustained by the clock as well as by
   sample count: `incidents.resource_open_seconds` (default 60, range 0–3600)
   is the minimum span the confirming samples must cover before a CPU, memory,
