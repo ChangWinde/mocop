@@ -40,6 +40,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- `flush()` on the history writer reports a dropped write even when the
+  write and the flush barrier landed in different batches. The writer
+  batches whatever is queued when it wakes, so a write could be processed
+  (and dropped) alone and the barrier that followed it committed trivially;
+  the barrier now answers from the drop counter. This was the intermittent
+  CI failure of the prune-failure test on Python 3.10.
 - A single failed probe no longer closes a host's whole GPU process
   inventory. On a live deployment behind an SSH relay, every transient
   failure emitted a hidden `stopped` for each process, re-seeded them all a

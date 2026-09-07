@@ -129,10 +129,9 @@ class _GpuTelemetryWrite:
 
 @dataclass(slots=True)
 class _Flush:
-    """Write barrier that reports whether preceding writes were committed."""
+    """Write barrier: set once every write queued ahead of it was processed."""
 
     completed: threading.Event
-    committed: bool = True
 
 
 _Write = _HistoryWrite | _IncidentWrite | _GpuTelemetryWrite
@@ -232,6 +231,13 @@ class SqliteTelemetryPersistence:
             }
 
     def flush(self, timeout_seconds: float = 5.0) -> bool:
+        """Wait for every write queued so far; True only if all were committed.
+
+        The writer batches whatever is queued when it wakes, so a write and
+        the barrier that follows it may land in different batches; the drop
+        counter, not the barrier's own batch, says whether anything ahead of
+        the barrier was lost.
+        """
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         barrier = _Flush(threading.Event())
         while True:
@@ -239,6 +245,7 @@ class SqliteTelemetryPersistence:
                 with self._status_lock:
                     if self._closed:
                         return False
+                    dropped_before = self._dropped_writes
                 try:
                     self._queue.put_nowait(barrier)
                 except queue.Full:
@@ -251,7 +258,8 @@ class SqliteTelemetryPersistence:
             time.sleep(min(0.01, remaining))
         if not barrier.completed.wait(max(0.0, deadline - time.monotonic())):
             return False
-        return barrier.committed
+        with self._status_lock:
+            return self._dropped_writes == dropped_before
 
     def close(self, timeout_seconds: float = 5.0) -> None:
         with self._admission_lock:
@@ -487,14 +495,14 @@ class SqliteTelemetryPersistence:
                         item, _HistoryWrite | _IncidentWrite | _GpuTelemetryWrite
                     )
                 )
-                committed = not writes or self._commit_batch(connection, writes)
+                if writes:
+                    self._commit_batch(connection, writes)
                 if time.monotonic() >= next_prune_at:
                     self._prune_batch(connection)
                     next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
 
                 for item in items:
                     if isinstance(item, _Flush):
-                        item.committed = committed
                         item.completed.set()
                     self._queue.task_done()
         except Exception:
