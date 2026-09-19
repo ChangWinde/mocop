@@ -2633,6 +2633,26 @@ try {
   );
 
   await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 790,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const midWidth = await cdp.evaluate(`(() => {
+    const sync = document.querySelector(".sync-time").getBoundingClientRect();
+    return { width: sync.width, height: sync.height };
+  })()`);
+  assert(
+    midWidth.width >= 32,
+    `790 px last-sync collapsed to ${midWidth.width}px`,
+  );
+  assert(
+    midWidth.height <= 48,
+    `790 px last-sync stacked as a column (${midWidth.height}px)`,
+  );
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 390,
     height: 844,
     deviceScaleFactor: 1,

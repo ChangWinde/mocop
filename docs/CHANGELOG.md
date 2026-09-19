@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-20
+
 ### Added
 
 - Hysteresis for numeric conditions: `incidents.recovery_margin` (default 5).
@@ -40,6 +42,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- The header's last-sync label no longer collapses to a one-character
+  column around 800 px. Flex shrink was squeezing `.sync-time` to ~11 px,
+  so CJK wrapped glyph-by-glyph; the control now keeps its width, and the
+  header wraps as a row before that width. Remaining `10px` type uses
+  `--text-xs`, so compact density actually reaches the GPU table and
+  filters.
 - `flush()` on the history writer reports a dropped write even when the
   write and the flush barrier landed in different batches. The writer
   batches whatever is queued when it wakes, so a write could be processed
