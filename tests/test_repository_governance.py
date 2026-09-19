@@ -178,6 +178,11 @@ class RepositoryGovernanceTests(unittest.TestCase):
         ]
         self.assertTrue(literals)
         self.assertGreaterEqual(min(literals), 9.0, sorted(literals)[:5])
+        self.assertNotIn(
+            "font-size: 10px",
+            stylesheet,
+            "10 px is --text-xs; a leftover literal skips compact density",
+        )
         for variable in ("--text-2xs", "--text-xs", "--text-sm"):
             self.assertIn(f"{variable}:", stylesheet)
 

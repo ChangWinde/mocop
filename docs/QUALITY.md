@@ -2,10 +2,10 @@
 
 This document records the current cross-dimensional assessment of Mocop. It
 separates measured evidence from architectural expectations and from work that
-has not been measured. Every figure names the date it was measured; the runtime
-profile and coverage below were re-measured on 2026-09-05 against the 0.12.0
-tree, while the live-deployment collection figures date from the
-0.9.0 era and are labelled as such. Detailed benchmark history remains in
+has not been measured. Every figure names the date it was measured. The runtime profile below was
+measured on 2026-09-05 against the 0.12.0 tree. Python branch coverage was
+re-measured on 2026-09-20 against the 0.13.0 tree. Live-deployment collection
+figures date from the 0.9.0 era and are labelled as such. Detailed benchmark history remains in
 [Performance](PERFORMANCE.md); security claims remain in
 [Security](SECURITY.md).
 
@@ -102,7 +102,7 @@ The verification surface intentionally includes more than happy-path unit tests:
   layout, keyboard focus, bounded process views, filters, drill-down, copy
   actions, and global search transitions.
 
-The 2026-09-07 Python 3.14 run executed 647 tests and measured 90% combined
+The 2026-09-20 Python 3.14 run executed 647 tests and measured 90% combined
 statement/branch coverage with Coverage.py 7.15.4 (the 2026-08-16 0.9.0 baseline
 was 467 tests at 88%). CI enforces a conservative 85% floor as a
 regression signal; the focused contracts and failure-injection oracles remain

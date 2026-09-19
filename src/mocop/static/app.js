@@ -4236,12 +4236,13 @@ function updateGpuTaskRow(row, process, gpu) {
   if (entry) chips.push(create("span", "", `解释器 ${shortName}`));
   row.workload.hidden = chips.length === 0;
   row.workload.replaceChildren(...chips);
-  row.searchFleet.setAttribute("aria-label", `在全部服务器查找 ${shortName}`);
+  const shown = entry || shortName;
+  row.searchFleet.setAttribute("aria-label", `在全部服务器查找 ${shown}`);
   row.searchFleet.onclick = () => searchFleetForProcess(process);
-  row.copyPid.setAttribute("aria-label", `复制 ${shortName} 的 PID ${process.pid}`);
+  row.copyPid.setAttribute("aria-label", `复制 ${shown} 的 PID ${process.pid}`);
   row.copyPid.onclick = () => copyGpuTaskText(process.pid, `已复制 PID ${process.pid}`);
   row.copyCommand.hidden = !command;
-  row.copyCommand.setAttribute("aria-label", `复制 ${shortName} 的完整命令`);
+  row.copyCommand.setAttribute("aria-label", `复制 ${shown} 的完整命令`);
   row.copyCommand.onclick = () => copyGpuTaskText(command, "已复制完整命令");
 }
 

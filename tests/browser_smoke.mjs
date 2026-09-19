@@ -2633,6 +2633,46 @@ try {
   );
 
   await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 790,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const midWidth = await cdp.evaluate(`(() => {
+    const sync = document.querySelector(".sync-time");
+    const label = sync.querySelector("span");
+    const value = sync.querySelector("strong");
+    const previous = { label: label.textContent, value: value.textContent };
+    // Pixel width of CJK tofu depends on whether the host has a CJK font;
+    // probe with ASCII so CI and a desktop with Noto CJK see the same box.
+    label.textContent = "Last collected";
+    value.textContent = "just now";
+    const rect = sync.getBoundingClientRect();
+    const measured = {
+      width: rect.width,
+      height: rect.height,
+      flexShrink: getComputedStyle(sync).flexShrink,
+      labelWrap: getComputedStyle(label).whiteSpace,
+      valueWrap: getComputedStyle(value).whiteSpace,
+    };
+    label.textContent = previous.label;
+    value.textContent = previous.value;
+    return measured;
+  })()`);
+  assert.equal(midWidth.flexShrink, "0");
+  assert.equal(midWidth.labelWrap, "nowrap");
+  assert.equal(midWidth.valueWrap, "nowrap");
+  assert(
+    midWidth.width >= 64,
+    `790 px last-sync collapsed to ${midWidth.width}px`,
+  );
+  assert(
+    midWidth.height <= 48,
+    `790 px last-sync stacked as a column (${midWidth.height}px)`,
+  );
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 390,
     height: 844,
     deviceScaleFactor: 1,
