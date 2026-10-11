@@ -93,6 +93,14 @@ interfaces without a runtime plugin registry.
 | `notifications.py` | webhook endpoint validation, deduplication, throttling, pairing, and retry policy |
 | `webhook_transport.py` | one bounded HTTPS delivery attempt: pinned DNS, SSRF guards, response bound |
 | `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
+| `training_config.py` | opt-in training policy, private credential path and origin validation; never contacts the platform during configuration checks |
+| `training_client.py` | fixed platform GETs, descriptor-validated private token reads, redirect refusal, response and shared request/concurrency bounds |
+| `training_projection.py` | bounded provider-to-monitor observations, unknown numeric values, native metric units, recognized-secret redaction |
+| `training_jobs.py` | independently scheduled owned-job collection, complete-list disclosure, active diagnostics, stale state, owner-revalidated in-memory details |
+| `web_training.py` | manifest-declared training reads over an injectable `TrainingSource`; stable failures without provider response bodies |
+| `web_capacity.py` | the capacity response projection over the existing fleet snapshot |
+| `config_errors.py` | shared configuration error contract, re-exported by `config` to preserve imports without a parser-policy cycle |
+| `api_errors.py` | stable HTTP error catalog re-exported by the manifest |
 | `api_schema.py` | query-parameter and body-field types with their JSON descriptions, and the two validators that turn a raw query or parsed body into accepted values with stable codes and the rejected field |
 | `api_manifest.py` | the machine-readable HTTP contract: routes, tiers, query and body schemas, body caps, error catalog; `/api/meta` publishes it and every GET query and POST body is validated through it |
 | `api_describe.py` | how the manifest is published through `GET /api/meta`: the meta document, field conventions, write requirements |
@@ -387,9 +395,10 @@ Every module above roughly 800 lines has an executable line ceiling; the
 ceilings are a ratchet, not a target. A change that would cross one extracts a coherent leaf and
 lowers the ceiling instead of increasing it. Browser leaves remain dependency-free
 classic scripts loaded before `app.js`, expose one frozen namespace/factory, and
-consume the authenticated snapshot rather than creating a second API or state
-store. `app.js` keeps request transport, notification delivery, DOM rendering,
-and dashboard lifecycle; each leaf owns one concern and is unit-tested in Node
+use the shared authenticated transport rather than independent credentials or a
+second fleet state store. `app.js` keeps fleet state, notification delivery, DOM rendering,
+and dashboard lifecycle; a leaf may load its manifest-declared read through
+that shared authenticated transport. Each leaf owns one concern and is unit-tested in Node
 by `tests/<leaf>_test.mjs`:
 
 | Leaf | Owns |
@@ -406,6 +415,7 @@ by `tests/<leaf>_test.mjs`:
 | `capacity-watch.js` | the durable watch, its armed/notified edge, cooldown, and presented text |
 | `csv-export.js` | CSV cell escaping (including formula-injection defense) and row building |
 | `update-pill.js` | release-currency polling cadence, pill state, and the fixed apply action |
+| `training_jobs.js` | opt-in owned training task panel, filters, native-unit charts and safe-text detail/log dialog, over the dashboard's authenticated request transport |
 | `attention-groups.js` | shared-cause grouping for the attention panel: configured-path and fleet-wide simultaneous-loss correlations, shared storage devices, each marking the conditions it explains |
 | `attention.js` | the attention panel's decisions: which active conditions a host contributes, per-host issues after the shared-cause groups, and ranking |
 | `background-asset.js` | the custom background: IndexedDB storage of one asset, container sniffing that refuses animated or mislabelled files, size and dimension caps, and the WebP quality bisection and shrink loop, over injected browser primitives |
@@ -415,6 +425,15 @@ A repository test compares the leaf directory with the static route table, the
 `index.html` script order, and `tests/<leaf>_test.mjs`, so a new leaf cannot be
 half-registered. Python extraction must keep each lock-owned invariant inside
 one module.
+
+Training collection has its own lifecycle and request budget and never changes
+SSH target inventory, probe cadence, GPU accounting, or fleet incident truth.
+The default policy starts no training thread. The collector's cached list can
+outlive a network outage only with explicit stale state; authentication denial
+clears it. Details are owner-revalidated before cache reuse, and neither the
+platform credential nor a caller-selected URL can cross the HTTP boundary.
+See [ADR-0031](adr/0031-owned-training-job-monitoring.md) for the alternatives and
+[configuration](CONFIGURATION.md#training-jobs) for the independent bounds.
 
 [ADR-0021](adr/0021-incremental-module-boundaries.md) compares immediate splitting,
 incremental leaf extraction, and adding a build/registry layer. It selects the

@@ -4,6 +4,23 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Added
+
+- Optional owner-scoped Zenith training-job monitoring beside the GPU fleet:
+  paginated task history, active and failed filters, replica diagnostics,
+  native-unit resource trends, and bounded logs. The collector is disabled by
+  default and configured through `training_jobs`; enabling it requires a private
+  token file and Bearer dashboard authentication. New manifest-declared GETs
+  expose cached jobs and owner-revalidated details. Requests, response sizes,
+  diagnostic samples and caches are bounded; network errors disclose stale data
+  and platform authentication denial clears caches. No training write operation
+  or new runtime dependency is introduced. See [ADR-0031](adr/0031-owned-training-job-monitoring.md).
+
+### Changed
+
+- Extract the stable API error catalog and capacity response handler into leaf
+  modules to keep HTTP dispatch and manifest growth within their existing budgets.
+
 ## [0.13.0] - 2026-09-20
 
 ### Added

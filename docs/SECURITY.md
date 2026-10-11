@@ -225,6 +225,39 @@ the `ControlPath` directory must be owned by the operator with mode `0700`; a
 group- or world-accessible socket directory lets another local account hijack the
 multiplexed session, and doctor flags it.
 
+## Training platform boundary
+
+Training monitoring is disabled by default. Enabling it requires the monitor's
+Bearer authentication and an operator-configured platform origin; the browser
+never receives or supplies a platform token or upstream URL. Only fixed
+owner-scoped list, job, replica, metric and log GETs are supported. The worker
+cannot submit, modify or cancel jobs. Its token is read from an owner-only
+regular file through a non-following descriptor; public permissions, symlinks,
+other ownership and non-regular files fail closed. Configuration checking reads
+neither the token nor the network. The shared read budget and connection cap
+also apply to browser-triggered details.
+
+The transport refuses redirects and environment proxies. HTTPS is required by
+default; `allow_http: true` explicitly permits the credential and workload data
+to travel in plaintext on an operator-trusted private network. It is not a TLS
+substitute. The configured origin is trusted local operator policy, not a
+public API input; do not accept configuration from untrusted parties.
+
+Only IDs in the collected owner list may request details. Each detail request
+revalidates ownership before reusing an in-memory sample; losing a diagnostic
+capability removes that kind from the returned cached detail. Platform
+authentication failure clears caches, while a network outage retains a clearly
+stale snapshot. Tokens are read on every request, and the browser poll follows
+the existing dashboard authentication lifecycle.
+
+Job names, diagnostic messages and log lines are untrusted workload output.
+The server projects bounded fields and redacts recognized platform-token,
+Bearer, common key/password and private-key patterns; this is not a guarantee
+that arbitrary secrets printed by a workload will be detected. The browser
+uses text nodes, never HTML interpretation. Logs are never persisted by this
+integration and require the same operator capability as the fleet's private
+API. Do not share an operator token with someone who should not see these logs.
+
 ## Deployment requirement
 
 Changing `listen_host` away from loopback is a security-sensitive deployment

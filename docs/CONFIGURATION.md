@@ -69,10 +69,65 @@ The ten fields marked required must be present, even when empty.
 | `topology` | no | absent | Validated display-only tree; never authorizes a probe. |
 | `persistence` | no | disabled | Bounded SQLite history settings. |
 | `workloads` | no | disabled | Remote process metadata tier. |
+| `training_jobs` | no | `{enabled: false}` | Optional owner-scoped Zenith job monitoring. Requires explicit origin, a private token file, and Bearer dashboard authentication when enabled. See [training jobs](#training-jobs). |
 | `webhooks` | no | `[]` | At most 16 HTTPS endpoint definitions using environment-variable names. |
 | `incident_actions` | no | `[]` | At most 512 durable acknowledgement/silence records. Usually UI-managed. |
 | `incident_overrides` | no | `{}` | Per-active-host/per-configured-group thresholds and disk exclusions. |
 | `updates` | no | `{mode: "off"}` | Release-currency policy: `{mode, check_interval_seconds}`. `mode` is `off` (default: no release checks, no outbound requests), `check` (poll and display), or `self-update` (also allow the dashboard's one-click apply); interval 3,600–86,400 seconds, default 21,600. The poll target is the hardcoded official repository ([ADR-0026](adr/0026-dashboard-self-update.md)); no configuration value can change the update source. |
+
+## Training jobs
+
+Add this object to the monitor configuration, replace the fictional origin with
+your platform's origin, and create the token file locally. Restart the monitor
+after `mocop config check` succeeds. Disabling the integration performs no
+platform requests and hides the training panel.
+
+```json
+{
+  "training_jobs": {
+    "enabled": true,
+    "origin": "https://training.example.invalid",
+    "token_file": "~/.config/mocop/training-token",
+    "poll_interval_seconds": 30,
+    "allow_http": false
+  }
+}
+```
+
+| Field | Default | Boundary |
+|---|---|---|
+| `enabled` | `false` | Boolean; enabling requires `origin`, `token_file`, and `authentication: "bearer"`. |
+| `origin` | absent | HTTP(S) origin, optionally with a port; no credentials, non-root path, query or fragment. HTTPS is required unless `allow_http` is true. |
+| `token_file` | absent | Path to an owner-only regular file containing the personal platform token. Relative paths resolve beside the monitor configuration; `~` expands locally. Symlinks, non-regular files, other-owned files, and group/other permissions are rejected. Maximum 256 bytes. |
+| `poll_interval_seconds` | `30` | Integer 15–300; independent of SSH collection. |
+| `allow_http` | `false` | Boolean; explicitly permits plaintext transport for a trusted private network. |
+
+Store a read-scoped personal token in the file and set its permissions to `0600`.
+Keep the directory private (`0700`). Configuration validation does not read the
+token or contact the platform. Tokens are read for each platform request, so
+replacing the token file takes effect without restarting; changing these
+configuration fields requires a restart. The monitor never sends the platform
+token to the browser and never creates, changes or cancels a training job.
+
+The collector reads up to 20 pages of 100 jobs, deduplicates IDs, and reports
+whether the list is complete. It enriches at most the newest 20 active jobs with
+replica and metric observations. It limits all viewers together to 60 platform
+GETs per rolling minute and two simultaneous connections. Each response is at
+most 2,000,000 bytes and each request has a 10-second timeout. A provider `429`
+imposes `Retry-After` (seconds or HTTP date, bounded to 24 hours); other failed
+collections back off to at most 300 seconds. Network failure keeps the last
+sample marked stale. Platform `401`/`403` clears private caches. Stale state also
+applies before the first success and after the longer of 120 seconds or three
+configured polling intervals without a successful collection.
+
+Details only accept a platform ledger ID present in the collected job list and
+revalidate ownership before returning cached diagnostics. Details have one
+request in flight and an in-memory cache of 32 entries for 30 seconds. Replica
+diagnostics show at most 100 replicas and explicitly disclose incompleteness.
+Metrics retain up to 128 provider series with 120 points each, or 120 stored
+samples with up to 64 GPUs each. Logs retain at most 100 lines of 4,000 characters,
+preserve platform order, and do not claim to be a full history. Nothing from this
+integration is persisted to SQLite or included in GPU occupancy accounting.
 
 ## Thresholds and incident stability
 

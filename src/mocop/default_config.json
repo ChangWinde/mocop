@@ -35,6 +35,9 @@
   "workloads": {
     "mode": "disabled"
   },
+  "training_jobs": {
+    "enabled": false
+  },
   "webhooks": [],
   "incident_actions": [],
   "incident_overrides": {},

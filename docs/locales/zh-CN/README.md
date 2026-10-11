@@ -154,8 +154,7 @@ mocop service uninstall
 ## 配置
 
 `mocop deploy` 写入全新服务器配置；`mocop init` 是只创建配置的底层命令。
-控制台可安全修改常用的资产、周期、
-维护和分组设置，无需重启。所有字段、默认值和限制以
+控制台可安全修改资产、周期、维护和分组设置，无需重启。所有字段、默认值和限制以
 [配置参考](../../CONFIGURATION.md)为准；手工编写 JSON 时参考
 [完整安全示例](../../../examples/mocop.example.json)。可选 workload 身份和
 限额 SQLite 历史默认关闭。手工修改后先执行 `mocop config check`；需要重启
@@ -163,6 +162,7 @@ mocop service uninstall
 
 ## 日常使用
 
+- 按[训练监管配置](../../CONFIGURATION.md#training-jobs)填写平台地址和私有令牌文件，检查后重启，即可查看 Zenith 任务、副本状态、资源趋势和日志片段。默认关闭。
 - 在“全部服务器”中搜索整个集群；先选择服务器后，可按程序、命令、PID、
   用户、workload、队列、主机、型号或 UUID 限定范围。
 - 主 GPU 表直接展示进程数、最大分配、显存覆盖和新鲜度；打开单卡后，任务行以

@@ -39,6 +39,7 @@ from .persistence import create_persistence
 from .persistence_api import DisabledPersistence, PersistenceError
 from .probe import OpenSshLinuxResourceProbe
 from .service import MonitorService, StateStore
+from .training_jobs import TrainingMonitor
 from .updates import UpdateManager
 from .web import MonitorHttpServer
 
@@ -186,6 +187,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
     def stop(_signum: int, _frame: object) -> None:
         stop_event.set()
 
+    training_jobs = TrainingMonitor(config.training_jobs)
     updates = UpdateManager(
         config.updates,
         restart=restart_event.set if args.managed_service else None,
@@ -202,6 +204,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
             access_token=access_token,
             authentication=config.authentication,
             updates=updates,
+            training_jobs=training_jobs if config.training_jobs.enabled else None,
         )
     except (OSError, ValueError, UnicodeError) as exc:
         print(
@@ -228,6 +231,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
     try:
         collector.start()
         updates.start()
+        training_jobs.start()
         print(f"Configuration: {config_path}")
         dashboard_url = _http_url(config.listen_host, config.listen_port)
         if not args.managed_service and access_token:
@@ -248,6 +252,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
         signal.signal(signal.SIGTERM, previous_sigterm)
         stop_event.set()
         updates.stop()
+        training_jobs.close()
         monitor.stop()
         server.server_close()
         collector.join(timeout=monitor.shutdown_timeout_seconds())

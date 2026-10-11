@@ -18,6 +18,7 @@ from mocop.models import (
 )
 from mocop.service import StateStore
 from mocop.web import MonitorHttpServer, MonitorRequestHandler
+from tests.training_fixture import DemoTraining
 
 # The dashboard marks every read it initiates so the service keeps the
 # attended probe cadence; these level-triggered paths accept unmarked reads
@@ -642,6 +643,11 @@ def main() -> int:
         access_token=_BROWSER_ACCESS_TOKEN,
         authentication=os.environ.get("MOCOP_BROWSER_AUTHENTICATION", "bearer"),
         updates=DemoUpdates(),
+        training_jobs=(
+            DemoTraining()
+            if os.environ.get("MOCOP_BROWSER_AUTHENTICATION", "bearer") == "bearer"
+            else None
+        ),
     )
     server.unmarked_dashboard_reads = 0
     server.unauthenticated_private_requests = 0

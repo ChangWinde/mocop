@@ -5754,6 +5754,7 @@ async function startDashboard() {
   const snapshotLoaded = await fetchSnapshot();
   if (view.authenticationFailed || !snapshotLoaded) return false;
   fetchTopology();
+  trainingJobs.start();
   connect();
   return true;
 }
@@ -5761,4 +5762,5 @@ async function startDashboard() {
 const updatePill = globalThis.MocopUpdatePill
   .create({ button: $("#update-pill"), request: (path, options) => fetch(path, options) });
 
+const trainingJobs = globalThis.MocopTrainingJobs.create({ request: fetch });
 startDashboard();

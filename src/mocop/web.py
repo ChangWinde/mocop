@@ -23,7 +23,6 @@ from .api_manifest import (
 )
 from .api_schema import BodyError, QueryError, parse_query, validate_body
 from .brief import brief_from_state
-from .capacity import CapacityRequest, match_capacity
 from .config import (
     is_valid_host_group,
     is_valid_incident_action_reason,
@@ -55,8 +54,11 @@ from .static_assets import (
     load_asset,
     strong_etag,
 )
+from .training_jobs import TrainingSource
 from .updates import UpdateStatusSource
 from .web_auth import authentication_error
+from .web_capacity import send_capacity
+from .web_training import send_training_detail, send_training_jobs
 
 _SSE_HEARTBEAT_SECONDS = 15.0
 # SSE loops wake at this cadence to notice the server shutdown event.
@@ -128,6 +130,7 @@ class MonitorHttpServer(ThreadingHTTPServer):
         authentication: str = "bearer",
         trusted_hosts: Iterable[str] | None = None,
         updates: UpdateStatusSource | None = None,
+        training_jobs: TrainingSource | None = None,
     ) -> None:
         if authentication not in AUTHENTICATION_MODES:
             raise ValueError("invalid HTTP authentication mode")
@@ -144,6 +147,9 @@ class MonitorHttpServer(ThreadingHTTPServer):
         self.inventory = inventory
         self.restart = restart
         self.probe_control = probe_control
+        if training_jobs is not None and authentication != "bearer":
+            raise ValueError("training jobs require bearer authentication")
+        self.training_jobs = training_jobs
         self.updates = updates
         self.trusted_hostnames, self.trusted_origin_suffixes = trusted_web_policy(
             address[0], trusted_hosts
@@ -1035,26 +1041,6 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(report)
 
-    def _send_capacity(self, query: str) -> None:
-        """Rank idle GPU groups against a demand; observations, never reservations."""
-        values = self._parse_query("/api/capacity", query)
-        if values is None:
-            return
-        state = self.monitor_server.state
-        snapshot = state.snapshot_view()
-        thresholds = snapshot["thresholds"]
-        assert isinstance(thresholds, dict)
-        result = match_capacity(
-            snapshot["servers"],  # type: ignore[arg-type]
-            state.incidents(1)["active"],  # type: ignore[arg-type]
-            CapacityRequest(values["gpus"], values["min_vram_gib"], values["model"]),
-            busy_pct=float(thresholds["gpu_busy_pct"]),
-            temperature_c=float(thresholds["gpu_temperature_warning_c"]),
-        )
-        result["generatedAt"] = snapshot["generatedAt"]
-        result["lastPollCompletedAt"] = snapshot["lastPollCompletedAt"]
-        self._send_json(result)
-
     def _send_gpu_history(self, query: str) -> None:
         if not self._require_dashboard_read():
             return
@@ -1261,7 +1247,8 @@ _QUERY_READS: dict[str, Callable[[MonitorRequestHandler, str], None]] = {
     "/api/reports/usage": MonitorRequestHandler._send_usage_report,
     "/api/reports/utilization": MonitorRequestHandler._send_utilization_report,
     "/api/brief": MonitorRequestHandler._send_brief,
-    "/api/capacity": MonitorRequestHandler._send_capacity,
+    "/api/capacity": send_capacity,
+    "/api/training-job-detail": send_training_detail,
     "/api/gpu-history": MonitorRequestHandler._send_gpu_history,
     "/api/incidents": MonitorRequestHandler._send_incidents,
     "/api/diagnostics": MonitorRequestHandler._send_diagnostics,
@@ -1270,6 +1257,7 @@ _PLAIN_READS: dict[str, Callable[[MonitorRequestHandler], None]] = {
     "/api/inventory": MonitorRequestHandler._send_inventory,
     "/api/topology": MonitorRequestHandler._send_topology,
     "/api/update": MonitorRequestHandler._send_update_status,
+    "/api/training-jobs": send_training_jobs,
     "/api/meta": MonitorRequestHandler._send_meta,
     "/metrics": MonitorRequestHandler._send_openmetrics,
 }

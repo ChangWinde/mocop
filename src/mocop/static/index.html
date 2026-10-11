@@ -8,6 +8,7 @@
     <title>Mocop · AI-native GPU cluster monitor</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/training_jobs.css">
   </head>
   <body>
     <div class="app-shell">
@@ -143,6 +144,19 @@
             <button id="toggle-incidents" type="button" hidden>展开全部</button>
           </div>
           <div id="incident-list" class="incident-list"></div>
+        </section>
+
+        <section id="training-jobs" class="training-jobs" aria-labelledby="training-jobs-title" hidden>
+          <div class="tj-heading">
+            <div><h2 id="training-jobs-title">训练任务 <span class="tj-muted">/ ZENITH</span></h2><div id="training-jobs-summary" class="tj-muted">等待平台采集</div></div>
+            <div class="tj-toolbar">
+              <input id="training-jobs-search" type="search" aria-label="搜索训练任务" placeholder="搜索任务名称或 ID" maxlength="120">
+              <select id="training-jobs-filter" aria-label="训练任务筛选"><option value="active">活跃任务</option><option value="recent">最近 20 条</option><option value="failed">失败任务</option><option value="all">全部历史</option></select>
+              <button id="training-jobs-refresh" type="button">刷新观测</button>
+            </div>
+          </div>
+          <div id="training-job-cards" class="tj-cards" aria-live="polite"><p class="tj-empty">正在读取训练任务…</p></div>
+          <p class="tj-footer tj-muted"><span id="training-jobs-status" role="status">等待连接</span><br>任务状态以平台观测为准；多卡任务按副本展示，副本数不等于 GPU 卡数。资源指标使用接口声明的单位，未知数据不视为零。</p>
         </section>
 
         <section class="workspace">
@@ -732,6 +746,11 @@
     <script src="/attention-groups.js" defer></script>
     <script src="/attention.js" defer></script>
     <script src="/owner-usage.js" defer></script>
+    <dialog id="training-job-dialog" class="tj-dialog" aria-labelledby="training-job-detail-title">
+      <header class="tj-detail-header"><div><h2 id="training-job-detail-title">训练任务详情</h2><span id="training-job-detail-status" class="tj-muted" role="status"></span></div><div class="tj-detail-actions"><button id="training-job-detail-refresh" type="button">刷新详情</button><button id="training-job-detail-close" type="button" aria-label="关闭训练任务详情">关闭</button></div></header>
+      <div id="training-job-detail-content"></div>
+    </dialog>
+    <script src="/training_jobs.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { verifyTrainingJourney } from "./browser_training_journey.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -2797,6 +2798,7 @@ try {
     removeDisabled: true,
     status: "背景已从当前浏览器移除",
   });
+  await verifyTrainingJourney(cdp, waitForEvaluation, anonymousMode);
   // The public service manifest the dashboard booted from, then the
   // end-to-end viewer marker audit: every dashboard-initiated read of the
   // level-triggered API paths must have carried X-Monitor-Request, or

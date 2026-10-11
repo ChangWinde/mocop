@@ -61,6 +61,7 @@ from .discovery_policy import (
 )
 from .hostnames import normalize_web_hostname
 from .maintenance import MaintenanceWindowConfig
+from .training_config import parse_training_config
 from .updates import UpdatesConfig, UpdatesPolicyError, parse_updates_config
 
 _REQUIRED_KEYS = {
@@ -100,6 +101,7 @@ _OPTIONAL_KEYS = {
     "incident_overrides",
     "ssh_discovery",
     "updates",
+    "training_jobs",
 }
 _THRESHOLD_KEYS = {
     "cpu_warning_pct",
@@ -1035,6 +1037,9 @@ def _parse_config_bytes(content: bytes, config_path: Path) -> MonitorConfig:
         authentication=authentication,
         ssh_discovery=ssh_discovery,
         updates=updates,
+        training_jobs=parse_training_config(
+            data.get("training_jobs", {}), config_path.parent, authentication
+        ),
         trusted_web_hosts=trusted_web_hosts,
         gpu_process_poll_interval_seconds=gpu_process_poll_interval,
         retry_jitter_pct=retry_jitter_pct,

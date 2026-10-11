@@ -34,9 +34,10 @@ the tier its handler enforces. Field-level examples are maintained by hand.
   `listen_host` / `listen_port`; the default listener is loopback-only).
 - Protocol: HTTP/1.1. JSON responses are UTF-8
   (`Content-Type: application/json; charset=utf-8`) with compact separators.
-- **Timestamps** are RFC 3339 / ISO 8601 UTC strings with second precision
+- **Fleet timestamps** are RFC 3339 / ISO 8601 UTC strings with second precision
   and a `Z` suffix, for example `2026-08-13T06:10:00Z`. There are no local
-  timezones and no sub-second precision anywhere in the API.
+  timezones in these fields. The training-job endpoints retain platform epoch
+  milliseconds; their log `timestamp_us` is epoch microseconds.
 - **Caching:** JSON, SSE, and OpenMetrics responses are `Cache-Control:
   no-store`. Static dashboard assets (`/`, `/index.html`, `/app.js`,
   `/styles.css`, `/favicon.svg`) are   `no-cache` with a strong content
@@ -139,7 +140,7 @@ the unattended power/command savings.
 
 ### Naming
 
-Top-level JSON keys are `camelCase`. Two legacy subtrees are `snake_case`
+Fleet top-level JSON keys are `camelCase`. Two legacy subtrees are `snake_case`
 and are documented as-is (there are no duplicate camelCase keys):
 
 - `servers[].system` and `servers[].gpus` in the snapshot, including their
@@ -147,6 +148,10 @@ and are documented as-is (there are no duplicate camelCase keys):
   (for example `memory_total_mib`, `used_memory_mib`, `first_seen_at`,
   `started_at`).
 - `incidentActions[]` items in the inventory use `condition_key`.
+
+The training-job endpoints use `snake_case` for their projection and envelope,
+retaining the platform's job field names and numeric timestamps. They do not
+participate in fleet telemetry or usage accounting.
 
 ### Units
 
@@ -238,6 +243,12 @@ any out-of-band knowledge; the capability value itself is never included.
 | `INVALID_LIMIT` | 400 | `limit` is not an integer within the route's bounds. |
 | `INVALID_HOURS` | 400 | `hours` is not an integer within the route's bounds. |
 | `INVALID_CAPACITY_REQUEST` | 400 | `gpus`, `min_vram_gib`, or `model` on `/api/capacity` is malformed or out of bounds. |
+| `INVALID_TRAINING_JOB` | 400 | Missing, duplicate, or invalid platform ledger ID. |
+| `TRAINING_ACCESS_DENIED` | 403 | Platform token invalid or owner-scoped read denied. |
+| `TRAINING_JOB_NOT_FOUND` | 404 | ID not in the collected owner list, or no longer accessible. |
+| `TRAINING_RATE_LIMITED` | 429 | Platform request budget, provider cooldown, or another detail request in flight; includes `Retry-After`. |
+| `TRAINING_NOT_CONFIGURED` | 503 | Training-job monitoring is disabled. |
+| `TRAINING_READ_FAILED` | 503 | Platform diagnostics unavailable or malformed. |
 | `INVALID_HOST` | 400 | The `host` query value is not a safe alias. |
 | `INVALID_JSON` | 400 | The body is not valid strict JSON (duplicate keys and non-finite numbers included). |
 | `INVALID_SCHEMA` | 400 | The body is not an object, its key set does not match the route (see `body` in `/api/meta`), or a field has the wrong JSON type. |
@@ -400,6 +411,8 @@ This table matches the server's route manifest exactly.
 | GET | `/api/reports/utilization` | A | Hourly GPU utilization, busy share, and memory per host, or per device of one host, over up to 90 days of rollups. |
 | GET | `/api/brief` | A | The operator's scan as one document: fleet status, actionable conditions worst first, changes and recurring conditions over a window, idle capacity, per-owner usage with idle share. |
 | GET | `/api/capacity` | A | Ranked same-host, same-model GPU groups that can take a job. |
+| GET | `/api/training-jobs` | A | Cached owner-scoped platform job list and bounded active diagnostics. |
+| GET | `/api/training-job-detail` | A | Owner-revalidated replica, resource, and bounded log observations. |
 | GET | `/api/incidents` | A | Active conditions, transition events, correlations. |
 | GET | `/api/meta` | P | API self-description: versions, capabilities, endpoints. |
 | GET | `/healthz` | P | Liveness plus cumulative transport retries. |
@@ -421,6 +434,65 @@ This table matches the server's route manifest exactly.
 | POST | `/api/update/apply` | W | Install the latest verified release and restart. |
 
 ## Endpoints
+
+### GET /api/training-jobs
+
+No query parameters. Returns `{"enabled": false}` when the optional integration
+is disabled. Enabling it requires Bearer authentication even if another
+deployment normally uses `authentication: "none"`.
+
+When enabled, the cached snapshot has `source: "Zenith"`, `enabled`,
+`poll_interval_seconds`, `sampled_at`, `attempted_at`, `stale`, `error_status`,
+`total`, `complete`, `enriched_active_limit: 20`, and `jobs`. Reading the snapshot
+does not make a platform request. `total` is the platform's reported total;
+`jobs.length` may be smaller. Only `complete: true` indicates a complete list.
+Network failures retain a stale sample; platform authentication denial clears
+private caches. A successful list fetch does not guarantee current diagnostics
+for every job: inspect each `replicas_status` and `metrics_status` separately.
+
+Each job includes `id` (the 25-character lowercase alphanumeric platform ledger
+ID), `vendor`, `job_id` (the provider ID), `name`, `project_id`, `status`,
+`execution_class`, `created_at`, `updated_at`, `ended_at`, `capabilities` (boolean
+`logs` and `replicas`), and `worker_status`. Diagnostics appear only when
+observed. Status is the platform's observation, not a completion inference from
+GPU load or an empty replica list. Timestamps are epoch milliseconds or `null`.
+
+### GET /api/training-job-detail
+
+Requires exactly one `id` query parameter; no other query is accepted. Use the
+platform `id` from the collected list, not `job_id`. The endpoint refuses IDs
+outside that list and revalidates ownership before returning cached diagnostics.
+It exposes only fixed provider GETs and cannot submit or cancel jobs.
+
+The response has `job`, `fetched_at`, and per-kind `replicas_status`,
+`metrics_status`, `logs_status`. Each successful kind is included under its name;
+unsupported or failed kinds have a status without data. Kind status `501`
+indicates unsupported diagnostics. A platform access denial ends the request
+without replaying the cached detail. Other failures can produce partial detail.
+
+- `replicas`: `replicas`, nullable `total`, `complete`, and `fetched_at`.
+  Replicas retain state, exit code, start/end times and bounded diagnostic text.
+  At most 100 are shown. A replica count is not a GPU count.
+- Provider `metrics`: `source: "provider"`, nullable `fetched_at`, and `series`.
+  Each series has `replica_id`, `metric`, `unit: "provider_native"`, and bounded
+  `points` with `ts` and `value`. Supported metrics are `GpuUsage`,
+  `GpuMemoryUsage`, `CpuUsage`, and `MemoryUsage`; no percentage conversion is
+  implied. Missing/non-finite numbers remain `null`; actual zero remains zero.
+- Stored `metrics`: `source: "stored"`, `replica`, `replicas`,
+  `collection_enabled`, `fetched_at`, and `samples`. Samples have `ts`, `cpu_pct`,
+  `mem_used_mb`, `mem_total_mb`, and `gpus`; each GPU has `index`, `util_pct`,
+  `mem_used_mb`, `mem_total_mb`. Percent and MB units apply only to these
+  explicitly named fields.
+- `logs`: bounded `lines` (`body`, `source`, nullable `timestamp_us`), `pending`,
+  `truncated`, and nullable `returned`. At most 100 lines of 4,000 characters;
+  platform order is preserved. A non-truncated sample still need not be the full
+  history. Recognized credential patterns are redacted; all text remains
+  untrusted workload output.
+
+Details cache at most 32 entries for 30 seconds. Cached observations remain
+samples rather than proof of present resource use. See the
+[configuration limits](CONFIGURATION.md#training-jobs) and
+[security boundary](SECURITY.md#training-platform-boundary).
 
 ### GET /api/snapshot
 

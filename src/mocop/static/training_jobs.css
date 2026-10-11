@@ -1,0 +1,46 @@
+.training-jobs { margin: 0 0 24px; padding: 22px; border: 1px solid var(--line); border-radius: var(--radius-2xl); background: var(--panel-solid); }
+.tj-heading, .tj-toolbar, .tj-card-top, .tj-detail-header, .tj-detail-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.tj-heading { margin-bottom: 16px; flex-wrap: wrap; }
+.tj-heading h2 { font-size: 20px; margin: 0 0 5px; }
+.tj-muted { color: var(--muted); font-size: max(12px, var(--text-sm)); overflow-wrap: anywhere; }
+.tj-toolbar { flex-wrap: wrap; justify-content: flex-end; }
+.tj-toolbar input, .tj-toolbar select, .tj-toolbar button, .tj-detail-button, .tj-detail-header button { border: 1px solid var(--line); border-radius: var(--radius-md); padding: 8px 12px; background: var(--panel-solid); color: var(--text); font: inherit; font-size: max(12px, var(--text-sm)); }
+.tj-toolbar input { width: 190px; max-width: 100%; }
+.tj-toolbar button, .tj-detail-button, .tj-detail-header button { cursor: pointer; }
+.tj-toolbar button:disabled, .tj-detail-header button:disabled { opacity: .5; cursor: wait; }
+.tj-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 14px; max-height: 650px; overflow-y: auto; }
+.tj-card { border: 1px solid var(--line); border-radius: var(--radius-xl); padding: 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; background: var(--surface); }
+.tj-name { margin: 0; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.tj-vendor { font-size: max(11px, var(--text-xs)); color: var(--muted); }
+.tj-badge { border-radius: var(--radius-sm); padding: 4px 8px; font-size: max(11px, var(--text-xs)); white-space: nowrap; background: #293547; color: #c7d3e4; }
+.tj-badge.running { color: #80e9b9; background: #153c30; }
+.tj-badge.success { color: #84c4f9; background: #16344a; }
+.tj-badge.failed { color: #ffadad; background: #4c252e; }
+html[data-style="ledger"] .tj-warning { color: #805415; }
+html[data-style="ledger"] .tj-badge.running { color: #166145; background: #d1eadc; }
+html[data-style="ledger"] .tj-badge.failed { color: #922331; background: #f5d9dc; }
+.tj-warning { color: var(--amber); font-size: max(12px, var(--text-sm)); overflow-wrap: anywhere; }
+.tj-metrics { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.tj-metric { font-size: 15px; font-variant-numeric: tabular-nums; }
+.tj-sparkline { display: block; width: 100%; height: 42px; }
+.tj-sample-age { width: 100%; }
+.tj-detail-button { margin-top: auto; align-self: flex-start; }
+.tj-empty { color: var(--muted); padding: 18px 0; margin: 0; }
+.tj-footer { margin: 14px 0 0; line-height: 1.65; }
+.tj-dialog { width: min(1000px, calc(100vw - 36px)); max-height: calc(100vh - 50px); padding: 0; color: var(--text); background: var(--panel-solid); border: 1px solid var(--line); border-radius: var(--radius-2xl); }
+.tj-dialog::backdrop { background: rgba(0, 0, 0, .65); }
+.tj-detail-header { padding: 20px; position: sticky; top: 0; z-index: 2; background: var(--panel-solid); border-bottom: 1px solid var(--line); }
+.tj-detail-header h2 { font-size: 18px; margin: 0 0 6px; overflow-wrap: anywhere; }
+.tj-detail-header > div:first-child { min-width: 0; }
+.tj-detail-actions { display: flex; gap: 8px; flex-shrink: 0; }
+#training-job-detail-content { padding: 20px; }
+.tj-detail-meta { justify-content: flex-start; flex-wrap: wrap; }
+.tj-detail-heading { margin-top: 26px; font-size: 15px; }
+.tj-replica { border: 1px solid var(--line); border-radius: var(--radius-md); padding: 12px; margin: 8px 0; display: flex; flex-wrap: wrap; gap: 10px; font-size: max(12px, var(--text-sm)); overflow-wrap: anywhere; }
+.tj-detail-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.tj-metric-cell { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-lg); font-size: max(12px, var(--text-sm)); min-width: 0; }
+.tj-metric-value { font-size: 24px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.tj-logs { max-height: 420px; overflow: auto; padding: 14px; border-radius: var(--radius-md); background: var(--panel-deep); color: var(--text); font-size: max(11px, var(--text-xs)); line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .training-jobs { padding: 14px; } .tj-toolbar { justify-content: flex-start; } .tj-toolbar input { width: 160px; } .tj-heading { align-items: flex-start; } .tj-detail-header { align-items: flex-start; padding: 14px; } .tj-detail-header h2 { font-size: 14px; } .tj-detail-actions { flex-direction: column; } }
+
+.tj-toolbar input:focus-visible, .tj-toolbar select:focus-visible, .tj-toolbar button:focus-visible, .tj-detail-button:focus-visible, .tj-detail-header button:focus-visible { outline: none; box-shadow: var(--focus); }

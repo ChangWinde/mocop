@@ -8,10 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 
+from .config_errors import ConfigError as ConfigError
 from .discovery_policy import (
     SshDiscoveryConfig,
 )
 from .maintenance import MaintenanceWindowConfig
+from .training_config import TrainingJobsConfig
 from .updates import UpdatesConfig
 
 CONFIG_ENV_VAR = "MOCOP_CONFIG"
@@ -30,12 +32,6 @@ TOPOLOGY_TRANSPORTS = frozenset({"ssh", "frp-stcp", "frp-xtcp", "vpn"})
 TRUSTED_WEB_HOSTS_MAX_ENTRIES = 32
 CONFIG_MAX_BYTES = 1_048_576
 CONFIG_MAX_HOST_ALIASES = 1_024
-
-
-class ConfigError(ValueError):
-    """Raised when monitor configuration is invalid."""
-
-    code = "INVALID_CONFIG"
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +189,7 @@ class MonitorConfig:
     authentication: str = "bearer"
     ssh_discovery: SshDiscoveryConfig = field(default_factory=SshDiscoveryConfig)
     updates: UpdatesConfig = field(default_factory=UpdatesConfig)
+    training_jobs: TrainingJobsConfig = field(default_factory=TrainingJobsConfig)
     trusted_web_hosts: tuple[str, ...] = ()
     gpu_process_poll_interval_seconds: float = 15
     retry_jitter_pct: float = 15

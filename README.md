@@ -148,16 +148,17 @@ rollback, token rotation, or cleanup; it covers `mocop migrate`, retained files,
 
 ## Configuration
 
-`mocop deploy` writes the fresh-host configuration; `mocop init` is the lower-level configuration-only command. The dashboard safely edits
-the common inventory, cadence, maintenance, and grouping settings without a
-restart. Use the [configuration reference](docs/CONFIGURATION.md) for every field,
-default, and limit; use the [complete safe example](examples/mocop.example.json)
-when authoring JSON. Optional workload identity and bounded SQLite history are
-disabled by default. After a manual edit, run `mocop config check` and follow the
-[operations runbook](docs/OPERATIONS.md) when a service restart is required.
+`mocop deploy` writes fresh-host configuration; `mocop init` creates configuration
+only. The dashboard edits inventory, cadence, maintenance and grouping without
+restarting. See [configuration reference](docs/CONFIGURATION.md) for all
+fields and the [safe example](examples/mocop.example.json) for JSON.
+Workload identity and SQLite history default to disabled. After manual edits,
+run `mocop config check`; follow the [operations runbook](docs/OPERATIONS.md)
+when restarting.
 
 ## Daily use
 
+- Enable [Zenith training monitoring](docs/CONFIGURATION.md#training-jobs) using a platform origin and private token file; validate and restart for jobs, replicas, metrics and logs.
 - Search from **All servers** for programs across the fleet, or select a server to
   scope by process, command, PID, owner, workload, queue, host, model, or UUID.
 - Scan process count, largest allocation, memory coverage, and freshness in the

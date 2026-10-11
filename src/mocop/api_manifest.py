@@ -11,6 +11,7 @@ manifest with that reference and with live routing behaviour.
 from __future__ import annotations
 
 from . import __version__
+from .api_errors import ERROR_CODES as ERROR_CODES
 from .api_schema import BodyField, BodySchema, QueryParameter, QuerySchema
 from .config import (
     HOST_GROUP_MAX_LENGTH,
@@ -40,6 +41,8 @@ API_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/reports/usage", "authenticated"),
     ("GET", "/api/reports/utilization", "authenticated"),
     ("GET", "/api/brief", "authenticated"),
+    ("GET", "/api/training-jobs", "authenticated"),
+    ("GET", "/api/training-job-detail", "authenticated"),
     ("GET", "/api/capacity", "authenticated"),
     ("GET", "/api/incidents", "authenticated"),
     ("GET", "/api/meta", "public"),
@@ -101,6 +104,11 @@ def _integer(
 
 
 QUERY_SCHEMAS: dict[str, QuerySchema] = {
+    "/api/training-job-detail": QuerySchema(
+        {"id": QueryParameter("text", required=True)},
+        "INVALID_TRAINING_JOB",
+        "invalid training job ID",
+    ),
     "/api/history": QuerySchema(
         {
             "host": QueryParameter("alias", required=True),
@@ -246,37 +254,3 @@ WRITE_SCHEMAS: dict[str, BodySchema] = {
 
 # Stable HTTP error codes and their status. /api/meta publishes this list;
 # docs/API.md and the handler string literals must stay in lockstep.
-ERROR_CODES: tuple[tuple[str, int], ...] = (
-    ("INVALID_REQUEST_AUTHORITY", 400),
-    ("INVALID_REQUEST_FRAMING", 400),
-    ("INVALID_REQUEST_TARGET", 400),
-    ("REQUEST_BODY_NOT_ALLOWED", 400),
-    ("QUERY_NOT_ALLOWED", 400),
-    ("UNKNOWN_QUERY_PARAMETER", 400),
-    ("INVALID_QUERY", 400),
-    ("INVALID_LIMIT", 400),
-    ("INVALID_HOURS", 400),
-    ("INVALID_CAPACITY_REQUEST", 400),
-    ("INVALID_HOST", 400),
-    ("INVALID_JSON", 400),
-    ("INVALID_SCHEMA", 400),
-    ("INVALID_SETTINGS", 400),
-    ("UNTRUSTED_ORIGIN", 403),
-    ("AUTHENTICATION_REQUIRED", 403),
-    ("NOT_FOUND", 404),
-    ("UNKNOWN_HOST", 404),
-    ("UNKNOWN_GPU", 404),
-    ("METHOD_NOT_ALLOWED", 405),
-    ("PROBE_IN_PROGRESS", 409),
-    ("UPDATE_NOT_APPLICABLE", 409),
-    ("INVENTORY_CHANGED", 409),
-    ("INCIDENT_NOT_ACTIVE", 409),
-    ("PAYLOAD_TOO_LARGE", 413),
-    ("UNSUPPORTED_MEDIA_TYPE", 415),
-    ("RATE_LIMITED", 429),
-    ("SERVICE_UNAVAILABLE", 503),
-    ("METRICS_LIMIT_EXCEEDED", 503),
-    ("NOTIFICATIONS_DISABLED", 503),
-    ("HISTORY_UNAVAILABLE", 503),
-    ("CONNECTION_LIMIT", 503),
-)
