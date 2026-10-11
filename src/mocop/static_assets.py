@@ -33,6 +33,7 @@ STATIC_ROUTES: dict[str, tuple[str, str]] = {
     "/attention-groups.js": ("attention-groups.js", _JAVASCRIPT),
     "/attention.js": ("attention.js", _JAVASCRIPT),
     "/owner-usage.js": ("owner-usage.js", _JAVASCRIPT),
+    "/training_summary.js": ("training_summary.js", _JAVASCRIPT),
     "/training_jobs.js": ("training_jobs.js", _JAVASCRIPT),
     "/training_jobs.css": ("training_jobs.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", _JAVASCRIPT),

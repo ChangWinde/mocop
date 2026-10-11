@@ -12,6 +12,12 @@ export async function verifyTrainingJourney(cdp, waitForEvaluation, anonymousMod
     status: document.querySelector("#training-jobs-status").textContent,
     provider: document.querySelector(".tj-card").textContent,
     stored: document.querySelectorAll(".tj-card")[1].textContent,
+    allocated: document.querySelector(".tj-card .tj-gpu").textContent,
+    observed: document.querySelectorAll(".tj-card .tj-gpu")[1].textContent,
+    submitted: document.querySelector(".tj-submitted").textContent,
+    runtime: document.querySelector(".tj-runtime").textContent,
+    rowHeight: document.querySelector(".tj-card").getBoundingClientRect().height,
+    listCanvases: document.querySelectorAll("#training-job-cards canvas").length,
     images: document.querySelectorAll("#training-jobs img").length,
     injected: Boolean(globalThis.trainingInjected),
   }))()`);
@@ -20,7 +26,12 @@ export async function verifyTrainingJourney(cdp, waitForEvaluation, anonymousMod
   assert.match(summary.provider, /GPU 0/);
   assert.match(summary.provider, /显存 未知/);
   assert.match(summary.provider, /厂商原生值/);
-  assert.match(summary.stored, /GPU 4 张/);
+  assert.match(summary.allocated, /8 张/);
+  assert.match(summary.observed, /4 张观测 \/ 副本/);
+  assert.match(summary.submitted, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+  assert.match(summary.runtime, /1小时 30分已运行/);
+  assert(summary.rowHeight <= 64, `training row is too tall: ${summary.rowHeight}`);
+  assert.equal(summary.listCanvases, 0);
   assert.match(summary.stored, /1 个副本/);
   assert.equal(summary.images, 0);
   assert.equal(summary.injected, false);

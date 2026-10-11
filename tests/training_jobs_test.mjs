@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import "../src/mocop/static/training_summary.js";
 import "../src/mocop/static/training_jobs.js";
 
 const { latest, valueText, timeText, errorText, create } = globalThis.MocopTrainingJobs;

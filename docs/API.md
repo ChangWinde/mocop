@@ -452,10 +452,23 @@ for every job: inspect each `replicas_status` and `metrics_status` separately.
 
 Each job includes `id` (the 25-character lowercase alphanumeric platform ledger
 ID), `vendor`, `job_id` (the provider ID), `name`, `project_id`, `status`,
-`execution_class`, `created_at`, `updated_at`, `ended_at`, `capabilities` (boolean
+`execution_class`, `created_at`, `updated_at`, `started_at`, `ended_at`,
+`gpu_count`, `gpu_model`, `capabilities` (boolean
 `logs` and `replicas`), and `worker_status`. Diagnostics appear only when
 observed. Status is the platform's observation, not a completion inference from
 GPU load or an empty replica list. Timestamps are epoch milliseconds or `null`.
+`gpu_count` is an explicit platform integer from 0 to 16384, otherwise `null`;
+`gpu_model` is bounded display text or `null`. The current platform API may omit
+all three resource/start fields. Mocop does not infer card counts from task
+names, replica counts or provider metric series. Stored GPU samples show the
+observed count for that sampled replica, not the allocated job total.
+
+The compact table shows local submission time and refreshes its displayed age
+with the snapshot. Runtime uses explicit `started_at`, or the earliest replica
+start only when the replica page is complete and every replica has a start
+time. Without that observation, the age is labeled “提交至今” or “提交至结束”;
+queue age is labeled “排队等待”. Terminal durations stop at `ended_at`, and
+a missing end time remains unknown. Resource charts appear in the detail dialog.
 
 ### GET /api/training-job-detail
 

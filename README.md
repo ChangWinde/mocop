@@ -158,7 +158,7 @@ when restarting.
 
 ## Daily use
 
-- Enable [Zenith training monitoring](docs/CONFIGURATION.md#training-jobs) using a platform origin and private token file; validate and restart for jobs, replicas, metrics and logs.
+- Enable [Zenith training monitoring](docs/CONFIGURATION.md#training-jobs) with an origin and private token file; restart for compact jobs, GPU counts, submission times, runtimes and diagnostics.
 - Search from **All servers** for programs across the fleet, or select a server to
   scope by process, command, PID, owner, workload, queue, host, model, or UUID.
 - Scan process count, largest allocation, memory coverage, and freshness in the

@@ -156,7 +156,7 @@
             </div>
           </div>
           <div id="training-job-cards" class="tj-cards" aria-live="polite"><p class="tj-empty">正在读取训练任务…</p></div>
-          <p class="tj-footer tj-muted"><span id="training-jobs-status" role="status">等待连接</span><br>任务状态以平台观测为准；多卡任务按副本展示，副本数不等于 GPU 卡数。资源指标使用接口声明的单位，未知数据不视为零。</p>
+          <p class="tj-footer tj-muted"><span id="training-jobs-status" role="status">等待连接</span> · 未提供开跑时间时，时长按提交起算并标明；GPU 观测按副本统计。</p>
         </section>
 
         <section class="workspace">
@@ -750,6 +750,7 @@
       <header class="tj-detail-header"><div><h2 id="training-job-detail-title">训练任务详情</h2><span id="training-job-detail-status" class="tj-muted" role="status"></span></div><div class="tj-detail-actions"><button id="training-job-detail-refresh" type="button">刷新详情</button><button id="training-job-detail-close" type="button" aria-label="关闭训练任务详情">关闭</button></div></header>
       <div id="training-job-detail-content"></div>
     </dialog>
+    <script src="/training_summary.js" defer></script>
     <script src="/training_jobs.js" defer></script>
     <script src="/app.js" defer></script>
   </body>

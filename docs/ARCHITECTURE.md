@@ -415,7 +415,8 @@ by `tests/<leaf>_test.mjs`:
 | `capacity-watch.js` | the durable watch, its armed/notified edge, cooldown, and presented text |
 | `csv-export.js` | CSV cell escaping (including formula-injection defense) and row building |
 | `update-pill.js` | release-currency polling cadence, pill state, and the fixed apply action |
-| `training_jobs.js` | opt-in owned training task panel, filters, native-unit charts and safe-text detail/log dialog, over the dashboard's authenticated request transport |
+| `training_jobs.js` | opt-in owned training task panel, filters, native-unit detail charts and safe-text log dialog, over the dashboard's authenticated request transport |
+| `training_summary.js` | compact task table, explicit or observed GPU counts, submission timestamps and labeled runtime or submission-age calculations |
 | `attention-groups.js` | shared-cause grouping for the attention panel: configured-path and fleet-wide simultaneous-loss correlations, shared storage devices, each marking the conditions it explains |
 | `attention.js` | the attention panel's decisions: which active conditions a host contributes, per-host issues after the shared-cause groups, and ranking |
 | `background-asset.js` | the custom background: IndexedDB storage of one asset, container sniffing that refuses animated or mislabelled files, size and dimension caps, and the WebP quality bisection and shrink loop, over injected browser primitives |

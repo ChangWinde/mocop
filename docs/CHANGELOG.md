@@ -18,6 +18,11 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Show training jobs as compact rows with GPU count/source, submission time,
+  labeled runtime and inline resource readings. Keep charts in job details;
+  unavailable GPU specifications stay unknown, and missing start observations
+  show submission age without including queue time in a claimed runtime.
+
 - Extract the stable API error catalog and capacity response handler into leaf
   modules to keep HTTP dispatch and manifest growth within their existing budgets.
 

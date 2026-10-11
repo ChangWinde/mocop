@@ -125,31 +125,17 @@
         cards.append(node("p", "tj-empty", snapshot.stale && !snapshot.sampled_at ? "训练平台暂不可用，等待采集" : "没有符合筛选条件的任务"));
         return;
       }
-      for (const job of visible) {
-        const card = node("article", "tj-card");
-        card.dataset.jobId = job.id;
-        const heading = node("div", "tj-card-top");
-        heading.append(node("span", "tj-vendor", VENDORS[job.vendor] || job.vendor), badge(job.status));
-        const name = node("h3", "tj-name", job.name || job.job_id);
-        name.title = job.name || job.job_id;
-        const meta = node("div", "tj-muted", `${job.execution_class === "low_priority" ? "低优先级" : job.execution_class === "standard" ? "标准任务" : job.execution_class || "未知队列"} · ${job.replicas?.total != null ? `${job.replicas.total} 个副本` : "副本数未知"}`);
-        card.append(heading, name, meta);
-        if (!TERMINAL.has(job.status)) card.append(metricsPreview(job));
-        const observed = numeric(job.updated_at) && Date.now() - job.updated_at > 120_000 && !TERMINAL.has(job.status);
-        const age = node("small", observed ? "tj-warning" : "tj-muted", `平台观测 ${timeText(job.updated_at)}${observed ? " · 可能滞后" : ""}`);
-        const button = node("button", "tj-detail-button", "详情与日志");
-        button.type = "button";
-        button.addEventListener("click", () => openDetail(job));
-        card.append(age, button);
-        cards.append(card);
-      }
+      cards.append(globalThis.MocopTrainingSummary.table(visible, { vendors: VENDORS, badge, openDetail, valueText, timeText }));
     };
 
     const renderDetail = data => {
-      const job = data.job;
+      const job = { ...data.job, replicas: data.replicas, replicas_status: data.replicas_status, metrics: data.metrics, metrics_status: data.metrics_status };
+      const gpu = globalThis.MocopTrainingSummary.gpuSummary(job);
+      const duration = globalThis.MocopTrainingSummary.runtimeSummary(job);
       content.replaceChildren();
       const meta = node("div", "tj-detail-meta");
-      meta.append(badge(job.status), node("span", "tj-muted", `${VENDORS[job.vendor] || job.vendor} · ${job.execution_class} · 创建 ${timeText(job.created_at)}`));
+      meta.append(badge(job.status), node("span", "tj-muted", `${VENDORS[job.vendor] || job.vendor} · ${job.execution_class} · 提交 ${timeText(job.created_at)}`));
+      meta.append(node("span", "tj-muted", `GPU ${gpu.text}（${gpu.note}） · ${duration.note} ${duration.text}`));
       content.append(meta, node("p", "tj-muted", `任务 ID ${job.job_id} · 平台观测 ${timeText(job.updated_at)}`));
       content.append(node("h3", "tj-detail-heading", "副本状态"));
       if (data.replicas_status !== 200) content.append(node("p", "tj-muted", errorText(data.replicas_status)));

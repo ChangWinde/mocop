@@ -24,7 +24,10 @@ class DemoTraining:
                         else f"Demo training {index}",
                         "status": status,
                         "execution_class": "standard",
-                        "created_at": now - index * 1000,
+                        "created_at": now - 7200000 - index * 1000,
+                        "started_at": now - 5400000 if index == 0 else None,
+                        "gpu_count": 8 if index == 0 else None,
+                        "gpu_model": "Example GPU" if index == 0 else None,
                         "updated_at": now,
                         "capabilities": {"logs": True, "replicas": True},
                     }
@@ -69,7 +72,12 @@ class DemoTraining:
         self.replicas = project_replicas(
             {
                 "replicas": [
-                    {"name": "worker-0", "status": "RUNNING", "exit_code": None}
+                    {
+                        "name": "worker-0",
+                        "status": "RUNNING",
+                        "exit_code": None,
+                        "started_at": now - 1800000,
+                    }
                 ],
                 "total": 1,
             }

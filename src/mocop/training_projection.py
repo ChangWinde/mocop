@@ -79,8 +79,17 @@ def project_job(value):
             "execution_class",
         )
     }
-    for key in ("created_at", "updated_at", "ended_at"):
+    for key in ("created_at", "updated_at", "started_at", "ended_at"):
         result[key] = number(value.get(key))
+    count = value.get("gpu_count")
+    result["gpu_count"] = (
+        count
+        if isinstance(count, int)
+        and not isinstance(count, bool)
+        and 0 <= count <= 16384
+        else None
+    )
+    result["gpu_model"] = redact_text(value.get("gpu_model"), 120)
     caps = value.get("capabilities")
     if caps is None:
         caps = {}
