@@ -401,6 +401,7 @@ by `tests/<leaf>_test.mjs`:
 | `keyed-loader.js` | bounded-backoff loading of one keyed resource: single flight, success-confirmed keys, one 4–30 s retry timer, stale-response rejection |
 | `api-contracts.js` | payload contracts: bounded normalizers for snapshot, incidents, inventory, collector, maintenance, group, and topology responses that throw on anything malformed |
 | `process-search.js` | NFKC term normalization, bounded process/GPU matching, ranking and memory ordering |
+| `process-inventory.js` | selected-server process listing and truthful empty-state copy for unavailable samples |
 | `gpu-tasks.js` | entry point, environment, footprint, and per-card summary projections of a GPU process |
 | `capacity-match.js` | ranking same-host, same-model GPU candidates against a demand |
 | `capacity-watch.js` | the durable watch, its armed/notified edge, cooldown, and presented text |

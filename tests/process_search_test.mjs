@@ -43,7 +43,9 @@ const snapshot = {
         uuid: "GPU-A",
         name: "NVIDIA A100",
         processes_available: false,
-        processes: [],
+        // A cached row can remain on an unavailable sample. It must not be
+        // presented as current searchable process data.
+        processes: [{ pid: 99, name: "/work/stale.py", used_memory_mib: 99 }],
       }],
     },
   ],
@@ -56,6 +58,7 @@ assert.deepEqual(result.matches.map(({ process }) => process.pid), [30, 20]);
 assert.equal(result.unavailableGpuCount, 1);
 assert.equal(result.staleCount, 0);
 assert.equal(search.searchProcessRecords(snapshot, "train.py", "gpu-a").total, 0);
+assert.equal(search.searchProcessRecords(snapshot, "stale.py", "gpu-a").total, 0);
 
 const terms = search.normalizedSearchTerms("gpu-b h100");
 assert.equal(
