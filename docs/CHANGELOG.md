@@ -6,6 +6,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Public requests with the dashboard marker no longer enable attended collection.
+- Webhooks withdrawn after acknowledgement or silencing now count as suppressed
+  deliveries, preserving the dropped count and last delivery error.
+- Self-update apply refreshes release metadata before downloading, installing a
+  newly published release and refusing a withdrawn release with nothing newer.
+
 - Reloaded host exclusions now take effect even when SSH discovery fails.
 - Shutdown keeps completed probe results and returns without waiting for probes
   or topology discovery still running, while cancelling owned child processes.

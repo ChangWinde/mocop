@@ -291,10 +291,11 @@ class _WebhookWorker:
                             while len(self._active_conditions) > _WEBHOOK_SEEN_CAPACITY:
                                 self._active_conditions.popitem(last=False)
                                 self._pairing_saturated = True
+                    elif suppressed:
+                        self._suppressed += 1
                     else:
                         self._dropped += 1
-                        if not suppressed:
-                            self._last_error = last_error_code
+                        self._last_error = last_error_code
             finally:
                 self._queue.task_done()
 

@@ -204,37 +204,42 @@ class UpdateManager:
             self.check_now()
             self._stop.wait(self._config.check_interval_seconds)
 
+    def _refresh_release(self) -> tuple[tuple[int, int, int], dict[str, str]]:
+        """Fetch one release and publish it, returning that same metadata pair.
+
+        Apply must use its own fresh answer even if a concurrent poll publishes
+        another one; a failed fetch must never fall back to cached artifacts.
+        """
+        release = json.loads(self._fetch(_RELEASE_URL, _MAX_METADATA_BYTES))
+        latest = parse_release_tag(
+            release.get("tag_name") if isinstance(release, dict) else None
+        )
+        if latest is None:
+            raise ValueError("latest release does not carry a v<semver> tag")
+        assets: dict[str, str] = {}
+        for asset in release.get("assets", []) or []:
+            name = asset.get("name") if isinstance(asset, dict) else None
+            url = asset.get("browser_download_url") if isinstance(asset, dict) else None
+            if (
+                isinstance(name, str)
+                and isinstance(url, str)
+                and url.startswith("https://")
+            ):
+                assets[name] = url
+        with self._lock:
+            self._latest = latest
+            self._assets = assets
+            self._checked_at = self._clock()
+            if self._state == "failed" and self._update_available_locked():
+                # A newer release supersedes a failed attempt at an older one.
+                self._state = "idle"
+                self._detail = None
+        return latest, assets
+
     def check_now(self) -> None:
         """One bounded release poll; failures leave the last good answer."""
         try:
-            release = json.loads(self._fetch(_RELEASE_URL, _MAX_METADATA_BYTES))
-            latest = parse_release_tag(
-                release.get("tag_name") if isinstance(release, dict) else None
-            )
-            if latest is None:
-                raise ValueError("latest release does not carry a v<semver> tag")
-            assets: dict[str, str] = {}
-            for asset in release.get("assets", []) or []:
-                name = asset.get("name") if isinstance(asset, dict) else None
-                url = (
-                    asset.get("browser_download_url")
-                    if isinstance(asset, dict)
-                    else None
-                )
-                if (
-                    isinstance(name, str)
-                    and isinstance(url, str)
-                    and url.startswith("https://")
-                ):
-                    assets[name] = url
-            with self._lock:
-                self._latest = latest
-                self._assets = assets
-                self._checked_at = self._clock()
-                if self._state == "failed" and self._update_available_locked():
-                    # A newer release supersedes a failed attempt at an older one.
-                    self._state = "idle"
-                    self._detail = None
+            self._refresh_release()
         except Exception as error:  # noqa: BLE001 - poller must never die
             with self._lock:
                 self._checked_at = self._clock()
@@ -270,10 +275,8 @@ class UpdateManager:
 
     def _apply_worker(self) -> None:
         try:
-            with self._lock:
-                latest = self._latest
-                assets = dict(self._assets)
-            if latest is None or self._current is None or latest <= self._current:
+            latest, assets = self._refresh_release()
+            if self._current is None or latest <= self._current:
                 self._fail("release state changed before download")
                 return
             version = ".".join(map(str, latest))

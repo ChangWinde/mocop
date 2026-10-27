@@ -42,7 +42,7 @@ ANONYMOUS_HEADER = "X-Mocop-Test-Anonymous"
 
 class _BearerHandler(BaseHandler):
     def http_request(self, request: Request) -> Request:
-        if request.has_header(ANONYMOUS_HEADER):
+        if request.has_header(ANONYMOUS_HEADER.capitalize()):
             request.remove_header(ANONYMOUS_HEADER)
         elif not request.has_header("Authorization"):
             request.add_unredirected_header("Authorization", f"Bearer {TEST_TOKEN}")
@@ -65,6 +65,7 @@ def serve_in_thread(
     probe_control=None,
     trusted_hosts=None,
     access_token: str = TEST_TOKEN,
+    authentication: str = "bearer",
     updates=None,
 ) -> tuple[MonitorHttpServer, threading.Thread]:
     server = MonitorHttpServer(
@@ -75,6 +76,7 @@ def serve_in_thread(
         probe_control,
         trusted_hosts=trusted_hosts,
         access_token=access_token,
+        authentication=authentication,
         updates=updates,
     )
     thread = threading.Thread(
@@ -292,7 +294,7 @@ class WebTests(unittest.TestCase):
             error.close()
             return error.code
 
-    def test_dashboard_reads_and_event_streams_mark_viewer_presence(self) -> None:
+    def test_web_attended_authenticated_reads_and_streams(self) -> None:
         self.assertFalse(self.state.dashboard_attended())
 
         # An unmarked probe (curl, scraper, health check) is not a viewer.
@@ -313,12 +315,124 @@ class WebTests(unittest.TestCase):
         # A live event stream keeps refreshing presence on its own.
         fresh = self.standalone_server()
         self.assertFalse(fresh.state.dashboard_attended())
-        stream = self.open_event_stream(fresh.server_port)
-        stream.recv(256)
-        deadline = time.monotonic() + 2
-        while not fresh.state.dashboard_attended() and time.monotonic() < deadline:
-            time.sleep(0.02)
+        activity = threading.Event()
+        record = fresh.state.record_dashboard_activity
+
+        def record_activity():
+            record()
+            activity.set()
+
+        with patch.object(
+            fresh.state, "record_dashboard_activity", side_effect=record_activity
+        ):
+            self.open_event_stream(fresh.server_port)
+            self.assertTrue(activity.wait(2))
         self.assertTrue(fresh.state.dashboard_attended())
+
+    def test_web_attended_none_event_stream_needs_no_bearer(self) -> None:
+        server = self.standalone_server(authentication="none")
+        connection = self.open_connection(server.server_port)
+        connection.request("GET", "/api/events")
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.readline(), b"event: snapshot\n")
+        self.assertTrue(server.state.dashboard_attended())
+
+    def test_web_attended_public_routes_never_mark_presence(self) -> None:
+        for mode in ("bearer", "none"):
+            server = self.standalone_server(authentication=mode)
+            base = f"http://127.0.0.1:{server.server_port}"
+            for path in ("/healthz", "/readyz", "/api/meta", "/", "/app.js"):
+                for method in ("GET", "HEAD"):
+                    for credentials in ({}, AUTHORIZATION):
+                        with self.subTest(
+                            mode=mode, path=path, method=method, credentials=credentials
+                        ):
+                            request = anonymous(
+                                f"{base}{path}",
+                                method=method,
+                                headers={
+                                    "X-Monitor-Request": "dashboard",
+                                    **credentials,
+                                },
+                            )
+                            self.assertIn(self.request_status(request), {200, 503})
+                            self.assertFalse(server.state.dashboard_attended())
+
+    def test_web_attended_bearer_data_requires_valid_credentials(self) -> None:
+        for path in ("/api/snapshot", "/api/history", "/api/events"):
+            for credentials in ({}, {"Authorization": "Bearer wrong"}):
+                with self.subTest(path=path, credentials=credentials):
+                    self.assert_json_error(
+                        anonymous(
+                            f"{self.base}{path}",
+                            headers={"X-Monitor-Request": "dashboard", **credentials},
+                        ),
+                        403,
+                        "AUTHENTICATION_REQUIRED",
+                    )
+                    self.assertFalse(self.state.dashboard_attended())
+
+    def test_web_attended_data_reads_obey_each_authentication_mode(self) -> None:
+        for mode in ("bearer", "none"):
+            for method in ("GET", "HEAD"):
+                with self.subTest(mode=mode, method=method):
+                    server = self.standalone_server(authentication=mode)
+                    base = f"http://127.0.0.1:{server.server_port}"
+                    headers = AUTHORIZATION if mode == "bearer" else {}
+                    # Accepted automation reads do not signal a viewer.
+                    self.assertEqual(
+                        self.request_status(
+                            anonymous(
+                                f"{base}/api/snapshot", headers=headers, method=method
+                            )
+                        ),
+                        200,
+                    )
+                    self.assertFalse(server.state.dashboard_attended())
+                    # Direct-access mode still refuses untrusted requests.
+                    if mode == "none":
+                        self.assert_json_error(
+                            anonymous(
+                                f"{base}/api/snapshot",
+                                headers={
+                                    "X-Monitor-Request": "dashboard",
+                                    "Sec-Fetch-Site": "cross-site",
+                                },
+                            ),
+                            403,
+                            "UNTRUSTED_ORIGIN",
+                        )
+                        self.assertFalse(server.state.dashboard_attended())
+                    self.assertEqual(
+                        self.request_status(
+                            anonymous(
+                                f"{base}/api/snapshot",
+                                method=method,
+                                headers={"X-Monitor-Request": "dashboard", **headers},
+                            )
+                        ),
+                        200,
+                    )
+                    self.assertTrue(server.state.dashboard_attended())
+
+    def test_web_attended_non_data_requests_never_mark_presence(self) -> None:
+        headers = {"X-Monitor-Request": "dashboard"}
+        for path, method, status in (
+            ("/api/unknown", "GET", 404),
+            ("/api/probe", "GET", 405),
+            ("/api/snapshot", "PUT", 405),
+            ("/api/events", "HEAD", 405),
+            ("/metrics", "GET", 200),
+        ):
+            with self.subTest(path=path, method=method):
+                self.assertEqual(
+                    self.request_status(
+                        Request(f"{self.base}{path}", headers=headers, method=method)
+                    ),
+                    status,
+                )
+                self.assertFalse(self.state.dashboard_attended())
 
     def test_bearer_capability_protects_private_api_without_ambient_cookie(
         self,

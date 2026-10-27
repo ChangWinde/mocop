@@ -119,9 +119,14 @@ are not authentication. See [SECURITY.md](SECURITY.md) and
 The `X-Monitor-Request: dashboard` header is not just an access marker — it
 is a **presence signal**:
 
-- Any read request carrying the header, and every wake of a connected
-  `GET /api/events` stream, marks the monitor as *attended* for the next
-  30 seconds.
+- A known API data read carrying the header marks the monitor as *attended*
+  for the next 30 seconds only after it passes the configured authentication
+  policy and dashboard Host/Fetch Metadata checks.
+  Every wake of an authenticated `GET /api/events` stream also marks presence.
+  Public endpoints (`/healthz`, `/readyz`, `/api/meta`, and static assets),
+  `/metrics`, unknown routes, and refused authentication never mark presence.
+  In `authentication: "none"` mode, data reads still require a trusted Host
+  and non-cross-site Fetch Metadata before they can mark presence.
 - While attended, GPU **process** telemetry keeps its baseline cadence
   (15 seconds by default). While unattended, every device stretches its
   process query to 16× the base interval (4 minutes at defaults); core GPU,
@@ -442,7 +447,7 @@ Top-level fields:
 | `lastPollDurationMs` | int \| null | Duration of that batch. |
 | `collectorError` | string \| null | Fleet-level collector failure (e.g. discovery failed), else `null`. |
 | `persistence` | object | `{enabled, backend, healthy, queuedWrites, droppedWrites, lastError}` (+ `writtenRecords` when SQLite). |
-| `notifications` | object | `{enabled, healthy, queuedDeliveries, droppedDeliveries, suppressedDeliveries, endpoints[]}`; each endpoint reports `{name, healthy, queuedDeliveries, deliveredEvents, droppedDeliveries, suppressedDeliveries, lastError, lastAttemptAt, lastSuccessAt}`. `suppressedDeliveries` counts deliberately withheld recoveries (an unpaired resolved event, for example inside a maintenance window) and never marks the endpoint unhealthy. |
+| `notifications` | object | `{enabled, healthy, queuedDeliveries, droppedDeliveries, suppressedDeliveries, endpoints[]}`; each endpoint reports `{name, healthy, queuedDeliveries, deliveredEvents, droppedDeliveries, suppressedDeliveries, lastError, lastAttemptAt, lastSuccessAt}`. `suppressedDeliveries` counts withdrawn non-actionable events and deliberately withheld recoveries (an unpaired resolved event, for example inside a maintenance window); it leaves `droppedDeliveries`, `lastError`, and endpoint health unchanged. |
 | `thresholds` | object | The eleven active incident thresholds (`cpu_warning_pct`, …, `psi_io_some_pct`). |
 | `stats` | object | Fleet aggregates; see below. |
 | `servers` | array | Per-host state; see below. |
@@ -1222,8 +1227,12 @@ official repository; see the configuration reference and ADR-0026.
 
 Install the latest verified official release and restart. Tier W. Body cap
 32 bytes. Body: exactly `{}` — the request cannot name a version,
-repository, or installer option; the service always applies the newest
-release it verified. Success `202`: `{"status": "updating"}`; follow
+repository, or installer option; the worker re-reads the latest release
+metadata before downloading instead of applying the cached poll result.
+It installs only a release newer than the running version.
+If the refresh fails or offers nothing newer, the attempt fails with the
+manual-recovery hint and installs nothing.
+Success `202`: `{"status": "updating"}`; follow
 progress through `GET /api/update` and treat a new snapshot `startedAt` as
 the completed switch. `409 UPDATE_NOT_APPLICABLE` when self-update is not
 enabled, the service is not supervised, no newer release exists, or an
@@ -1302,7 +1311,9 @@ shared-path or simultaneous-loss group (`GET /api/incidents`
   signature, so a receiver that recorded the id can drop the duplicate.
 - Only actionable transitions are sent (`actionable` under
   `GET /api/incidents`); an event that is silenced or acknowledged while it
-  waits is withdrawn, counted as suppressed, not as dropped. A service restart
+  waits is withdrawn, incrementing `suppressedDeliveries` without changing
+  `droppedDeliveries` or `lastError`. Exhausted retries and permanent delivery
+  failures still increment `droppedDeliveries` and set `lastError`. A service restart
   does not repeat `opened` for incidents that were open before it when history
   persistence is enabled; their later `resolved` is still delivered. When an endpoint
   subscribes to both `opened` and `resolved`, a `resolved` for a condition

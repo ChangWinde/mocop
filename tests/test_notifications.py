@@ -466,7 +466,7 @@ class NotificationTests(unittest.TestCase):
         self.assertIn(("cpu:a", "resolved"), deliveries)
         self.assertEqual(sink.status()["endpoints"][0]["droppedDeliveries"], 0)
 
-    def test_actionable_check_runs_before_every_delivery_attempt(self) -> None:
+    def test_notifications_withdrawn_during_retry_is_suppressed(self) -> None:
         checks = []
 
         def actionable(event) -> bool:
@@ -492,8 +492,66 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(len(sender.calls), 1)
         status = sink.status()["endpoints"][0]
         self.assertEqual(status["deliveredEvents"], 0)
-        self.assertEqual(status["droppedDeliveries"], 1)
+        self.assertEqual(status["droppedDeliveries"], 0)
+        self.assertEqual(status["suppressedDeliveries"], 1)
         self.assertIsNone(status["lastError"])
+
+    def test_notifications_withdrawn_queued_preserves_previous_error(self) -> None:
+        for prior_failure in (False, True):
+            with self.subTest(prior_failure=prior_failure):
+                sender = _AlwaysRetryableSender()
+                sink = create_notification_sink(
+                    (self.config(max_attempts=1),),
+                    environ={
+                        "MOCOP_WEBHOOK_URL": "https://hooks.example.test/events",
+                        "MOCOP_WEBHOOK_SECRET": "top-secret",
+                    },
+                    resolver=resolver_for("8.8.8.8"),
+                    sender=sender,
+                )
+                self.addCleanup(sink.close)
+                worker = sink._workers[0]
+                if prior_failure:
+                    sink.publish((replace(incident(), event_id=41),), ())
+                    worker._queue.join()
+                before = sink.status()
+                sink.set_actionable_check(lambda event: False)
+                sink.publish((incident(),), ())
+                worker._queue.join()
+                after = sink.status()
+                self.assertEqual(after["suppressedDeliveries"], 1)
+                self.assertEqual(after["droppedDeliveries"], int(prior_failure))
+                self.assertEqual(after["healthy"], before["healthy"])
+                endpoint = after["endpoints"][0]
+                for field in ("lastError", "lastAttemptAt", "lastSuccessAt"):
+                    self.assertEqual(endpoint[field], before["endpoints"][0][field])
+                self.assertEqual(endpoint["suppressedDeliveries"], 1)
+                self.assertEqual(endpoint["droppedDeliveries"], int(prior_failure))
+                self.assertEqual(len(sender.calls), int(prior_failure))
+
+    def test_notifications_withdrawn_real_failure_is_still_dropped(self) -> None:
+        sender = _AlwaysRetryableSender()
+        sink = create_notification_sink(
+            (self.config(),),
+            environ={
+                "MOCOP_WEBHOOK_URL": "https://hooks.example.test/events",
+                "MOCOP_WEBHOOK_SECRET": "top-secret",
+            },
+            resolver=resolver_for("8.8.8.8"),
+            sender=sender,
+        )
+        self.addCleanup(sink.close)
+        sink.publish((incident(),), ())
+        sink._workers[0]._queue.join()
+        status = sink.status()
+        self.assertEqual(len(sender.calls), 2)
+        self.assertEqual(status["droppedDeliveries"], 1)
+        self.assertEqual(status["suppressedDeliveries"], 0)
+        self.assertFalse(status["healthy"])
+        endpoint = status["endpoints"][0]
+        self.assertEqual(endpoint["droppedDeliveries"], 1)
+        self.assertEqual(endpoint["suppressedDeliveries"], 0)
+        self.assertEqual(endpoint["lastError"], "delivery_failed")
 
     def test_queue_full_event_can_be_retried_after_capacity_returns(self) -> None:
         sender = _GateSender()
@@ -663,7 +721,39 @@ class NotificationTests(unittest.TestCase):
         payloads = [json.loads(call[1]) for call in sender.calls]
         self.assertEqual(len(payloads), 1)
         self.assertTrue(payloads[0]["test"])
-        self.assertEqual(sink.status()["endpoints"][0]["droppedDeliveries"], 1)
+        self.assertEqual(sink.status()["endpoints"][0]["droppedDeliveries"], 0)
+        self.assertEqual(sink.status()["endpoints"][0]["suppressedDeliveries"], 1)
+
+    def test_notifications_tls_verify_certificate_and_hostname_on_send(self) -> None:
+        tls_socket = _ScriptedTlsSocket(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        )
+        raw_socket = _ScriptedRawSocket()
+        observed = []
+
+        def wrap_socket(context, sock, *, server_hostname):
+            # Observe the real default context at the handshake boundary;
+            # injecting a context would leave its production defaults untested.
+            observed.append(
+                (context.verify_mode, context.check_hostname, server_hostname)
+            )
+            sock.close()
+            return tls_socket
+
+        sender = PinnedHttpsWebhookSender(
+            resolver=resolver_for("8.8.8.8"),
+            connect=lambda address, timeout=None: raw_socket,
+        )
+        self.addCleanup(sender.close)
+        endpoint = Endpoint(
+            self.config(), urlsplit("https://hooks.example.test/events"), None
+        )
+        with patch.object(ssl.SSLContext, "wrap_socket", new=wrap_socket):
+            result = sender.send(endpoint, b"{}", {})
+
+        self.assertEqual(result, DeliveryResult(True, False))
+        self.assertEqual(observed, [(ssl.CERT_REQUIRED, True, "hooks.example.test")])
+        self.assertTrue(raw_socket.closed)
 
     def test_send_bounds_dns_resolution_by_the_delivery_deadline(self) -> None:
         started = threading.Event()

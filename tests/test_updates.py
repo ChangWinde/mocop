@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
 import sys
 import threading
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from mocop.updates import (
@@ -207,6 +209,129 @@ class UpdateManagerTests(unittest.TestCase):
         self.assertIn("--force-reinstall", install)
         self.assertTrue(install[-1].endswith("mocop-9.9.9-py3-none-any.whl"))
         self.assertTrue(any(url.endswith(".whl") for url in fetch.calls))
+
+    def finish_apply(self, manager: UpdateManager) -> dict[str, object]:
+        self.assertTrue(manager.apply()[0])
+        assert manager._apply_thread is not None
+        manager._apply_thread.join(timeout=2)
+        self.assertFalse(
+            manager._apply_thread.is_alive(), "apply worker did not finish"
+        )
+        return manager.status()
+
+    def test_updates_apply_refresh_installs_release_published_since_poll(self) -> None:
+        restarted = threading.Event()
+        manager, fetch, runner = self.manager(
+            runner=_Runner(installed_version="9.9.10"), restart=restarted.set
+        )
+        manager.check_now()
+        self.assertEqual(manager.status()["latestVersion"], "9.9.9")
+        fetch.version = "9.9.10"
+
+        status = self.finish_apply(manager)
+
+        self.assertEqual(status["state"], "restarting", status["detail"])
+        self.assertEqual(status["latestVersion"], "9.9.10")
+        self.assertEqual(
+            fetch.calls,
+            [
+                _RELEASE_URL,
+                _RELEASE_URL,
+                "https://example.test/SHA256SUMS",
+                "https://example.test/9.9.10.whl",
+            ],
+        )
+        install = next(c for c in runner.commands if "install" in c)
+        self.assertTrue(install[-1].endswith("mocop-9.9.10-py3-none-any.whl"))
+        self.assertTrue(restarted.is_set())
+
+    def test_updates_apply_refresh_withdrawn_release_installs_nothing(self) -> None:
+        for refreshed_version in ("1.0.0", "0.9.9"):
+            with self.subTest(refreshed_version=refreshed_version):
+                restarted = threading.Event()
+                manager, fetch, runner = self.manager(restart=restarted.set)
+                manager.check_now()
+                fetch.version = refreshed_version
+
+                status = self.finish_apply(manager)
+
+                self.assertEqual(status["state"], "failed")
+                self.assertEqual(status["latestVersion"], refreshed_version)
+                self.assertFalse(status["updateAvailable"])
+                self.assertIn(
+                    "release state changed before download", str(status["detail"])
+                )
+                self.assertIn(
+                    "recover manually with: uv tool install", str(status["detail"])
+                )
+                self.assertEqual(fetch.calls, [_RELEASE_URL, _RELEASE_URL])
+                self.assertEqual(runner.commands, [])
+                self.assertFalse(restarted.is_set())
+
+    def test_updates_apply_refresh_failure_never_uses_cached_artifacts(self) -> None:
+        for refreshed_metadata in (
+            OSError("release withdrawn"),
+            b'{"tag_name":"latest"}',
+            b"null",
+        ):
+            with self.subTest(refreshed_metadata=refreshed_metadata):
+                fetch = _Fetcher()
+
+                def refresh_failure(
+                    url: str,
+                    limit: int,
+                    fetch: _Fetcher = fetch,
+                    refreshed_metadata: bytes | OSError = refreshed_metadata,
+                ) -> bytes:
+                    if fetch.calls:
+                        fetch.calls.append(url)
+                        if isinstance(refreshed_metadata, OSError):
+                            raise refreshed_metadata
+                        return refreshed_metadata
+                    return fetch(url, limit)
+
+                restarted = threading.Event()
+                manager, _, runner = self.manager(
+                    fetch=refresh_failure, restart=restarted.set
+                )  # type: ignore[arg-type]
+                manager.check_now()
+
+                status = self.finish_apply(manager)
+
+                self.assertEqual(status["state"], "failed")
+                self.assertIn(
+                    "recover manually with: uv tool install", str(status["detail"])
+                )
+                self.assertEqual(fetch.calls, [_RELEASE_URL, _RELEASE_URL])
+                self.assertEqual(runner.commands, [])
+                self.assertFalse(restarted.is_set())
+
+    def test_updates_verify_distribution_queries_mocop_before_restart(self) -> None:
+        runner = _Runner()
+        queried = []
+
+        def run(command: list[str], timeout: float) -> subprocess.CompletedProcess:
+            if "-c" not in command:
+                return runner(command, timeout)
+            self.assertEqual(command[:2], [sys.executable, "-c"])
+            # Execute the actual verification program against fake metadata;
+            # canned stdout alone cannot prove which distribution it queried.
+            with (
+                patch("importlib.metadata.version", return_value="9.9.9") as version,
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                exec(command[2], {})
+            queried.extend(call.args[0] for call in version.call_args_list)
+            return subprocess.CompletedProcess(command, 0, output.getvalue(), "")
+
+        restarted = threading.Event()
+        manager, _, _ = self.manager(runner=run, restart=restarted.set)  # type: ignore[arg-type]
+        manager.check_now()
+        status = self.finish_apply(manager)
+
+        self.assertEqual(status["state"], "restarting", status["detail"])
+        self.assertEqual(queried, ["mocop"])
+        self.assertTrue(restarted.is_set())
 
     def test_apply_rejects_a_tampered_wheel_without_restarting(self) -> None:
         fetch = _Fetcher()
