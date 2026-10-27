@@ -1169,16 +1169,18 @@ class ProbeTests(unittest.TestCase):
             )
 
     def test_bounded_process_preserves_stderr_when_it_times_out(self) -> None:
+        # The child must start and write before the deadline; a loaded machine
+        # (or coverage) can take well over 0.1 s to start Python, so leave room.
         with self.assertRaises(subprocess.TimeoutExpired) as context:
             _run_bounded_process(
                 [
                     sys.executable,
                     "-c",
                     "import sys,time; sys.stderr.write('started\\n'); "
-                    "sys.stderr.flush(); time.sleep(2)",
+                    "sys.stderr.flush(); time.sleep(60)",
                 ],
                 input_text="",
-                timeout_seconds=0.1,
+                timeout_seconds=3.0,
                 max_output_bytes=65_536,
                 environment=os.environ.copy(),
             )
