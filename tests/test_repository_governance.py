@@ -49,7 +49,7 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/static/process-inventory.js": 125,
     "src/mocop/static/update-pill.js": 175,
     "src/mocop/service.py": 1_571,
-    "src/mocop/service_scheduler.py": 656,
+    "src/mocop/service_scheduler.py": 655,
     "src/mocop/process_transitions.py": 150,
     "src/mocop/fleet_stats.py": 125,
     "src/mocop/telemetry_points.py": 250,
