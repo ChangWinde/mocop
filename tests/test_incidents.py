@@ -600,7 +600,13 @@ class IncidentTrackerTests(unittest.TestCase):
     def test_failed_probe_preserves_resource_incidents_until_fresh_recovery(
         self,
     ) -> None:
-        warning = ProbeResult("node-a", "online", 1, system=system(20, 90))
+        warning = ProbeResult(
+            "node-a",
+            "online",
+            1,
+            system=system(20, 90),
+            observed_at="2026-08-09T00:00:00Z",
+        )
         self.tracker.update(warning)
         self.tracker.update(warning)
         self.tracker.update(
@@ -1241,6 +1247,289 @@ class IncidentTrackerTests(unittest.TestCase):
         snapshot = self.tracker.snapshot(20)
         self.assertEqual(snapshot["active"][0]["severity"], "warning")
         self.assertEqual(snapshot["events"][0]["state"], "deescalated")
+
+
+class IncidentDetectionRegressionTests(unittest.TestCase):
+    @staticmethod
+    def tracker(incidents: IncidentConfig | None = None) -> IncidentTracker:
+        return IncidentTracker(
+            ThresholdIncidentPolicy(
+                ThresholdConfig(), incidents=incidents or cycles_only()
+            ),
+            history_points=20,
+        )
+
+    @staticmethod
+    def sample(
+        second: int, cpu: float = 20, gpus: tuple[GpuMetrics, ...] = ()
+    ) -> ProbeResult:
+        return ProbeResult(
+            "node-a",
+            "online",
+            1,
+            gpus,
+            system=system(cpu, 10),
+            observed_at=f"2026-08-09T00:{second // 60:02d}:{second % 60:02d}Z",
+        )
+
+    @staticmethod
+    def ecc_gpu(errors: int | None) -> GpuMetrics:
+        return gpu(
+            60,
+            health=GpuHealthMetrics(errors, False, False, False, False, "Disabled"),
+        )
+
+    def test_incident_duration_floor_first_sample(self) -> None:
+        tracker = self.tracker(
+            IncidentConfig(resource_open_cycles=1, resource_open_seconds=60)
+        )
+        self.assertEqual(tracker.update(self.sample(0, cpu=90)), ())
+        self.assertEqual(tracker.snapshot(20)["active"], [])
+        self.assertEqual(tracker.snapshot(20)["events"], [])
+        self.assertTrue(tracker.has_pending_condition("node-a", "cpu"))
+
+    def test_incident_duration_floor_clears_before_floor(self) -> None:
+        tracker = self.tracker(
+            IncidentConfig(resource_open_cycles=1, resource_open_seconds=60)
+        )
+        for second, cpu in ((0, 90), (55, 90), (59, 20), (60, 20)):
+            self.assertEqual(tracker.update(self.sample(second, cpu=cpu)), ())
+        self.assertFalse(tracker.has_pending_condition("node-a", "cpu"))
+        # The cleared spike must not contribute time to a new streak.
+        for second in (65, 120, 124):
+            self.assertEqual(tracker.update(self.sample(second, cpu=90)), ())
+        events = tracker.update(self.sample(125, cpu=90))
+        self.assertEqual(
+            [(e.condition.key, e.state) for e in events], [("cpu", "opened")]
+        )
+        self.assertEqual(events[0].observed_at, self.sample(125).observed_at)
+
+    def test_incident_duration_floor_holds_to_or_past_floor(self) -> None:
+        for elapsed in (60, 61):
+            for initially_healthy in (False, True):
+                with self.subTest(elapsed=elapsed, initially_healthy=initially_healthy):
+                    tracker = self.tracker(
+                        IncidentConfig(resource_open_cycles=1, resource_open_seconds=60)
+                    )
+                    if initially_healthy:
+                        self.assertEqual(tracker.update(self.sample(0)), ())
+                    for second in (5, 5, 64):
+                        self.assertEqual(
+                            tracker.update(self.sample(second, cpu=90)), ()
+                        )
+                    opened = tracker.update(self.sample(5 + elapsed, cpu=90))
+                    self.assertEqual([e.state for e in opened], ["opened"])
+                    self.assertEqual(
+                        opened[0].observed_at, self.sample(5 + elapsed).observed_at
+                    )
+                    self.assertEqual(tracker.update(self.sample(70, cpu=90)), ())
+
+    def test_incident_duration_floor_also_requires_cycles(self) -> None:
+        tracker = self.tracker(
+            IncidentConfig(resource_open_cycles=3, resource_open_seconds=10)
+        )
+        self.assertEqual(tracker.update(self.sample(0, cpu=90)), ())
+        self.assertEqual(tracker.update(self.sample(10, cpu=90)), ())
+        self.assertEqual(
+            [e.state for e in tracker.update(self.sample(11, cpu=90))], ["opened"]
+        )
+
+    def test_incident_ecc_unknown_partial_health_block(self) -> None:
+        tracker = self.tracker()
+        for second in (0, 5):
+            tracker.update(self.sample(second, gpus=(self.ecc_gpu(1),)))
+        self.assertTrue(tracker.has_active_condition("node-a", "gpu_ecc:GPU-1"))
+        for second in (10, 15, 20):
+            self.assertEqual(
+                tracker.update(self.sample(second, gpus=(self.ecc_gpu(None),))), ()
+            )
+            self.assertTrue(tracker.has_active_condition("node-a", "gpu_ecc:GPU-1"))
+        self.assertEqual(
+            [e["state"] for e in tracker.snapshot(20)["events"]], ["opened"]
+        )
+
+    def test_incident_ecc_unknown_does_not_open_or_confirm(self) -> None:
+        tracker = self.tracker()
+        for second in (0, 5, 10):
+            self.assertEqual(
+                tracker.update(self.sample(second, gpus=(self.ecc_gpu(None),))), ()
+            )
+        self.assertEqual(tracker.snapshot(20)["active"], [])
+        tracker.update(self.sample(15, gpus=(self.ecc_gpu(1),)))
+        tracker.update(self.sample(20, gpus=(self.ecc_gpu(None),)))
+        self.assertEqual(tracker.update(self.sample(25, gpus=(self.ecc_gpu(1),))), ())
+        self.assertEqual(
+            [e.state for e in tracker.update(self.sample(30, gpus=(self.ecc_gpu(1),)))],
+            ["opened"],
+        )
+
+    def test_incident_ecc_unknown_later_healthy_sample(self) -> None:
+        tracker = self.tracker()
+        for second in (0, 5):
+            tracker.update(self.sample(second, gpus=(self.ecc_gpu(1),)))
+        # ECC alone is sufficient: unrelated health fields may be unknown.
+        healthy = gpu(60, health=GpuHealthMetrics(0, None, None, None, None, None))
+        self.assertEqual(tracker.update(self.sample(10, gpus=(healthy,))), ())
+        for second in (15, 20):
+            self.assertEqual(
+                tracker.update(self.sample(second, gpus=(self.ecc_gpu(None),))), ()
+            )
+            self.assertTrue(tracker.has_active_condition("node-a", "gpu_ecc:GPU-1"))
+        resolved = tracker.update(self.sample(25, gpus=(healthy,)))
+        self.assertEqual(
+            [(e.condition.key, e.state) for e in resolved],
+            [("gpu_ecc:GPU-1", "resolved")],
+        )
+        self.assertEqual(tracker.snapshot(20)["active"], [])
+
+    def test_incident_ecc_unknown_gpu_disappears(self) -> None:
+        tracker = self.tracker()
+        for second in (0, 5):
+            tracker.update(self.sample(second, gpus=(self.ecc_gpu(1),)))
+        for second in (10, 15):
+            tracker.update(
+                replace(self.sample(second), message="nvidia-smi query failed")
+            )
+            self.assertTrue(tracker.has_active_condition("node-a", "gpu_ecc:GPU-1"))
+        tracker.update(self.sample(20))
+        self.assertTrue(tracker.has_active_condition("node-a", "gpu_ecc:GPU-1"))
+        resolved = tracker.update(self.sample(25))
+        self.assertIn(
+            ("gpu_ecc:GPU-1", "resolved"),
+            [(e.condition.key, e.state) for e in resolved],
+        )
+        self.assertEqual(tracker.snapshot(20)["active"], [])
+
+    def test_incident_late_samples_before_opening_do_not_recover(self) -> None:
+        tracker = self.tracker()
+        tracker.update(self.sample(10, cpu=90))
+        (opened,) = tracker.update(self.sample(15, cpu=90))
+        for second in (0, 5, 14):
+            self.assertEqual(tracker.update(self.sample(second)), ())
+            self.assertTrue(tracker.has_active_condition("node-a", "cpu"))
+        self.assertEqual(tracker.update(self.sample(20)), ())
+        (resolved,) = tracker.update(self.sample(25))
+        self.assertEqual(resolved.state, "resolved")
+        self.assertGreater(resolved.observed_at, opened.observed_at)
+
+    def test_incident_late_samples_do_not_advance_or_reset_partial_recovery(
+        self,
+    ) -> None:
+        tracker = self.tracker()
+        tracker.update(self.sample(10, cpu=90))
+        tracker.update(self.sample(15, cpu=90))
+        self.assertEqual(tracker.update(self.sample(20)), ())
+        for second in (0, 5):
+            self.assertEqual(tracker.update(self.sample(second)), ())
+            self.assertTrue(tracker.has_active_condition("node-a", "cpu"))
+        self.assertEqual(
+            [e.state for e in tracker.update(self.sample(25))], ["resolved"]
+        )
+
+    def test_incident_late_samples_cannot_recover_a_new_generation(self) -> None:
+        tracker = self.tracker(cycles_only(resource_open_cycles=1, recovery_cycles=1))
+        tracker.update(self.sample(10, cpu=90))
+        self.assertEqual(
+            [e.state for e in tracker.update(self.sample(15))], ["resolved"]
+        )
+        (opened,) = tracker.update(self.sample(30, cpu=90))
+        for second in (20, 25):
+            self.assertEqual(tracker.update(self.sample(second)), ())
+            self.assertTrue(tracker.has_active_condition("node-a", "cpu"))
+        (resolved,) = tracker.update(self.sample(35))
+        self.assertEqual(resolved.state, "resolved")
+        self.assertGreater(resolved.observed_at, opened.observed_at)
+
+    def test_incident_late_samples_restored_opening_uses_timestamp_order(self) -> None:
+        original = self.tracker()
+        original.update(self.sample(10, cpu=90))
+        (opened,) = original.update(self.sample(15, cpu=90))
+        tracker = IncidentTracker(
+            ThresholdIncidentPolicy(ThresholdConfig(), incidents=cycles_only()),
+            20,
+            open_incidents=(
+                OpenIncident("node-a", opened.condition, opened.observed_at),
+            ),
+        )
+        # Lexical order differs from chronological order across UTC offsets.
+        late = replace(self.sample(0), observed_at="2026-08-09T08:00:00+08:00")
+        for _ in range(2):
+            self.assertEqual(tracker.update(late), ())
+            self.assertTrue(tracker.has_active_condition("node-a", "cpu"))
+        self.assertEqual(tracker.update(self.sample(20)), ())
+        self.assertEqual(
+            [e.state for e in tracker.update(self.sample(25))], ["resolved"]
+        )
+
+    def test_incident_margin_idle_memory_exact_busy_boundary(self) -> None:
+        tracker = self.tracker(cycles_only(gpu_idle_memory_cycles=1, recovery_cycles=2))
+        tracker.update(self.sample(0, gpus=(gpu(60, utilization=0, memory_used=40),)))
+        # Busy threshold 10 plus margin 5: values below 15 must keep it open.
+        for second in (5, 10):
+            self.assertEqual(
+                tracker.update(
+                    self.sample(
+                        second, gpus=(gpu(60, utilization=14.99, memory_used=40),)
+                    )
+                ),
+                (),
+            )
+            self.assertTrue(
+                tracker.has_active_condition("node-a", "gpu_idle_memory:GPU-1")
+            )
+        edge = (gpu(60, utilization=15, memory_used=40),)
+        self.assertEqual(tracker.update(self.sample(15, gpus=edge)), ())
+        self.assertTrue(tracker.has_active_condition("node-a", "gpu_idle_memory:GPU-1"))
+        self.assertEqual(
+            [e.state for e in tracker.update(self.sample(20, gpus=edge))], ["resolved"]
+        )
+
+    def test_incident_margin_idle_memory_uses_configured_margin(self) -> None:
+        for margin in (0, 2, 9):
+            with self.subTest(margin=margin):
+                tracker = self.tracker(
+                    cycles_only(gpu_idle_memory_cycles=1, recovery_margin=margin)
+                )
+                tracker.update(
+                    self.sample(0, gpus=(gpu(60, utilization=0, memory_used=40),))
+                )
+                inside = (gpu(60, utilization=10 + margin - 0.01, memory_used=40),)
+                for second in (5, 10):
+                    self.assertEqual(
+                        tracker.update(self.sample(second, gpus=inside)), ()
+                    )
+                    self.assertTrue(
+                        tracker.has_active_condition("node-a", "gpu_idle_memory:GPU-1")
+                    )
+                edge = (gpu(60, utilization=10 + margin, memory_used=40),)
+                self.assertEqual(tracker.update(self.sample(15, gpus=edge)), ())
+                self.assertEqual(
+                    [e.state for e in tracker.update(self.sample(20, gpus=edge))],
+                    ["resolved"],
+                )
+
+    def test_incident_margin_numeric_uses_configured_margin(self) -> None:
+        for margin in (0, 2, 9):
+            with self.subTest(margin=margin):
+                tracker = self.tracker(
+                    cycles_only(resource_open_cycles=1, recovery_margin=margin)
+                )
+                tracker.update(self.sample(0, cpu=90))
+                for second in (5, 10):
+                    self.assertEqual(
+                        tracker.update(self.sample(second, cpu=85 - margin + 0.01)), ()
+                    )
+                    self.assertTrue(tracker.has_active_condition("node-a", "cpu"))
+                self.assertEqual(
+                    tracker.update(self.sample(15, cpu=85 - margin - 0.01)), ()
+                )
+                self.assertEqual(
+                    [
+                        e.state
+                        for e in tracker.update(self.sample(20, cpu=85 - margin - 0.01))
+                    ],
+                    ["resolved"],
+                )
 
 
 if __name__ == "__main__":

@@ -101,6 +101,9 @@ its confirming samples also span this many seconds, so sensitivity does not
 depend on the poll interval — at a five-second cadence, two samples alone would
 open an incident for a ten-second VRAM spike. Connectivity and GPU-availability
 conditions open immediately regardless. `0` confirms by sample count alone.
+Setting `resource_open_cycles` to `1` still requires the duration floor:
+the first resource sample starts confirmation and cannot open an incident
+when `resource_open_seconds` is nonzero.
 `incidents.gpu_idle_memory_seconds` (300, same range) is the corresponding
 floor for the idle-VRAM condition, which also needs `gpu_idle_memory_cycles`
 samples: checkpoint and evaluation pauses idle a GPU for a minute or two and
@@ -116,6 +119,18 @@ the margin covers both sides of the claim (VRAM just under
 `gpu_idle_memory_pct`, utilization just over `gpu_busy_pct`). A reading that
 hovers around a threshold is one incident and one webhook, not one per
 crossing; `0` restores closing on the first sample under the line.
+Idle-VRAM recovery starts when utilization reaches exactly `gpu_busy_pct`
+plus `recovery_margin`; values below that boundary hold the incident open
+while VRAM remains above its recovery line. Resolution still requires
+`recovery_cycles` healthy samples.
+
+An unavailable ECC measurement is unknown even when the GPU reports other
+health fields. It cannot confirm a new ECC incident or advance recovery of
+an open one. A present GPU must report zero uncorrected ECC errors to advance
+recovery; a complete, successful GPU inventory that no longer contains the
+device also advances recovery. A failed GPU query cannot do so.
+Samples timestamped before the current incident opened never count toward
+its recovery, including after a restart or a new opening of the same condition.
 
 `incident_overrides` may contain only `hosts` and `groups`, each with at most
 256 entries. A scope object is non-empty and may contain `thresholds` and/or

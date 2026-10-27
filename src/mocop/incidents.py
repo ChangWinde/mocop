@@ -398,6 +398,8 @@ class ThresholdIncidentPolicy:
                     domains.add(f"gpu_utilization:{identity}")
                 if gpu.health is not None:
                     domains.add(f"gpu_health:{identity}")
+                    if gpu.health.ecc_uncorrected_volatile is not None:
+                        domains.add(f"gpu_ecc:{identity}")
         return frozenset(domains)
 
     def condition_observed(self, result: ProbeResult, key: str) -> bool:
@@ -503,7 +505,6 @@ class IncidentTracker:
         ] = {}
         self._opened_at: dict[str, dict[str, str]] = {}
         self._last_observed_at: dict[str, dict[str, str]] = {}
-        self._initialized: set[str] = set()
         retained_events = historical_events[-history_points:]
         self._events: deque[IncidentEvent] = deque(
             retained_events, maxlen=history_points
@@ -514,8 +515,7 @@ class IncidentTracker:
         # Conditions open at shutdown resume their generation instead of
         # opening again: no duplicate transition, firstObservedAt survives,
         # and the first live sample confirms, recovers, or freezes them under
-        # the same rules as any later sample. A host with restored conditions
-        # therefore skips first-sample initialization.
+        # the same rules as any later sample.
         recovery_cycles = policy.recovery_cycles()
         for restored in open_incidents:
             host, key = restored.host, restored.condition.key
@@ -524,14 +524,10 @@ class IncidentTracker:
             self._active.setdefault(host, {})[key] = replace(
                 restored.condition, recovery_cycles=recovery_cycles
             )
-            self._candidates.setdefault(host, {})
-            self._recoveries.setdefault(host, {})
-            self._severity_changes.setdefault(host, {})
             self._opened_at.setdefault(host, {})[key] = restored.opened_at
             self._last_observed_at.setdefault(host, {})[key] = (
                 restored.condition.observed_at
             )
-            self._initialized.add(host)
 
     @property
     def version(self) -> int:
@@ -546,7 +542,6 @@ class IncidentTracker:
             self._severity_changes.pop(host, None)
             self._opened_at.pop(host, None)
             self._last_observed_at.pop(host, None)
-            self._initialized.discard(host)
             if had_active_conditions:
                 self._version += 1
 
@@ -563,43 +558,12 @@ class IncidentTracker:
             if not condition.below_threshold
         }
 
-        initialized = result.host in self._initialized
-        if not initialized:
-            self._initialized.add(result.host)
-            immediate = {
-                key: condition
-                for key, condition in confirming.items()
-                if condition.open_after_cycles == 1
-            }
-            self._active[result.host] = immediate
-            self._candidates[result.host] = {
-                key: (condition, 1, condition.observed_at)
-                for key, condition in confirming.items()
-                if condition.open_after_cycles > 1
-            }
-            self._recoveries[result.host] = {}
-            self._severity_changes[result.host] = {}
-            self._opened_at[result.host] = {
-                key: condition.observed_at for key, condition in immediate.items()
-            }
-            self._last_observed_at[result.host] = {
-                key: condition.observed_at for key, condition in immediate.items()
-            }
-            # First activations are real transitions even on an online sample;
-            # without an opened event they would never persist or notify.
-            for key in sorted(immediate):
-                created.append(
-                    self._append(
-                        result.host, immediate[key], "opened", result.observed_at
-                    )
-                )
-            return tuple(created)
-
-        candidates = self._candidates[result.host]
-        recoveries = self._recoveries[result.host]
-        severity_changes = self._severity_changes[result.host]
-        opened_at = self._opened_at[result.host]
-        last_observed_at = self._last_observed_at[result.host]
+        # First samples follow the same cycle and duration rules as later ones.
+        candidates = self._candidates.setdefault(result.host, {})
+        recoveries = self._recoveries.setdefault(result.host, {})
+        severity_changes = self._severity_changes.setdefault(result.host, {})
+        opened_at = self._opened_at.setdefault(result.host, {})
+        last_observed_at = self._last_observed_at.setdefault(result.host, {})
         current = dict(previous)
         observed_domains = self._policy.observed_domains(result)
         # Opening a condition requires consecutively confirmable samples: an
@@ -673,8 +637,17 @@ class IncidentTracker:
                 candidates[key] = (new, count, since)
 
         if result.status == "online":
+            sample_time = epoch_seconds(result.observed_at)
             for key in set(previous) - set(observed):
                 old = previous[key]
+                opening_time = epoch_seconds(opened_at[key])
+                if (
+                    sample_time is not None
+                    and opening_time is not None
+                    and sample_time < opening_time
+                ):
+                    # A delayed sample cannot speak for this incident generation.
+                    continue
                 if telemetry_unknown(old.category, key, observed_domains):
                     # The sample carried no fresh data for this domain, so it
                     # can neither advance nor reset the recovery count.
