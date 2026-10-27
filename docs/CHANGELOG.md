@@ -6,6 +6,10 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Resource incidents now respect the duration floor even with a one-sample
+  opening count. Unavailable ECC measurements freeze recovery of an open ECC
+  incident on a present GPU, and samples older than an incident's opening
+  cannot advance its recovery.
 - The selected-server view now keeps its process inventory above the GPU list,
   labels low-utilization GPUs that still have active processes, reports when a
   process sample is unavailable, refreshes process labels when workload

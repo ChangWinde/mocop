@@ -24,6 +24,8 @@ def condition_domains(category: str, key: str) -> tuple[str, ...]:
     if category in {"gpu_availability", "gpu_count"}:
         return ("gpu_query",)
     identity = key.partition(":")[2]
+    if category == "gpu_ecc":
+        return (f"gpu_present:{identity}", f"gpu_ecc:{identity}")
     if category in _GPU_HEALTH_CATEGORIES:
         return (f"gpu_present:{identity}", f"gpu_health:{identity}")
     if category == "gpu_processes":
@@ -42,7 +44,14 @@ def condition_domains(category: str, key: str) -> tuple[str, ...]:
 
 
 _PER_IDENTITY_GPU_DOMAINS = frozenset(
-    {"gpu_present", "gpu_health", "gpu_temperature", "gpu_memory", "gpu_utilization"}
+    {
+        "gpu_present",
+        "gpu_health",
+        "gpu_ecc",
+        "gpu_temperature",
+        "gpu_memory",
+        "gpu_utilization",
+    }
 )
 
 
