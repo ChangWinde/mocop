@@ -388,7 +388,7 @@ try {
     gpuMemoryCard: Boolean(document.querySelector("#gpu-memory-card")),
     overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth
   })`);
-  assert.equal(initial.title, "Mocop · AI-native GPU cluster monitor");
+  assert.equal(initial.title, "Mocop · GPU 集群实时监控");
   assert.equal(initial.heading, "GPU 集群实时监控");
   assert.equal(initial.earlyCadenceChange, true);
   assert.equal(initial.gpuMemoryCard, true);
@@ -463,8 +463,27 @@ try {
     const heatmapHeading = document.querySelector(
       '.heatmap-row[data-host="atlas-01"] .heatmap-host',
     )?.textContent;
+    const headerCells = [...document.querySelectorAll(".gpu-table-head th")]
+      .filter((cell) => cell.offsetWidth > 0);
+    const fleetDataCells = [...document.querySelector(
+      '.gpu-server-group[data-host="atlas-01"] .gpu-table-body tbody tr',
+    )?.children || []].filter((cell) => cell.offsetWidth > 0);
+    const fleetColumnAlignment = Math.max(...headerCells.map((cell, index) => Math.max(
+      Math.abs(cell.getBoundingClientRect().left - fleetDataCells[index].getBoundingClientRect().left),
+      Math.abs(cell.getBoundingClientRect().right - fleetDataCells[index].getBoundingClientRect().right),
+    )));
     selectHost("atlas-01");
     const inventoryTitle = document.querySelector("#inventory-title")?.textContent;
+    const processPanel = document.querySelector("#program-search-panel");
+    const processRows = [...document.querySelectorAll("#program-search-panel .program-search-result")];
+    const dataCells = [...document.querySelector(".gpu-table-body tbody tr")?.children || []]
+      .filter((cell) => cell.offsetWidth > 0);
+    const columnAlignment = Math.max(...headerCells.map((cell, index) => Math.max(
+      Math.abs(cell.getBoundingClientRect().left - dataCells[index].getBoundingClientRect().left),
+      Math.abs(cell.getBoundingClientRect().right - dataCells[index].getBoundingClientRect().right),
+    )));
+    const processPanelVisible = !processPanel.hidden;
+    const processPanelCount = Number(processPanel.querySelector("#program-search-count")?.textContent);
     const tableHeading = document.querySelector(
       '#gpu-groups tr[data-host="atlas-01"] .device-text strong',
     )?.textContent;
@@ -483,6 +502,11 @@ try {
       groupHeading,
       heatmapHeading,
       inventoryTitle,
+      processPanelVisible,
+      processPanelCount,
+      processPanelRows: processRows.length,
+      columnAlignment,
+      fleetColumnAlignment,
       tableHeading,
       gpuDetailHeading,
       internalHost: server.host,
@@ -492,9 +516,171 @@ try {
   assert.equal(displayName.groupHeading, "console-0");
   assert.equal(displayName.heatmapHeading, "console-0");
   assert.equal(displayName.inventoryTitle, "console-0");
+  assert.equal(displayName.processPanelVisible, true);
+  assert.ok(displayName.processPanelCount > 0);
+  assert.equal(displayName.processPanelRows, displayName.processPanelCount);
+  assert.ok(displayName.columnAlignment < 1, `GPU table columns drifted: ${displayName.columnAlignment}px`);
+  assert.ok(
+    displayName.fleetColumnAlignment < 1,
+    `fleet GPU table columns drifted: ${displayName.fleetColumnAlignment}px`,
+  );
   assert.equal(displayName.tableHeading, "console-0");
   assert.match(displayName.gpuDetailHeading, /^console-0 · GPU 0$/);
   assert.equal(displayName.internalHost, "atlas-01");
+
+  const processState = await cdp.evaluate(`(() => {
+    const previousSnapshot = view.snapshot;
+    const previousHost = view.selectedHost;
+    const previousFilter = view.filter;
+    const template = previousSnapshot.servers.find((server) => server.host === "atlas-01");
+    const gpu = { ...template.gpus[0], utilization_gpu_pct: 0 };
+    const server = { ...template, host: "process-state", displayName: "process-state", gpus: [gpu] };
+    view.snapshot = { ...previousSnapshot, servers: [server] };
+    view.selectedHost = "process-state";
+    view.filter = "all";
+    view.selectedPanelKey = "";
+    view.singleTableCache = null;
+    view.groupCache.clear();
+    view.heatmapCache.clear();
+    render();
+    const result = {
+      state: document.querySelector(".gpu-table-body .state-pill")?.textContent,
+      processRows: document.querySelectorAll(".gpu-table-body .gpu-process-cell strong:not(.idle)").length,
+      idleRows: (() => {
+        view.filter = "idle";
+        render();
+        return document.querySelectorAll(".gpu-table-body tbody tr").length;
+      })(),
+      clearVisible: !document.querySelector("#clear-inventory-filters")?.hidden,
+      clearReset: (() => {
+        document.querySelector("#clear-inventory-filters")?.click();
+        return {
+          filter: view.filter,
+          query: view.query,
+          hidden: document.querySelector("#clear-inventory-filters")?.hidden,
+        };
+      })(),
+    };
+    view.snapshot = previousSnapshot;
+    view.selectedHost = previousHost;
+    view.filter = previousFilter;
+    view.selectedPanelKey = "";
+    view.singleTableCache = null;
+    view.groupCache.clear();
+    view.heatmapCache.clear();
+    render();
+    return result;
+  })()`);
+  assert.deepEqual(processState, {
+    state: "有进程", processRows: 1, idleRows: 0, clearVisible: true,
+    clearReset: { filter: "all", query: "", hidden: true },
+  });
+
+  const processEmptyStates = await cdp.evaluate(`(() => {
+    const previousSnapshot = view.snapshot;
+    const previousHost = view.selectedHost;
+    const template = previousSnapshot.servers.find((server) => server.host === "atlas-01");
+    const emptyServer = {
+      ...template,
+      host: "process-empty",
+      displayName: "process-empty",
+      gpus: [{ ...template.gpus[0], processes: [], processes_available: true }],
+    };
+    const unavailableServer = {
+      ...template,
+      host: "process-unavailable",
+      displayName: "process-unavailable",
+      gpus: [{
+        ...template.gpus[0],
+        processes_available: false,
+        processes: [{ pid: 991, name: "/work/stale.py", used_memory_mib: 12 }],
+      }],
+    };
+    const readPanel = (server) => {
+      view.snapshot = { ...previousSnapshot, servers: [server] };
+      view.selectedHost = server.host;
+      view.query = "";
+      view.filter = "all";
+      view.singleTableCache = null;
+      view.groupCache.clear();
+      view.heatmapCache.clear();
+      render();
+      return {
+        summary: document.querySelector("#program-search-summary")?.textContent,
+        empty: document.querySelector(".program-search-empty")?.textContent,
+        rows: document.querySelectorAll(".program-search-result").length,
+      };
+    };
+    const result = {
+      empty: readPanel(emptyServer),
+      unavailable: readPanel(unavailableServer),
+    };
+    view.snapshot = previousSnapshot;
+    view.selectedHost = previousHost;
+    view.query = "";
+    view.filter = "all";
+    view.singleTableCache = null;
+    view.groupCache.clear();
+    view.heatmapCache.clear();
+    render();
+    return result;
+  })()`);
+  assert.deepEqual(processEmptyStates.empty, {
+    summary: "process-empty没有可见的活跃 GPU 进程",
+    empty: "当前服务器没有可见的活跃 GPU 进程",
+    rows: 0,
+  });
+  assert.deepEqual(processEmptyStates.unavailable, {
+    summary: "process-unavailable没有可见的活跃 GPU 进程 · 1 张 GPU 的任务数据不可用",
+    empty: "当前 GPU 的任务数据不可用，恢复采样后会显示进程",
+    rows: 0,
+  });
+
+  const cachedProcessRefresh = await cdp.evaluate(`(() => {
+    const previousSnapshot = view.snapshot;
+    const previousHost = view.selectedHost;
+    const template = previousSnapshot.servers.find((server) => server.host === "atlas-01");
+    const makeServer = (entry) => ({
+      ...template,
+      host: "process-refresh",
+      displayName: "process-refresh",
+      gpus: [{
+        ...template.gpus[0],
+        processes_available: true,
+        processes_sampled: false,
+        processes_observed_at: "2026-01-01T00:00:00Z",
+        processes: [{
+          pid: 501,
+          name: "python",
+          used_memory_mib: 50,
+          workload: { command: "python -m " + entry },
+        }],
+      }],
+    });
+    const readName = (server) => {
+      view.snapshot = { ...previousSnapshot, servers: [server] };
+      view.selectedHost = server.host;
+      view.filter = "all";
+      view.query = "";
+      render();
+      return {
+        name: document.querySelector(".gpu-process-cell strong")?.textContent,
+        context: document.querySelector("#program-search-panel .program-search-placement small")?.textContent.split(" · ")[0],
+      };
+    };
+    const result = { before: readName(makeServer("before")), after: readName(makeServer("after")) };
+    view.snapshot = previousSnapshot;
+    view.selectedHost = previousHost;
+    view.filter = "all";
+    view.query = "";
+    view.singleTableCache = null;
+    render();
+    return result;
+  })()`);
+  assert.deepEqual(cachedProcessRefresh, {
+    before: { name: "1 · before", context: "复用样本" },
+    after: { name: "1 · after", context: "复用样本" },
+  });
 
   const heatmapPacking = await cdp.evaluate(`(() => {
     const previousSnapshot = view.snapshot;
@@ -2691,6 +2877,15 @@ try {
       > document.documentElement.clientWidth;
     search.value = "";
     search.dispatchEvent(new Event("input", { bubbles: true }));
+    const mobileHeaderCells = [...document.querySelectorAll(".gpu-table-head th")]
+      .filter((cell) => cell.offsetWidth > 0);
+    const mobileDataCells = [...document.querySelector(
+      ".gpu-server-group .gpu-table-body tbody tr",
+    )?.children || []].filter((cell) => cell.offsetWidth > 0);
+    const tableColumnAlignment = Math.max(...mobileHeaderCells.map((cell, index) => Math.max(
+      Math.abs(cell.getBoundingClientRect().left - mobileDataCells[index].getBoundingClientRect().left),
+      Math.abs(cell.getBoundingClientRect().right - mobileDataCells[index].getBoundingClientRect().right),
+    )));
     document.querySelector("#settings-toggle").click();
     const rect = document.querySelector("#settings-dialog").getBoundingClientRect();
     const header = document.querySelector(".app-header").getBoundingClientRect();
@@ -2703,6 +2898,7 @@ try {
       kickerHeight: kicker.height,
       programSearchColumns,
       programSearchDocumentOverflow,
+      tableColumnAlignment,
       gpuMemoryWidth: document.querySelector("#gpu-memory-card")?.getBoundingClientRect().width,
       gridWidth: document.querySelector(".metrics-grid")?.getBoundingClientRect().width,
       settingsCenterDelta: Math.abs(
@@ -2762,6 +2958,10 @@ try {
   assert(mobile.kickerHeight < 18, `mobile kicker ${mobile.kickerHeight}px`);
   assert.equal(mobile.programSearchColumns, 1);
   assert.equal(mobile.programSearchDocumentOverflow, false);
+  assert.ok(
+    mobile.tableColumnAlignment < 1,
+    `mobile GPU table columns drifted: ${mobile.tableColumnAlignment}px`,
+  );
   assert(mobile.gpuMemoryWidth > mobile.gridWidth * 0.9);
   assert(mobile.settingsCenterDelta < 2);
   assert(mobile.topologyCenterDelta < 2);

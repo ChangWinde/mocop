@@ -582,7 +582,7 @@ class WebTests(unittest.TestCase):
         with urlopen(f"{self.base}/format.js", timeout=2) as response:
             format_script = response.read().decode("utf-8")
         self.assertIn("Mocop", body)
-        self.assertIn("AI-NATIVE GPU CLUSTER MONITOR", body)
+        self.assertIn("GPU 集群监控", body)
         self.assertIn("GPU 集群实时监控", body)
         self.assertIn('id="attention-panel"', body)
         self.assertIn('data-attention-filter="storage"', body)

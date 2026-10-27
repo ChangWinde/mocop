@@ -4,8 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
-    <meta name="description" content="Mocop：AI-native GPU cluster monitor">
-    <title>Mocop · AI-native GPU cluster monitor</title>
+    <meta name="description" content="Mocop：GPU 集群实时监控">
+    <title>Mocop · GPU 集群实时监控</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/styles.css">
   </head>
@@ -17,7 +17,7 @@
             <i></i><i></i><i></i><i></i>
           </div>
           <div>
-            <div class="product-line">Mocop <span>/</span> AI-NATIVE GPU CLUSTER MONITOR</div>
+            <div class="product-line">Mocop <span>/</span> GPU 集群监控</div>
             <h1>GPU 集群实时监控</h1>
           </div>
         </div>
@@ -98,7 +98,7 @@
           <article class="metric-card network-card">
             <div class="metric-top">
               <span class="metric-name">集群网络吞吐</span>
-              <span class="metric-side">TOTAL</span>
+              <span class="metric-side">合计</span>
             </div>
             <div class="network-values">
               <div><span>↓</span><strong id="network-rx">—</strong></div>
@@ -120,7 +120,7 @@
         <section id="attention-panel" class="attention-panel" aria-label="需要关注的服务器" hidden>
           <div class="attention-heading">
             <div>
-              <span class="section-kicker">ATTENTION</span>
+              <span class="section-kicker">需要关注</span>
               <strong id="attention-summary">需要关注</strong>
             </div>
             <div class="attention-filters" role="group" aria-label="问题类型筛选">
@@ -137,7 +137,7 @@
         <section id="incident-panel" class="incident-panel" aria-label="近期状态变化" hidden>
           <div class="incident-heading">
             <div>
-              <span class="section-kicker">RECENT EVENTS</span>
+                <span class="section-kicker">近期事件</span>
               <strong id="incident-summary">近期状态变化</strong>
             </div>
             <button id="toggle-incidents" type="button" hidden>展开全部</button>
@@ -149,7 +149,7 @@
           <aside class="fleet-panel panel">
             <div class="panel-heading">
               <div>
-                <span class="section-kicker">FLEET</span>
+                <span class="section-kicker">服务器</span>
                 <h2>服务器</h2>
               </div>
               <span id="server-count" class="count-badge">0</span>
@@ -168,7 +168,7 @@
           <section class="inventory-panel panel">
             <div class="inventory-header">
               <div>
-                <span class="section-kicker">INVENTORY</span>
+                <span class="section-kicker">资源清单</span>
                 <div class="title-row">
                   <h2 id="inventory-title">全局资源</h2>
                   <span id="visible-count" class="count-badge">0</span>
@@ -206,7 +206,7 @@
             <section id="program-search-panel" class="program-search-panel" aria-labelledby="program-search-title" hidden>
               <div class="program-search-heading">
                 <div>
-                  <span class="section-kicker">PROGRAM SEARCH</span>
+                  <span class="section-kicker">GPU 进程</span>
                   <h3 id="program-search-title">活跃程序</h3>
                 </div>
                 <div class="program-search-status">
@@ -220,7 +220,7 @@
             <section id="gpu-heatmap" class="gpu-heatmap" aria-label="GPU 调度热力图" hidden>
               <div class="heatmap-heading">
                 <div>
-                  <span class="section-kicker">SCHEDULING MAP</span>
+                  <span class="section-kicker">调度热力图</span>
                   <h3>GPU 调度热力图</h3>
                 </div>
                 <div class="heatmap-modes" role="group" aria-label="热力图指标">
@@ -238,7 +238,7 @@
             <section id="trend-panel" class="trend-panel" aria-label="服务器短期趋势" hidden>
               <div class="trend-heading">
                 <div>
-                  <span class="section-kicker">RECENT HISTORY</span>
+                  <span class="section-kicker">近期趋势</span>
                   <h3>实时趋势</h3>
                 </div>
                 <span id="trend-range">等待样本</span>
@@ -273,8 +273,9 @@
               <div id="gpu-groups" class="gpu-groups"></div>
               <div id="empty-state" class="empty-state" hidden>
                 <div class="empty-glyph" aria-hidden="true"><i></i></div>
-                <strong>没有匹配的 GPU</strong>
+                <strong>没有可显示的 GPU</strong>
                 <span>调整服务器、状态筛选或搜索条件</span>
+                <button id="clear-inventory-filters" class="secondary-action" type="button" hidden>清除筛选</button>
               </div>
             </div>
           </section>
@@ -282,14 +283,14 @@
       </main>
 
       <footer class="app-footer">
-        <span>Mocop · AI-native GPU cluster monitor · OpenSSH 无代理采集</span>
+        <span>Mocop · GPU 集群监控 · OpenSSH 采集</span>
         <span id="poll-info">等待采集</span>
       </footer>
     </div>
     <dialog id="authentication-dialog" class="authentication-dialog" aria-labelledby="authentication-title" aria-describedby="authentication-description">
       <div class="authentication-mark" aria-hidden="true">M</div>
       <div class="authentication-heading">
-        <span class="section-kicker">SECURE ACCESS</span>
+        <span class="section-kicker">安全访问</span>
         <h2 id="authentication-title">连接 Mocop</h2>
       </div>
       <p id="authentication-description">输入此 Mocop 实例的访问令牌。令牌来自受保护的安装配置，仅用于此页面向 Mocop API 认证。</p>
@@ -305,7 +306,7 @@
     <dialog id="settings-dialog" class="side-dialog settings-dialog" aria-labelledby="settings-title">
       <div class="dialog-heading">
         <div>
-          <span class="section-kicker">SETTINGS</span>
+          <span class="section-kicker">设置</span>
           <h2 id="settings-title">监控与外观</h2>
         </div>
         <button class="dialog-close" data-close-dialog="settings-dialog" type="button" aria-label="关闭设置">×</button>
@@ -515,7 +516,7 @@
     <dialog id="restart-confirm-dialog" class="confirm-dialog" aria-labelledby="restart-confirm-title" aria-describedby="restart-confirm-description">
       <div class="confirm-dialog-mark" aria-hidden="true">↻</div>
       <div>
-        <span class="section-kicker">SERVICE RESTART</span>
+        <span class="section-kicker">服务重启</span>
         <h2 id="restart-confirm-title">确认重启监控服务？</h2>
       </div>
       <p id="restart-confirm-description">采集和网页连接会中断数秒。服务恢复后页面将自动刷新，现有配置、浏览器偏好和历史数据保持不变。</p>
@@ -528,7 +529,7 @@
     <dialog id="topology-dialog" class="side-dialog topology-dialog" aria-labelledby="topology-title">
       <div class="dialog-heading">
         <div>
-          <span class="section-kicker">CONNECTION MAP</span>
+          <span class="section-kicker">连接拓扑</span>
           <h2 id="topology-title">集群连接拓扑</h2>
         </div>
         <button class="dialog-close" data-close-dialog="topology-dialog" type="button" aria-label="关闭连接拓扑">×</button>
@@ -555,7 +556,7 @@
     <dialog id="capacity-dialog" class="side-dialog capacity-dialog" aria-labelledby="capacity-title">
       <div class="dialog-heading">
         <div>
-          <span class="section-kicker">CAPACITY MATCHER</span>
+          <span class="section-kicker">算力匹配</span>
           <h2 id="capacity-title">匹配可用 GPU</h2>
         </div>
         <button class="dialog-close" data-close-dialog="capacity-dialog" type="button" aria-label="关闭算力匹配">×</button>
@@ -582,7 +583,7 @@
       </div>
       <div class="capacity-rule"><i></i><span id="capacity-rule">空闲判定将在获得数据后显示</span></div>
       <div class="capacity-heading">
-        <div><span class="section-kicker">LIVE CANDIDATES</span><h3 id="capacity-summary">等待 GPU 快照</h3></div>
+        <div><span class="section-kicker">可用节点</span><h3 id="capacity-summary">等待 GPU 快照</h3></div>
         <span id="capacity-updated">实时更新</span>
       </div>
       <div id="capacity-results" class="capacity-results"></div>
@@ -592,19 +593,19 @@
     <dialog id="owners-dialog" class="side-dialog capacity-dialog owners-dialog" aria-labelledby="owners-title">
       <div class="dialog-heading">
         <div>
-          <span class="section-kicker">WORKLOAD OWNERS</span>
+          <span class="section-kicker">任务归属</span>
           <h2 id="owners-title">谁在使用集群</h2>
         </div>
         <button class="dialog-close" data-close-dialog="owners-dialog" type="button" aria-label="关闭使用者视图">×</button>
       </div>
       <p class="dialog-intro">按进程归属聚合当前快照中的 GPU 显存占用。归属来自可选的 Slurm / Kubernetes / 进程属主采集，计算完全在浏览器内进行，不会触发额外请求。</p>
       <div class="capacity-heading">
-        <div><span class="section-kicker">CURRENT OWNERS</span><h3 id="owners-summary">等待 GPU 快照</h3></div>
+        <div><span class="section-kicker">当前使用者</span><h3 id="owners-summary">等待 GPU 快照</h3></div>
         <span id="owners-updated">实时更新</span>
       </div>
       <div id="owners-results" class="capacity-results"></div>
       <div class="capacity-heading owners-usage-heading">
-        <div><span class="section-kicker">USAGE WINDOW</span><h3 id="owners-usage-summary">等待占用账单</h3></div>
+        <div><span class="section-kicker">占用时间</span><h3 id="owners-usage-summary">等待占用账单</h3></div>
         <label class="owners-usage-window">窗口
           <select id="owners-usage-hours">
             <option value="24" selected>24 小时</option>
@@ -620,7 +621,7 @@
     <dialog id="gpu-detail-dialog" class="side-dialog gpu-detail-dialog" aria-labelledby="gpu-detail-title">
       <div class="dialog-heading">
         <div>
-          <span id="gpu-detail-host" class="section-kicker">GPU DETAIL</span>
+          <span id="gpu-detail-host" class="section-kicker">GPU 详情</span>
           <h2 id="gpu-detail-title">GPU 详情</h2>
         </div>
         <button id="gpu-detail-ssh" class="inline-action gpu-detail-ssh" type="button">复制 SSH</button>
@@ -635,7 +636,7 @@
           <section class="gpu-task-workspace" aria-labelledby="gpu-task-title">
             <div class="gpu-task-heading">
               <div>
-                <span class="section-kicker">GPU PROCESSES</span>
+                <span class="section-kicker">GPU 进程</span>
                 <h3 id="gpu-task-title">活跃计算进程</h3>
               </div>
               <div id="gpu-task-heading-tools" class="gpu-task-heading-tools">
@@ -665,7 +666,7 @@
           <section class="gpu-history-section" aria-label="GPU 近期历史">
             <div class="gpu-task-heading">
               <div>
-                <span class="section-kicker">GPU HISTORY</span>
+                <span class="section-kicker">近期历史</span>
                 <h3>单卡实时趋势</h3>
               </div>
               <span id="gpu-history-range" class="count-badge">等待样本</span>
@@ -681,7 +682,7 @@
     <dialog id="incident-detail-dialog" class="side-dialog incident-detail-dialog" aria-labelledby="incident-detail-title">
       <div class="dialog-heading">
         <div>
-          <span id="incident-detail-host" class="section-kicker">INCIDENT DIAGNOSIS</span>
+          <span id="incident-detail-host" class="section-kicker">问题诊断</span>
           <h2 id="incident-detail-title">问题诊断</h2>
         </div>
         <button class="dialog-close" data-close-dialog="incident-detail-dialog" type="button" aria-label="关闭问题诊断">×</button>
@@ -699,7 +700,7 @@
         </section>
         <section class="incident-actions">
           <div>
-            <span class="section-kicker">OPERATOR ACTION</span>
+            <span class="section-kicker">处理方式</span>
             <h3>处理状态</h3>
           </div>
           <p>确认后仍保留事件和恢复通知；静默期间不计入待处理问题，也不发送新的 Webhook 告警。</p>
@@ -723,6 +724,7 @@
     <script src="/keyed-loader.js" defer></script>
     <script src="/csv-export.js" defer></script>
     <script src="/process-search.js" defer></script>
+    <script src="/process-inventory.js" defer></script>
     <script src="/gpu-tasks.js" defer></script>
     <script src="/capacity-match.js" defer></script>
     <script src="/capacity-watch.js" defer></script>

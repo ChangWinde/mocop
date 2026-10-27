@@ -169,7 +169,11 @@ const {
   processName: (process) => gpuTasks.processName(process),
   numeric,
 });
-
+const processInventory = globalThis.MocopProcessInventory.create({
+  maxResults: MAX_PROGRAM_SEARCH_RESULTS,
+  numeric,
+});
+const { listProcessRecords, panelCopy } = processInventory;
 const capacityMatch = globalThis.MocopCapacityMatch.create();
 // The localizer is a hoisted function declaration, so the leaf can take it
 // before its definition site.
@@ -449,8 +453,8 @@ const elements = {
   exportCsv: $("#export-csv"),
   probeNow: $("#probe-now"),
   groupToggle: $("#toggle-groups"),
-  gpuGroups: $("#gpu-groups"),
-  emptyState: $("#empty-state"),
+  gpuGroups: $("#gpu-groups"), gpuTableHead: document.querySelector(".gpu-table-head"),
+  emptyState: $("#empty-state"), clearInventoryFilters: $("#clear-inventory-filters"),
   programSearchPanel: $("#program-search-panel"),
   programSearchScope: $("#program-search-scope"),
   programSearchCount: $("#program-search-count"),
@@ -3848,6 +3852,7 @@ function gpuState(gpu, server) {
   const threshold = limits();
   if (temperature >= threshold.gpu_temperature_warning_c) return ["高温", "hot"];
   if (utilization >= threshold.gpu_busy_pct) return ["运行中", "busy"];
+  if (gpuProcessSummary(gpu).count) return ["有进程", "process"];
   return ["空闲", "idle"];
 }
 
@@ -3886,6 +3891,7 @@ function gpuProcessSummarySignature(gpu) {
     ownedCount: summary.ownedCount,
     topPid: summary.topProcess?.pid,
     topName: summary.topProcess?.name,
+    topDisplayName: summary.topProcess ? gpuTasks.displayName(summary.topProcess) : null,
     topMemory: summary.topMemoryMiB,
   };
 }
@@ -3947,8 +3953,8 @@ function updateProgramSearchRow(row, record) {
   row.location.textContent = `${displayHost(server)} · GPU ${gpu.index} · PID ${process.pid}`;
   const freshness = gpu.processes_observed_at
     ? `任务数据 ${age(gpu.processes_observed_at)}` : "等待任务数据";
-  row.context.textContent = `${server.stale ? "历史样本" : "当前样本"} · ${freshness}`;
-  row.context.classList.toggle("stale", server.stale);
+  row.context.textContent = `${processInventory.sampleLabel(server, gpu)} · ${freshness}`;
+  row.context.classList.toggle("stale", processInventory.sampleIsStale(server, gpu));
 
   const workload = process.workload;
   if (workload && Object.hasOwn(WORKLOAD_KIND_LABELS, workload.kind)) {
@@ -3991,8 +3997,10 @@ function renderProgramSearch() {
   elements.search.placeholder = view.selectedHost === "all"
     ? "搜索服务器、GPU 或程序"
     : `在 ${displayHost(view.selectedHost)} 搜索 GPU 或程序`;
-  elements.programSearchPanel.hidden = !terms.length;
-  if (!terms.length) {
+  const serverProcessMode = view.selectedHost !== "all" && !terms.length;
+  elements.programSearchPanel.hidden = !terms.length && !serverProcessMode;
+  elements.programSearchPanel.classList.toggle("server-process-mode", serverProcessMode);
+  if (!terms.length && !serverProcessMode) {
     view.programSearchRowCache.clear();
     elements.programSearchResults.replaceChildren();
     elements.programSearchCount.textContent = "0";
@@ -4001,20 +4009,12 @@ function renderProgramSearch() {
     return;
   }
 
-  const result = searchProcessRecords(view.snapshot, view.query, view.selectedHost);
+  const result = serverProcessMode
+    ? listProcessRecords(view.snapshot, view.selectedHost)
+    : searchProcessRecords(view.snapshot, view.query, view.selectedHost);
   elements.programSearchCount.textContent = String(result.total);
-  const notes = [];
-  if (!result.total) notes.push(`${scope}没有匹配的活跃程序`);
-  else if (result.total > result.matches.length) {
-    notes.push(`找到 ${result.total} 条，显示相关度最高的 ${result.matches.length} 条`);
-  } else {
-    notes.push(`找到 ${result.total} 条 GPU 进程记录`);
-  }
-  if (result.staleCount) notes.push(`含 ${result.staleCount} 条历史样本`);
-  if (result.unavailableGpuCount) {
-    notes.push(`${result.unavailableGpuCount} 张 GPU 的任务数据不可用`);
-  }
-  const summary = notes.join(" · ");
+  const copy = panelCopy(scope, serverProcessMode, result);
+  const summary = copy.summary;
   if (elements.programSearchSummary.textContent !== summary) {
     elements.programSearchSummary.textContent = summary;
   }
@@ -4023,7 +4023,7 @@ function renderProgramSearch() {
     view.programSearchRowCache.clear();
     elements.programSearchResults.setAttribute("role", "status");
     elements.programSearchResults.replaceChildren(
-      create("div", "program-search-empty", "换一个名称、PID、用户或 workload 关键词重试"),
+      create("div", "program-search-empty", copy.empty),
     );
     return;
   }
@@ -4445,7 +4445,7 @@ function renderGpuDetail() {
   elements.gpuDetailSsh.title = `复制 ssh ${server.host}`;
   elements.gpuDetailState.textContent = [
     state,
-    server.stale ? "历史样本" : "实时样本",
+    processInventory.detailSampleLabel(server, gpu),
     gpu.uuid || "No UUID",
     `Driver ${gpu.driver_version || "—"}`,
   ].join(" · ");
@@ -4724,7 +4724,7 @@ function filteredRecords() {
     const temperature = numeric(gpu.temperature_c);
     const threshold = limits();
     if (view.filter === "busy" && utilization < threshold.gpu_busy_pct) return false;
-    if (view.filter === "idle" && utilization >= threshold.gpu_busy_pct) return false;
+    if (view.filter === "idle" && (utilization >= threshold.gpu_busy_pct || gpuProcessSummary(gpu).count)) return false;
     if (view.filter === "hot" && temperature < threshold.gpu_temperature_warning_c) return false;
     if (view.filter === "processes" && !gpuProcessSummary(gpu).count) return false;
     return gpuRecordMatchesSearch(server, gpu, terms);
@@ -4957,6 +4957,8 @@ function renderTable() {
   elements.visibleCount.textContent = records.length;
   elements.exportCsv.disabled = records.length === 0;
   elements.gpuGroups.classList.toggle("single", Boolean(selected));
+  elements.gpuTableHead.classList.toggle("fleet", !selected);
+  elements.clearInventoryFilters.hidden = records.length !== 0 || (view.filter === "all" && !view.query.trim() && view.serverFilter === "all");
   if (selected) {
     const ordered = sortedRecords(records);
     const signature = tableSignature(selected, ordered);
@@ -5264,6 +5266,10 @@ document.querySelectorAll(".filter").forEach((button) => {
     view.filter = button.dataset.filter;
     render();
   });
+});
+
+elements.clearInventoryFilters.addEventListener("click", () => {
+  view.filter = "all"; view.query = ""; view.serverFilter = "all"; elements.search.value = ""; syncPreferenceControls(); savePreferences(); render();
 });
 
 document.querySelectorAll(".fleet-filter").forEach((button) => {

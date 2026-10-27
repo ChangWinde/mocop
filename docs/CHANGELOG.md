@@ -4,6 +4,16 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Fixed
+
+- The selected-server view now keeps its process inventory above the GPU list,
+  labels low-utilization GPUs that still have active processes, reports when a
+  process sample is unavailable, refreshes process labels when workload
+  identity changes, and aligns fleet and selected-server GPU table headers
+  with their data columns. Cached process samples now say that they are
+  reused, empty GPU filters offer a one-click reset, and dashboard section
+  labels describe their content in Chinese.
+
 ## [0.13.0] - 2026-09-20
 
 ### Added

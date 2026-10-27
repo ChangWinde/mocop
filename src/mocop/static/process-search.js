@@ -157,7 +157,10 @@
       snapshot.servers.forEach((server) => {
         if (host !== "all" && server.host !== host) return;
         server.gpus.forEach((gpu) => {
-          if (gpu.processes_available === false) unavailableGpuCount += 1;
+          if (gpu.processes_available === false) {
+            unavailableGpuCount += 1;
+            return;
+          }
           const processes = Array.isArray(gpu.processes) ? gpu.processes : [];
           processes.forEach((process) => {
             if (!processMatchesSearch(process, terms, server, gpu)) return;
