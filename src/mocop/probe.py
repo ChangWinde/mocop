@@ -4,14 +4,10 @@ import csv
 import io
 import math
 import os
-import selectors
-import signal
 import subprocess
 import threading
 import time
-import weakref
 from collections import Counter
-from contextlib import suppress
 from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 
@@ -26,6 +22,15 @@ from .models import (
     ProbeResult,
     SystemMetrics,
     utc_now,
+)
+from .probe_process import (
+    _ActiveProcessRegistry,
+    _ProcessCancelled,
+    _ProcessOutputLimitExceeded,
+    _run_bounded_process,
+)
+from .probe_process import (
+    _BoundedProcessResult as _BoundedProcessResult,
 )
 from .remote_script import (
     _COMBINED_QUERY_FIELDS,
@@ -43,7 +48,6 @@ from .ssh_failures import (
 from .workloads import parse_workload_records
 
 _UNAVAILABLE = {"", "n/a", "[n/a]", "not supported", "[not supported]"}
-_PROCESS_READ_CHUNK_BYTES = 65_536
 _MAX_GPUS_PER_HOST = 256
 _MAX_DISKS_PER_HOST = 1_024
 # Single-file mounts injected by Docker, containerd and Kubernetes.
@@ -78,224 +82,11 @@ class AttendedAwareResourceProbe(Protocol):
     def set_attended(self, attended: bool) -> None: ...
 
 
-@dataclass(frozen=True, slots=True)
-class _BoundedProcessResult:
-    returncode: int
-    stdout: str
-    stderr: str
-
-
-class _ProcessOutputLimitExceeded(RuntimeError):
-    pass
-
-
-class _ProcessCancelled(RuntimeError):
-    pass
-
-
-class _ActiveProcessRegistry:
-    """Own active collectors so shutdown can interrupt them without polling."""
-
-    def __init__(self) -> None:
-        self.cancelled = threading.Event()
-        self._lock = threading.Lock()
-        self._processes: set[subprocess.Popen[bytes]] = set()
-        # Raw descriptors: the registry lives for the whole probe lifetime and
-        # selectors accept integer descriptors directly. A finalizer reclaims
-        # both ends so recreating probes never leaks the wake-up pipe.
-        self.cancel_wakeup, self._cancel_write_fd = os.pipe()
-        os.set_blocking(self._cancel_write_fd, False)
-        self._finalizer = weakref.finalize(
-            self,
-            _ActiveProcessRegistry._close_fds,
-            self.cancel_wakeup,
-            self._cancel_write_fd,
-        )
-
-    @staticmethod
-    def _close_fds(read_fd: int, write_fd: int) -> None:
-        for fd in (read_fd, write_fd):
-            with suppress(OSError):
-                os.close(fd)
-
-    def close(self) -> None:
-        """Idempotently reclaim the wake-up pipe once the probe is done."""
-        self._finalizer()
-
-    def register(self, process: subprocess.Popen[bytes]) -> bool:
-        with self._lock:
-            if self.cancelled.is_set():
-                return False
-            self._processes.add(process)
-            return True
-
-    def unregister(self, process: subprocess.Popen[bytes]) -> None:
-        with self._lock:
-            self._processes.discard(process)
-
-    def cancel(self) -> None:
-        self.cancelled.set()
-        # Level-triggered wake-up: the byte is intentionally never consumed,
-        # so every selector that registered the read end stays readable.
-        with suppress(OSError):
-            os.write(self._cancel_write_fd, b"x")
-        with self._lock:
-            processes = tuple(self._processes)
-        for process in processes:
-            _kill_process_group(process)
-
-
-def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    except OSError:
-        with suppress(OSError):
-            process.kill()
-
-
 def ssh_environment() -> dict[str, str]:
     """The inherited environment with OpenSSH output pinned to the C locale."""
     environment = os.environ.copy()
     environment["LC_ALL"] = "C"
     return environment
-
-
-def _run_bounded_process(
-    command: list[str],
-    *,
-    input_text: str,
-    timeout_seconds: float,
-    max_output_bytes: int,
-    environment: dict[str, str],
-    cancel_event: threading.Event | None = None,
-    process_registry: _ActiveProcessRegistry | None = None,
-) -> _BoundedProcessResult:
-    """Run one SSH process while bounding combined stdout/stderr in memory."""
-    if cancel_event is not None and cancel_event.is_set():
-        raise _ProcessCancelled
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=environment,
-        start_new_session=True,
-    )
-    stdin = process.stdin
-    stdout = process.stdout
-    stderr = process.stderr
-    registered = process_registry.register(process) if process_registry else False
-
-    try:
-        if process_registry is not None and not registered:
-            raise _ProcessCancelled
-        if stdin is None or stdout is None or stderr is None:
-            raise RuntimeError("SSH process pipes were not created")
-        try:
-            stdin.write(input_text.encode("utf-8"))
-        except BrokenPipeError:
-            pass
-        finally:
-            # A process that exits before draining stdin makes both the write
-            # above and the implicit flush on close raise EPIPE; swallow it so
-            # the real exit status still drives classification and mux retries.
-            with suppress(BrokenPipeError):
-                stdin.close()
-
-        output = {"stdout": bytearray(), "stderr": bytearray()}
-        total_bytes = 0
-        deadline = time.monotonic() + timeout_seconds
-        selector = selectors.DefaultSelector()
-        selector.register(stdout, selectors.EVENT_READ, "stdout")
-        selector.register(stderr, selectors.EVENT_READ, "stderr")
-        stream_keys = 2
-        if process_registry is not None:
-            # A cancellation wake-up descriptor lets the wait span the full
-            # deadline; without one, a bounded poll observes the bare event.
-            selector.register(
-                process_registry.cancel_wakeup, selectors.EVENT_READ, "cancel"
-            )
-        try:
-            while stream_keys:
-                if cancel_event is not None and cancel_event.is_set():
-                    raise _ProcessCancelled
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(
-                        command,
-                        timeout_seconds,
-                        output=bytes(output["stdout"]),
-                        stderr=bytes(output["stderr"]),
-                    )
-                wait_seconds = (
-                    remaining if process_registry is not None else min(remaining, 0.25)
-                )
-                events = selector.select(wait_seconds)
-                for key, _mask in events:
-                    if key.data == "cancel":
-                        # The wake-up byte stays unread so concurrent probes
-                        # sharing the registry observe the same level trigger.
-                        raise _ProcessCancelled
-                    chunk = os.read(key.fileobj.fileno(), _PROCESS_READ_CHUNK_BYTES)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        key.fileobj.close()
-                        stream_keys -= 1
-                        continue
-                    total_bytes += len(chunk)
-                    if total_bytes > max_output_bytes:
-                        raise _ProcessOutputLimitExceeded
-                    output[key.data].extend(chunk)
-        except (
-            subprocess.TimeoutExpired,
-            _ProcessOutputLimitExceeded,
-            _ProcessCancelled,
-        ):
-            _kill_process_group(process)
-            raise
-        finally:
-            selector.close()
-
-        if cancel_event is not None and cancel_event.is_set():
-            raise _ProcessCancelled
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            returncode = process.poll()
-            if returncode is None:
-                raise subprocess.TimeoutExpired(
-                    command,
-                    timeout_seconds,
-                    output=bytes(output["stdout"]),
-                    stderr=bytes(output["stderr"]),
-                )
-        else:
-            try:
-                returncode = process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                raise subprocess.TimeoutExpired(
-                    command,
-                    timeout_seconds,
-                    output=bytes(output["stdout"]),
-                    stderr=bytes(output["stderr"]),
-                ) from None
-        return _BoundedProcessResult(
-            returncode=returncode,
-            stdout=output["stdout"].decode("utf-8", errors="replace"),
-            stderr=output["stderr"].decode("utf-8", errors="replace"),
-        )
-    finally:
-        if process_registry is not None and registered:
-            process_registry.unregister(process)
-        if process.poll() is None:
-            _kill_process_group(process)
-        with suppress(OSError, subprocess.TimeoutExpired):
-            process.wait(timeout=1)
-        for stream in (stdin, stdout, stderr):
-            if stream is not None:
-                with suppress(OSError):
-                    stream.close()
 
 
 def _finite_number(normalized: str) -> float | None:

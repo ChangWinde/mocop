@@ -65,7 +65,8 @@ interfaces without a runtime plugin registry.
 | `capacity.py` | server-side twin of the browser capacity matcher behind `GET /api/capacity` |
 | `brief.py` | the situation brief behind `GET /api/brief` and `mocop brief`: fleet status, actionable conditions with shared filesystems collapsed, changes and recurring conditions over a window, idle capacity, per-owner usage with idle share, composed from the projections the dashboard already shows, plus its text rendering |
 | `ssh_failures.py` | sanitized classification of OpenSSH client failures into the published `servers[].message` vocabulary, and the stale-multiplex retry decision |
-| `probe.py` | bounded process execution, fixed remote probe, protocol parsing |
+| `probe.py` | fixed remote probe, protocol parsing, metric baselines |
+| `probe_process.py` | collector process ownership and cancellation, with script delivery and output collection sharing one deadline and selector |
 | `remote_script.py` | the fixed `MONITOR_V8` collection script: protocol constants, template, rendering |
 | `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |
 | `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
