@@ -109,6 +109,8 @@ GPU_RETENTION_STATEMENT = (
     "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), cutoff TEXT NOT NULL)"
 )
 COMPANION_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS incident_events_condition "
+    "ON incident_events(host, condition_key)",
     "CREATE TABLE IF NOT EXISTS incident_criteria ("
     "event_id INTEGER PRIMARY KEY, critical_at REAL)",
     GPU_RETENTION_STATEMENT,

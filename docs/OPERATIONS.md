@@ -126,7 +126,11 @@ against the only copy of production state.
 Persistence restores an open incident's generation, `firstObservedAt`, severity,
 and numeric `critical_at` threshold. The threshold is the critical line crossed
 by the reading, not a timestamp. Criterion changes without severity transitions
-also reach persistence; unchanged criteria are coalesced in SQLite.
+also reach persistence. The writer remembers each open condition's committed
+criterion and skips unchanged updates in memory. Changed criteria commit once;
+failed batches leave the cache unchanged so the next sample can retry.
+Startup adds an index on incident host and condition to existing databases;
+restored conditions use that index to load their cached criterion on first use.
 Retention keeps each condition's latest transition by `event_id` sequence,
 including resolutions, and the opening of every still-open generation.
 A resolution marker survives even when its timestamp predates an escalation,

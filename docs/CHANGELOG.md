@@ -6,6 +6,10 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Unchanged incident criteria now skip SQLite work in the writer's committed
+  cache. Startup adds a host/condition index to existing databases so restored
+  and changed criteria avoid scanning retained transitions at fleet scale.
+
 - Critical incident criteria now persist when the threshold changes without a
   severity transition. Legacy startup records the GPU expiry cutoff atomically
   with raw expiry, preventing re-admission after a clock rollback. Retention

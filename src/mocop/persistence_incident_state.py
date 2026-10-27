@@ -39,6 +39,8 @@ def write_criteria(
     criteria: tuple[tuple[str, float | None], ...],
 ) -> int:
     """Coalesce unchanged criteria without inventing public transitions."""
+    if not criteria:
+        return 0
     cursor = connection.executemany(
         """
         INSERT INTO incident_criteria (event_id, critical_at)

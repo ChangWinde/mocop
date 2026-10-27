@@ -19,8 +19,12 @@ projection after each tracker update, under the existing StateStore lock.
 Forward transitions and current criteria as one immutable queue item and commit
 them together. Read the tracker's confirmed conditions rather than deriving a
 new condition from telemetry; pending severity changes retain their confirmed
-criterion. Coalesce unchanged criteria in SQLite and retry failed updates on
-the next sample. Neither detection rules nor HTTP or notification events change.
+criterion. Keep the last committed criterion per open condition in the writer;
+skip unchanged updates in memory and publish cache changes only after the batch
+commits. Resolutions remove their cache entries. Failed batches leave the prior
+cache intact, so the next sample retries the update. Hydrate restored criteria
+on first use through a host/condition index installed by companion migration.
+Neither detection rules nor HTTP or notification events change.
 
 Use `event_id` as the transition sequence. Retain every condition's latest
 transition, resolved included, and the opening of an open generation. Restore
@@ -35,6 +39,8 @@ initializes the watermark and expires raw rows atomically before writes resume.
 
 - Inferring a critical criterion from a percentage loses absolute headroom.
 - Emitting synthetic public transitions changes the incident and webhook API.
+- Coalescing only inside SQLite still searches retained history on every sample.
+- Updating the cache before commit can suppress a retry after a failed write.
 - Using timestamps for transition order can resurrect incidents after a clock rollback.
 - Deleting raw GPU rows before persisting the cutoff loses the evidence needed
   to reject a replay after migration and a clock rollback.

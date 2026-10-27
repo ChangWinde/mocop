@@ -85,6 +85,8 @@ interfaces without a runtime plugin registry.
 | `correlation.py` | possible shared-path grouping without changing incident truth |
 | `diagnostics.py` | deterministic incident guidance and redacted support bundles |
 | `persistence.py` | optional bounded asynchronous SQLite history: the writer thread, hourly GPU rollups kept beside the raw samples, retention, and the size cap |
+| `persistence_batches.py` | batch transactions, loss accounting, and publication of the committed criterion cache |
+| `persistence_criteria.py` | writer-owned cache of open incident criteria; skips unchanged updates and hydrates restored conditions through the host/condition index |
 | `persistence_api.py` | the persistence contract the store programs against, and the in-memory answer when history is off |
 | `persistence_rollups.py` | the hourly GPU rollup table: creation after the size cap, backfill, upserts, retention, and the reads behind the reports |
 | `persistence_transitions.py` | persisted process transitions: hidden rows, the first-observation sidecar, and emission order |

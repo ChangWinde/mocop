@@ -17,7 +17,9 @@ from .persistence_api import (
     PersistenceError,
     TelemetryPersistence,
 )
-from .persistence_gpu import filter_gpu_points, gpu_cutoff, prune_gpu
+from .persistence_batches import commit_batch
+from .persistence_criteria import CriteriaCache
+from .persistence_gpu import gpu_cutoff, prune_gpu
 from .persistence_incidents import prune_incidents
 from .persistence_restore import LoadedTelemetry, restore_telemetry
 from .persistence_retention import bootstrap_gpu_retention
@@ -106,6 +108,7 @@ class SqliteTelemetryPersistence:
         self._stop_requested = threading.Event()
         self._dropped_writes = 0
         self._written_records = 0
+        self._incident_criteria: CriteriaCache = {}
         self._last_error: str | None = None
         self._prepare_database()
         self._writer = threading.Thread(
@@ -515,72 +518,7 @@ class SqliteTelemetryPersistence:
             if connection is not None:
                 connection.close()
 
-    def _commit_batch(
-        self, connection: sqlite3.Connection, writes: tuple[_Write, ...]
-    ) -> bool:
-        pruned = False
-        while True:
-            try:
-                written_records = 0
-                dropped_writes = 0
-                with connection:
-                    if not self._companions_enabled and any(
-                        isinstance(
-                            item,
-                            _GpuTelemetryWrite | _IncidentWrite | _IncidentStateWrite,
-                        )
-                        for item in writes
-                    ):
-                        raise sqlite3.OperationalError(
-                            "history metadata waits for space"
-                        )
-                    if not self._rollups_enabled and any(
-                        isinstance(item, _GpuTelemetryWrite) and item.points
-                        for item in writes
-                    ):
-                        raise sqlite3.OperationalError("hourly rollups are unavailable")
-                    cutoff = None
-                    if any(
-                        isinstance(item, _GpuTelemetryWrite) and item.points
-                        for item in writes
-                    ):
-                        now = datetime.now(timezone.utc) - timedelta(
-                            hours=self._config.retention_hours
-                        )
-                        cutoff = gpu_cutoff(
-                            connection,
-                            now.isoformat(timespec="seconds").replace("+00:00", "Z"),
-                        )
-                    for item in writes:
-                        if isinstance(item, _GpuTelemetryWrite) and cutoff is not None:
-                            retained = filter_gpu_points(item.points, cutoff)
-                            dropped_writes += retained != item.points
-                            item = _GpuTelemetryWrite(
-                                item.host, retained, item.process_events
-                            )
-                        written_records += self._write(
-                            connection,
-                            item,
-                            self._busy_pct if self._rollups_enabled else None,
-                        )
-            except sqlite3.Error as exc:
-                if not pruned and _is_size_error(exc):
-                    # Expired records may free enough space; retry this batch
-                    # once after pruning instead of dropping it outright.
-                    pruned = True
-                    if self._prune_batch(connection):
-                        continue
-                with self._status_lock:
-                    self._dropped_writes += len(writes)
-                    self._last_error = "history database write failed"
-                return False
-            with self._status_lock:
-                self._written_records += written_records
-                self._dropped_writes += dropped_writes
-                self._last_error = (
-                    "history write outside retention window" if dropped_writes else None
-                )
-            return True
+    _commit_batch = commit_batch
 
     def _prune_batch(self, connection: sqlite3.Connection) -> bool:
         """Prune in a dedicated transaction so failures stay contained."""
