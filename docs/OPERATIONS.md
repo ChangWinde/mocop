@@ -121,6 +121,53 @@ tables/triggers created by short-lived development builds. A future binary may r
 the schema version and an older binary may then reject it. Never test any downgrade
 against the only copy of production state.
 
+## History continuity and durability
+
+Persistence restores an open incident's generation, `firstObservedAt`, severity,
+and numeric `critical_at` threshold. The threshold is the critical line crossed
+by the reading, not a timestamp. Retention keeps that generation's opening and
+latest transitions until it resolves. Recovery and pending severity counters reset
+at restart, as [ADR-0027](adr/0027-restored-incident-generations.md) specifies.
+
+Legacy transitions without `critical_at` use their condition's numeric policy
+line when restored: 95 for CPU, memory, disk and GPU memory; 90 for swap;
+`min(100, threshold * 2)` for pressure; and `threshold + 5` for GPU temperature.
+Noncritical and categorical conditions use `None`. Legacy disk transitions lack
+absolute headroom evidence, so their fallback is the percentage line, 95.
+New disk transitions preserve zero when insufficient free space caused escalation.
+Live readings use the configured recovery margin against the restored line.
+
+A repeated GPU timestamp replaces the retained raw row and its hourly contribution
+in one transaction. Busy counts retain the threshold used when that contribution
+was written. Expired samples cannot reenter the rollups: the database remembers
+the furthest raw-retention cutoff even after a restart or clock rollback.
+Rejected GPU writes increase `droppedWrites`; a queue item with several expired
+points counts as one lost write. Accepted points in that item still commit.
+Older aggregate contributions remain unchanged, including when their legacy raw
+row is replaced: their original busy threshold is unavailable. New writer
+contributions in the same hour still replace normally. Upgrade does not repair
+historical double counts. Legacy memory maxima remain a historical floor.
+
+Additive metadata tables keep the released v3 positional table layouts intact.
+Migration runs atomically under `max_bytes`. A legacy database already at the cap
+can still restore history; if metadata cannot fit, incident and GPU writes are
+rejected and counted until a later restart can create it after space is freed.
+The persistence status reports that rollups are waiting for retention space.
+GPU sample writes also fail when hourly rollups are unavailable, so replacements
+cannot change raw rows without updating their aggregate contributions.
+Retention deletes expired raw rows before archiving their memory maxima in the
+same transaction, allowing archive metadata to reuse pages at the size cap.
+
+`flush()` waits for preceding queue items and returns false for any lost write
+since the previous completed flush, including a loss completed before the call.
+A completed flush acknowledges those losses; a timeout does not. A subsequent
+flush can succeed after new writes commit. `droppedWrites` counts lost queue
+items, including each item in a failed transaction and writes admitted before a
+writer connection failure; it does not count failed batches or barrier requests.
+A writer failure drains the queue and wakes waiting flushes with failure.
+The queue and counters are in memory: an abrupt process kill can lose unflushed
+writes, so only committed rows survive restart.
+
 ## Upgrade and verification
 
 1. Install the desired package version using the same package manager and Python

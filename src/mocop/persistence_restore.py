@@ -13,21 +13,20 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 
-from .incident_types import IncidentCondition, IncidentEvent, OpenIncident
-from .persistence_schema import (
-    GPU_ROW_FILTER,
-    HISTORY_FIELDS,
-    HISTORY_ROW_FILTER,
-    INCIDENT_ROW_FILTER,
-    INCIDENT_SEVERITIES,
-    INCIDENT_STATES,
-    PROCESS_ROW_FILTER,
-    REQUIRED_HISTORY_FIELDS,
-)
+from .incident_types import IncidentEvent, OpenIncident
+from .persistence_incidents import event_from_row
+from .persistence_schema import HISTORY_FIELDS
 from .persistence_transitions import (
     _is_optional_finite_number,
     decode_process_rows,
     emission_order,
+)
+from .persistence_validation import (
+    GPU_ROW_FILTER,
+    HISTORY_ROW_FILTER,
+    INCIDENT_ROW_FILTER,
+    PROCESS_ROW_FILTER,
+    REQUIRED_HISTORY_FIELDS,
 )
 
 
@@ -120,16 +119,25 @@ def restore_telemetry(
         """,
         history_points,
     )
+    criterion = (
+        "(SELECT critical_at FROM incident_criteria c "
+        "WHERE c.event_id = incident_events.event_id)"
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'incident_criteria'"
+        ).fetchone()
+        else "NULL"
+    )
     event_rows = connection.execute(
         f"""
         SELECT event_id, host, condition_key, category, resource,
                severity, value, threshold, condition_observed_at,
-               detail, group_key, state, observed_at
+               detail, group_key, state, observed_at,
+               {criterion}
         FROM (
             SELECT * FROM incident_events
             WHERE {INCIDENT_ROW_FILTER}
             ORDER BY event_id DESC LIMIT ?
-        )
+        ) AS incident_events
         ORDER BY event_id
         """,
         (incident_points,),
@@ -143,7 +151,8 @@ def restore_telemetry(
         f"""
         SELECT event_id, host, condition_key, category, resource,
                severity, value, threshold, condition_observed_at,
-               detail, group_key, state, observed_at
+               detail, group_key, state, observed_at,
+               {criterion}
         FROM incident_events
         WHERE event_id IN (
             SELECT MAX(event_id) FROM incident_events
@@ -213,7 +222,7 @@ def restore_telemetry(
         history.setdefault(host, []).append(point)
 
     events = tuple(
-        event for row in event_rows if (event := _event_from_row(row)) is not None
+        event for row in event_rows if (event := event_from_row(row)) is not None
     )
     opened_at = {
         (host, key): observed
@@ -227,7 +236,7 @@ def restore_telemetry(
             opened_at.get((event.host, event.condition.key), event.observed_at),
         )
         for row in open_rows
-        if (event := _event_from_row(row)) is not None
+        if (event := event_from_row(row)) is not None
     )
     gpu_history: dict[tuple[str, str], list[dict[str, object]]] = {}
     for row in gpu_rows:
@@ -265,64 +274,4 @@ def restore_telemetry(
         gpu_history={key: tuple(points) for key, points in gpu_history.items()},
         process_events=restored_process_events,
         open_incidents=open_incidents,
-    )
-
-
-def _event_from_row(row: tuple[object, ...]) -> IncidentEvent | None:
-    (
-        event_id,
-        host,
-        condition_key,
-        category,
-        resource,
-        severity,
-        value,
-        threshold,
-        condition_observed_at,
-        detail,
-        group_key,
-        state,
-        observed_at,
-    ) = row
-    if (
-        not isinstance(event_id, int)
-        or event_id < 1
-        or not all(
-            isinstance(item, str) and 0 < len(item) <= 512
-            for item in (
-                host,
-                condition_key,
-                category,
-                resource,
-                condition_observed_at,
-                observed_at,
-            )
-        )
-        or severity not in INCIDENT_SEVERITIES
-        or state not in INCIDENT_STATES
-        or not _is_optional_finite_number(value)
-        or not _is_optional_finite_number(threshold)
-        or (detail is not None and (not isinstance(detail, str) or len(detail) > 4096))
-        or (
-            group_key is not None
-            and (not isinstance(group_key, str) or len(group_key) > 512)
-        )
-    ):
-        return None
-    return IncidentEvent(
-        event_id=event_id,
-        host=host,
-        condition=IncidentCondition(
-            key=condition_key,
-            category=category,
-            resource=resource,
-            severity=severity,
-            value=float(value) if value is not None else None,
-            threshold=float(threshold) if threshold is not None else None,
-            observed_at=condition_observed_at,
-            detail=detail,
-            group_key=group_key,
-        ),
-        state=state,
-        observed_at=observed_at,
     )

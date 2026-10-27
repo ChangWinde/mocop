@@ -523,13 +523,14 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         self.assertNotIn("gpu_hourly", tables)
 
     def test_roundtrips_gpu_samples_and_process_transitions_as_one_batch(self) -> None:
+        now = datetime.now(timezone.utc) - timedelta(minutes=5)
         store = SqliteTelemetryPersistence(self.config, self.path)
         self.addCleanup(store.close)
         store.record_gpu_telemetry(
             "gpu-01",
             (
                 {
-                    "observedAt": "2026-08-10T00:00:00Z",
+                    "observedAt": utc_text(now + timedelta(seconds=0)),
                     "gpuId": "GPU-1",
                     "index": 0,
                     "utilizationGpuPct": 50,
@@ -539,7 +540,7 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
                     "powerDrawW": 120,
                 },
                 {
-                    "observedAt": "2026-08-10T00:00:05Z",
+                    "observedAt": utc_text(now + timedelta(seconds=5)),
                     "gpuId": "GPU-1",
                     "index": 0,
                     "utilizationGpuPct": 55,
@@ -551,7 +552,7 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
             ),
             (
                 {
-                    "observedAt": "2026-08-10T00:00:01Z",
+                    "observedAt": utc_text(now + timedelta(seconds=1)),
                     "gpuId": "GPU-1",
                     "index": 0,
                     "event": "started",
@@ -561,7 +562,7 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
                     "workload": {"kind": "slurm", "workload_id": "7"},
                 },
                 {
-                    "observedAt": "2026-08-10T00:00:06Z",
+                    "observedAt": utc_text(now + timedelta(seconds=6)),
                     "gpuId": "GPU-1",
                     "index": 0,
                     "event": "stopped",
@@ -1284,7 +1285,7 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         status = store.status()
         self.assertFalse(status["healthy"])
         self.assertEqual(status["queuedWrites"], 0)
-        self.assertEqual(status["droppedWrites"], _QUEUE_CAPACITY + 1)
+        self.assertEqual(status["droppedWrites"], _QUEUE_CAPACITY + 2)
         self.assertEqual(status["lastError"], cause)
 
     def test_prune_failure_is_reported_and_contained(self) -> None:

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import queue
 import sqlite3
@@ -19,23 +17,27 @@ from .persistence_api import (
     PersistenceError,
     TelemetryPersistence,
 )
+from .persistence_gpu import filter_gpu_points, gpu_cutoff, prune_gpu
+from .persistence_incidents import prune_incidents
 from .persistence_restore import LoadedTelemetry, restore_telemetry
 from .persistence_rollups import (
     ensure_rollups,
     load_report_inputs,
     prune_rollups,
-    upsert_rollups,
 )
 from .persistence_schema import (
+    COMPANION_STATEMENTS,
     CREATE_SCHEMA_STATEMENTS,
     GPU_TABLE_STATEMENTS,
-    HISTORY_FIELDS,
+    LEGACY_MEMORY_BASELINE,
     SCHEMA_VERSION,
 )
-from .persistence_transitions import (
-    FIRST_SEEN_KEY,
-    INTERNAL_USAGE_HOST,
-    INTERNAL_USAGE_KEY,
+from .persistence_writes import (
+    _GpuTelemetryWrite,
+    _HistoryWrite,
+    _IncidentWrite,
+    _Write,
+    _write,
 )
 from .reports import ReportInputs
 
@@ -109,32 +111,15 @@ def _is_size_error(exc: sqlite3.Error) -> bool:
     return "full" in str(exc).lower()
 
 
-@dataclass(frozen=True, slots=True)
-class _HistoryWrite:
-    host: str
-    point: dict[str, object]
-
-
-@dataclass(frozen=True, slots=True)
-class _IncidentWrite:
-    event: IncidentEvent
-
-
-@dataclass(frozen=True, slots=True)
-class _GpuTelemetryWrite:
-    host: str
-    points: tuple[dict[str, object], ...]
-    process_events: tuple[dict[str, object], ...]
-
-
 @dataclass(slots=True)
 class _Flush:
     """Write barrier: set once every write queued ahead of it was processed."""
 
     completed: threading.Event
+    dropped: int = 0
+    failed: bool = False
 
 
-_Write = _HistoryWrite | _IncidentWrite | _GpuTelemetryWrite
 _QueueItem = _Write | _Flush
 
 
@@ -154,6 +139,7 @@ class SqliteTelemetryPersistence:
         self._path = path.expanduser().absolute()
         self._busy_pct = float(busy_pct)
         self._rollups_enabled = False
+        self._companions_enabled = False
         self._queue: queue.Queue[_QueueItem] = queue.Queue(_QUEUE_CAPACITY)
         # Serializes producer admission with close.  Without this boundary a
         # producer could observe ``_closed == False``, lose the CPU to close,
@@ -161,6 +147,8 @@ class SqliteTelemetryPersistence:
         self._admission_lock = threading.Lock()
         self._status_lock = threading.Lock()
         self._closed = False
+        self._writer_failed = False
+        self._flushed_drops = 0
         self._stop_requested = threading.Event()
         self._dropped_writes = 0
         self._written_records = 0
@@ -231,21 +219,21 @@ class SqliteTelemetryPersistence:
             }
 
     def flush(self, timeout_seconds: float = 5.0) -> bool:
-        """Wait for every write queued so far; True only if all were committed.
+        """Wait for prior writes; report losses since the last completed flush.
 
-        The writer batches whatever is queued when it wakes, so a write and
-        the barrier that follows it may land in different batches; the drop
-        counter, not the barrier's own batch, says whether anything ahead of
-        the barrier was lost.
+        A completed flush acknowledges its losses even when returning False.
+        Timeouts do not acknowledge losses. Each barrier snapshots the counter
+        before later writes can fail, and retries never reset the baseline.
         """
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         barrier = _Flush(threading.Event())
+        with self._status_lock:
+            dropped_before = self._flushed_drops
         while True:
             with self._admission_lock:
                 with self._status_lock:
-                    if self._closed:
+                    if self._closed or self._writer_failed:
                         return False
-                    dropped_before = self._dropped_writes
                 try:
                     self._queue.put_nowait(barrier)
                 except queue.Full:
@@ -259,7 +247,8 @@ class SqliteTelemetryPersistence:
         if not barrier.completed.wait(max(0.0, deadline - time.monotonic())):
             return False
         with self._status_lock:
-            return self._dropped_writes == dropped_before
+            self._flushed_drops = max(self._flushed_drops, barrier.dropped)
+            return not barrier.failed and barrier.dropped == dropped_before
 
     def close(self, timeout_seconds: float = 5.0) -> None:
         with self._admission_lock:
@@ -277,7 +266,7 @@ class SqliteTelemetryPersistence:
                     self._dropped_writes += 1
                     self._last_error = "history persistence is closed"
                     return
-                if not self._writer.is_alive():
+                if self._writer_failed or not self._writer.is_alive():
                     # The writer recorded why it stopped; queueing behind it
                     # would only replace that cause with "queue is full".
                     self._dropped_writes += 1
@@ -317,6 +306,13 @@ class SqliteTelemetryPersistence:
                         self._migrate_v2(connection)
                     elif version == 3:
                         self._migrate_v3(connection)
+                    self._companions_enabled = (
+                        connection.execute(
+                            "SELECT count(*) FROM sqlite_master WHERE name IN "
+                            "('incident_criteria', 'gpu_retention', 'gpu_rollup_busy', 'gpu_retired_memory')"
+                        ).fetchone()[0]
+                        == 4
+                    )
                     self._prune(connection, reclaim_pages=0)
                 # Pages the prune (or a long downtime's worth of expiry) left on
                 # the freelist go back before the cap is compared, so a lowered
@@ -339,7 +335,12 @@ class SqliteTelemetryPersistence:
                             "history database exceeds the configured size limit"
                         )
                     self._apply_size_limit(connection)
-                rollup_error = ensure_rollups(connection, self._busy_pct)
+                self._companions_enabled = self._migrate_companions(connection)
+                rollup_error = (
+                    ensure_rollups(connection, self._busy_pct)
+                    if self._companions_enabled
+                    else "hourly rollups wait for retention to free space"
+                )
                 self._rollups_enabled = rollup_error is None
                 if rollup_error is not None:
                     self._set_error(rollup_error)
@@ -430,6 +431,30 @@ class SqliteTelemetryPersistence:
             raise
         connection.execute("COMMIT")
 
+    @staticmethod
+    def _migrate_companions(connection: sqlite3.Connection) -> bool:
+        """Add metadata atomically under the cap; retry after retention frees space."""
+        try:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                had_memory = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = 'gpu_retired_memory'"
+                ).fetchone()
+                for statement in COMPANION_STATEMENTS:
+                    connection.execute(statement)
+                if (
+                    not had_memory
+                    and connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name = 'gpu_hourly'"
+                    ).fetchone()
+                ):
+                    connection.execute(LEGACY_MEMORY_BASELINE)
+        except sqlite3.OperationalError as exc:
+            if not _is_size_error(exc):
+                raise
+            return False
+        return True
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path, timeout=5)
         try:
@@ -452,14 +477,24 @@ class SqliteTelemetryPersistence:
                 "history database size limit could not be applied"
             )
 
+    def _finish_items(self, items: list[_QueueItem], *, failed: bool = False) -> None:
+        for item in items:
+            if isinstance(item, _Flush):
+                with self._status_lock:
+                    item.dropped = self._dropped_writes
+                item.failed = failed
+                item.completed.set()
+            self._queue.task_done()
+
     def _write_loop(self) -> None:
+        connection = None
+        items: list[_QueueItem] = []
+        uncommitted = 0
+        error = "history writer could not open the database"
         try:
             connection = self._connect()
-        except sqlite3.Error:
-            self._set_error("history writer could not open the database")
-            return
-        next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
-        try:
+            error = "history writer stopped unexpectedly"
+            next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
             while True:
                 try:
                     first = self._queue.get(
@@ -468,17 +503,12 @@ class SqliteTelemetryPersistence:
                 except queue.Empty:
                     if self._stop_requested.is_set():
                         break
-                    # Retention must keep holding during idle periods too,
-                    # on the same interval: the short get timeout exists for
-                    # stop responsiveness, not as the prune cadence.
                     if time.monotonic() >= next_prune_at:
                         self._prune_batch(connection)
                         next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
                     continue
                 items = [first]
-                if isinstance(
-                    first, _HistoryWrite | _IncidentWrite | _GpuTelemetryWrite
-                ):
+                if not isinstance(first, _Flush):
                     for _ in range(_WRITE_BATCH_SIZE - 1):
                         try:
                             item = self._queue.get_nowait()
@@ -487,29 +517,36 @@ class SqliteTelemetryPersistence:
                         items.append(item)
                         if isinstance(item, _Flush):
                             break
-
-                writes = tuple(
-                    item
-                    for item in items
-                    if isinstance(
-                        item, _HistoryWrite | _IncidentWrite | _GpuTelemetryWrite
-                    )
-                )
+                writes = tuple(item for item in items if not isinstance(item, _Flush))
+                uncommitted = len(writes)
                 if writes:
                     self._commit_batch(connection, writes)
+                uncommitted = 0
                 if time.monotonic() >= next_prune_at:
                     self._prune_batch(connection)
                     next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
-
-                for item in items:
-                    if isinstance(item, _Flush):
-                        item.completed.set()
-                    self._queue.task_done()
+                self._finish_items(items)
+                items = []
         except Exception:
-            # Corrupt internal records must fail this writer, not the collector.
-            self._set_error("history writer stopped unexpectedly")
+            # Close admission before draining: a producer must never enqueue
+            # behind a writer that has decided to exit but is still alive.
+            with self._admission_lock:
+                self._writer_failed = True
+                pending = []
+                while True:
+                    try:
+                        pending.append(self._queue.get_nowait())
+                    except queue.Empty:
+                        break
+                with self._status_lock:
+                    self._dropped_writes += uncommitted + sum(
+                        not isinstance(item, _Flush) for item in pending
+                    )
+                    self._last_error = error
+                self._finish_items(items + pending, failed=True)
         finally:
-            connection.close()
+            if connection is not None:
+                connection.close()
 
     def _commit_batch(
         self, connection: sqlite3.Connection, writes: tuple[_Write, ...]
@@ -518,8 +555,39 @@ class SqliteTelemetryPersistence:
         while True:
             try:
                 written_records = 0
+                dropped_writes = 0
                 with connection:
+                    if not self._companions_enabled and any(
+                        isinstance(item, _GpuTelemetryWrite | _IncidentWrite)
+                        for item in writes
+                    ):
+                        raise sqlite3.OperationalError(
+                            "history metadata waits for space"
+                        )
+                    if not self._rollups_enabled and any(
+                        isinstance(item, _GpuTelemetryWrite) and item.points
+                        for item in writes
+                    ):
+                        raise sqlite3.OperationalError("hourly rollups are unavailable")
+                    cutoff = None
+                    if any(
+                        isinstance(item, _GpuTelemetryWrite) and item.points
+                        for item in writes
+                    ):
+                        now = datetime.now(timezone.utc) - timedelta(
+                            hours=self._config.retention_hours
+                        )
+                        cutoff = gpu_cutoff(
+                            connection,
+                            now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                        )
                     for item in writes:
+                        if isinstance(item, _GpuTelemetryWrite) and cutoff is not None:
+                            retained = filter_gpu_points(item.points, cutoff)
+                            dropped_writes += retained != item.points
+                            item = _GpuTelemetryWrite(
+                                item.host, retained, item.process_events
+                            )
                         written_records += self._write(
                             connection,
                             item,
@@ -538,7 +606,10 @@ class SqliteTelemetryPersistence:
                 return False
             with self._status_lock:
                 self._written_records += written_records
-                self._last_error = None
+                self._dropped_writes += dropped_writes
+                self._last_error = (
+                    "history write outside retention window" if dropped_writes else None
+                )
             return True
 
     def _prune_batch(self, connection: sqlite3.Connection) -> bool:
@@ -551,199 +622,7 @@ class SqliteTelemetryPersistence:
             return False
         return True
 
-    @staticmethod
-    def _write(
-        connection: sqlite3.Connection, item: _Write, busy_pct: float | None
-    ) -> int:
-        if isinstance(item, _HistoryWrite):
-            point = item.point
-            cursor = connection.execute(
-                """
-                INSERT OR REPLACE INTO history VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
-                """,
-                (
-                    item.host,
-                    point.get("observedAt"),
-                    *(point.get(field) for field in HISTORY_FIELDS),
-                    1 if point.get("transportRetried") else 0,
-                ),
-            )
-            return max(0, cursor.rowcount)
-
-        if isinstance(item, _GpuTelemetryWrite):
-            return SqliteTelemetryPersistence._write_gpu_telemetry(
-                connection, item, busy_pct
-            )
-
-        assert isinstance(item, _IncidentWrite)
-        event = item.event
-        condition = event.condition
-        # OR REPLACE lets a restarted tracker reclaim event ids still held by
-        # corrupt rows; valid rows are never hit because trackers restart from
-        # the highest restorable id.
-        cursor = connection.execute(
-            """
-            INSERT OR REPLACE INTO incident_events VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )
-            """,
-            (
-                event.event_id,
-                event.host,
-                condition.key,
-                condition.category,
-                condition.resource,
-                condition.severity,
-                condition.value,
-                condition.threshold,
-                condition.observed_at,
-                condition.detail,
-                condition.group_key,
-                event.state,
-                event.observed_at,
-            ),
-        )
-        return max(0, cursor.rowcount)
-
-    @staticmethod
-    def _write_gpu_telemetry(
-        connection: sqlite3.Connection,
-        item: _GpuTelemetryWrite,
-        busy_pct: float | None,
-    ) -> int:
-        written_records = 0
-        if item.points and busy_pct is not None:
-            upsert_rollups(connection, item.host, item.points, busy_pct)
-        if item.points:
-            cursor = connection.executemany(
-                """
-                INSERT OR REPLACE INTO gpu_history VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
-                """,
-                (
-                    (
-                        item.host,
-                        point.get("gpuId"),
-                        point.get("index"),
-                        point.get("observedAt"),
-                        point.get("utilizationGpuPct"),
-                        point.get("memoryUsedMiB"),
-                        point.get("memoryTotalMiB"),
-                        point.get("temperatureC"),
-                        point.get("powerDrawW"),
-                    )
-                    for point in item.points
-                ),
-            )
-            written_records += max(0, cursor.rowcount)
-        if item.process_events:
-            visible_events = tuple(
-                event
-                for event in item.process_events
-                if event.get("_visible") is not False
-            )
-            cursor = connection.executemany(
-                """
-                INSERT OR IGNORE INTO process_events (
-                    host, gpu_id, gpu_index, observed_at, event_type,
-                    pid, name, used_memory_mib, workload_json
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
-                """,
-                (
-                    (
-                        item.host,
-                        event.get("gpuId"),
-                        event.get("index"),
-                        event.get("observedAt"),
-                        event.get("event"),
-                        event.get("pid"),
-                        event.get("name"),
-                        event.get("usedMemoryMiB"),
-                        SqliteTelemetryPersistence._serialize_workload(event),
-                    )
-                    for event in visible_events
-                ),
-            )
-            written_records += max(0, cursor.rowcount)
-            hidden_events = tuple(
-                event for event in item.process_events if event.get("_visible") is False
-            )
-            hidden_cursor = connection.executemany(
-                """
-                INSERT OR IGNORE INTO process_events (
-                    host, gpu_id, gpu_index, observed_at, event_type,
-                    pid, name, used_memory_mib, workload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    (
-                        INTERNAL_USAGE_HOST,
-                        SqliteTelemetryPersistence._internal_usage_gpu_key(
-                            item.host, event
-                        ),
-                        event.get("index"),
-                        event.get("observedAt"),
-                        event.get("event"),
-                        event.get("pid"),
-                        event.get("name"),
-                        event.get("usedMemoryMiB"),
-                        SqliteTelemetryPersistence._serialize_hidden_usage(
-                            item.host, event
-                        ),
-                    )
-                    for event in hidden_events
-                ),
-            )
-            written_records += max(0, hidden_cursor.rowcount)
-        return written_records
-
-    @staticmethod
-    def _internal_usage_gpu_key(host: str, event: dict[str, object]) -> str:
-        identity = f"{host}\x00{event.get('gpuId')}".encode(
-            "utf-8", errors="surrogatepass"
-        )
-        return hashlib.sha256(identity).hexdigest()
-
-    @staticmethod
-    def _serialize_hidden_usage(host: str, event: dict[str, object]) -> str:
-        return json.dumps(
-            {
-                INTERNAL_USAGE_KEY: {
-                    "host": host,
-                    "gpuId": event.get("gpuId"),
-                    "workload": event.get("workload")
-                    if isinstance(event.get("workload"), dict)
-                    else None,
-                    "firstSeenAt": event.get("firstSeenAt")
-                    if isinstance(event.get("firstSeenAt"), str)
-                    else None,
-                }
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
-    @staticmethod
-    def _serialize_workload(event: dict[str, object]) -> str | None:
-        workload = event.get("workload")
-        payload = dict(workload) if isinstance(workload, dict) else {}
-        first_seen_at = event.get("firstSeenAt")
-        if isinstance(first_seen_at, str):
-            payload[FIRST_SEEN_KEY] = first_seen_at
-        if not payload:
-            return None
-        return json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+    _write = staticmethod(_write)
 
     def _prune(
         self,
@@ -756,12 +635,13 @@ class SqliteTelemetryPersistence:
         )
         cutoff_text = cutoff.isoformat(timespec="seconds").replace("+00:00", "Z")
         connection.execute("DELETE FROM history WHERE observed_at < ?", (cutoff_text,))
-        connection.execute(
-            "DELETE FROM incident_events WHERE observed_at < ?", (cutoff_text,)
-        )
-        connection.execute(
-            "DELETE FROM gpu_history WHERE observed_at < ?", (cutoff_text,)
-        )
+        prune_incidents(connection, cutoff_text, companions=self._companions_enabled)
+        if self._companions_enabled:
+            prune_gpu(connection, gpu_cutoff(connection, cutoff_text))
+        else:
+            connection.execute(
+                "DELETE FROM gpu_history WHERE observed_at < ?", (cutoff_text,)
+            )
         connection.execute(
             "DELETE FROM process_events WHERE observed_at < ?", (cutoff_text,)
         )

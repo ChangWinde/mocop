@@ -89,7 +89,11 @@ interfaces without a runtime plugin registry.
 | `persistence_rollups.py` | the hourly GPU rollup table: creation after the size cap, backfill, upserts, retention, and the reads behind the reports |
 | `persistence_transitions.py` | persisted process transitions: hidden rows, the first-observation sidecar, and emission order |
 | `persistence_restore.py` | restore of the retained window per host and device, and of the incidents open at shutdown |
-| `persistence_schema.py` | the history database's DDL, column contracts, and row validity filters |
+| `persistence_schema.py` | the history database's DDL and additive metadata companions |
+| `persistence_validation.py` | stored column type contracts and row validity filters |
+| `persistence_incidents.py` | transition decoding, legacy critical thresholds, and generation-preserving retention |
+| `persistence_gpu.py` | raw GPU replacement, rollup contribution deltas, expired memory maxima, and the durable retention cutoff |
+| `persistence_writes.py` | immutable queue payloads and transactional record writes |
 | `notifications.py` | webhook endpoint validation, deduplication, throttling, pairing, and retry policy |
 | `webhook_transport.py` | one bounded HTTPS delivery attempt: pinned DNS, SSRF guards, response bound |
 | `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
@@ -231,6 +235,13 @@ whether it was open and with which severity, its last `opened` transition suppli
 under the same rules as any later sample. No duplicate `opened` is emitted, bound
 actions keep applying, and webhook workers are primed so the eventual `resolved`
 of a restored condition pairs with the `opened` an earlier process delivered.
+Persistence keeps the opening and latest transitions of each open generation
+through retention. Numeric critical thresholds travel with transitions in an
+additive metadata table; legacy thresholds and durability reporting are described
+in [Operations](OPERATIONS.md#history-continuity-and-durability).
+[ADR-0031](adr/0031-compatible-persistence-metadata.md) records the additive
+metadata and compatibility choice.
+
 Without persistence, active conditions are rebuilt from live post-start probes,
 and a durable generation-bound action gets one startup rebinding opportunity for
 a matching condition; a healthy observation or subsequent recovery consumes it,

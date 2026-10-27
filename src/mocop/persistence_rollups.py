@@ -14,8 +14,8 @@ import sqlite3
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 
-from .persistence_schema import PROCESS_ROW_FILTER
 from .persistence_transitions import decode_process_rows, emission_order
+from .persistence_validation import PROCESS_ROW_FILTER
 from .reports import ReportInputs
 
 # Hourly rollups of gpu_history, maintained by the writer in the same
@@ -139,6 +139,10 @@ def upsert_rollups(
 def prune_rollups(connection: sqlite3.Connection, retention_hours: int) -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(
         hours=max(retention_hours, ROLLUP_RETENTION_HOURS)
+    )
+    connection.execute(
+        "DELETE FROM gpu_retired_memory WHERE hour < ?",
+        (cutoff.isoformat(timespec="seconds").replace("+00:00", "Z"),),
     )
     connection.execute(
         "DELETE FROM gpu_hourly WHERE hour < ?",

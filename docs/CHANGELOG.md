@@ -6,6 +6,16 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- SQLite history now preserves critical incident thresholds and open generations
+  through restart and retention. Legacy critical transitions restore their
+  condition's numeric policy line; recovery counters still reset.
+- Repeated GPU timestamps replace their hourly contributions. Expired writes
+  are rejected even after a clock rollback, and historical aggregate totals
+  remain unchanged on upgrade.
+- History drop counts include admitted writes lost on writer failure and every
+  write in a failed batch. `flush()` reports losses completed before its call
+  and acknowledges them only when the barrier completes.
+
 - Resource incidents now respect the duration floor even with a one-sample
   opening count. Unavailable ECC measurements freeze recovery of an open ECC
   incident on a present GPU, and samples older than an incident's opening
