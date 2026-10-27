@@ -70,7 +70,8 @@ interfaces without a runtime plugin registry.
 | `remote_script.py` | the fixed `MONITOR_V8` collection script: protocol constants, template, rendering |
 | `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |
 | `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
-| `service.py` | concurrent scheduling, failure backoff, state publication |
+| `service.py` | thread-safe current-state store and public service interfaces |
+| `service_scheduler.py` | configuration replacement, manual and periodic probes, background topology discovery, failure backoff, and completion draining during shutdown |
 | `process_transitions.py` | lock-free arithmetic over GPU process transitions: building one transition, same-instance identity, the open starts of a ring, and closing or reconciling restored open starts against the first live sample |
 | `telemetry_points.py` | compact in-memory history records: struct-packed host and GPU samples, process transitions |
 | `fleet_stats.py` | the snapshot's fleet-wide `stats` block: host, incident, GPU, and capacity totals over the serialized servers |
@@ -190,7 +191,15 @@ The optional `local_host` alias must be present in the explicit host allowlist. 
 
 Each host has one scheduler-owned deadline and at most one in-flight probe. Results are
 published as soon as they complete; later due work does not wait for an older slow
-batch. A completed submission batch updates the latest collection time and duration.
+batch. Topology discovery runs on a separate worker while collection uses the last
+accepted discovery inventory. A configuration exclusion removes a host from that
+inventory even if discovery fails; discovery from an older configuration cannot
+replace a newer inventory. A completed submission batch updates the latest
+collection time and duration.
+Shutdown drains completed probe results through `StateStore.apply` and its existing
+persistence policy, preserving host-incarnation checks. The scheduler returns
+without joining probes or topology discovery still running; `stop()` cancels
+probe-owned and discovery-owned child processes when supported.
 The state version increases on observable changes, which lets SSE clients reject older
 snapshots that arrive after a cadence update. Concurrent SSE readers share the same
 read-only snapshot projection for one state revision; general snapshot callers receive

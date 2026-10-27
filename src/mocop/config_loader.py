@@ -324,7 +324,7 @@ def _read_config_bytes(descriptor: int, config_path: Path) -> bytes:
 
 def _read_config_path(config_path: Path) -> bytes:
     try:
-        descriptor = os.open(config_path, os.O_RDONLY)
+        descriptor = os.open(config_path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError as exc:
         raise ConfigError(f"cannot read config: {config_path}") from exc
     try:
@@ -363,7 +363,7 @@ def _read_private_config_path(config_path: Path) -> bytes:
         try:
             descriptor = os.open(
                 config_path.name,
-                os.O_RDONLY | os.O_NOFOLLOW,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
                 dir_fd=parent_descriptor,
             )
         except OSError as exc:

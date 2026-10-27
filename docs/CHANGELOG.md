@@ -6,6 +6,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Reloaded host exclusions now take effect even when SSH discovery fails.
+- Shutdown keeps completed probe results and returns without waiting for probes
+  or topology discovery still running, while cancelling owned child processes.
+- Expired topology discovery refreshes no longer delay collection or scheduling
+  from the last accepted discovery inventory.
+- Foreground and managed configuration readers reject FIFO paths without
+  waiting for a writer.
+
 - Collection deadlines now include script delivery to clients that stop reading
   stdin. CPU totals count guest time once, and disk capacity includes sources
   and mount points containing spaces.

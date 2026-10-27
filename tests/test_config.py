@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -48,6 +51,54 @@ class ConfigTests(unittest.TestCase):
         else:
             path.write_text(raw, encoding="utf-8")
         return path
+
+    def _assert_fifo_rejected(self, reader, error):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "config.json"
+        os.mkfifo(path, 0o600)
+        # A subprocess timeout keeps a regressed blocking open from hanging the suite.
+        # There is deliberately no FIFO writer.
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                """
+import sys
+sys.path.insert(0, sys.argv[1])
+from mocop import config_loader
+from mocop.config import ConfigError
+try:
+    getattr(config_loader, sys.argv[3])(sys.argv[2])
+except ConfigError as exc:
+    print(exc)
+else:
+    sys.exit(1)
+""",
+                str(Path(__file__).resolve().parents[1] / "src"),
+                str(path),
+                reader,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(error, result.stdout)
+
+    def test_config_fifo_foreground_path(self):
+        self._assert_fifo_rejected("load_config", "not a regular file")
+
+    def test_config_fifo_managed_path(self):
+        self._assert_fifo_rejected(
+            "load_private_config", "must be an owned regular file"
+        )
+
+    def test_config_fifo_managed_document_path(self):
+        self._assert_fifo_rejected(
+            "load_private_config_document", "must be an owned regular file"
+        )
 
     def test_loads_valid_config(self) -> None:
         config = load_config(self.write(valid_config()))
