@@ -57,21 +57,21 @@ Prefer “Mocop retries a failed host with a delay of up to 60 seconds” over �
 
 ## Commits
 
-Each commit must represent one independently reviewable intent and leave the repository verifiable. Use the Forge subject format:
+Each commit must represent one independently reviewable intent and leave the repository verifiable. Use Conventional Commits with a required scope:
 
 ```text
-[scope/op]: imperative summary
+type(scope): imperative summary
 ```
 
-Scopes use lowercase path-like names such as `repo`, `core`, `config`, `probe`, `service`, `web`, `docs`, `security`, `ci`, or `tests`. The final segment must be one of `add`, `cleanup`, `document`, `fix`, `harden`, `promote`, `refactor`, `remove`, `test`, or `validate`.
+The type is one of `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `perf`, `style`, `ci`, `build`, or `revert`; add `!` after the scope for a breaking change. Scopes use lowercase path-like names such as `repo`, `core`, `config`, `probe`, `service`, `web`, `docs`, `security`, `ci`, or `tests`, with segments of letters, digits, and hyphens joined by `/`.
 
 ```text
-[repo/refactor]: simplify public project layout
-[docs/readme/document]: explain cluster configuration
-[tests/fix]: stabilize browser smoke test
+refactor(repo): simplify public project layout
+docs(docs/readme): explain cluster configuration
+fix(tests): stabilize browser smoke test
 ```
 
-The complete subject must be at most 72 characters, and the imperative summary must not end with a period. Use a body when the rationale or trade-offs are not evident from the diff. The local `commit-msg` hook checks new commits, and CI validates the complete reachable history. Git-generated merge and revert subjects are accepted only when their commit metadata proves their origin. A commit that reached the protected branch before its rule was enforced is listed by full SHA with a reason in `HISTORICAL_EXEMPTIONS` inside `.github/scripts/check_commit_message.py`; a repository test pins that list, so adding to it is a reviewed change, never a silent one.
+Earlier history uses the bracket format `[scope/op]: imperative summary`; the checker still accepts it so the whole-history gate stays green, but new commits use the format above. The complete subject must be at most 72 characters, and the imperative summary must not end with a period. Use a body when the rationale or trade-offs are not evident from the diff. The local `commit-msg` hook checks new commits, and CI validates the complete reachable history. Git-generated merge and revert subjects are accepted only when their commit metadata proves their origin. A commit that reached the protected branch before its rule was enforced is listed by full SHA with a reason in `HISTORICAL_EXEMPTIONS` inside `.github/scripts/check_commit_message.py`; a repository test pins that list, so adding to it is a reviewed change, never a silent one.
 
 Do not mix generated output, unrelated formatting, or local configuration into a commit. Before committing, inspect staged paths and run the checks relevant to the change.
 

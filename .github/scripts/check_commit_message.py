@@ -21,6 +21,26 @@ ALLOWED_OPERATIONS = frozenset(
         "validate",
     }
 )
+# New commits use Conventional Commits with the types the Forge git guard
+# accepts; the bracket format below stays valid so existing history passes.
+CONVENTIONAL_TYPES = frozenset(
+    {
+        "build",
+        "chore",
+        "ci",
+        "docs",
+        "feat",
+        "fix",
+        "perf",
+        "refactor",
+        "revert",
+        "style",
+        "test",
+    }
+)
+CONVENTIONAL_PATTERN = re.compile(
+    r"^(?P<type>[a-z]+)\((?P<scope>[^()]*)\)!?: (?P<summary>\S.*)$"
+)
 SUBJECT_PATTERN = re.compile(r"^\[(?P<body>[a-z0-9][a-z0-9/-]*)\]: (?P<summary>\S.*)$")
 SCOPE_SEGMENT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 AUTOSQUASH_PREFIXES = ("fixup! ", "squash! ")
@@ -59,9 +79,19 @@ def validate_subject(subject: str, *, allow_git_generated: bool = False) -> str 
     if len(normalized) > MAX_SUBJECT_LENGTH:
         return f"subject must not exceed {MAX_SUBJECT_LENGTH} characters"
 
+    conventional = CONVENTIONAL_PATTERN.fullmatch(normalized)
+    if conventional is not None:
+        kind = conventional.group("type")
+        if kind not in CONVENTIONAL_TYPES:
+            allowed = ", ".join(sorted(CONVENTIONAL_TYPES))
+            return f"type '{kind}' is not allowed; choose one of: {allowed}"
+        return scope_and_summary_problem(
+            conventional.group("scope"), conventional.group("summary")
+        )
+
     match = SUBJECT_PATTERN.fullmatch(normalized)
     if match is None:
-        return "subject must match '[scope/op]: imperative summary'"
+        return "subject must match 'type(scope): imperative summary'"
 
     body = match.group("body")
     if "/" not in body:
@@ -70,6 +100,10 @@ def validate_subject(subject: str, *, allow_git_generated: bool = False) -> str 
     if operation not in ALLOWED_OPERATIONS:
         allowed = ", ".join(sorted(ALLOWED_OPERATIONS))
         return f"operation '{operation}' is not allowed; choose one of: {allowed}"
+    return scope_and_summary_problem(scope, match.group("summary"))
+
+
+def scope_and_summary_problem(scope: str, summary: str) -> str | None:
     invalid_segments = [
         segment
         for segment in scope.split("/")
@@ -77,7 +111,7 @@ def validate_subject(subject: str, *, allow_git_generated: bool = False) -> str 
     ]
     if invalid_segments:
         return "scope must use lowercase path segments with letters, digits, or hyphens"
-    if match.group("summary").rstrip().endswith("."):
+    if summary.rstrip().endswith("."):
         return "imperative summary must not end with a period"
     return None
 
@@ -149,7 +183,7 @@ def subjects_from_revision(revision: str) -> list[tuple[str, str]]:
 
 def parser() -> argparse.ArgumentParser:
     argument_parser = argparse.ArgumentParser(
-        description="Validate Forge-style Git commit subjects."
+        description="Validate Git commit subjects against the repository policy."
     )
     argument_parser.add_argument("message_file", nargs="?", type=Path)
     argument_parser.add_argument("--subject")

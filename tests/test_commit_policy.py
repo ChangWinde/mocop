@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,10 +34,36 @@ class CommitPolicyTests(unittest.TestCase):
             with self.subTest(subject=subject):
                 self.assertEqual(check("--subject", subject).returncode, 0)
 
+    def test_accepts_conventional_subjects(self) -> None:
+        subjects = (
+            "feat(web): show selected-server processes",
+            "fix(docs/readme): correct the cluster example",
+            "refactor(repo)!: drop the legacy layout",
+            "fixup! test(probe): cover guest counters",
+        )
+        for subject in subjects:
+            with self.subTest(subject=subject):
+                self.assertEqual(check("--subject", subject).returncode, 0)
+
+    def test_rejects_malformed_conventional_subjects(self) -> None:
+        cases = {
+            "feat: add a subject without a scope": "type(scope): imperative summary",
+            "Fix(web): capitalize the type": "type(scope): imperative summary",
+            "ship(web): use an unknown type": "type 'ship' is not allowed",
+            "fix(Web): use an uppercase scope": "lowercase path segments",
+            "fix(): leave the scope empty": "lowercase path segments",
+            "fix(web): end with a period.": "must not end with a period",
+            "fix(web): " + "x" * 70: "must not exceed 72 characters",
+        }
+        for subject, reason in cases.items():
+            with self.subTest(subject=subject):
+                result = check("--subject", subject)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(reason, result.stderr)
+
     def test_rejects_non_forge_subjects(self) -> None:
         subjects = (
             "",
-            "refactor(repo): simplify layout",
             "[repo]: simplify layout",
             "[Repo/refactor]: simplify layout",
             "[repo/ship]: simplify layout",
@@ -125,6 +152,61 @@ class CommitPolicyTests(unittest.TestCase):
             result = check("--range", "HEAD", cwd=repository)
             self.assertEqual(result.returncode, 1)
             self.assertIn("generated Merge/Revert subjects require", result.stderr)
+
+    def test_hook_runs_the_checker_from_a_subdirectory(self) -> None:
+        # Hook managers refuse interpreters started on runtime-derived paths,
+        # so the hook must name the checker statically.
+        hook = ROOT / ".githooks" / "commit-msg"
+        self.assertNotIn("$(", hook.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            # Drop inherited configuration (including GIT_CONFIG_COUNT
+            # injections of core.hooksPath) so the repository hook runs.
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_CONFIG")
+                and key not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"}
+            }
+            environment["GIT_CONFIG_GLOBAL"] = os.devnull
+            environment["GIT_CONFIG_SYSTEM"] = os.devnull
+            for relative in (
+                ".githooks/commit-msg",
+                ".github/scripts/check_commit_message.py",
+            ):
+                target = repository / relative
+                target.parent.mkdir(parents=True)
+                shutil.copy2(ROOT / relative, target)
+            nested = repository / "nested"
+            nested.mkdir()
+
+            def git(*arguments: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["git", *arguments],
+                    cwd=nested,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+
+            git("init", "--quiet", "--initial-branch=main", str(repository))
+            git("config", "user.name", "Mocop Tests")
+            git("config", "user.email", "tests@example.invalid")
+            git("config", "core.hooksPath", ".githooks")
+            accepted = git(
+                "commit", "--quiet", "--allow-empty", "-m", "test(repo): pass the hook"
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            rejected = git(
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "Add a subject without a type",
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("invalid commit subject", rejected.stderr)
 
     def test_historical_exemptions_are_exact_and_explained(self) -> None:
         # The whole-history gate tolerates only the listed pre-enforcement
