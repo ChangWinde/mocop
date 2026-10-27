@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import tempfile
 import threading
 import time
@@ -18,7 +19,8 @@ from mocop.config import (
     PersistenceConfig,
     TopologyLinkConfig,
 )
-from mocop.discovery import HostDiscoverySnapshot
+from mocop.discovery import HostDiscoverySnapshot, OpenSshConfigHostSource
+from mocop.discovery_policy import SshDiscoveryConfig
 from mocop.maintenance import MaintenanceWindowConfig
 from mocop.models import (
     DiskMetrics,
@@ -32,6 +34,7 @@ from mocop.persistence import SqliteTelemetryPersistence
 from mocop.persistence_api import DisabledPersistence
 from mocop.persistence_restore import LoadedTelemetry
 from mocop.service import _MAX_GPU_IDENTITIES_PER_HOST, MonitorService, StateStore
+from mocop.ssh_topology import SshRoute, SshRouteResolution, SshTopologyProjection
 
 
 class StateStoreTests(unittest.TestCase):
@@ -2363,7 +2366,7 @@ class MonitorServiceTests(unittest.TestCase):
         wake_event = _ControlledWakeEvent(stop_event)
         service._scheduler_wakeup = wake_event
 
-        with patch("mocop.service.print"):
+        with patch("mocop.service_scheduler.print"):
             service.run(stop_event)
 
         self.assertEqual(source.calls, 1)
@@ -2836,6 +2839,426 @@ class MonitorServiceTests(unittest.TestCase):
         service.poll_once()
 
         self.assertEqual(probe.calls, 2)
+
+
+def _regression_config(**changes):
+    return replace(
+        MonitorConfig(
+            ssh_config=Path("/tmp/fictional-ssh-config"),
+            auto_discover=False,
+            hosts=("gpu-01", "gpu-02"),
+            exclude_hosts=frozenset(),
+            poll_interval_seconds=60,
+            probe_timeout_seconds=12,
+            connect_timeout_seconds=5,
+            max_workers=8,
+            listen_host="127.0.0.1",
+            listen_port=8787,
+        ),
+        **changes,
+    )
+
+
+class _SteppedScheduler:
+    """Each queue handshake permits exactly one scheduler pass, without sleeps."""
+
+    def __init__(self, service):
+        self.service = service
+        self.stop_event = threading.Event()
+        self.returned = threading.Event()
+        self.passes = queue.Queue()
+        self.permits = queue.Queue()
+        self.completed = queue.Queue()
+        service._scheduler_wakeup = self
+        service._wake_scheduler = self.completed.put
+        self.thread = threading.Thread(target=self.run)
+
+    def run(self):
+        try:
+            self.service.run(self.stop_event)
+        finally:
+            self.returned.set()
+
+    def clear(self):
+        pass
+
+    def set(self):
+        pass
+
+    def wait(self, _timeout):
+        self.passes.put(None)
+        self.permits.get(timeout=10)
+
+    def start(self):
+        self.thread.start()
+        self.passes.get(timeout=5)
+
+    def step(self):
+        self.permits.put(None)
+        self.passes.get(timeout=5)
+
+    def results(self, count):
+        # The callback runs only once the real Future is complete.
+        return [self.completed.get(timeout=5) for _ in range(count)]
+
+    def stop(self):
+        self.stop_event.set()
+        self.service.stop()
+        self.permits.put(None)
+
+    def cleanup(self):
+        self.stop()
+        self.thread.join(5)
+
+
+class _ReloadHostSource:
+    def __init__(self):
+        self.fail = False
+        self.calls = 0
+
+    def hosts(self, config):
+        self.calls += 1
+        if self.fail:
+            raise OSError("test discovery failure")
+        return tuple(host for host in config.hosts if host not in config.exclude_hosts)
+
+
+class _BlockedTopologyPlanner:
+    def __init__(self, hosts):
+        self.hosts = hosts
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+        self.cancel = Mock()
+        self.calls = 0
+        self.fail = False
+
+    def resolve(self, aliases, _targets, _config):
+        self.calls += 1
+        if self.calls > 1:
+            self.started.set()
+            self.release.wait()
+            self.finished.set()
+            if self.fail:
+                raise OSError("test topology failure")
+        return SshRouteResolution(
+            aliases,
+            tuple((host, SshRoute("proxyjump", ("jump",))) for host in self.hosts),
+            (),
+            (),
+        )
+
+    def project(self, _root, _hosts, _resolution):
+        return SshTopologyProjection(
+            ConnectionTopologyConfig(
+                root="monitor",
+                links=(TopologyLinkConfig("monitor", "display-only", "ssh"),),
+            ),
+            ("jump",),
+            tuple((host, "jump") for host in self.hosts),
+            (),
+        )
+
+
+class ServiceRegressionTests(unittest.TestCase):
+    def _clock(self):
+        clock = Mock(return_value=100.0)
+        patcher = patch("mocop.service.time.monotonic", clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return clock
+
+    def _topology_service(self, hosts, probe, store):
+        clock = self._clock()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        ssh_path = Path(directory.name) / "ssh-config"
+        ssh_path.write_text("Host jump " + " ".join(hosts) + "\n", encoding="utf-8")
+        planner = _BlockedTopologyPlanner(hosts)
+        self.addCleanup(planner.release.set)
+        config = _regression_config(
+            ssh_config=ssh_path,
+            hosts=(),
+            auto_discover=True,
+            ssh_discovery=SshDiscoveryConfig(mode="topology", refresh_seconds=30),
+        )
+        source = OpenSshConfigHostSource(planner, monotonic=clock)
+        service = MonitorService(config, source, probe, store)
+        service.update_config(
+            config
+        )  # Accept and cache the initial discovery inventory.
+        clock.return_value = 200.0  # Expire the actual topology cache before run().
+        scheduler = _SteppedScheduler(service)
+        self.addCleanup(scheduler.cleanup)
+        return service, scheduler, planner, clock
+
+    def _reload_excludes(self, discovery_fails, during_pass=False):
+        clock = self._clock()
+        source = _ReloadHostSource()
+        probe = _InventoryRecordingProbe()
+        store = StateStore(60)
+        config = _regression_config()
+        service = MonitorService(config, source, probe, store)
+        scheduler = _SteppedScheduler(service)
+        self.addCleanup(scheduler.cleanup)
+        scheduler.start()
+        scheduler.results(2)
+        scheduler.step()
+        source.fail = discovery_fails
+        updated = replace(config, exclude_hosts=frozenset({"gpu-01"}))
+        if during_pass:
+            rebase = service._rebase_failure_backoff
+
+            def reload_once(now, current):
+                service._rebase_failure_backoff = rebase
+                service.update_config(updated)
+                rebase(now, current)
+
+            service._rebase_failure_backoff = reload_once
+        else:
+            service.update_config(updated)
+            self.assertEqual(service.request_probe("gpu-01")["status"], "unknown_host")
+        clock.return_value = 200.0
+        scheduler.step()
+        scheduler.results(1)
+        scheduler.step()
+        clock.return_value = 300.0
+        scheduler.step()
+        scheduler.results(1)
+        scheduler.step()
+        self.assertEqual([call[0] for call in probe.calls].count("gpu-01"), 1)
+        self.assertEqual([call[0] for call in probe.calls].count("gpu-02"), 3)
+        self.assertEqual(
+            [item["host"] for item in store.snapshot()["servers"]], ["gpu-02"]
+        )
+        self.assertEqual(probe.retained_hosts[-1], frozenset({"gpu-02"}))
+        self.assertNotIn("gpu-01", service._next_probe_at)
+        self.assertNotIn("gpu-01", service._failure_counts)
+        self.assertGreaterEqual(source.calls, 4)
+
+    def test_service_reload_exclude_discovery_failure(self):
+        self._reload_excludes(discovery_fails=True)
+
+    def test_service_reload_exclude_discovery_success(self):
+        self._reload_excludes(discovery_fails=False)
+
+    def test_service_reload_exclude_races_scheduler_snapshot(self):
+        self._reload_excludes(discovery_fails=True, during_pass=True)
+
+    def test_service_topology_refresh_collects_and_dispatches_200_hosts(self):
+        hosts = tuple(f"gpu-{index:03d}" for index in range(200))
+        probe = _RecordingProbe()
+        store = StateStore(60)
+        service, scheduler, planner, _clock = self._topology_service(
+            hosts, probe, store
+        )
+        scheduler.start()
+        self.assertTrue(planner.started.wait(5))
+        completed = 0
+        while completed < len(hosts):
+            count = min(8, len(hosts) - completed)
+            scheduler.results(count)
+            completed += count
+            scheduler.step()
+            self.assertEqual(
+                sum(item["status"] == "online" for item in store.snapshot()["servers"]),
+                completed,
+            )
+            self.assertFalse(planner.release.is_set())
+            self.assertFalse(planner.finished.is_set())
+        self.assertCountEqual([call[0] for call in probe.calls], hosts)
+        self.assertEqual(len(probe.calls), 200)
+        self.assertEqual(planner.calls, 2)
+        self.assertEqual(set(service._runtime_hosts), set(hosts))
+        self.assertTrue(all(call[1] == () for call in probe.calls))
+        self.assertEqual(dict(store._host_groups), dict.fromkeys(hosts, "jump"))
+
+    def test_service_topology_refresh_failure_keeps_accepted_inventory(self):
+        probe = _RecordingProbe()
+        store = StateStore(60)
+        service, scheduler, planner, clock = self._topology_service(
+            ("gpu-01",), probe, store
+        )
+        scheduler.start()
+        self.assertTrue(planner.started.wait(5))
+        scheduler.results(1)
+        scheduler.step()
+        planner.fail = True
+        planner.release.set()
+        scheduler.results(1)  # Refresh Future has failed before the next pass.
+        scheduler.step()
+        self.assertIn("discovery failed", store.snapshot()["collectorError"])
+        self.assertEqual(service._runtime_hosts, {"gpu-01"})
+        clock.return_value = 261.0
+        scheduler.step()
+        scheduler.results(2)  # A failed refresh and the next resource probe.
+        scheduler.step()
+        self.assertEqual(len(probe.calls), 2)
+
+    def test_service_topology_refresh_rejects_an_old_config_generation(self):
+        probe = _RecordingProbe()
+        store = StateStore(60)
+        service, scheduler, planner, _clock = self._topology_service(
+            ("gpu-01",), probe, store
+        )
+        scheduler.start()
+        self.assertTrue(planner.started.wait(5))
+        scheduler.results(1)
+        scheduler.step()
+        # The old refresh is blocked. A reload must win over its later result.
+        updated = replace(
+            service._config,
+            hosts=("gpu-02",),
+            auto_discover=False,
+            exclude_hosts=frozenset({"gpu-01"}),
+        )
+        with patch(
+            "mocop.service_scheduler.resolve_host_discovery",
+            return_value=HostDiscoverySnapshot(
+                (), (), ("gpu-02",), (), (), None, (), "topology"
+            ),
+        ):
+            service.update_config(updated)
+        scheduler.step()
+        scheduler.results(1)
+        scheduler.step()
+        planner.release.set()
+        scheduler.results(1)
+        scheduler.step()
+        self.assertEqual(
+            [item["host"] for item in store.snapshot()["servers"]], ["gpu-02"]
+        )
+        self.assertEqual([call[0] for call in probe.calls], ["gpu-01", "gpu-02"])
+
+    def test_service_shutdown_drains_completed_batch(self):
+        self._clock()
+        store = _PollCycleRecordingStore(60)
+        probe = _RecordingProbe()
+        service = MonitorService(
+            _regression_config(), _ConfigHostSource(), probe, store
+        )
+        scheduler = _SteppedScheduler(service)
+        self.addCleanup(scheduler.cleanup)
+        scheduler.start()
+        scheduler.results(2)
+        scheduler.stop()
+        self.assertTrue(scheduler.returned.wait(5))
+        scheduler.thread.join(5)
+        self.assertFalse(scheduler.thread.is_alive())
+        self.assertEqual(
+            [item["status"] for item in store.snapshot()["servers"]],
+            ["online", "online"],
+        )
+        self.assertEqual(len(store.apply_durations), 2)
+        self.assertEqual(sum(value is not None for value in store.apply_durations), 1)
+        self.assertEqual(store.record_poll_cycle_calls, 0)
+        self.assertIsNotNone(store.snapshot()["lastPollCompletedAt"])
+        self.assertEqual(service._runtime_hosts, set())
+        self.assertEqual(service._runtime_in_flight, set())
+
+    def test_service_shutdown_drains_results_and_returns_with_workers_blocked(self):
+        for enabled in (False, True):
+            with self.subTest(persistence_enabled=enabled):
+                release_probe = threading.Event()
+                probe_started = threading.Event()
+                probe_finished = threading.Event()
+                self.addCleanup(release_probe.set)
+                persistence = Mock(wraps=DisabledPersistence())
+                persistence.is_enabled.return_value = enabled
+                store = StateStore(60, persistence=persistence)
+                system = SystemMetrics(
+                    hostname="fictional",
+                    uptime_seconds=100,
+                    load_1m=1,
+                    load_5m=1,
+                    load_15m=1,
+                    cpu_cores=8,
+                    cpu_usage_pct=20,
+                    memory_total_mib=16000,
+                    memory_used_mib=4000,
+                    memory_available_mib=12000,
+                    swap_total_mib=0,
+                    swap_used_mib=0,
+                    disk_total_mib=1000,
+                    disk_used_mib=100,
+                    network_rx_bps=0,
+                    network_tx_bps=0,
+                )
+
+                def probe_host(
+                    host,
+                    _config,
+                    probe_started=probe_started,
+                    release_probe=release_probe,
+                    probe_finished=probe_finished,
+                    system=system,
+                ):
+                    if host == "slow":
+                        probe_started.set()
+                        release_probe.wait()
+                        probe_finished.set()
+                    if host == "broken":
+                        raise RuntimeError("test probe failure")
+                    return ProbeResult(host, "online", 1, system=system)
+
+                probe = Mock(spec=["probe", "cancel"])
+                # Python 3.12+ runtime protocols inspect attributes statically.
+                probe.cancel = Mock()
+                probe.probe.side_effect = probe_host
+                service, scheduler, planner, _clock = self._topology_service(
+                    ("good", "stale", "broken", "slow"), probe, store
+                )
+                try:
+                    scheduler.start()
+                    self.assertTrue(planner.started.wait(5))
+                    self.assertTrue(probe_started.wait(5))
+                    scheduler.results(3)
+                    # Reintroducing the same alias must not admit its old result.
+                    old_incarnation = store.host_incarnation("stale")
+                    store.set_hosts(("good", "broken", "slow"))
+                    store.set_hosts(("good", "stale", "broken", "slow"))
+                    self.assertNotEqual(
+                        store.host_incarnation("stale"), old_incarnation
+                    )
+                    self.assertEqual(
+                        store.snapshot()["servers"][0]["status"], "pending"
+                    )
+                    scheduler.stop()
+                    self.assertTrue(
+                        scheduler.returned.wait(5), "MonitorService.run did not return"
+                    )
+                    scheduler.thread.join(5)
+                    self.assertFalse(scheduler.thread.is_alive())
+                    self.assertFalse(release_probe.is_set())
+                    self.assertFalse(probe_finished.is_set())
+                    self.assertFalse(planner.release.is_set())
+                    self.assertFalse(planner.finished.is_set())
+                    probe.cancel.assert_called_once_with()
+                    planner.cancel.assert_called_once_with()
+                    states = {
+                        item["host"]: item for item in store.snapshot()["servers"]
+                    }
+                    self.assertEqual(states["good"]["status"], "online")
+                    self.assertEqual(states["broken"]["status"], "error")
+                    self.assertEqual(states["stale"]["status"], "pending")
+                    self.assertEqual(states["slow"]["status"], "pending")
+                    if enabled:
+                        self.assertEqual(persistence.record_history.call_count, 1)
+                        self.assertEqual(
+                            persistence.record_history.call_args.args[0], "good"
+                        )
+                    else:
+                        persistence.record_history.assert_not_called()
+                    self.assertEqual(len(store.history("good", 10)["points"]), 1)
+                    self.assertEqual(store.history("stale", 10)["points"], [])
+                finally:
+                    release_probe.set()
+                    planner.release.set()
+                    scheduler.cleanup()
+                    if probe_started.is_set():
+                        self.assertTrue(probe_finished.wait(5))
+                    if planner.started.is_set():
+                        self.assertTrue(planner.finished.wait(5))
 
 
 class UsageRollupTests(unittest.TestCase):
