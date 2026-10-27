@@ -10,7 +10,9 @@ All notable changes are documented here. This project follows Semantic Versionin
   stdin. CPU totals count guest time once, and disk capacity includes sources
   and mount points containing spaces.
 - SSH topology discovery skips ProxyCommand option arguments when identifying
-  hops, while preserving destinations and ProxyJump chains.
+  hops, while preserving destinations and ProxyJump chains. It also applies
+  options after the destination and honors the first ProxyJump value, including
+  `none`. Conflicting `-J` commands remain unresolved routes.
 
 - Failed SQLite index creation now logs a warning while existing metadata tables
   stay in use. Retention preserves expired GPU memory maxima at the size cap,

@@ -208,37 +208,73 @@ def _proxy_command_destinations(tokens: list[str]) -> list[str]:
         tokens = tokens[1:]
     if not tokens or tokens[0].rsplit("/", 1)[-1] != "ssh":
         return []
-    destinations: list[str] = []
-    index = 1
-    while index < len(tokens):
-        token = tokens[index]
+    parsed = _ssh_proxy_options(tokens[1:])
+    if parsed is None:
+        return []
+    destination, options = parsed
+    jumps = _ssh_proxy_jumps(options)
+    return [] if jumps is None else [*jumps, destination]
+
+
+def _ssh_proxy_options(
+    arguments: list[str],
+) -> tuple[str, list[tuple[str, str]]] | None:
+    """Read options on both sides of the destination, stopping at the command."""
+    destination: str | None = None
+    options: list[tuple[str, str]] = []
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
         index += 1
         if token == "--":
-            return destinations + tokens[index : index + 1]
+            if destination is None and index < len(arguments):
+                destination = arguments[index]
+            break
         if not token.startswith("-") or token == "-":
-            return destinations + [token]
+            if destination is not None:
+                break  # The first remote-command word ends option parsing.
+            destination = token
+            continue
         for offset, option in enumerate(token[1:], 2):
             if option in "BbcDEeFIiJLlmOoPpQRSWw":
                 argument = token[offset:]
                 if not argument:
-                    if index == len(tokens):
-                        return []
-                    argument = tokens[index]
+                    if index == len(arguments):
+                        return None
+                    argument = arguments[index]
                     index += 1
-                if option == "J" and argument.strip().lower() not in _NONE_OPTIONS:
-                    destinations.extend(argument.split(","))
-                elif option == "o":
-                    jump = re.fullmatch(
-                        r"ProxyJump\s*(?:=\s*|\s+)(.+)", argument.strip(), re.I
-                    )
-                    if jump and jump.group(1).strip().lower() not in _NONE_OPTIONS:
-                        destinations.extend(jump.group(1).split(","))
+                if option in "Jo":
+                    options.append((option, argument))
                 break
             if option not in "1246AaCfGgKkMNnqsTtVvXxYy":
                 # An unknown command grammar is opaque, not evidence that a
                 # subsequent argument is an infrastructure alias.
-                return []
-    return []
+                return None
+    return None if destination is None else (destination, options)
+
+
+def _ssh_proxy_jumps(options: list[tuple[str, str]]) -> list[str] | None:
+    """Apply first-value proxy precedence; None means SSH rejects the command."""
+    jump: str | None = None
+    proxy_command = False
+    for option, argument in options:
+        if option == "J":
+            # ssh.c rejects -J if any earlier proxy option already set a value,
+            # including "none". Later -o ProxyJump values merely get ignored.
+            if jump is not None or proxy_command:
+                return None
+            jump = argument.strip()
+            continue
+        setting = re.fullmatch(r"([^\s=]+)\s*(?:=\s*|\s+)(.+)", argument.strip())
+        if setting is None:
+            continue
+        name, value = setting.groups()
+        if jump is None and not proxy_command:
+            if name.lower() == "proxycommand":
+                proxy_command = True
+            elif name.lower() == "proxyjump":
+                jump = value
+    return [] if jump is None or jump.lower() in _NONE_OPTIONS else jump.split(",")
 
 
 class OpenSshRouteResolver:
