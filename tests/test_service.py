@@ -3045,6 +3045,47 @@ class ServiceRegressionTests(unittest.TestCase):
     def test_service_reload_exclude_races_scheduler_snapshot(self):
         self._reload_excludes(discovery_fails=True, during_pass=True)
 
+    def test_service_topology_refresh_cold_start_schedules_first_inventory(self):
+        self._clock()
+        hosts = ("gpu-01", "gpu-02")
+        config = _regression_config(
+            hosts=(),
+            auto_discover=True,
+            ssh_discovery=SshDiscoveryConfig(mode="topology"),
+        )
+        discovery = HostDiscoverySnapshot(
+            aliases=(*hosts, "jump"),
+            eligible_aliases=hosts,
+            hosts=hosts,
+            infrastructure_hosts=("jump",),
+            host_groups=tuple((host, "jump") for host in hosts),
+            topology=None,
+            warnings=(),
+            mode="topology",
+        )
+        store = StateStore(60)
+        probe = _RecordingProbe()
+        service = MonitorService(config, _ResolvedHostSource(discovery), probe, store)
+        scheduler = _SteppedScheduler(service)
+        self.addCleanup(scheduler.cleanup)
+        self.assertEqual(store.snapshot()["servers"], [])
+
+        scheduler.start()
+        self.assertEqual(scheduler.results(1)[0].result(), discovery)
+        scheduler.step()
+        self.assertCountEqual(
+            [item["host"] for item in store.snapshot()["servers"]], hosts
+        )
+        scheduler.results(len(hosts))
+        scheduler.step()
+
+        self.assertCountEqual([call[0] for call in probe.calls], hosts)
+        self.assertTrue(all(call[1] == () for call in probe.calls))
+        self.assertEqual(
+            [item["status"] for item in store.snapshot()["servers"]],
+            ["online", "online"],
+        )
+
     def test_service_topology_refresh_collects_and_dispatches_200_hosts(self):
         hosts = tuple(f"gpu-{index:03d}" for index in range(200))
         probe = _RecordingProbe()
