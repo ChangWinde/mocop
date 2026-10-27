@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mocop.config import MonitorConfig, SshDiscoveryConfig
+from mocop.discovery import OpenSshConfigHostSource
 from mocop.probe import _BoundedProcessResult
 from mocop.ssh_topology import (
     OpenSshRouteResolver,
@@ -34,6 +35,118 @@ def config() -> MonitorConfig:
 
 
 class OpenSshRouteResolverTests(unittest.TestCase):
+    def _proxy_options_route(self, command: str) -> SshRoute | None:
+        with patch("mocop.probe._run_bounded_process") as run:
+            run.return_value = _BoundedProcessResult(
+                0, "proxyjump none\nproxycommand " + command + "\n", ""
+            )
+            return OpenSshRouteResolver().resolve(
+                "gpu-01",
+                config(),
+                ("gpu-01", "compute", "bastion", "relay", "edge", "ssh", "none"),
+                3,
+            )
+
+    def test_ssh_topology_proxy_options_separate_and_attached_arguments(self) -> None:
+        for option in "lpiFWbcDELRS mwBIeOPQ".replace(" ", ""):
+            for argument in (f"-{option} compute", f"-{option}compute"):
+                with self.subTest(argument=argument):
+                    route = self._proxy_options_route(
+                        f"ssh {argument} -W %h:%p bastion"
+                    )
+                    self.assertEqual(route, SshRoute("proxycommand", ("bastion",)))
+        for argument in (
+            "-o User=compute",
+            "-oUser=compute",
+            "-o 'User compute'",
+            "-o IdentityFile=compute",
+            "-o ProxyCommand=compute",
+            "-o 'ProxyCommand ssh compute'",
+            "-o Hostname=compute",
+            "-Jnone",
+            "-oProxyJump=none",
+        ):
+            with self.subTest(argument=argument):
+                self.assertEqual(
+                    self._proxy_options_route(f"ssh {argument} bastion"),
+                    SshRoute("proxycommand", ("bastion",)),
+                )
+
+    def test_ssh_topology_proxy_options_keep_jump_hosts(self) -> None:
+        for argument in (
+            "-J operator@edge:2200,relay",
+            "-Joperator@edge:2200,relay",
+            "-o ProxyJump=operator@edge:2200,relay",
+            "-oProxyJump=operator@edge:2200,relay",
+            "-o 'ProxyJump operator@edge:2200,relay'",
+            "-o 'proxyjump = operator@edge:2200,relay'",
+            "-o '  ProxyJump = operator@edge:2200,relay  '",
+            "-vJedge,relay",
+        ):
+            with self.subTest(argument=argument):
+                self.assertEqual(
+                    self._proxy_options_route(
+                        f"/usr/bin/ssh -lcompute {argument} -W%h:%p bastion"
+                    ),
+                    SshRoute("proxycommand", ("edge", "relay", "bastion")),
+                )
+
+    def test_ssh_topology_proxy_options_destination_boundary(self) -> None:
+        for command in (
+            "ssh -vvq -lcompute -- operator@bastion compute",
+            "ssh -lcompute bastion echo compute",
+            "exec ssh -lcompute bastion compute",
+            "ssh -Jedge,edge -oProxyJump=edge,bastion bastion compute",
+        ):
+            with self.subTest(command=command):
+                expected = ("edge", "bastion") if "-J" in command else ("bastion",)
+                self.assertEqual(
+                    self._proxy_options_route(command),
+                    SshRoute("proxycommand", expected),
+                )
+
+    def test_ssh_topology_proxy_options_opaque_commands(self) -> None:
+        for command in (
+            "ssh -l",
+            "ssh -J",
+            "ssh -Jedge",
+            "ssh -oProxyJump=edge",
+            "ssh -o",
+            "ssh -Z compute bastion",
+            "ssh -oUser=compute",
+            "nc -x compute %h %p",
+            "ssh 'unterminated",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self._proxy_options_route(command),
+                    SshRoute("proxycommand", ("proxy-gpu-01",), opaque=True),
+                )
+
+    def test_ssh_topology_proxy_options_login_alias_remains_discoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ssh_config = Path(directory) / "config"
+            ssh_config.write_text(
+                "Host gpu-01 compute bastion relay\n", encoding="utf-8"
+            )
+
+            def resolved(command, **kwargs):
+                proxy = "none"
+                if command[-1] == "gpu-01":
+                    proxy = "ssh -l compute -J relay -W %h:%p bastion"
+                return _BoundedProcessResult(
+                    0, f"proxyjump none\nproxycommand {proxy}\n", ""
+                )
+
+            with patch("mocop.probe._run_bounded_process", side_effect=resolved):
+                snapshot = OpenSshConfigHostSource().discovery(
+                    replace(config(), ssh_config=ssh_config)
+                )
+
+        self.assertEqual(snapshot.hosts, ("compute", "gpu-01"))
+        self.assertEqual(snapshot.eligible_aliases, ("compute", "gpu-01"))
+        self.assertEqual(snapshot.infrastructure_hosts, ("bastion", "relay"))
+
     @unittest.skipUnless(shutil.which("ssh"), "system OpenSSH client is required")
     def test_system_ssh_g_resolves_jump_and_common_proxycommand(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import selectors
 import subprocess
@@ -107,6 +108,216 @@ def resource_payload(
 
 
 class ProbeTests(unittest.TestCase):
+    def _cpu_fixture_sample(self, fixture: str) -> _RawSystemSample:
+        # Run the emitted system awk unchanged except for its input filenames.
+        script = _remote_script("disabled", False)
+        fragment = script[script.index("awk '") : script.index("printf 'DISKS_BEGIN")]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                "/proc/stat": (
+                    Path(__file__).parent / "fixtures/collection" / fixture
+                ).read_text(),
+                "/proc/meminfo": "MemTotal: 1024 kB\nMemAvailable: 512 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+                "/proc/loadavg": "0 0 0 1/1 1\n",
+                "/proc/uptime": "10 5\n",
+                "/proc/net/dev": "header\nheader\n",
+            }
+            for original, content in files.items():
+                target = root / original.rsplit("/", 1)[1]
+                target.write_text(content)
+                fragment = fragment.replace(original, str(target))
+            completed = subprocess.run(
+                ["sh", "-c", fragment],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env={**os.environ, "LC_ALL": "C"},
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = (
+            "MONITOR_V8\n"
+            + completed.stdout
+            + "DISKS_BEGIN"
+            + resource_payload().split("DISKS_BEGIN", 1)[1]
+        )
+        return _parse_resource_payload(payload).system
+
+    def test_probe_cpu_counters_without_guest(self) -> None:
+        raw = self._cpu_fixture_sample("stat-standard")
+        self.assertEqual((raw.cpu_total_ticks, raw.cpu_idle_ticks), (360, 90))
+        self.assertEqual(raw.cpu_cores, 1)
+
+    def test_probe_cpu_counters_with_guest_and_future_columns(self) -> None:
+        for fixture in ("stat-guest", "stat-future"):
+            with self.subTest(fixture=fixture):
+                raw = self._cpu_fixture_sample(fixture)
+                self.assertEqual((raw.cpu_total_ticks, raw.cpu_idle_ticks), (360, 90))
+
+    def test_probe_cpu_counters_old_kernel(self) -> None:
+        raw = self._cpu_fixture_sample("stat-old")
+        self.assertEqual((raw.cpu_total_ticks, raw.cpu_idle_ticks), (100, 40))
+
+    def test_probe_cpu_counters_utilization_keeps_idle_and_iowait(self) -> None:
+        probe = OpenSshLinuxResourceProbe()
+        self.addCleanup(probe._processes.close)
+        first = probe._system_metrics(
+            "fixture", self._cpu_fixture_sample("stat-guest"), 1
+        )
+        second = probe._system_metrics(
+            "fixture", self._cpu_fixture_sample("stat-next"), 2
+        )
+        self.assertIsNone(first.cpu_usage_pct)
+        self.assertEqual(second.cpu_usage_pct, 75.0)
+
+    def _disk_fixture_sample(self, fixture: str) -> _RawSystemSample:
+        script = _remote_script("disabled", False)
+        fragment = script[script.index("df -PTk") : script.index("printf 'DISKS_END")]
+        fragment = fragment.replace("df -PTk 2>/dev/null", "cat")
+        completed = subprocess.run(
+            ["sh", "-c", fragment],
+            input=(Path(__file__).parent / "fixtures/collection" / fixture).read_text(),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        prefix, rest = resource_payload().split("DISKS_BEGIN\n", 1)
+        tail = rest.split("DISKS_END\n", 1)[1]
+        return _parse_resource_payload(
+            prefix + "DISKS_BEGIN\n" + completed.stdout + "DISKS_END\n" + tail
+        ).system
+
+    def _assert_disk_spaces(self, fixture: str, source: str, mountpoint: str) -> None:
+        raw = self._disk_fixture_sample(fixture)
+        self.assertEqual(len(raw.disks), 2)
+        disk = raw.disks[1]
+        self.assertEqual(
+            (disk.device, disk.filesystem_type, disk.mountpoint),
+            (source, "nfs4", mountpoint),
+        )
+        self.assertEqual(
+            (disk.total_mib, disk.used_mib, disk.available_mib, disk.used_pct),
+            (100, 50, 50, 50),
+        )
+        probe = OpenSshLinuxResourceProbe()
+        self.addCleanup(probe._processes.close)
+        metrics = probe._system_metrics("fixture", raw, 1)
+        self.assertEqual((metrics.disk_total_mib, metrics.disk_used_mib), (150, 62.5))
+
+    def test_probe_disk_spaces_source(self) -> None:
+        self._assert_disk_spaces("df-source", "archive:/training data", "/mnt/archive")
+
+    def test_probe_disk_spaces_mountpoint(self) -> None:
+        self._assert_disk_spaces("df-mount", "/dev/sdb1", "/mnt/training data")
+
+    def test_probe_disk_spaces_both(self) -> None:
+        self._assert_disk_spaces(
+            "df-both", "archive:/training  data 2026", "/mnt/training  data 2026"
+        )
+
+    def test_probe_disk_spaces_skips_nonnumeric_and_incomplete_rows(self) -> None:
+        raw = self._disk_fixture_sample("df-invalid")
+        self.assertEqual(
+            [(disk.device, disk.mountpoint) for disk in raw.disks], [("/dev/sda1", "/")]
+        )
+
+    def test_probe_stdin_deadline_never_drains(self) -> None:
+        # Finite child lifetime also bounds a regression to the old blocking
+        # write; shrinking the real pipe makes the oversized case deterministic.
+        original_popen = subprocess.Popen
+        children = []
+        registry = _ActiveProcessRegistry()
+        self.addCleanup(registry.close)
+
+        def small_pipe(*args, **kwargs):
+            child = original_popen(*args, **kwargs, pipesize=4096)
+            children.append(child)
+            self.assertEqual(fcntl.fcntl(child.stdin, fcntl.F_GETPIPE_SZ), 4096)
+            return child
+
+        for script in ("x", _remote_script("disabled", False)):
+            for close_outputs in (False, True):
+                with self.subTest(size=len(script), close_outputs=close_outputs):
+                    command = "import os,time; "
+                    command += "os.close(1); os.close(2); " if close_outputs else ""
+                    command += "time.sleep(4)"
+                    started = time.monotonic()
+                    with (
+                        patch(
+                            "mocop.probe_process.subprocess.Popen",
+                            side_effect=small_pipe,
+                        ),
+                        self.assertRaises(subprocess.TimeoutExpired),
+                    ):
+                        _run_bounded_process(
+                            [sys.executable, "-c", command],
+                            input_text=script,
+                            timeout_seconds=0.5,
+                            max_output_bytes=65_536,
+                            environment=os.environ.copy(),
+                            process_registry=registry,
+                            cancel_event=registry.cancelled,
+                        )
+                    self.assertLess(time.monotonic() - started, 3)
+                    self.assertIsNotNone(
+                        children[-1].poll(), "timed-out child was not reaped"
+                    )
+        self.assertGreater(len(_remote_script("disabled", False).encode()), 4096)
+
+    def test_probe_stdin_deadline_full_duplex_and_partial_writes(self) -> None:
+        script = _remote_script("disabled", False) * 64 + "λ"
+        result = _run_bounded_process(
+            [
+                sys.executable,
+                "-c",
+                "import signal,sys; signal.alarm(4); "
+                "sys.stdout.buffer.write(b'o'*131072); sys.stdout.flush(); "
+                "sys.stderr.buffer.write(b'e'*131072); sys.stderr.flush(); "
+                "print(len(sys.stdin.buffer.read()))",
+            ],
+            input_text=script,
+            timeout_seconds=5,
+            max_output_bytes=300_000,
+            environment=os.environ.copy(),
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "o" * 131072 + str(len(script.encode())) + "\n")
+        self.assertEqual(result.stderr, "e" * 131072)
+
+    def test_probe_stdin_deadline_keeps_partial_output(self) -> None:
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            _run_bounded_process(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os,time; os.write(1,b'partial'); os.write(2,b'started'); time.sleep(4)",
+                ],
+                input_text="x" * 2_000_000,
+                timeout_seconds=1,
+                max_output_bytes=65_536,
+                environment=os.environ.copy(),
+            )
+        self.assertEqual(raised.exception.output, b"partial")
+        self.assertEqual(raised.exception.stderr, b"started")
+
+    def test_probe_stdin_deadline_enforces_output_limit_during_write(self) -> None:
+        started = time.monotonic()
+        with self.assertRaises(_ProcessOutputLimitExceeded):
+            _run_bounded_process(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os,time; os.write(1,b'x'*8192); time.sleep(4)",
+                ],
+                input_text="x" * 2_000_000,
+                timeout_seconds=5,
+                max_output_bytes=1024,
+                environment=os.environ.copy(),
+            )
+        self.assertLess(time.monotonic() - started, 3)
+
     def test_parses_complete_and_unavailable_values(self) -> None:
         payload = (
             '0, GPU-abc, "NVIDIA A100, Special", 550.54, P0, 61, 93, 34, '
@@ -1207,7 +1418,7 @@ class ProbeTests(unittest.TestCase):
 
         self.assertLess(time.monotonic() - started, 1)
 
-    @patch("mocop.probe._kill_process_group")
+    @patch("mocop.probe_process._kill_process_group")
     def test_registry_cancellation_wakes_the_full_deadline_wait(self, _kill) -> None:
         # With the child kill suppressed, only the registry wake-up pipe can
         # interrupt the selector before the five-second deadline. The bounded
@@ -1237,7 +1448,7 @@ class ProbeTests(unittest.TestCase):
 
         self.assertLess(time.monotonic() - started, 2.5)
 
-    @patch("mocop.probe._kill_process_group")
+    @patch("mocop.probe_process._kill_process_group")
     def test_active_process_registry_kills_every_child_synchronously(
         self, kill
     ) -> None:
@@ -1353,9 +1564,13 @@ class ProbeTests(unittest.TestCase):
         self.assertFalse(retryable("user@host: Permission denied (publickey)"))
         self.assertFalse(retryable("Host key verification failed."))
 
-    def test_bounded_process_survives_epipe_on_stdin_close(self) -> None:
+    def test_probe_stdin_deadline_early_exit(self) -> None:
         result = _run_bounded_process(
-            [sys.executable, "-c", "import os, sys; os.close(0); sys.exit(7)"],
+            [
+                sys.executable,
+                "-c",
+                "import os, sys; os.close(0); os.write(1,b'partial'); os.write(2,b'failed'); sys.exit(7)",
+            ],
             input_text="x" * 2_000_000,
             timeout_seconds=5,
             max_output_bytes=65_536,
@@ -1363,6 +1578,7 @@ class ProbeTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 7)
+        self.assertEqual((result.stdout, result.stderr), ("partial", "failed"))
 
     def test_active_process_registry_closes_wakeup_pipe(self) -> None:
         registry = _ActiveProcessRegistry()

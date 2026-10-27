@@ -1,0 +1,3 @@
+Filesystem Type 1024-blocks Used Available Capacity Mounted on
+/dev/sda1 ext4 51200 12800 38400 25% /
+archive:/training  data 2026   nfs4  102400 51200 51200 50% /mnt/training  data 2026

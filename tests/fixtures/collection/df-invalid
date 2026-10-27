@@ -1,0 +1,8 @@
+Filesystem Type 1024-blocks Used Available Capacity Mounted on
+/dev/sda1 ext4 51200 12800 38400 25% /
+fuse source fuse.gvfsd - 1 2 50% /mnt/bad total
+fuse source fuse.gvfsd 3 - 2 50% /mnt/bad used
+fuse source fuse.gvfsd 3 1 - 50% /mnt/bad free
+fuse source fuse.gvfsd 3 1 2 - /mnt/bad percent
+fuse source fuse.gvfsd 3 1 2 5x% /mnt/bad percent
+fuse source fuse.gvfsd 3 1 2 50%

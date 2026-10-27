@@ -193,13 +193,52 @@ def _proxy_command_route(
     except ValueError:
         tokens = []
     hops: list[str] = []
-    for token in tokens:
-        alias = _alias_from_destination(token, known_aliases)
+    for destination in _proxy_command_destinations(tokens):
+        alias = _alias_from_destination(destination, known_aliases)
         if alias is not None and alias != target and alias not in hops:
             hops.append(alias)
     if hops:
         return SshRoute("proxycommand", tuple(hops))
     return SshRoute("proxycommand", (_synthetic_proxy_alias(target, 0),), opaque=True)
+
+
+def _proxy_command_destinations(tokens: list[str]) -> list[str]:
+    """Infer only SSH destinations, never option values or remote commands."""
+    if tokens and tokens[0] == "exec":
+        tokens = tokens[1:]
+    if not tokens or tokens[0].rsplit("/", 1)[-1] != "ssh":
+        return []
+    destinations: list[str] = []
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if token == "--":
+            return destinations + tokens[index : index + 1]
+        if not token.startswith("-") or token == "-":
+            return destinations + [token]
+        for offset, option in enumerate(token[1:], 2):
+            if option in "BbcDEeFIiJLlmOoPpQRSWw":
+                argument = token[offset:]
+                if not argument:
+                    if index == len(tokens):
+                        return []
+                    argument = tokens[index]
+                    index += 1
+                if option == "J" and argument.strip().lower() not in _NONE_OPTIONS:
+                    destinations.extend(argument.split(","))
+                elif option == "o":
+                    jump = re.fullmatch(
+                        r"ProxyJump\s*(?:=\s*|\s+)(.+)", argument.strip(), re.I
+                    )
+                    if jump and jump.group(1).strip().lower() not in _NONE_OPTIONS:
+                        destinations.extend(jump.group(1).split(","))
+                break
+            if option not in "1246AaCfGgKkMNnqsTtVvXxYy":
+                # An unknown command grammar is opaque, not evidence that a
+                # subsequent argument is an infrastructure alias.
+                return []
+    return []
 
 
 class OpenSshRouteResolver:

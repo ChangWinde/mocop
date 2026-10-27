@@ -134,7 +134,9 @@ awk '
   FILENAME == "/proc/stat" {
     if ($1 == "cpu") {
       total=0
-      for (i=2; i<=NF; i++) total += $i
+      # guest and guest_nice are already included in user and nice. Ignore
+      # them and future columns; older kernels may omit the trailing fields.
+      for (i=2; i<=9 && i<=NF; i++) total += $i
       idle=$5+$6
     } else if ($1 ~ /^cpu[0-9]+$/) {
       cores++
@@ -171,15 +173,21 @@ awk '
 ' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/net/dev "$@" 2>/dev/null
 printf 'DISKS_BEGIN\n'
 df -PTk 2>/dev/null | awk '
-  # An overlay mounted at / is a container root with real backing storage, so
-  # it must be reported; overlay mounts elsewhere belong to containers running
-  # on a Docker host and are not this target'"'"'s capacity.
-  NR > 1 && ($2 !~ /^(tmpfs|devtmpfs|squashfs|overlay|proc|sysfs|cgroup2?|efivarfs|tracefs|debugfs|mqueue|fusectl|securityfs|pstore|configfs|autofs|binfmt_misc|ramfs|nsfs)$/ || ($2 == "overlay" && $7 == "/")) {
-    pct=$6; gsub(/%/, "", pct)
-    # Some FUSE backends report "-" instead of numbers; forwarding such a
-    # row would poison the whole sample, so emit only fully numeric rows.
-    if ($3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && pct ~ /^[0-9]+$/)
-      printf "DISK\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $5, pct, $7
+  NR > 1 {
+    # Locate the type and numeric columns without splitting the source or
+    # mount point: both can contain spaces, including repeated spaces.
+    if (!match($0, /[[:space:]]+[^[:space:]]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+%[[:space:]]+/)) next
+    source = substr($0, 1, RSTART - 1)
+    mountpoint = substr($0, RSTART + RLENGTH)
+    split(substr($0, RSTART, RLENGTH), columns, " ")
+    type = columns[1]
+    pct = columns[5]; sub(/%$/, "", pct)
+    if (source == "" || mountpoint == "") next
+    # An overlay mounted at / is a container root with real backing storage, so
+    # it must be reported; overlay mounts elsewhere belong to containers running
+    # on a Docker host and are not this target'"'"'s capacity.
+    if (type !~ /^(tmpfs|devtmpfs|squashfs|overlay|proc|sysfs|cgroup2?|efivarfs|tracefs|debugfs|mqueue|fusectl|securityfs|pstore|configfs|autofs|binfmt_misc|ramfs|nsfs)$/ || (type == "overlay" && mountpoint == "/"))
+      printf "DISK\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", source, type, columns[2], columns[3], columns[4], pct, mountpoint
   }
 '
 printf 'DISKS_END\n'
