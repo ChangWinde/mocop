@@ -110,6 +110,7 @@ interfaces without a runtime plugin registry.
 | `api_describe.py` | how the manifest is published through `GET /api/meta`: the meta document, field conventions, write requirements |
 | `web.py` | fixed HTTP routes, JSON/SSE delivery, bounded configuration controls |
 | `web_auth.py` | non-public request authentication: default Bearer validation or explicit direct access with trusted Host and Fetch Metadata checks |
+| `web_json.py` | strict UTF-8 JSON body decoding, rejecting duplicate keys and non-finite numbers before schema validation |
 | `client.py` | the local client behind `mocop api`: listener from the configuration, capability from the private file, public and authenticated GETs, and writer-tier POSTs presenting the listener's own origin |
 | `cli_arguments.py` | the `mocop` command line: every subcommand, flag, and help text, separate from the runtime that acts on them |
 | `cli_client_arguments.py` | the subcommands that talk to a running service, `api` and `brief`, and the listener/capability options they share |

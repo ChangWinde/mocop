@@ -57,6 +57,7 @@ from .static_assets import (
 )
 from .updates import UpdateStatusSource
 from .web_auth import authentication_error
+from .web_json import decode_json_body
 
 _SSE_HEARTBEAT_SECONDS = 15.0
 # SSE loops wake at this cadence to notice the server shutdown event.
@@ -93,19 +94,6 @@ def _allowed_methods_header(path: str) -> str:
     if "POST" in methods:
         allowed.append("POST")
     return ", ".join(allowed)
-
-
-def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    value: dict[str, object] = {}
-    for key, item in pairs:
-        if key in value:
-            raise ValueError("duplicate JSON key")
-        value[key] = item
-    return value
-
-
-def _reject_json_constant(_value: str) -> object:
-    raise ValueError("non-finite JSON number")
 
 
 class MonitorHttpServer(ThreadingHTTPServer):
@@ -371,6 +359,17 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             server.trusted_hostnames,
         )
         if error is None:
+            # Public routes return before authentication, so their arbitrary
+            # headers cannot change collection cadence. Only dashboard data
+            # reads that cleared this policy signal a viewer here.
+            if (
+                self.command in {"GET", "HEAD"}
+                and path.startswith("/api/")
+                and "GET" in ROUTE_METHODS.get(path, ())
+                and path != "/api/events"
+                and self._is_dashboard_read_request()
+            ):
+                server.state.record_dashboard_activity()
             return True
         self._send_json(error, HTTPStatus.FORBIDDEN)
         return False
@@ -429,11 +428,6 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 code="QUERY_NOT_ALLOWED",
             )
             return
-        # Any authenticated dashboard-marked read (snapshot polling included)
-        # is a live viewer; the event stream marks presence separately because
-        # EventSource cannot attach the marker header.
-        if self.headers.get("X-Monitor-Request") == "dashboard":
-            self.monitor_server.state.record_dashboard_activity()
         if path == "/api/snapshot":
             snapshot = self._read_only_snapshot()
             self._send_json_payload(self.monitor_server.snapshot_payload(snapshot))
@@ -613,11 +607,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 timer.join()
             if len(body) != content_length:
                 return
-            payload = json.loads(
-                body.decode("utf-8"),
-                object_pairs_hook=_unique_json_object,
-                parse_constant=_reject_json_constant,
-            )
+            payload = decode_json_body(body)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             self._send_error(
                 "invalid JSON body", HTTPStatus.BAD_REQUEST, code="INVALID_JSON"
