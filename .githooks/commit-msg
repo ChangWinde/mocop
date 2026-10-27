@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
 
-repository_root=$(git rev-parse --show-toplevel)
-exec python3 "$repository_root/.github/scripts/check_commit_message.py" "$1"
+# Git runs hooks from the top of the working tree, so the script path is
+# static; hook managers refuse interpreters started on runtime-derived paths.
+exec python3 .github/scripts/check_commit_message.py "$1"

@@ -38,9 +38,9 @@ first saves a failed run.
 Run the gate list from `CONTRIBUTING.md`: `unittest`, branch coverage at or
 above 85 %, `ruff check` and `ruff format --check`, `node --check` on every
 leaf, every `tests/*_test.mjs`, and the browser smoke journey. Commit
-subjects are `[scope/op]: imperative summary`, at most 72 characters, with
-`op` from the list in `CONTRIBUTING.md`; the `commit-msg` hook and CI both
-enforce it. Record every user-visible change under `[Unreleased]` in
+subjects are Conventional Commits, `type(scope): imperative summary`, at most
+72 characters, with the type list in `CONTRIBUTING.md`; the `commit-msg` hook
+and CI both enforce it. Record every user-visible change under `[Unreleased]` in
 `docs/CHANGELOG.md`.
 
 ## Boundaries that must hold
