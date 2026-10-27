@@ -27,7 +27,9 @@ def filter_gpu_points(
     )
 
 
-def prune_gpu(connection: sqlite3.Connection, cutoff: str) -> None:
+def prune_gpu(
+    connection: sqlite3.Connection, cutoff: str, *, busy_metadata: bool = True
+) -> None:
     # Preserve maxima from expired samples; retained samples remain replaceable.
     maxima = connection.execute(
         """
@@ -41,7 +43,10 @@ def prune_gpu(connection: sqlite3.Connection, cutoff: str) -> None:
     # Delete first so archiving can reuse pages even at max_page_count.
     # Both steps commit together; a failure restores the raw rows too.
     connection.execute("DELETE FROM gpu_history WHERE observed_at < ?", (cutoff,))
-    connection.execute("DELETE FROM gpu_rollup_busy WHERE observed_at < ?", (cutoff,))
+    if busy_metadata:
+        connection.execute(
+            "DELETE FROM gpu_rollup_busy WHERE observed_at < ?", (cutoff,)
+        )
     connection.executemany(
         """
         INSERT INTO gpu_retired_memory VALUES (?, ?, ?, ?)

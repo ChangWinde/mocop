@@ -53,3 +53,6 @@ writer and serialization line ceilings. Schema migration still dispatches from
 `persistence.py`; companion DDL remains in `persistence_schema.py`.
 Resolved markers consume one retained transition per closed condition until a
 later generation replaces that marker. The configured size cap remains enforced.
+
+[ADR-0033](0033-optional-persistence-indexes.md) refines index-failure handling
+and preserves existing metadata during a deferred index upgrade.

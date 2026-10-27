@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import sqlite3
@@ -22,14 +23,15 @@ from .persistence_criteria import CriteriaCache
 from .persistence_gpu import gpu_cutoff, prune_gpu
 from .persistence_incidents import prune_incidents
 from .persistence_restore import LoadedTelemetry, restore_telemetry
-from .persistence_retention import bootstrap_gpu_retention
+from .persistence_retention import bootstrap_gpu_retention, companion_tables
 from .persistence_rollups import (
     ensure_rollups,
     load_report_inputs,
     prune_rollups,
 )
 from .persistence_schema import (
-    COMPANION_STATEMENTS,
+    COMPANION_INDEX_STATEMENTS,
+    COMPANION_TABLE_STATEMENTS,
     CREATE_SCHEMA_STATEMENTS,
     GPU_TABLE_STATEMENTS,
     LEGACY_MEMORY_BASELINE,
@@ -272,13 +274,7 @@ class SqliteTelemetryPersistence:
                         self._migrate_v2(connection)
                     elif version == 3:
                         self._migrate_v3(connection)
-                    self._companions_enabled = (
-                        connection.execute(
-                            "SELECT count(*) FROM sqlite_master WHERE name IN "
-                            "('incident_criteria', 'gpu_retention', 'gpu_rollup_busy', 'gpu_retired_memory')"
-                        ).fetchone()[0]
-                        == 4
-                    )
+                    self._companions_enabled = len(companion_tables(connection)) == 4
                     cutoff = self._prune(connection, reclaim_pages=0)
                 # Pages the prune (or a long downtime's worth of expiry) left on
                 # the freelist go back before the cap is compared, so a lowered
@@ -408,7 +404,7 @@ class SqliteTelemetryPersistence:
                 had_memory = connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE name = 'gpu_retired_memory'"
                 ).fetchone()
-                for statement in COMPANION_STATEMENTS:
+                for statement in COMPANION_TABLE_STATEMENTS:
                     connection.execute(statement)
                 if (
                     not had_memory
@@ -422,7 +418,17 @@ class SqliteTelemetryPersistence:
         except sqlite3.OperationalError as exc:
             if not _is_size_error(exc):
                 raise
-            return False
+            return len(companion_tables(connection)) == 4
+        for statement in COMPANION_INDEX_STATEMENTS:
+            try:
+                with connection:
+                    connection.execute(statement)
+            except sqlite3.Error as exc:
+                logging.getLogger(__name__).warning(
+                    "history index unavailable (%s); retry at next startup: %s",
+                    statement,
+                    exc,
+                )
         return True
 
     def _connect(self) -> sqlite3.Connection:

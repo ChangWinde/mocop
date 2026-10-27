@@ -6,6 +6,10 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Failed SQLite index creation now logs a warning while existing metadata tables
+  stay in use. Retention preserves expired GPU memory maxima at the size cap,
+  so replacement after a restart cannot lower the hourly maximum incorrectly.
+
 - Unchanged incident criteria now skip SQLite work in the writer's committed
   cache. Startup adds a host/condition index to existing databases so restored
   and changed criteria avoid scanning retained transitions at fleet scale.

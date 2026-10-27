@@ -108,21 +108,24 @@ GPU_RETENTION_STATEMENT = (
     "CREATE TABLE IF NOT EXISTS gpu_retention ("
     "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), cutoff TEXT NOT NULL)"
 )
-COMPANION_STATEMENTS = (
-    "CREATE INDEX IF NOT EXISTS incident_events_condition "
-    "ON incident_events(host, condition_key)",
+COMPANION_TABLE_STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS incident_criteria ("
     "event_id INTEGER PRIMARY KEY, critical_at REAL)",
     GPU_RETENTION_STATEMENT,
     "CREATE TABLE IF NOT EXISTS gpu_rollup_busy ("
     "host TEXT NOT NULL, gpu_id TEXT NOT NULL, observed_at TEXT NOT NULL,"
     "busy INTEGER NOT NULL, PRIMARY KEY(host, gpu_id, observed_at)) WITHOUT ROWID",
-    "CREATE INDEX IF NOT EXISTS gpu_rollup_busy_observed_at ON gpu_rollup_busy(observed_at)",
     "CREATE TABLE IF NOT EXISTS gpu_retired_memory ("
     "host TEXT NOT NULL, gpu_id TEXT NOT NULL, hour TEXT NOT NULL,"
     "memory_total_max REAL, PRIMARY KEY(host, gpu_id, hour)) WITHOUT ROWID",
+)
+COMPANION_INDEX_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS incident_events_condition "
+    "ON incident_events(host, condition_key)",
+    "CREATE INDEX IF NOT EXISTS gpu_rollup_busy_observed_at ON gpu_rollup_busy(observed_at)",
     "CREATE INDEX IF NOT EXISTS gpu_retired_memory_hour ON gpu_retired_memory(hour)",
 )
+COMPANION_STATEMENTS = COMPANION_TABLE_STATEMENTS + COMPANION_INDEX_STATEMENTS
 LEGACY_MEMORY_BASELINE = """
     INSERT OR IGNORE INTO gpu_retired_memory
     SELECT host, gpu_id, hour, memory_total_max FROM gpu_hourly

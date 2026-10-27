@@ -91,14 +91,14 @@ interfaces without a runtime plugin registry.
 | `persistence_rollups.py` | the hourly GPU rollup table: creation after the size cap, backfill, upserts, retention, and the reads behind the reports |
 | `persistence_transitions.py` | persisted process transitions: hidden rows, the first-observation sidecar, and emission order |
 | `persistence_restore.py` | restore of the retained window per host and device, and of the incidents open at shutdown |
-| `persistence_schema.py` | the history database's DDL and additive metadata companions |
+| `persistence_schema.py` | the history database's DDL, required metadata tables, and optional companion indexes |
 | `persistence_validation.py` | stored column type contracts and row validity filters |
 | `persistence_incidents.py` | transition decoding, legacy critical thresholds, and generation-preserving retention |
 | `persistence_gpu.py` | raw GPU replacement, rollup contribution deltas, expired memory maxima, and the durable retention cutoff |
 | `persistence_writes.py` | transactional record serialization |
 | `persistence_records.py` | immutable queue payloads, including incident state bundles |
 | `persistence_incident_state.py` | confirmed criterion snapshots under the store lock and coalesced SQLite updates |
-| `persistence_retention.py` | atomic legacy GPU cutoff initialization and expiry |
+| `persistence_retention.py` | companion-table presence and atomic legacy GPU cutoff initialization, memory archiving, and expiry |
 | `persistence_space.py` | bounded SQLite page reclaim and startup rebuilding |
 | `notifications.py` | webhook endpoint validation, deduplication, throttling, pairing, and retry policy |
 | `webhook_transport.py` | one bounded HTTPS delivery attempt: pinned DNS, SSRF guards, response bound |

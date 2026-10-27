@@ -131,6 +131,9 @@ criterion and skips unchanged updates in memory. Changed criteria commit once;
 failed batches leave the cache unchanged so the next sample can retry.
 Startup adds an index on incident host and condition to existing databases;
 restored conditions use that index to load their cached criterion on first use.
+Companion indexes are optional at startup. If an index cannot be created,
+Mocop logs a warning and retries at the next startup. Existing metadata tables
+stay in use, including memory archives and hourly reports.
 Retention keeps each condition's latest transition by `event_id` sequence,
 including resolutions, and the opening of every still-open generation.
 A resolution marker survives even when its timestamp predates an escalation,
@@ -168,8 +171,10 @@ rejected and counted until a later restart can create it after space is freed.
 The persistence status reports that rollups are waiting for retention space.
 GPU sample writes also fail when hourly rollups are unavailable, so replacements
 cannot change raw rows without updating their aggregate contributions.
-Retention deletes expired raw rows before archiving their memory maxima in the
-same transaction, allowing archive metadata to reuse pages at the size cap.
+Retention captures expired memory maxima and commits their archive with raw
+deletion, even when only some companion tables exist. It can delete raw rows
+before inserting the archive so the archive can reuse pages at the size cap.
+An archive failure rolls back raw deletion and the expiry cutoff together.
 
 `flush()` waits for preceding queue items and returns false for any lost write
 since the previous completed flush, including a loss completed before the call.
