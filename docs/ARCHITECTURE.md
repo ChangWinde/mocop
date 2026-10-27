@@ -93,7 +93,11 @@ interfaces without a runtime plugin registry.
 | `persistence_validation.py` | stored column type contracts and row validity filters |
 | `persistence_incidents.py` | transition decoding, legacy critical thresholds, and generation-preserving retention |
 | `persistence_gpu.py` | raw GPU replacement, rollup contribution deltas, expired memory maxima, and the durable retention cutoff |
-| `persistence_writes.py` | immutable queue payloads and transactional record writes |
+| `persistence_writes.py` | transactional record serialization |
+| `persistence_records.py` | immutable queue payloads, including incident state bundles |
+| `persistence_incident_state.py` | confirmed criterion snapshots under the store lock and coalesced SQLite updates |
+| `persistence_retention.py` | atomic legacy GPU cutoff initialization and expiry |
+| `persistence_space.py` | bounded SQLite page reclaim and startup rebuilding |
 | `notifications.py` | webhook endpoint validation, deduplication, throttling, pairing, and retry policy |
 | `webhook_transport.py` | one bounded HTTPS delivery attempt: pinned DNS, SSRF guards, response bound |
 | `updates.py` | opt-in release polling, verified wheel-only self-update, restart gating |
@@ -236,11 +240,15 @@ under the same rules as any later sample. No duplicate `opened` is emitted, boun
 actions keep applying, and webhook workers are primed so the eventual `resolved`
 of a restored condition pairs with the `opened` an earlier process delivered.
 Persistence keeps the opening and latest transitions of each open generation
-through retention. Numeric critical thresholds travel with transitions in an
-additive metadata table; legacy thresholds and durability reporting are described
+through retention. It also keeps the latest resolved transition as a sequence
+marker, regardless of wall-clock order. Numeric critical thresholds travel with
+transitions and criterion-only updates in an additive metadata table; legacy
+thresholds and durability reporting are described
 in [Operations](OPERATIONS.md#history-continuity-and-durability).
 [ADR-0031](adr/0031-compatible-persistence-metadata.md) records the additive
 metadata and compatibility choice.
+[ADR-0032](adr/0032-incident-criteria-and-expiry-order.md) extends it for
+criterion-only updates and atomic expiry ordering.
 
 Without persistence, active conditions are rebuilt from live post-start probes,
 and a durable generation-bound action gets one startup rebinding opportunity for

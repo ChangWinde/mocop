@@ -29,6 +29,13 @@ class TelemetryPersistence(Protocol):
 
     def record_incidents(self, events: tuple[IncidentEvent, ...]) -> None: ...
 
+    def record_incident_state(
+        self,
+        host: str,
+        events: tuple[IncidentEvent, ...],
+        criteria: tuple[tuple[str, float | None], ...],
+    ) -> None: ...
+
     def record_gpu_telemetry(
         self,
         host: str,
@@ -58,6 +65,14 @@ class DisabledPersistence:
 
     def record_incidents(self, events: tuple[IncidentEvent, ...]) -> None:
         del events
+
+    def record_incident_state(
+        self,
+        host: str,
+        events: tuple[IncidentEvent, ...],
+        criteria: tuple[tuple[str, float | None], ...],
+    ) -> None:
+        del host, events, criteria
 
     def record_gpu_telemetry(
         self,

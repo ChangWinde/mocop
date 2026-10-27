@@ -410,10 +410,16 @@ class PersistenceRegressionTests(unittest.TestCase):
         self.assertTrue(store.flush())
         self.prune_at(store, self.now)
         self.assertEqual(store.load(20, 20).open_incidents, ())
-        self.assertEqual(store.load(20, 20).incident_events, ())
+        self.assertEqual(
+            [
+                (event.event_id, event.state)
+                for event in store.load(20, 20).incident_events
+            ],
+            [(5, "resolved")],
+        )
         with closing(sqlite3.connect(self.path)) as conn:
             self.assertEqual(
-                conn.execute("SELECT count(*) FROM incident_criteria").fetchone()[0], 0
+                conn.execute("SELECT count(*) FROM incident_criteria").fetchone()[0], 1
             )
 
     def gated_writer(self, *, fail: bool = False):

@@ -104,11 +104,14 @@ CREATE_SCHEMA_STATEMENTS = (
 ) + GPU_TABLE_STATEMENTS
 
 # Additive companions preserve the released positional INSERT contracts.
+GPU_RETENTION_STATEMENT = (
+    "CREATE TABLE IF NOT EXISTS gpu_retention ("
+    "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), cutoff TEXT NOT NULL)"
+)
 COMPANION_STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS incident_criteria ("
     "event_id INTEGER PRIMARY KEY, critical_at REAL)",
-    "CREATE TABLE IF NOT EXISTS gpu_retention ("
-    "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), cutoff TEXT NOT NULL)",
+    GPU_RETENTION_STATEMENT,
     "CREATE TABLE IF NOT EXISTS gpu_rollup_busy ("
     "host TEXT NOT NULL, gpu_id TEXT NOT NULL, observed_at TEXT NOT NULL,"
     "busy INTEGER NOT NULL, PRIMARY KEY(host, gpu_id, observed_at)) WITHOUT ROWID",

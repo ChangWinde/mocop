@@ -20,6 +20,7 @@ from .persistence_api import (
 from .persistence_gpu import filter_gpu_points, gpu_cutoff, prune_gpu
 from .persistence_incidents import prune_incidents
 from .persistence_restore import LoadedTelemetry, restore_telemetry
+from .persistence_retention import bootstrap_gpu_retention
 from .persistence_rollups import (
     ensure_rollups,
     load_report_inputs,
@@ -32,9 +33,16 @@ from .persistence_schema import (
     LEGACY_MEMORY_BASELINE,
     SCHEMA_VERSION,
 )
+from .persistence_space import (
+    _VACUUM_PAGES_PER_PRUNE,
+    _free_pages,
+    _rebuild_file,
+    _reclaim_free_pages,
+)
 from .persistence_writes import (
     _GpuTelemetryWrite,
     _HistoryWrite,
+    _IncidentStateWrite,
     _IncidentWrite,
     _Write,
     _write,
@@ -48,61 +56,7 @@ from .reports import ReportInputs
 _QUEUE_CAPACITY = 4096
 _WRITE_BATCH_SIZE = 128
 _PRUNE_INTERVAL_SECONDS = 60.0
-# Steady-state retention frees a few dozen pages a minute. The online reclaim
-# after each prune is bounded in pages (8 MiB at the 4 KiB page size) and in
-# pragma calls, so the writer's transaction stays short on every interpreter;
-# a backlog left by a long downtime or a lowered cap is rebuilt away at startup.
-_VACUUM_PAGES_PER_PRUNE = 2048
-_VACUUM_CHUNK_PAGES = 1024
-_VACUUM_CALLS_PER_PRUNE = 64
 _SQLITE_FULL_ERRORCODE = 13  # sqlite3.SQLITE_FULL is unavailable on Python 3.10
-
-
-def _free_pages(connection: sqlite3.Connection) -> int:
-    return int(connection.execute("PRAGMA freelist_count").fetchone()[0])
-
-
-def _reclaim_free_pages(connection: sqlite3.Connection, page_budget: int) -> int:
-    """Return up to ``page_budget`` freed pages to the filesystem online.
-
-    ``PRAGMA incremental_vacuum`` releases pages as its statement is stepped,
-    one per step, so a bare ``execute()`` reclaims a single page and the file
-    keeps its high-water mark forever. Exhausting the cursor frees the rest on
-    most interpreters, but CPython 3.11's ``sqlite3`` yields no rows for the
-    pragma and still frees one page per call, so progress is measured on
-    ``freelist_count`` and the call count is bounded: a large backlog is not
-    this path's job (startup rebuilds the file instead), keeping up with the
-    few dozen pages a minute that retention frees is.
-    """
-    reclaimed = 0
-    for _call in range(_VACUUM_CALLS_PER_PRUNE):
-        before = _free_pages(connection)
-        chunk = min(before, page_budget - reclaimed, _VACUUM_CHUNK_PAGES)
-        if chunk <= 0:
-            break
-        for _row in connection.execute(f"PRAGMA incremental_vacuum({chunk})"):
-            pass
-        freed = before - _free_pages(connection)
-        if freed <= 0:
-            break
-        reclaimed += freed
-    return reclaimed
-
-
-def _rebuild_file(connection: sqlite3.Connection) -> None:
-    """Return every free page at startup, preferring a one-statement rebuild.
-
-    ``VACUUM`` needs temporary space up to the file's size; on a full disk or
-    a file another process holds it fails without touching the database, so
-    the online reclaim runs instead and the cap check judges what remains.
-    A refusal to start would take collection and the dashboard down over a
-    condition the persistence status already reports.
-    """
-    try:
-        connection.execute("VACUUM")
-    except sqlite3.OperationalError:
-        with connection:
-            _reclaim_free_pages(connection, _VACUUM_PAGES_PER_PRUNE)
 
 
 def _is_size_error(exc: sqlite3.Error) -> bool:
@@ -190,6 +144,15 @@ class SqliteTelemetryPersistence:
     def record_incidents(self, events: tuple[IncidentEvent, ...]) -> None:
         for event in events:
             self._enqueue(_IncidentWrite(event))
+
+    def record_incident_state(
+        self,
+        host: str,
+        events: tuple[IncidentEvent, ...],
+        criteria: tuple[tuple[str, float | None], ...],
+    ) -> None:
+        if events or criteria:
+            self._enqueue(_IncidentStateWrite(host, events, criteria))
 
     def record_gpu_telemetry(
         self,
@@ -313,7 +276,7 @@ class SqliteTelemetryPersistence:
                         ).fetchone()[0]
                         == 4
                     )
-                    self._prune(connection, reclaim_pages=0)
+                    cutoff = self._prune(connection, reclaim_pages=0)
                 # Pages the prune (or a long downtime's worth of expiry) left on
                 # the freelist go back before the cap is compared, so a lowered
                 # max_bytes judges the live data rather than the file's old
@@ -335,7 +298,7 @@ class SqliteTelemetryPersistence:
                             "history database exceeds the configured size limit"
                         )
                     self._apply_size_limit(connection)
-                self._companions_enabled = self._migrate_companions(connection)
+                self._companions_enabled = self._migrate_companions(connection, cutoff)
                 rollup_error = (
                     ensure_rollups(connection, self._busy_pct)
                     if self._companions_enabled
@@ -432,7 +395,9 @@ class SqliteTelemetryPersistence:
         connection.execute("COMMIT")
 
     @staticmethod
-    def _migrate_companions(connection: sqlite3.Connection) -> bool:
+    def _migrate_companions(
+        connection: sqlite3.Connection, cutoff: str | None = None
+    ) -> bool:
         """Add metadata atomically under the cap; retry after retention frees space."""
         try:
             with connection:
@@ -449,6 +414,8 @@ class SqliteTelemetryPersistence:
                     ).fetchone()
                 ):
                     connection.execute(LEGACY_MEMORY_BASELINE)
+                if cutoff is not None:
+                    prune_gpu(connection, gpu_cutoff(connection, cutoff))
         except sqlite3.OperationalError as exc:
             if not _is_size_error(exc):
                 raise
@@ -558,7 +525,10 @@ class SqliteTelemetryPersistence:
                 dropped_writes = 0
                 with connection:
                     if not self._companions_enabled and any(
-                        isinstance(item, _GpuTelemetryWrite | _IncidentWrite)
+                        isinstance(
+                            item,
+                            _GpuTelemetryWrite | _IncidentWrite | _IncidentStateWrite,
+                        )
                         for item in writes
                     ):
                         raise sqlite3.OperationalError(
@@ -629,7 +599,7 @@ class SqliteTelemetryPersistence:
         connection: sqlite3.Connection,
         *,
         reclaim_pages: int = _VACUUM_PAGES_PER_PRUNE,
-    ) -> None:
+    ) -> str:
         cutoff = datetime.now(timezone.utc) - timedelta(
             hours=self._config.retention_hours
         )
@@ -639,9 +609,7 @@ class SqliteTelemetryPersistence:
         if self._companions_enabled:
             prune_gpu(connection, gpu_cutoff(connection, cutoff_text))
         else:
-            connection.execute(
-                "DELETE FROM gpu_history WHERE observed_at < ?", (cutoff_text,)
-            )
+            bootstrap_gpu_retention(connection, cutoff_text, self._config.max_bytes)
         connection.execute(
             "DELETE FROM process_events WHERE observed_at < ?", (cutoff_text,)
         )
@@ -649,6 +617,7 @@ class SqliteTelemetryPersistence:
             prune_rollups(connection, self._config.retention_hours)
         if reclaim_pages > 0:
             _reclaim_free_pages(connection, reclaim_pages)
+        return cutoff_text
 
     def _set_error(self, message: str) -> None:
         with self._status_lock:

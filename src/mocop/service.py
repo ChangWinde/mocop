@@ -40,6 +40,7 @@ from .maintenance import MaintenanceWindowConfig
 from .models import GpuProcess, ProbeResult, ServerState, utc_after, utc_now
 from .notifications import DisabledNotificationSink, IncidentNotificationSink
 from .persistence_api import DisabledPersistence, TelemetryPersistence
+from .persistence_incident_state import persist_incidents
 from .persistence_restore import LoadedTelemetry
 from .probe import (
     AttendedAwareResourceProbe,
@@ -578,6 +579,7 @@ class StateStore:
                 return False
             previous_incident_signature = self._incidents.active_signature(result.host)
             incident_events = self._incidents.update(result)
+            persist_incidents(self, result.host, incident_events)
             self._refresh_startup_action_bindings_locked(result)
             self._sync_tracker_revision_locked()
             if (
@@ -660,8 +662,6 @@ class StateStore:
             self._publish_locked()
         if history_point is not None and self._persistence_enabled:
             self._persistence.record_history(result.host, history_point.to_dict())
-        if self._persistence_enabled and incident_events:
-            self._persistence.record_incidents(incident_events)
         if self._persistence_enabled and (gpu_history_points or process_events):
             self._persistence.record_gpu_telemetry(
                 result.host,

@@ -125,8 +125,12 @@ against the only copy of production state.
 
 Persistence restores an open incident's generation, `firstObservedAt`, severity,
 and numeric `critical_at` threshold. The threshold is the critical line crossed
-by the reading, not a timestamp. Retention keeps that generation's opening and
-latest transitions until it resolves. Recovery and pending severity counters reset
+by the reading, not a timestamp. Criterion changes without severity transitions
+also reach persistence; unchanged criteria are coalesced in SQLite.
+Retention keeps each condition's latest transition by `event_id` sequence,
+including resolutions, and the opening of every still-open generation.
+A resolution marker survives even when its timestamp predates an escalation,
+so a clock rollback cannot resurrect a closed incident. Recovery and pending severity counters reset
 at restart, as [ADR-0027](adr/0027-restored-incident-generations.md) specifies.
 
 Legacy transitions without `critical_at` use their condition's numeric policy
@@ -149,7 +153,12 @@ contributions in the same hour still replace normally. Upgrade does not repair
 historical double counts. Legacy memory maxima remain a historical floor.
 
 Additive metadata tables keep the released v3 positional table layouts intact.
-Migration runs atomically under `max_bytes`. A legacy database already at the cap
+Legacy startup creates and initializes the GPU retention cutoff before expiring
+raw GPU rows, in the same transaction. If the cutoff metadata cannot fit, it
+keeps those raw rows; later companion creation initializes the cutoff and expires
+them together before admitting writes.
+Migration commits only when retained data fits `max_bytes`.
+A legacy database already at the cap
 can still restore history; if metadata cannot fit, incident and GPU writes are
 rejected and counted until a later restart can create it after space is freed.
 The persistence status reports that rollups are waiting for retention space.

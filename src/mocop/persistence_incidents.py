@@ -37,7 +37,7 @@ def prune_incidents(
             SELECT latest.* FROM latest JOIN incident_events e ON e.event_id = id
             WHERE e.state != 'resolved'
         ), protected AS (
-            SELECT id FROM active
+            SELECT id FROM latest
             UNION
             SELECT max(e.event_id) FROM incident_events e JOIN active a
               ON e.host = a.host AND e.condition_key = a.condition_key

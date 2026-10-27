@@ -143,7 +143,8 @@ def restore_telemetry(
         (incident_points,),
     ).fetchall()
     # Which conditions were open at shutdown is decided by each
-    # condition's latest transition over the whole retained
+    # condition's latest transition by event_id (sequence), never wall-clock
+    # order, over the whole retained
     # table, not the event window above: a disk that has been
     # full for a week must not reopen because gpu_memory churn
     # pushed its opened event out of the window.

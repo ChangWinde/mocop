@@ -5,37 +5,22 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
 
-from .incident_types import IncidentEvent
 from .persistence_gpu import write_gpu_points
+from .persistence_incident_state import write_criteria
+from .persistence_records import (
+    _GpuTelemetryWrite,
+    _HistoryWrite,
+    _IncidentStateWrite,
+    _IncidentWrite,
+    _Write,
+)
 from .persistence_schema import HISTORY_FIELDS
 from .persistence_transitions import (
     FIRST_SEEN_KEY,
     INTERNAL_USAGE_HOST,
     INTERNAL_USAGE_KEY,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _HistoryWrite:
-    host: str
-    point: dict[str, object]
-
-
-@dataclass(frozen=True, slots=True)
-class _IncidentWrite:
-    event: IncidentEvent
-
-
-@dataclass(frozen=True, slots=True)
-class _GpuTelemetryWrite:
-    host: str
-    points: tuple[dict[str, object], ...]
-    process_events: tuple[dict[str, object], ...]
-
-
-_Write = _HistoryWrite | _IncidentWrite | _GpuTelemetryWrite
 
 
 def _write(connection: sqlite3.Connection, item: _Write, busy_pct: float | None) -> int:
@@ -58,6 +43,12 @@ def _write(connection: sqlite3.Connection, item: _Write, busy_pct: float | None)
 
     if isinstance(item, _GpuTelemetryWrite):
         return _write_gpu_telemetry(connection, item, busy_pct)
+
+    if isinstance(item, _IncidentStateWrite):
+        records = sum(
+            _write(connection, _IncidentWrite(event), busy_pct) for event in item.events
+        )
+        return records + write_criteria(connection, item.host, item.criteria)
 
     assert isinstance(item, _IncidentWrite)
     event = item.event

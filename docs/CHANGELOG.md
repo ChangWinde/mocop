@@ -6,6 +6,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Critical incident criteria now persist when the threshold changes without a
+  severity transition. Legacy startup records the GPU expiry cutoff atomically
+  with raw expiry, preventing re-admission after a clock rollback. Retention
+  preserves resolved sequence markers so expired resolutions cannot resurrect
+  earlier critical transitions.
+
 - SQLite history now preserves critical incident thresholds and open generations
   through restart and retention. Legacy critical transitions restore their
   condition's numeric policy line; recovery counters still reset.
