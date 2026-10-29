@@ -196,6 +196,7 @@ def overview(jobs, now=None):
             "cards": sum(j["gpu_count"] for j in known),
             "unknown_card_jobs": len(rows) - len(known),
             "models": models,
+            "cached_spec_jobs": sum(j.get("gpu_spec_stale") is True for j in known),
         }
 
     states = {

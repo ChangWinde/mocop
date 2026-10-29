@@ -1671,7 +1671,9 @@ path, containing filesystem total, available space, and the directory scan size.
 A parent with child mounts has no combined capacity; child mount paths have
 separate rows. Completed children of an incomplete scan provide only a lower
 bound, marked `≥`. Shared directory sizes describe all accessible contents of
-the configured path, not exclusive ownership. Scan details start collapsed.
+the configured path, not exclusive ownership. Each server table and its scan details start collapsed. A user-opened server
+remains expanded when the cache view refreshes. The UI labels directory sizes
+“我占用的”; shared paths still account for their accessible contents.
 
 ### GET /api/training-jobs
 
@@ -1699,8 +1701,15 @@ are counted for 24 hours (`startup_failure_window_hours`); active ledger failure
 remain visible until resolved. Failed requests never contribute to active cards.
 Unknown specifications are not inferred from
 job names, cloud vendors, metric series or replica counts. An optional Mac
-browser bridge joins authorized webpage metadata by exact vendor/job ID and
-expires it after ten minutes; credentials remain in the logged-in browser.
+browser bridge joins authorized webpage metadata by exact vendor/job ID. Saved
+GPU request specifications remain reusable for jobs still returned by the
+owner-authorized API list; closing the tab does not erase these previously read
+requests. `gpu_spec_stale` marks specifications older than ten minutes and
+`spec_sampled_at` records their original reading time. Fresh API specifications
+take precedence. Browser execution states expire after two minutes and timing
+after ten minutes; saved specifications never extend those observations. A new
+job without an observed specification remains unknown. Credentials remain in
+the logged-in browser.
 
 `gpu_utilization` contains `pct`, `sampled_at`, coverage and individual
 observations. Provider `GpuUsage` is a mean per replica, not a per-device sample;

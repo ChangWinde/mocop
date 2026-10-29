@@ -428,7 +428,11 @@ Events. The helper compiles a small reader with the system Swift SDK, returns
 only job ID, vendor, GPU requests and timing, and writes private
 `~/.local/state/mocop/training-browser.json`. It never exports cookies or login
 tokens. Without that browser permission or after the tab/session closes, the
-bridge reports unavailable and its metadata expires after ten minutes. The
+bridge reports unavailable. Previously read GPU request specifications remain
+available for jobs still authorized by the personal API, with their original
+reading time and an explicit saved-specification label. New jobs need an initial
+webpage observation. Browser status expires after two minutes; runtime timing
+expires after ten minutes. The
 bridge opts out of the platform client's automatic authentication redirect,
 so an unsuccessful background read does not clear the browser login state.
 Stable Chrome window/tab IDs keep reads attached to the same tab after focus changes.

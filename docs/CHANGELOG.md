@@ -27,6 +27,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Preserve previously read GPU request specifications when the platform browser
+  tab closes; expire live browser status and timing separately. Unknown card
+  totals show a pending state instead of a misleading zero-plus count.
+- Label configured-directory sizes “我占用的” and collapse each server storage
+  table by default, preserving manual expansion across cache refreshes.
+
 - Public requests with the dashboard marker no longer enable attended collection.
 - Webhooks withdrawn after acknowledgement or silencing now count as suppressed
   deliveries, preserving the dropped count and last delivery error.

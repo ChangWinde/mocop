@@ -482,8 +482,8 @@ classifies execution phases using explicit ledger/browser states and fresh,
 complete replicas; mixed states and failures stay out of running totals.
 `training_insights.py`
 projects utilization, requested-card totals, personal billing and non-additive
-candidate capacity. `training_browser.py` joins fresh whitelisted webpage
-metadata; the optional Mac capture helper never returns a browser credential.
+candidate capacity. `training_browser.py` joins saved GPU request specifications by authorized job
+identity while separately expiring status and timing observations; the optional Mac capture helper never returns a browser credential.
 `training_overview.js` renders compact summaries and capacity, and
 `training_summary.js` owns the task list. `dashboard_startup.js` keeps startup
 prompt/control wiring outside the app module's line budget.

@@ -26,12 +26,13 @@ class Element {
 }
 globalThis.document={createElement:tag=>new Element(tag)};
 const container=new Element("div");render({servers:[server]},container);
-assert.match(container.text,/完整目录路径.*总容量.*剩余容量.*目录占用/);
+assert.match(container.text,/完整目录路径.*总容量.*剩余容量.*我占用的/);
 assert.match(container.text,/\/mnt\/archive\/share/);
 assert.match(container.text,/额度未知/);
 assert.doesNotMatch(container.text,/256\.00 TiB/);
 const find=(e,tag)=>e.tag===tag?[e]:e.children.flatMap(c=>find(c,tag));
-assert.equal(find(container,"details").some(e=>e.open),false,"diagnostics must start collapsed");
+assert.equal(find(container,"details").some(e=>e.open),false,"server rows and diagnostics must start collapsed");
+assert.equal(find(container,"details").filter(e=>e.className === "sa-card").length,1,"each server must be a collapsed details row");
 assert.equal(find(container,"table").length,1);
 assert.equal(find(container,"tbody")[0].children.length,4);
 console.log("Storage analysis contracts passed");

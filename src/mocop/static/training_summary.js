@@ -11,7 +11,7 @@
     return executionStatus(job) === "STARTUP_FAILED" && (!TERMINAL.has(job.status) || (numeric(at) && now-at >= 0 && now-at <= 86400000));
   };
   const gpuSummary = job => {
-    if (Number.isInteger(job.gpu_count) && job.gpu_count >= 0) return { text: `${job.gpu_count} 张`, note: `${job.gpu_model || "平台规格"}${job.gpu_count_source === "browser" ? " · 网页观测" : ""}` };
+    if (Number.isInteger(job.gpu_count) && job.gpu_count >= 0) return { text: `${job.gpu_count} 张`, note: `${job.gpu_model || "平台规格"}${job.gpu_spec_stale ? " · 已保存规格" : job.gpu_count_source === "browser" ? " · 网页观测" : ""}` };
     const sample = job.metrics_status === 200 && job.metrics?.source === "stored" ? latest(job.metrics.samples) : null;
     return sample?.gpus?.length ? { text: `${sample.gpus.length} 张`, note: "观测 / 副本" } : { text: "未提供", note: job.gpu_model || "规格未知" };
   };
@@ -99,7 +99,9 @@
       button.setAttribute("aria-label", `查看 ${job.name || job.job_id} 的详情与日志`);
       button.addEventListener("click", () => openDetail(job)); action.append(button);
       const metricCell = cell("tj-observation", metrics.text, metrics.note); metricCell.title = metrics.title;
-      row.append(name, status, cell("tj-gpu", gpu.text, gpu.note), submitted, cell("tj-runtime", duration.text, duration.note), metricCell, action);
+      const gpuCell = cell("tj-gpu", gpu.text, gpu.note);
+      if (timestamp(job.spec_sampled_at)) gpuCell.title = `申请规格读取于 ${timeText(job.spec_sampled_at)}${job.gpu_spec_stale ? "；当前使用已保存规格" : ""}`;
+      row.append(name, status, gpuCell, submitted, cell("tj-runtime", duration.text, duration.note), metricCell, action);
       body.append(row);
     }
     table.append(header, body);

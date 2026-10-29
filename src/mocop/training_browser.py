@@ -1,4 +1,4 @@
-"""Merge short-lived, non-secret projections from the user's logged-in browser."""
+"""Join saved job-request specifications and short-lived browser observations."""
 
 import copy
 import json
@@ -18,6 +18,8 @@ def merge_browser_observations(jobs, *, path=OBSERVATIONS, now=None):
     for job in result:
         job.pop("browser_execution_status", None)
         job.pop("browser_status_sampled_at", None)
+        job.pop("gpu_spec_stale", None)
+        job.pop("spec_sampled_at", None)
         if job.get("gpu_count_source") == "browser":
             job["gpu_count"] = job["gpu_model"] = job["gpu_count_source"] = None
         if job.pop("_browser_timing", False):
@@ -34,8 +36,8 @@ def merge_browser_observations(jobs, *, path=OBSERVATIONS, now=None):
         data = json.loads(path.read_text())
         sampled = data["sampled_at"]
         if (
-            not isinstance(sampled, float | int)
-            or not 0 <= now - sampled <= 600000
+            type(sampled) not in (float, int)
+            or not 0 <= sampled <= now
             or data.get("status") != "ok"
         ):
             return result
@@ -79,6 +81,11 @@ def merge_browser_observations(jobs, *, path=OBSERVATIONS, now=None):
                 job["gpu_model"] = model
                 job["gpu_count_source"] = "browser"
                 job["spec_sampled_at"] = sampled
+                job["gpu_spec_stale"] = now - sampled > 600000
+            # Saved resource requests are tied to this already-authorized job identity.
+            # Timing and execution are observations and retain their separate expiry.
+            if now - sampled > 600000:
+                continue
             for key in ("started_at", "runtime_seconds"):
                 value = row.get(key)
                 if (

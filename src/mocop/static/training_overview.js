@@ -3,13 +3,14 @@
   const number = value => typeof value === "number" && Number.isFinite(value);
   const fmt = value => number(value) ? value.toLocaleString("zh-CN", { maximumFractionDigits: 1 }) : "—";
   const node = (tag, cls, text) => { const e = document.createElement(tag); e.className = cls; if (text != null) e.textContent = text; return e; };
+  const cardText = (count, unknown, incomplete) => !number(count) || (count === 0 && (unknown || incomplete)) ? "卡数待同步" : `${unknown || incomplete ? "≥ " : ""}${fmt(count)} 张`;
   const stats = snapshot => {
     const overview = snapshot.overview || {};
     const states = overview.states || {};
     const fallback = {running:{jobs:overview.running_jobs,cards:overview.known_running_cards,unknown_card_jobs:overview.unknown_card_jobs,models:overview.models},starting:{cards:overview.known_starting_cards},startup_failed:{cards:0}};
     return [["running","我的运行中"],["starting","我的启动中"],["startup_failed","启动失败 · 近 24 小时"]].map(([key,label]) => {
       const state = states[key] || fallback[key];
-      const value = snapshot.sampled_at === null ? "等待采集" : `${fmt(state.cards)}${state.unknown_card_jobs || snapshot.complete === false ? "+" : ""} 张`;
+      const value = snapshot.sampled_at === null ? "等待采集" : cardText(state.cards, state.unknown_card_jobs, snapshot.complete === false);
       const models = Object.entries(state.models || {}).map(([model,count]) => `${model.replace(/^NVIDIA /, "")} × ${count}`).join(" · ");
       return [label,value,`${state.jobs || 0} 个任务${models ? ` · ${models}` : ""}${state.unknown_card_jobs ? ` · ${state.unknown_card_jobs} 个任务待补卡数` : ""}${key === "startup_failed" ? " · 失败申请卡数，不计入运行占用" : ""}`];
     });
@@ -21,7 +22,9 @@
     container.append(grid);
     const overview = snapshot.overview || {};
     const uncertain = (overview.states?.mixed?.jobs || 0)+(overview.states?.unknown?.jobs || 0);
-    container.append(node("p", "tj-muted", `排队 ${fmt(overview.known_queued_cards)} 张 · 活动申请合计 ${fmt(overview.known_active_cards)}${overview.unknown_active_card_jobs ? "+" : ""} 张${uncertain ? ` · ${uncertain} 个任务状态混合或待确认，未分摊到运行 / 启动卡数` : ""}`));
+    container.append(node("p", "tj-muted", `排队 ${fmt(overview.known_queued_cards)} 张 · 活动申请合计 ${cardText(overview.known_active_cards, overview.unknown_active_card_jobs, snapshot.complete === false)}${uncertain ? ` · ${uncertain} 个任务状态混合或待确认，未分摊到运行 / 启动卡数` : ""}`));
+    const cached = Object.values(overview.states || {}).reduce((sum, state) => sum+(state.cached_spec_jobs || 0),0);
+    if (cached) container.append(node("p", "tj-muted", `${cached} 个任务使用已保存的申请规格；网页观测中断不再清空卡数。任务状态和利用率继续自动同步。`));
     const personal = snapshot.platform?.card_hours?.personal;
     container.append(node("p", "tj-accounting-note tj-muted", `本周期原始卡时 ${fmt(personal?.raw_used_card_hours)} 卡·h · 折算用量 ${fmt(personal?.used_weighted_card_hours)} · 剩余额度 ${fmt(personal?.remaining_card_hours)} 卡·h`));
     if (snapshot.overview?.unknown_card_jobs) {

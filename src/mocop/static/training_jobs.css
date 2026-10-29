@@ -99,3 +99,11 @@ html[data-style="ledger"] .tj-badge.starting { color:#805415; background:#f4e6cc
 .sa-number small { display:block; }
 .sa-footnote { margin:8px 0 0; font-size:11px; }
 @media(max-width:600px) { .sa-card { padding:8px; gap:6px; } .sa-card-title { flex-wrap:wrap; gap:4px; } .sa-table th:first-child { width:43%; } .sa-table th,.sa-table td { padding:7px 3px; font-size:11px; } .tj-overview-grid { grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; } .tj-overview-stat { padding:8px; border-radius:8px; } .tj-overview-stat strong { font-size:18px; } }
+
+details.sa-card { display:block; }
+.sa-card > summary { cursor:pointer; list-style:none; }
+.sa-card > summary::-webkit-details-marker { display:none; }
+.sa-card > summary strong::before { content:"▸"; display:inline-block; margin-right:8px; color:var(--muted); }
+.sa-card[open] > summary strong::before { content:"▾"; }
+.sa-card > :not(summary) { margin-top:10px; }
+.sa-card > summary:focus-visible { outline:2px solid var(--accent); outline-offset:4px; border-radius:4px; }

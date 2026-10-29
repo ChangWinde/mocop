@@ -234,11 +234,61 @@ class TrainingInsightsTests(unittest.TestCase):
             self.assertEqual(stale_status[0]["gpu_count"], 8)
             self.assertIsNone(jobs[0]["gpu_count"])
             expired = merge_browser_observations(result, path=path, now=700000)
-            self.assertIsNone(expired[0]["gpu_count"])
+            self.assertEqual(expired[0]["gpu_count"], 8)
+            self.assertTrue(expired[0]["gpu_spec_stale"])
+            self.assertNotIn("browser_execution_status", expired[0])
             path.chmod(0o644)
             self.assertIsNone(
                 merge_browser_observations(jobs, path=path, now=2000)[0]["gpu_count"]
             )
+
+    def test_saved_specs_survive_tab_closure_without_replaying_live_observations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "observation.json"
+            payload = {
+                "status": "ok",
+                "sampled_at": 1000,
+                "jobs": [
+                    {
+                        "vendor": "baidu",
+                        "job_id": "owned-job",
+                        "gpu_count": 4,
+                        "gpu_model": "GPU A",
+                        "status": "PROVISIONING",
+                        "runtime_seconds": 0,
+                        "started_at": 1000,
+                    }
+                ],
+            }
+            path.write_text(json.dumps(payload))
+            path.chmod(0o600)
+            jobs = [
+                {"vendor": "baidu", "job_id": "owned-job", "gpu_count": None},
+                {"vendor": "baidu", "job_id": "different-job", "gpu_count": None},
+            ]
+            result = merge_browser_observations(jobs, path=path, now=700000)
+            self.assertEqual(result[0]["gpu_count"], 4)
+            self.assertEqual(result[0]["spec_sampled_at"], 1000)
+            self.assertTrue(result[0]["gpu_spec_stale"])
+            for key in ("started_at", "runtime_seconds", "browser_execution_status"):
+                self.assertNotIn(key, result[0])
+            self.assertIsNone(result[1]["gpu_count"])
+            preferred = [{**jobs[0], "gpu_count": 8, "gpu_model": "GPU B"}]
+            self.assertEqual(
+                merge_browser_observations(preferred, path=path, now=700000)[0][
+                    "gpu_count"
+                ],
+                8,
+            )
+            self.assertEqual(merge_browser_observations([], path=path, now=700000), [])
+            for timestamp in (True, 700001, float("nan")):
+                payload["sampled_at"] = timestamp
+                path.write_text(json.dumps(payload))
+                self.assertIsNone(
+                    merge_browser_observations(jobs, path=path, now=700000)[0][
+                        "gpu_count"
+                    ]
+                )
 
     def test_rotation_includes_active_jobs_beyond_previous_top_twenty(self):
         monitor = TrainingMonitor(start=False)
