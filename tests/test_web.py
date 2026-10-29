@@ -67,6 +67,7 @@ def serve_in_thread(
     access_token: str = TEST_TOKEN,
     authentication: str = "bearer",
     updates=None,
+    terminal=None,
 ) -> tuple[MonitorHttpServer, threading.Thread]:
     server = MonitorHttpServer(
         (host, port),
@@ -78,6 +79,7 @@ def serve_in_thread(
         access_token=access_token,
         authentication=authentication,
         updates=updates,
+        terminal=terminal,
     )
     thread = threading.Thread(
         target=server.serve_forever, name="mocop-http", daemon=True
@@ -209,6 +211,20 @@ class _ProbeControl:
         if host in self.responses:
             return dict(self.responses[host])
         return {"status": "queued", "accepted": True, "host": host}
+
+
+class _TerminalLauncher:
+    apps = ({"id": "terminal", "label": "Terminal.app"},)
+
+    def __init__(self) -> None:
+        self.calls = []
+        self.responses = {}
+
+    def open(self, host, app=None):
+        self.calls.append((host, app))
+        if host in self.responses:
+            return {**self.responses[host], "host": host}
+        return {"status": "opened", "accepted": True, "host": host, "app": app}
 
 
 class _StubNotificationSink:
@@ -982,10 +998,13 @@ class WebTests(unittest.TestCase):
         self.assertEqual(
             meta["capabilities"],
             {
+                "trainingMonitoringSupported": True,
                 "restartSupported": False,
                 "manualProbeSupported": True,
                 "configurationWriteSupported": True,
                 "updateSupported": False,
+                "terminalSupported": False,
+                "terminalApps": [],
             },
         )
         self.assertEqual(
@@ -1115,10 +1134,13 @@ class WebTests(unittest.TestCase):
         self.assertEqual(
             capabilities,
             {
+                "trainingMonitoringSupported": True,
                 "restartSupported": True,
                 "manualProbeSupported": False,
                 "configurationWriteSupported": False,
                 "updateSupported": False,
+                "terminalSupported": False,
+                "terminalApps": [],
             },
         )
 
@@ -1713,6 +1735,75 @@ class WebTests(unittest.TestCase):
         self.assertEqual(payload["status"], "rate_limited")
         self.assertEqual(payload["code"], "RATE_LIMITED")
 
+    def test_terminal_route_is_unavailable_without_a_launcher(self) -> None:
+        # The manifest validates the body first, so a schema-valid request
+        # against a server without a launcher learns about the platform.
+        request = self.write_request(
+            b'{"host":"gpu-01","app":""}', origin=self.base, path="/api/terminal"
+        )
+        self.assert_json_error(request, 503, "SERVICE_UNAVAILABLE")
+
+    def test_terminal_route_projects_launcher_statuses_and_capability(self) -> None:
+        launcher = _TerminalLauncher()
+        server = self.standalone_server(terminal=launcher)
+        base = f"http://127.0.0.1:{server.server_port}"
+
+        with urlopen(f"{base}/api/meta", timeout=2) as response:
+            meta = json.load(response)
+        self.assertTrue(meta["capabilities"]["terminalSupported"])
+        self.assertEqual(meta["capabilities"]["terminalApps"], list(launcher.apps))
+        terminal_entry = next(
+            entry for entry in meta["endpoints"] if entry["path"] == "/api/terminal"
+        )
+        self.assertEqual(terminal_entry["bodyLimitBytes"], 512)
+        self.assertEqual(set(terminal_entry["body"]["fields"]), {"host", "app"})
+
+        def post(body: bytes) -> Request:
+            return self.write_request(
+                body, origin=base, path="/api/terminal", base=base
+            )
+
+        with urlopen(
+            post(b'{"host":"gpu-01","app":"terminal"}'), timeout=2
+        ) as response:
+            opened = json.load(response)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(opened["status"], "opened")
+        self.assertEqual(launcher.calls, [("gpu-01", "terminal")])
+
+        # An empty `app` lets the launcher pick its preferred application.
+        with urlopen(post(b'{"host":"gpu-01","app":""}'), timeout=2):
+            pass
+        self.assertEqual(launcher.calls[-1], ("gpu-01", ""))
+
+        for host, status, http_status, code in (
+            ("gpu-02", "unknown_host", 404, "UNKNOWN_HOST"),
+            ("gpu-03", "unknown_app", 400, "INVALID_SETTINGS"),
+            ("gpu-04", "rate_limited", 429, "RATE_LIMITED"),
+            ("gpu-05", "failed", 500, "TERMINAL_LAUNCH_FAILED"),
+        ):
+            with self.subTest(status=status):
+                launcher.responses[host] = {"status": status, "accepted": False}
+                body = json.dumps({"host": host, "app": ""}).encode()
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(post(body), timeout=2)
+                try:
+                    self.assertEqual(raised.exception.code, http_status)
+                    payload = json.load(raised.exception)
+                finally:
+                    raised.exception.close()
+                self.assertEqual(payload["status"], status)
+                self.assertEqual(payload["code"], code)
+
+        cross_origin = self.write_request(
+            b'{"host":"gpu-01","app":""}',
+            origin="https://attacker.example",
+            path="/api/terminal",
+            fetch_site="cross-site",
+            base=base,
+        )
+        self.assert_http_error(cross_origin, 403)
+
     def test_notification_test_distinguishes_disabled_from_rate_limited(self) -> None:
         # Without a configured sink the endpoint is unavailable, not limited.
         disabled = self.write_request(
@@ -1919,11 +2010,14 @@ class WebTests(unittest.TestCase):
             ("/api/service/restart", b'{"force":true}'),
             ("/api/update/apply", b'{"version":"1.0.0"}'),
             ("/api/notifications/test", b'{"endpoint":"ops"}'),
+            ("/api/terminal", b'{"host":"gpu-01"}'),
+            ("/api/terminal", b'{"host":"gpu-01","app":"terminal","cmd":"rm"}'),
         )
         type_cases = (
             ("/api/settings/hosts", b'{"action":1,"host":"gpu-02"}'),
             ("/api/settings/hosts", b'{"action":"add","host":null}'),
             ("/api/probe", b'{"host":["gpu-01"]}'),
+            ("/api/terminal", b'{"host":"gpu-01","app":1}'),
             (
                 "/api/settings/maintenance",
                 b'{"host":"gpu-01","durationSeconds":"3600","reason":"Work"}',
@@ -1949,6 +2043,11 @@ class WebTests(unittest.TestCase):
             ("/api/settings/hosts", b'{"action":"replace","host":"gpu-01"}'),
             ("/api/settings/hosts", b'{"action":"add","host":"--proxy"}'),
             ("/api/probe", b'{"host":"bad alias"}'),
+            ("/api/terminal", b'{"host":"gpu-01; touch /tmp/x","app":""}'),
+            (
+                "/api/terminal",
+                json.dumps({"host": "gpu-01", "app": "x" * 33}).encode(),
+            ),
             (
                 "/api/settings/maintenance",
                 b'{"host":"gpu-01","durationSeconds":60,"reason":"Work"}',
@@ -2101,6 +2200,7 @@ class WebTests(unittest.TestCase):
         marker: str | None = "dashboard",
         path: str = "/api/settings/collector",
         fetch_site: str | None = None,
+        base: str | None = None,
     ) -> Request:
         headers = {"Content-Type": content_type}
         if origin is not None:
@@ -2110,7 +2210,7 @@ class WebTests(unittest.TestCase):
         if fetch_site is not None:
             headers["Sec-Fetch-Site"] = fetch_site
         return Request(
-            f"{self.base}{path}",
+            f"{base or self.base}{path}",
             data=payload,
             headers=headers,
             method="POST",

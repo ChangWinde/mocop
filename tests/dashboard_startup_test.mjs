@@ -1,0 +1,16 @@
+import assert from "node:assert/strict";
+import "../src/mocop/static/dashboard_startup.js";
+let config, status;
+const view={authenticationFailed:true,dashboardStarted:true};
+const authentication={bindPrompt:value=>{config=value;return "bound";}};
+assert.equal(globalThis.MocopDashboardStartup.bindPrompt({authentication,elements:{},startDashboard:async()=>true,view,setConnection:(...value)=>{status=value;}}),"bound");
+assert.deepEqual(await config.authenticate(),{started:true,rejected:false});
+config.onRequired();assert.equal(view.dashboardStarted,false);assert.equal(view.authenticationFailed,true);assert.deepEqual(status,["offline","需要访问令牌"]);
+console.log("Dashboard startup contracts passed");
+const calls=[];
+const sources={loadStoredBackground:()=>calls.push("background"),authentication:{consumeInvalidFragment:()=>false},view:{authenticationFailed:false},fetchSnapshot:async()=>{calls.push("snapshot");return false;},fetchTopology:()=>calls.push("topology"),trainingJobs:{start:()=>calls.push("training")},personalStorage:{start:()=>calls.push("storage")},connect:()=>calls.push("connect")};
+assert.equal(await globalThis.MocopDashboardStartup.start(sources),false);
+assert.deepEqual(calls,["background","snapshot"],"failed authentication cannot start private observations");
+sources.fetchSnapshot=async()=>true;calls.length=0;
+assert.equal(await globalThis.MocopDashboardStartup.start(sources),true);
+assert.deepEqual(calls,["background","topology","training","storage","connect"]);

@@ -128,9 +128,9 @@ mocop doctor
 
 ### 4. Open the dashboard
 
-Open the printed `Dashboard:` URL, for example `http://127.0.0.1:8787/#access_token=...`.
-Reloads retain authentication; new tabs need this URL or the token beside the
-configuration. See the [capability rules](docs/API.md#scope-and-compatibility).
+Open the `Dashboard:` URL:
+`http://127.0.0.1:8787/#access_token=...`. Capability storage survives browser restarts. After logout or clearing site data, use `~/.config/mocop/access-token`
+to authenticate again. See the [capability rules](docs/API.md#scope-and-compatibility).
 
 For [direct access without a token](docs/OPERATIONS.md#direct-access-without-a-token),
 set `"authentication": "none"` and reinstall the service. Every reachable client gains operator access.

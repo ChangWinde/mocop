@@ -13,7 +13,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import SplitResult, urlsplit
 
 from . import __version__
-from .api_describe import describe_meta
 from .api_manifest import (
     AUTHENTICATION_MODES,
     QUERY_SCHEMAS,
@@ -46,6 +45,8 @@ from .metrics import (
     OpenMetricsLimitError,
     render_openmetrics,
 )
+from .observability_web import attach_sources, open_terminal, send_meta
+from .observability_web import handle_read as handle_observability_read
 from .service import ProbeControl, StateStore
 from .static_assets import (
     STATIC_ROUTES as _STATIC_ROUTES,
@@ -55,9 +56,14 @@ from .static_assets import (
     load_asset,
     strong_etag,
 )
+from .terminal import TerminalLauncher
 from .updates import UpdateStatusSource
+from .user_memory import MemorySource
+from .web_auth import allowed_methods_header as _allowed_methods_header
 from .web_auth import authentication_error
+from .web_auth import is_api_family_path as _is_api_family_path
 from .web_json import decode_json_body
+from .zenith_monitor import TrainingMonitor
 
 _SSE_HEARTBEAT_SECONDS = 15.0
 # SSE loops wake at this cadence to notice the server shutdown event.
@@ -72,28 +78,6 @@ _SERVICE_UNAVAILABLE_RESPONSE = (
     b"Content-Length: " + str(len(_CONNECTION_LIMIT_BODY)).encode("ascii") + b"\r\n"
     b"\r\n" + _CONNECTION_LIMIT_BODY
 )
-
-
-def _is_api_family_path(path: str) -> bool:
-    """Paths whose failures must stay JSON instead of the HTML error page."""
-    if path == "/api" or path.startswith("/api/"):
-        return True
-    return any(
-        path == prefix or path.startswith(prefix + "/")
-        for prefix in ("/healthz", "/readyz", "/metrics")
-    )
-
-
-def _allowed_methods_header(path: str) -> str:
-    methods = ROUTE_METHODS[path]
-    allowed = []
-    if "GET" in methods:
-        allowed.append("GET")
-        if path != "/api/events":  # the event stream refuses HEAD
-            allowed.append("HEAD")
-    if "POST" in methods:
-        allowed.append("POST")
-    return ", ".join(allowed)
 
 
 class MonitorHttpServer(ThreadingHTTPServer):
@@ -116,6 +100,10 @@ class MonitorHttpServer(ThreadingHTTPServer):
         authentication: str = "bearer",
         trusted_hosts: Iterable[str] | None = None,
         updates: UpdateStatusSource | None = None,
+        terminal: TerminalLauncher | None = None,
+        user_memory: MemorySource | None = None,
+        directory_disk: MemorySource | None = None,
+        training_monitor: TrainingMonitor | None = None,
     ) -> None:
         if authentication not in AUTHENTICATION_MODES:
             raise ValueError("invalid HTTP authentication mode")
@@ -149,6 +137,7 @@ class MonitorHttpServer(ThreadingHTTPServer):
         self._metrics_cache_key: tuple[object, ...] | None = None
         self._metrics_cache_payload = b""
         super().__init__(address, MonitorRequestHandler)
+        attach_sources(self, terminal, user_memory, directory_disk, training_monitor)
 
     def process_request(
         self, request: socket.socket, client_address: tuple[str, int]
@@ -178,6 +167,7 @@ class MonitorHttpServer(ThreadingHTTPServer):
         # Wake live SSE loops so their worker threads exit promptly instead of
         # surviving until the next heartbeat write fails.
         self.shutdown_event.set()
+        self.training_monitor.stop.set()
         super().server_close()
 
     @staticmethod
@@ -428,6 +418,8 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
                 code="QUERY_NOT_ALLOWED",
             )
             return
+        if handle_observability_read(self, request_url):
+            return
         if path == "/api/snapshot":
             snapshot = self._read_only_snapshot()
             self._send_json_payload(self.monitor_server.snapshot_payload(snapshot))
@@ -494,17 +486,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self._write_body(payload)
 
-    def _send_meta(self) -> None:
-        server = self.monitor_server
-        self._send_json(
-            describe_meta(
-                restart_supported=server.restart is not None,
-                manual_probe_supported=server.probe_control is not None,
-                configuration_write_supported=self._configuration_write_supported(),
-                update_supported=server.updates is not None,
-                authentication=server.authentication,
-            )
-        )
+    _send_meta = send_meta
 
     def _configuration_write_supported(self) -> bool:
         """Writable-config capability without scanning or connecting over SSH."""
@@ -629,6 +611,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             "/api/settings/host-group": self._change_host_group,
             "/api/settings/incident-action": self._change_incident_action,
             "/api/probe": self._request_probe,
+            "/api/terminal": self._open_terminal,
             "/api/notifications/test": self._test_notifications,
             "/api/service/restart": self._restart_service,
             "/api/update/apply": self._apply_update,
@@ -681,6 +664,8 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             ):
                 extra_headers = (("Retry-After", str(max(0, math.ceil(retry_after)))),)
         self._send_json(result, response_status, extra_headers)
+
+    _open_terminal = open_terminal
 
     def _test_notifications(self, _body: dict[str, object]) -> None:
         notifications = self._read_only_snapshot().get("notifications")

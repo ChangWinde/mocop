@@ -267,7 +267,7 @@ Without persistence, active conditions are rebuilt from live post-start probes,
 and a durable generation-bound action gets one startup rebinding opportunity for
 a matching condition; a healthy observation or subsequent recovery consumes it,
 preventing the action from suppressing a later recurrence.
-[ADR-0027](adr/0027-restored-incident-generations.md) records this restore and
+[ADR-0034](adr/0027-restored-incident-generations.md) records this restore and
 the rejected live-rebuild and tracker-snapshot alternatives.
 [ADR-0007](adr/0007-time-bounded-maintenance-overlay.md) records the rejected
 pause-collection and drop-incident alternatives; [ADR-0013](adr/0013-operational-diagnostics-and-gpu-history.md)
@@ -426,7 +426,7 @@ by `tests/<leaf>_test.mjs`:
 
 | Leaf | Owns |
 |---|---|
-| `dashboard-auth.js` | capability ingestion, fragment scrubbing, tab-scoped retention, the token prompt |
+| `dashboard-auth.js` | capability ingestion, fragment scrubbing, browser-local retention, the token prompt |
 | `format.js` | pure numeric, memory, rate, and relative-time formatting; SSE chunk normalization |
 | `incident-text.js` | the operator-facing wording for collector failures (the exact probe vocabulary, kept aligned by a repository test), incident conditions, state labels, and evidence |
 | `diagnosis-text.js` | the incident dialog's guidance: fixed title, summary, and next steps per condition category, with the first connectivity step chosen by the failure classification |
@@ -452,3 +452,46 @@ one module.
 [ADR-0021](adr/0021-incremental-module-boundaries.md) compares immediate splitting,
 incremental leaf extraction, and adding a build/registry layer. It selects the
 incremental boundary and records the first extraction: bounded process search.
+
+## Daily user RAM
+
+`user_memory.py` owns a separate cancellable worker and bounded memory cache.
+The `MemorySource` protocol exposes detached snapshots to the HTTP layer.
+`USER_MEMORY_V1` in `remote_script.py` emits physical RAM and UID/user/RSS rows
+from a fixed `ps` invocation. The collector reuses bounded subprocess execution,
+SSH configuration, host validation and strict host-key checking. One worker
+attempts each current host once per 86400 seconds; HTTP never waits for SSH.
+Each process output is capped at 4 MiB, each host at 4096 owners, and execution
+uses the configured probe deadline. Removed hosts are hidden immediately and
+pruned on the next worker pass. No sample is written to disk.
+
+The `user-memory.js` browser leaf owns the separate daily RAM dialog and its
+read-only cache polling while open. It uses the dashboard transport and text
+nodes for all remote labels. See [ADR-0034](adr/0034-daily-user-memory.md).
+
+Personal storage uses `storage_analysis.py` and the fixed `storage_probe.py`
+program registered in `remote_script.py`. Administrative root lists are JSON on
+stdin; no path or browser field enters remote shell text. The collector retains
+private bounded history independently of GPU polling. Its compatibility view
+preserves the directory dialog, while `storage_analysis.js` owns the main
+personal-storage cards and trend display. See the operations guide for cadence,
+limits and policy ownership.
+
+`zenith_monitor.py` owns independent training polling. `training_insights.py`
+projects utilization, requested-card totals, personal billing and non-additive
+candidate capacity. `training_browser.py` joins fresh whitelisted webpage
+metadata; the optional Mac capture helper never returns a browser credential.
+`training_overview.js` renders compact summaries and capacity, and
+`training_summary.js` owns the task list. `dashboard_startup.js` keeps startup
+prompt/control wiring outside the app module's line budget.
+
+The additive observer schemas live in `observability_manifest.py` and compose
+into the canonical manifest. `observability_web.py` publishes their metadata
+and dispatch after shared authentication. `observability_sources.py` owns
+source startup/shutdown; `platform_origin.py` reads the private origin with no
+deployment address in source. Generic integer query construction lives with
+`QueryParameter` in `api_schema.py`. API-family and allowed-method recognition
+remain beside route authentication in `web_auth.py`.
+
+[ADR-0035](adr/0035-persistent-dashboard-capability.md) supersedes the browser
+retention part of ADR-0017 while keeping its HTTP capability boundary.

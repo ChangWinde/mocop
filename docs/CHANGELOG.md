@@ -4,6 +4,21 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Added
+
+- Add minute-synchronized training jobs with requested GPU totals and models,
+  per-task utilization, personal card-hours and visible candidate-pool capacity.
+  Unknown startup/running pool counts remain distinct from allocated capacity.
+- Add six-hour personal storage scans, NAS child mounts, full directory paths,
+  private 30-day trends and explicit partial results and virtual object capacity.
+- Add optional Mac browser specification observations without exporting login
+  credentials, plus daily user RAM and local SSH terminal controls.
+
+### Changed
+
+- Retain dashboard access capabilities in origin-scoped browser storage until
+  logout or site-data clearing, including across browser restarts.
+
 ### Fixed
 
 - Public requests with the dashboard marker no longer enable attended collection.

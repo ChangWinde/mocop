@@ -37,3 +37,4 @@ config/mocop.json
 /.claude/
 /.mcp.json
 /uv.lock
+.gitnexus

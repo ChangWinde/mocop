@@ -118,9 +118,8 @@ document.documentElement.style.setProperty(
 // service treats marked reads as "someone is watching" and keeps process
 // sampling on the attended cadence even when SSE falls back to polling.
 // The managed-service capability is delivered in the URL fragment, which is
-// never sent by HTTP. Keep it in tab-scoped session storage so an intentional
-// reload (including the managed restart workflow) remains usable, while never
-// turning it into an ambient cookie or persistent cross-session credential.
+// never sent by HTTP. Browser storage retains it across reloads and restarts;
+// it remains an explicit Bearer credential rather than an ambient cookie.
 const dashboardAuthentication = globalThis.MocopDashboardAuth.create(window);
 // Shadowing the script-scope fetch keeps the viewer marker and explicit
 // capability uniform for all call sites.
@@ -3491,9 +3490,8 @@ function cachedHeatmapRow(server, columns) {
 
 function renderHeatmap() {
   const servers = view.selectedHost === "all"
-    ? focusedServers(view.snapshot.servers)
-      .filter((server) => server.status === "online" && server.gpus.length)
-      .sort((a, b) => a.host.localeCompare(b.host))
+    ? orderedServers(focusedServers(view.snapshot.servers)
+      .filter((server) => server.status === "online" && server.gpus.length))
     : [];
   if (!servers.length) {
     elements.gpuHeatmap.hidden = true;
@@ -4775,6 +4773,7 @@ function exportVisibleCsv() {
 }
 
 function groupedRecords(records) {
+  const hostOrder = new Map(syncServerOrder(view.snapshot.servers).map((host, index) => [host, index]));
   const groups = new Map();
   records.forEach((record) => {
     if (!groups.has(record.server.host)) groups.set(record.server.host, []);
@@ -4789,7 +4788,7 @@ function groupedRecords(records) {
       return { host, server: items[0].server, records: sorted, score };
     })
     .sort((a, b) => {
-      if (view.sort === "host") return a.host.localeCompare(b.host);
+      if (view.sort === "host") return hostOrder.get(a.host) - hostOrder.get(b.host);
       return b.score - a.score || a.host.localeCompare(b.host);
     });
 }
@@ -4954,6 +4953,7 @@ function renderTable() {
   elements.probeNow.hidden = !selected;
   elements.probeNow.disabled = !selected || selected.polling || view.manualProbePending;
   elements.probeNow.textContent = selected?.polling ? "正在探测" : "立即探测";
+  terminalLaunch.setHost(selected?.host ?? null);
   elements.visibleCount.textContent = records.length;
   elements.exportCsv.disabled = records.length === 0;
   elements.gpuGroups.classList.toggle("single", Boolean(selected));
@@ -5729,42 +5729,14 @@ setInterval(() => {
   else if (elapsed > Math.max(16000, snapshotBackoffMs())) fetchSnapshot();
 }, 1000);
 
-const requestDashboardAuthentication = dashboardAuthentication.bindPrompt({
-  dialog: elements.authenticationDialog,
-  form: elements.authenticationForm,
-  input: elements.authenticationToken,
-  submit: elements.authenticationSubmit,
-  status: elements.authenticationStatus,
-  authenticate: async () => {
-    view.authenticationFailed = false;
-    const started = await startDashboard();
-    return { started, rejected: view.authenticationFailed };
-  },
-  onRequired: () => {
-    view.authenticationFailed = true;
-    view.dashboardStarted = false;
-    setConnection("offline", "需要访问令牌");
-  },
-});
+
+const requestDashboardAuthentication = globalThis.MocopDashboardStartup.bindPrompt({authentication: dashboardAuthentication, elements, startDashboard, view, setConnection});
 
 syncPreferenceControls();
 renderInventory();
 
-async function startDashboard() {
-  loadStoredBackground();
-  if (dashboardAuthentication.consumeInvalidFragment()) {
-    dashboardAuthentication.forget();
-  }
-  // Let the server decide whether this deployment requires a capability.
-  view.dashboardStarted = true;
-  const snapshotLoaded = await fetchSnapshot();
-  if (view.authenticationFailed || !snapshotLoaded) return false;
-  fetchTopology();
-  connect();
-  return true;
-}
+function startDashboard() { return globalThis.MocopDashboardStartup.start({loadStoredBackground, authentication: dashboardAuthentication, view, fetchSnapshot, fetchTopology, trainingJobs, personalStorage, connect}); }
 
-const updatePill = globalThis.MocopUpdatePill
-  .create({ button: $("#update-pill"), request: (path, options) => fetch(path, options) });
-
+const {updatePill, terminalLaunch} = globalThis.MocopDashboardStartup.controls({request: fetch, select: $, storage: localStorage});
+const {trainingJobs, personalStorage} = globalThis.MocopDashboardStartup.observers({request: fetch, select: $});
 startDashboard();

@@ -252,3 +252,15 @@ def validate_body(schema: BodySchema, payload: object) -> dict[str, object]:
                 f"{name} is not an accepted value", "INVALID_SETTINGS", name
             )
     return payload
+
+
+def integer_parameter(
+    minimum: int, maximum: int, default: int, invalid_code: str
+) -> QueryParameter:
+    return QueryParameter(
+        "integer",
+        minimum=minimum,
+        maximum=maximum,
+        default=default,
+        invalid_code=invalid_code,
+    )

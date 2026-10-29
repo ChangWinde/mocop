@@ -35,7 +35,7 @@ package-dir = {"" = "src"}
 packages = ["mocop", "mocop.static"]
 
 [tool.setuptools.package-data]
-mocop = ["default_config.json"]
+mocop = ["default_config.json", "mac_browser.swift"]
 "mocop.static" = ["*.html", "*.js", "*.css", "*.svg"]
 
 [tool.ruff]

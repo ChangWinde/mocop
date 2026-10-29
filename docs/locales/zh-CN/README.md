@@ -2,6 +2,7 @@
   <img src="../../../src/mocop/static/favicon.svg" width="88" height="88" alt="Mocop 标志">
 </p>
 
+
 <h1 align="center">Mocop</h1>
 
 <p align="center">基于 OpenSSH 的 AI-native GPU 集群监控</p>
@@ -129,12 +130,11 @@ mocop doctor
 
 ### 4. 打开控制台
 
-打开 `mocop deploy` 打印的完整 `Dashboard:` 能力 URL，例如
-`http://127.0.0.1:8787/#access_token=...`。页面把能力保存在当前标签页的
-`sessionStorage` 中，刷新后仍保持认证；新开标签页需要再次使用打印的 URL，
-或在弹出的输入框中粘贴配置旁 `access-token` 文件（默认为
-`~/.config/mocop/access-token`）的内容。能力的完整规则由
-[API 参考](../../API.md#scope-and-compatibility)负责说明。
+打开 `mocop deploy` 打印的 `Dashboard:` URL，例如 `http://127.0.0.1:8787/#access_token=...`。
+能力保存在浏览器 `localStorage`，刷新和重启后保持认证；退出或清理站点数据后，重新使用能力链接或配置旁的 `access-token`。
+完整规则见 [API 参考](../../API.md#scope-and-compatibility)。
+
+点击页头 **用户内存**，查看每天采样一次的各服务器用户系统内存占用。
 
 希望打开链接即可访问，可设置 `"authentication": "none"` 后重新安装服务。
 此时所有能连接到服务的客户端均可查看数据和操作设置，具体见

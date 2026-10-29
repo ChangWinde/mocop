@@ -35,6 +35,7 @@ from .notifications import (
     NotificationError,
     create_notification_sink,
 )
+from .observability_sources import create_sources, start_sources, stop_sources
 from .persistence import create_persistence
 from .persistence_api import DisabledPersistence, PersistenceError
 from .probe import OpenSshLinuxResourceProbe
@@ -190,8 +191,10 @@ def _run_monitor(args: argparse.Namespace) -> int:
         config.updates,
         restart=restart_event.set if args.managed_service else None,
     )
+    sources = {}
     try:
         inventory = ConfigInventory(config_path, host_source, monitor.update_config)
+        sources = create_sources(config, state)
         server = MonitorHttpServer(
             (config.listen_host, config.listen_port),
             state,
@@ -202,12 +205,14 @@ def _run_monitor(args: argparse.Namespace) -> int:
             access_token=access_token,
             authentication=config.authentication,
             updates=updates,
+            **sources,
         )
     except (OSError, ValueError, UnicodeError) as exc:
         print(
             f"Cannot listen on {config.listen_host}:{config.listen_port}: {exc}",
             file=sys.stderr,
         )
+        stop_sources(sources)
         persistence.close()
         notifications.close()
         return 1
@@ -228,6 +233,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
     try:
         collector.start()
         updates.start()
+        start_sources(sources)
         print(f"Configuration: {config_path}")
         dashboard_url = _http_url(config.listen_host, config.listen_port)
         if not args.managed_service and access_token:
@@ -248,6 +254,7 @@ def _run_monitor(args: argparse.Namespace) -> int:
         signal.signal(signal.SIGTERM, previous_sigterm)
         stop_event.set()
         updates.stop()
+        stop_sources(sources)
         monitor.stop()
         server.server_close()
         collector.join(timeout=monitor.shutdown_timeout_seconds())

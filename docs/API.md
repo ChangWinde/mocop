@@ -68,9 +68,9 @@ the tier its handler enforces. Field-level examples are maintained by hand.
   `--config` path) and prints a fragment URL; a foreground `mocop` process
   creates an ephemeral capability that exists only in its terminal output.
   A missing or wrong capability answers `403 AUTHENTICATION_REQUIRED`. URL
-  fragments are never sent over HTTP. The dashboard scrubs the fragment immediately and retains it only in
-  tab-scoped `sessionStorage`; it never creates an ambient Cookie or persistent
-  `localStorage`/IndexedDB credential. When no fragment or stored capability is
+  fragments are never sent over HTTP. The dashboard scrubs the fragment immediately and retains it in
+  origin-scoped `localStorage`; it never creates an ambient Cookie or IndexedDB
+  credential, and logging out or clearing site data removes it. When no fragment or stored capability is
   available, the dashboard presents a non-dismissible token prompt. It stores
   a submitted token only after an authenticated snapshot succeeds; malformed or
   rejected tokens remain unstored and do not enter a reconnect loop.
@@ -206,6 +206,7 @@ Each write route has a hard body cap:
 | `POST /api/settings/host-group` | 512 |
 | `POST /api/settings/incident-action` | 1024 |
 | `POST /api/probe` | 512 |
+| `POST /api/terminal` | 512 |
 | `POST /api/notifications/test` | 32 |
 | `POST /api/service/restart` | 32 |
 | `POST /api/update/apply` | 32 |
@@ -224,9 +225,9 @@ envelope also carries `field` with its name (`{"error": "limit must be between
 2 and 300", "code": "INVALID_LIMIT", "field": "limit"}`), so a client can map
 a rejection back to the input it sent without parsing the message; shape
 problems such as a missing key or a non-object body carry no `field`. One
-exception: the `POST /api/probe` conflict/rate-limit/unknown responses carry
-the probe status body *plus* a `code` field instead of an `error` key (see the
-endpoint entry). `403 AUTHENTICATION_REQUIRED` additionally carries `hint`
+exception: the `POST /api/probe` and `POST /api/terminal` non-success responses
+carry the action status body *plus* a `code` field instead of an `error` key
+(see the endpoint entries). `403 AUTHENTICATION_REQUIRED` additionally carries `hint`
 (where the capability lives and which header to send) and `documentation`
 (this reference for the running release), so a cold client can recover without
 any out-of-band knowledge; the capability value itself is never included.
@@ -246,7 +247,7 @@ any out-of-band knowledge; the capability value itself is never included.
 | `INVALID_HOST` | 400 | The `host` query value is not a safe alias. |
 | `INVALID_JSON` | 400 | The body is not valid strict JSON (duplicate keys and non-finite numbers included). |
 | `INVALID_SCHEMA` | 400 | The body is not an object, its key set does not match the route (see `body` in `/api/meta`), or a field has the wrong JSON type. |
-| `INVALID_SETTINGS` | 400 | Well-typed values outside the published grammar, `values`, bounds, or text length; cross-field rules; or values invalid for the current configuration. |
+| `INVALID_SETTINGS` | 400 | Well-typed values outside the published grammar, `values`, bounds, or text length; cross-field rules; or values invalid for the current configuration (including a terminal `app` the desktop does not offer). |
 | `UNTRUSTED_ORIGIN` | 403 | Missing/untrusted `Host`, marker header, `Origin`, or cross-site Fetch Metadata; also every `OPTIONS`. |
 | `AUTHENTICATION_REQUIRED` | 403 | Bearer capability is missing, duplicated, or incorrect. |
 | `NOT_FOUND` | 404 | Unknown API-family path. |
@@ -259,7 +260,14 @@ any out-of-band knowledge; the capability value itself is never included.
 | `INCIDENT_NOT_ACTIVE` | 409 | The condition is no longer active or its incident generation changed. |
 | `PAYLOAD_TOO_LARGE` | 413 | Body missing, empty, or beyond the route's byte cap. |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type` is not `application/json`. |
-| `RATE_LIMITED` | 429 | Manual probe cooldown (with `Retry-After` header) or notification-test cooldown. |
+| `RATE_LIMITED` | 429 | Manual probe cooldown (with `Retry-After` header), terminal-launch cooldown, or notification-test cooldown. |
+| `TERMINAL_LAUNCH_FAILED` | 500 | The desktop refused to open the terminal application, or `open` timed out; the body carries a short `detail`. |
+| `TRAINING_INVALID_ID` | 400 | The requested platform ledger ID is invalid. |
+| `TRAINING_AUTH_REQUIRED` | 401 | The upstream training credential was rejected. |
+| `TRAINING_ACCESS_DENIED` | 403 | The platform denied this training read. |
+| `TRAINING_NOT_FOUND` | 404 | The owned training task is absent or inaccessible. |
+| `TRAINING_RATE_LIMITED` | 429 | The bounded training read is temporarily rate limited. |
+| `TRAINING_READ_FAILED` | 503 | Training observations are temporarily unavailable. |
 | `SERVICE_UNAVAILABLE` | 503 | The capability is not available (no config controller, restart not supervised, manual probing disabled, SSE slots exhausted, scan/persist failure). |
 | `METRICS_LIMIT_EXCEEDED` | 503 | Rendering would exceed the fixed 100,000-series OpenMetrics budget. |
 | `NOTIFICATIONS_DISABLED` | 503 | Notification test requested but no webhook is configured. |
@@ -400,6 +408,11 @@ This table matches the server's route manifest exactly.
 | GET | `/api/snapshot` | A | Full current state: hosts, GPUs, processes, stats. |
 | GET | `/api/events` | A | SSE stream of snapshots with named heartbeats. |
 | GET | `/api/history` | A | Per-host resource trend points. |
+| GET | `/api/user-memory` | A | Daily per-user system RAM snapshots. |
+| GET | `/api/directory-disk` | A | Compatible directory view of personal storage snapshots. |
+| GET | `/api/storage-analysis` | A | Personal storage, capacity, changes and retained trends. |
+| GET | `/api/training-jobs` | A | Owned training jobs, GPU observations and platform accounting. |
+| GET | `/api/training-job-detail` | A | One owned training job; requires `id`. |
 | GET | `/api/usage` | A | Per-owner GPU occupancy and idle-occupancy rollup. |
 | GET | `/api/reports/usage` | A | Per-owner GPU occupancy over the retained history (no per-device cap), idle share at hourly resolution, per-day breakdown. |
 | GET | `/api/reports/utilization` | A | Hourly GPU utilization, busy share, and memory per host, or per device of one host, over up to 90 days of rollups. |
@@ -421,6 +434,7 @@ This table matches the server's route manifest exactly.
 | POST | `/api/settings/host-group` | W | Assign or clear one host's group. |
 | POST | `/api/settings/incident-action` | W | Acknowledge, silence, or clear one condition. |
 | POST | `/api/probe` | W | Queue one immediate probe of one host. |
+| POST | `/api/terminal` | W | Open a local terminal with an SSH session to one host (macOS desktop only). |
 | POST | `/api/notifications/test` | W | Queue one webhook delivery test. |
 | POST | `/api/service/restart` | W | Restart the supervised service. |
 | POST | `/api/update/apply` | W | Install the latest verified release and restart. |
@@ -916,7 +930,9 @@ document lives for the running release.
     "restartSupported": true,
     "manualProbeSupported": true,
     "configurationWriteSupported": true,
-    "updateSupported": true
+    "updateSupported": true,
+    "terminalSupported": true,
+    "terminalApps": [{"id": "ghostty", "label": "Ghostty"}, {"id": "terminal", "label": "Terminal.app"}]
   },
   "conventions": {
     "envelope": "camelCase",
@@ -969,7 +985,11 @@ order described under *Strict JSON on writes*. `responseType` is
 under the supervised user service; `manualProbeSupported` requires the live
 scheduler; `configurationWriteSupported` reports whether the active
 configuration file is dashboard-writable (file metadata only, no SSH);
-`updateSupported` is true when a self-update manager is wired. `write` names
+`updateSupported` is true when a self-update manager is wired;
+`terminalSupported` is true only when the service runs on a macOS desktop with
+a supported terminal application installed, and `terminalApps` lists those
+applications (`{id, label}`) in preference order — empty elsewhere — for
+`POST /api/terminal`. `write` names
 the Bearer header, `application/json` content type, same-origin Host/Origin
 rule, and the `X-Monitor-Request: dashboard` marker. `errorCodes` lists every
 stable `code` with its HTTP status, and `serverMessages` every string a
@@ -1196,6 +1216,38 @@ A duplicate request while one is already queued answers `202` with
 `status: "queued"` again (coalesced). Schema and availability failures use
 the normal envelope (`INVALID_SCHEMA`, `INVALID_SETTINGS` for an unsafe
 alias, `503 SERVICE_UNAVAILABLE`).
+
+### POST /api/terminal
+
+Open a terminal window on the machine running Mocop with an interactive
+`ssh <alias>` session to one host; the remote shell prints `df -h` first and
+then continues as the user's login shell. Tier W. Body cap 512 bytes. Body:
+exactly `{"host": "<alias>", "app": "<id>"}` where `app` is one `id` from
+`terminalApps` in `GET /api/meta` or the empty string for the first listed
+application. The service writes a private, owner-only launch script and hands
+it to the application through `open`; the alias is validated against the
+current monitoring targets, so the body can never inject a command. Only
+available where `terminalSupported` is true (macOS desktop); otherwise
+`503 SERVICE_UNAVAILABLE`.
+
+Success `200`:
+
+```json
+{"status": "opened", "accepted": true, "host": "gpu-node-01", "app": "ghostty"}
+```
+
+Non-success responses carry the same status body **plus `code`** (no
+`error` key):
+
+| HTTP | `status` | `code` | Notes |
+|---|---|---|---|
+| 400 | `unknown_app` | `INVALID_SETTINGS` | `app` is not one of `terminalApps`. |
+| 404 | `unknown_host` | `UNKNOWN_HOST` | Not a current target. |
+| 429 | `rate_limited` | `RATE_LIMITED` | Per-host cooldown between launches; body has `retryAfterSeconds`. |
+| 500 | `failed` | `TERMINAL_LAUNCH_FAILED` | `open` failed or timed out; body has a short `detail`. |
+
+Schema failures use the normal envelope (`INVALID_SCHEMA`, `INVALID_SETTINGS`
+for an unsafe alias or an over-long `app`).
 
 ### POST /api/notifications/test
 
@@ -1553,3 +1605,106 @@ underscores, or hyphens — the same grammar the configuration enforces for
 OpenSSH aliases. Values that fail it are rejected before any lookup
 (`INVALID_HOST` or `INVALID_QUERY` in a query string, `INVALID_SETTINGS` in
 a write body).
+
+### GET /api/user-memory
+
+Bearer-authenticated read with no query parameters. Reads never trigger SSH.
+The response has `intervalSeconds` (86400), `metric` (`rss`), and `servers`.
+Each server contains `host`, `status` (`pending`, `collecting`, `ok`, or `error`),
+`sampledAt` (last successful UTC time or null), and `users`. Completed attempts
+also report `attemptedAt`, `nextAttemptAt`, and `message` (null on success).
+Successful samples add `totalKiB` for physical RAM. Each user has `uid`, `user`,
+`processes`, and `rssKiB`, sorted by descending RSS and then UID.
+
+RAM includes all processes visible to the SSH user, including CPU-only tasks.
+Accounts with no visible processes are absent. RSS includes shared pages in each
+process, so sums can exceed physical RAM; this is neither PSS nor GPU VRAM.
+Containers restrict visibility to their process namespace. A failed attempt
+retains the previous successful data, explicitly marked `error`.
+The independent worker attempts each host once per 24 hours, including failures;
+new hosts are eligible within 30 seconds. Restarting the service discards this
+in-memory cache and schedules fresh samples.
+
+
+### GET /api/directory-disk
+
+This compatibility view exposes the personal storage collector as `metric: disk`,
+with `directories[].sizeKiB` and filesystem capacity in KiB. It no longer starts
+recursive scans of every user's directory. Use the analysis endpoint for byte
+units, completeness, changes and history.
+
+### GET /api/storage-analysis
+
+Authenticated, cache-only and query-free. `intervalSeconds` is 21600 and
+`retentionDays` is 30. The service scans configured personal roots with two
+workers; an HTTP read never launches SSH. Each server publishes `host`, `label`,
+`status`, `sampledAt`, `nextAttemptAt`, `stale`, `complete`, `knownBytes`,
+`directories`, `filesystems`, and a compact `history` array.
+
+Directory sizes use allocated bytes from `du -P -x -B1`; object-store FUSE
+mounts use apparent file sizes. Source symlinks are not followed. Child mounts
+are inventoried and scanned separately, then included once in the configured
+parent's total; each child mount has its full path. Repeated root device/inode identities are
+marked `linked` and excluded from totals. Unknown, missing, timed-out or
+unreadable roots are not reported as zero. Per-root `changeBytes` compares the
+last successful observation of the same path. Personal totals cover configured
+roots, not every file owned by the account or filesystem-wide used space. Hard
+links are deduplicated within one root; links shared across separately scanned
+roots can appear in both path totals. These are directory accounting figures,
+not a storage invoice. A timeout retains completed child observations while
+leaving the root total unknown. A changed root policy schedules a fresh scan
+and stops showing old roots and incompatible total-history samples.
+
+Filesystem `availableBytes` is the space available to an ordinary writer.
+The cache view overlays fresh online-host disk telemetry without launching SSH;
+`capacitySampledAt` distinguishes this live reading from the directory sample.
+`changeAvailableBytes` includes other users' activity; `daysUntilFull` is an
+estimate requiring at least two earlier observations spanning six hours. It is
+not a reservation or a cleanup instruction. Shared capacity is shown per host
+and never summed into a fleet total. History retains at most 120 observations
+per host for 30 days. Failures retain the previous success with explicit stale
+state. Initial and incomplete samples do not establish a growth trend.
+Filesystems marked `capacityVirtual` are object storage: reported statvfs
+capacity does not represent quota or remaining space and is hidden in the UI.
+
+### GET /api/training-jobs
+
+Authenticated, cache-only and query-free. `jobs` contains only the token owner's
+platform jobs; `complete` and `total` describe bounded pagination (at most 2000
+rows). The list refreshes every 60 seconds. Up to eight active jobs per 30-second
+pass receive rotating resource observations, with five-minute replica caching;
+there is no permanent first-20 cutoff. Detail reads share the bounded request
+budget and may return a temporary rate limit.
+
+`overview` reports running jobs, known requested running cards, jobs with unknown
+card counts, known model totals and jobs with recent utilization. Separate
+`known_active_cards`, `known_starting_cards`, `known_queued_cards` and
+`unknown_active_card_jobs` describe nonterminal requests. Queued jobs
+are excluded from running totals. Unknown specifications are not inferred from
+job names, cloud vendors, metric series or replica counts. An optional Mac
+browser bridge joins authorized webpage metadata by exact vendor/job ID and
+expires it after ten minutes; credentials remain in the logged-in browser.
+
+`gpu_utilization` contains `pct`, `sampled_at`, coverage and individual
+observations. Provider `GpuUsage` is a mean per replica, not a per-device sample;
+stored agent metrics expose devices. Samples older than three minutes are
+excluded, and true zero is retained. Raw provider series retain native units.
+`platform.card_hours` shows personal allowance accounting for the current
+platform period, including raw and weighted consumption and remaining hours;
+shared project spending is not included as a complete personal total.
+`platform.capacity` shows deduplicated offering/zone/workload candidate pools.
+Rows can overlap and must not be added into a platform-wide total. Availability
+is advisory; missing capacity remains unknown. `starting` and `running` require
+explicit upstream counters; absent values stay null. `allocated` is total minus
+free, including startup and other occupancy, and must not be labeled running.
+Platform summaries refresh every 60 seconds and disclose fetch times and read
+errors. Backoff and upstream request duration can delay synchronization.
+
+### GET /api/training-job-detail
+
+Requires one `id` (the 25-character platform ledger ID). Ownership is revalidated
+before serving cached detail; denial clears cached sensitive observations.
+Returns bounded replicas, metrics and the last 100 log lines. No submit, cancel,
+command-execution or arbitrary outbound URL is accepted. A failed upstream read
+returns a sanitized `TRAINING_*` error envelope with a manifested status; credentials and
+provider configuration are never returned.

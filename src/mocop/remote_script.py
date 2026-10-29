@@ -6,6 +6,186 @@ time; probes never build shell text from runtime values.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+PERSONAL_STORAGE_SCRIPT = (
+    Path(__file__).with_name("storage_probe.py").read_text(encoding="utf-8")
+)
+
+# TERMINAL_ENV_V1: keep native capabilities when the target has their entry.
+# This only changes the launched session; remote startup files are not edited.
+TERMINAL_ENVIRONMENT_SCRIPT = r"""
+if command -v infocmp >/dev/null 2>&1; then
+  if [ -z "${TERM:-}" ] || [ "$TERM" = dumb ] || ! infocmp "$TERM" >/dev/null 2>&1; then
+    for mocop_terminal_type in xterm-256color xterm vt100; do
+      if infocmp "$mocop_terminal_type" >/dev/null 2>&1; then
+        TERM=$mocop_terminal_type
+        export TERM
+        break
+      fi
+    done
+    unset mocop_terminal_type
+  fi
+fi
+"""
+
+# Separate daily RAM protocol; no browser or configuration text is interpolated.
+USER_MEMORY_SCRIPT = r"""
+LC_ALL=C
+export LC_ALL
+printf 'USER_MEMORY_V1\n'
+awk '/^MemTotal:/ { print "TOTAL", $2; found=1 } END { if (!found) exit 1 }' /proc/meminfo || exit 1
+ps -eo uid=,user:64=,rss= || exit 1
+printf 'END\n'
+"""
+
+# Fixed disk programs: no client or configuration text is interpolated.
+_DIRECTORY_DISK_PROGRAM = r"""
+import itertools, json, os, re, shutil, subprocess, time
+
+PSEUDO = {'proc', 'sysfs', 'tmpfs', 'devtmpfs', 'devpts', 'cgroup', 'cgroup2',
+          'mqueue', 'securityfs', 'pstore', 'debugfs', 'tracefs', 'hugetlbfs',
+          'configfs', 'fusectl', 'rpc_pipefs', 'autofs', 'binfmt_misc', 'efivarfs',
+          'bpf', 'ramfs', 'nsfs', 'squashfs', 'fuse.portal', 'fuse.gvfsd-fuse'}
+INTERNAL = ('/proc', '/sys', '/dev', '/etc', '/usr', '/run', '/snap',
+            '/var/lib/docker', '/var/lib/containerd', '/tmp/.ssh', '/tmp/RustDesk',
+            '/opt/bc-tools', '/mnt/.credential-0', '/mnt/.alibabacloud', '/mlplatform/.ssh')
+FALLBACK_ROOTS = ('/home', '/data', '/mnt/data', '/workspace', '/personal_fast_storage')
+
+
+def under(path, root):
+    return path == root or path.startswith(root.rstrip('/') + '/')
+
+
+def flatten(items):
+    for item in items:
+        yield item
+        yield from flatten(item.get('children', []))
+
+
+def discover_mounts():
+    result = subprocess.run(['findmnt', '-J', '-o', 'TARGET,SOURCE,FSTYPE,FSROOT,MAJ:MIN'],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=12, check=True)
+    groups = {}
+    for mount in sorted(flatten(json.loads(result.stdout)['filesystems']), key=lambda m: (len(m['target']), m['target'])):
+        target, kind = mount['target'], mount['fstype']
+        internal = any(under(target, prefix) for prefix in INTERNAL) and not under(target, '/run/media')
+        if kind in PSEUDO or internal or not os.path.isdir(target):
+            continue
+        key = (kind, mount['source'], mount.get('fsroot', '/'), mount.get('maj:min', target) if kind == 'overlay' else None)
+        if key in groups:
+            if target not in groups[key]['aliases']:
+                groups[key]['aliases'].append(target)
+            continue
+        if len(groups) >= 128:
+            raise ValueError('too many mounted filesystems')
+        groups[key] = {'mountPoint': target, 'aliases': [target], 'fsType': kind,
+            'kind': 'network' if kind in ('nfs', 'nfs4', 'cifs', 'smb3', 'ceph', 'glusterfs', 'lustre', 'gpfs', 'beegfs', 'vepfs') or kind.startswith('fuse') else 'local',
+            'scanRoot': target != '/' and not under(target, '/boot') and not under(target, '/nix'),
+            'totalKiB': None, 'usedKiB': None, 'availableKiB': None, 'percentUsed': None}
+    notes = []
+    try:
+        df = subprocess.run(['df', '-P', '-k', '-a'], stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=12, check=False)
+        usage = {}
+        for line in df.stdout.decode('utf-8', 'replace').splitlines():
+            match = re.match(r'^.+?\s+(\d+)\s+(\d+)\s+(-?\d+)\s+(\d+)%\s+(.+)$', line)
+            if match:
+                size, used, free, percent, target = match.groups()
+                usage[target] = dict(totalKiB=int(size), usedKiB=int(used), availableKiB=int(free), percentUsed=int(percent))
+        for mount in groups.values():
+            values = next((usage[p] for p in mount['aliases'] if p in usage), None)
+            if values:
+                mount.update(values)
+        if df.returncode:
+            notes.append('Some df capacity readings failed')
+    except (OSError, subprocess.TimeoutExpired):
+        notes.append('Filesystem capacity query timed out or failed')
+    return list(groups.values()), notes
+
+
+def candidate_directories(mounts, notes):
+    aliases = {p for mount in mounts for p in mount['aliases']}
+    roots = [m['mountPoint'] for m in mounts if m['scanRoot']]
+    roots += [p for p in FALLBACK_ROOTS if p not in aliases and os.path.isdir(p) and not os.path.islink(p)]
+    roots = list(dict.fromkeys(roots))
+    excluded = aliases | set(roots)
+    groups, seen = [], set()
+    for root in roots:
+        rows = []
+        try:
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if entry.path in excluded or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    real = os.path.realpath(entry.path)
+                    if real in seen:
+                        continue
+                    seen.add(real)
+                    rows.append(entry.path)
+                    if len(rows) == 256:
+                        notes.append('Directory listing limit reached: ' + root)
+                        break
+        except OSError:
+            notes.append('Cannot list ' + root)
+        groups.append(sorted(rows))
+    if os.path.isdir('/root') and '/root' not in aliases:
+        groups.append(['/root'])
+    candidates = [p for bundle in itertools.zip_longest(*groups) for p in bundle if p]
+    if len(candidates) > 256:
+        notes.append('Directory limit reached; inventory is incomplete')
+    return candidates[:256]
+
+
+def main(scan):
+    mounts, notes = discover_mounts()
+    rows = []
+    deadline = time.monotonic() + 1800
+    if scan:
+        for path in candidate_directories(mounts, notes):
+            print(" ", flush=True)  # Detect a closed SSH pipe before starting more work.
+            parent = max((m for m in mounts if any(under(path, p) for p in m['aliases'])), key=lambda m: max(len(p) for p in m['aliases'] if under(path, p)), default=None)
+            row = {'path': path, 'mountPoint': parent['mountPoint'] if parent else '/', 'sizeKiB': None, 'status': 'skipped'}
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                command = ['du', '-P', '-x', '-k', '-s', '--null']
+                for mount in mounts:
+                    for nested in mount['aliases']:
+                        if nested != path and under(nested, path):
+                            pattern = ''.join('[' + c + ']' if c in '*?[' else c for c in nested)
+                            command.append('--exclude=' + pattern)
+                command += ['--', path]
+                if shutil.which('nice'):
+                    command = ['nice', '-n', '19'] + command
+                if shutil.which('ionice'):
+                    command = ['ionice', '-c', '3'] + command
+                try:
+                    result = subprocess.run(command, stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL, timeout=min(90, remaining), check=False)
+                    value = result.stdout.split(b'\t', 1)[0]
+                    if result.returncode == 0 and value.isdigit():
+                        row.update(sizeKiB=int(value), status='ok')
+                    else:
+                        row['status'] = 'unreadable'
+                except subprocess.TimeoutExpired:
+                    row['status'] = 'timeout'
+                except OSError:
+                    row['status'] = 'unreadable'
+            rows.append(row)
+    print(json.dumps({'protocol': 'DIRECTORY_DISK_V1', 'filesystems': mounts,
+        'directories': rows, 'notes': notes[:32]}))
+"""
+DIRECTORY_DISK_INVENTORY_SCRIPT = (
+    "LC_ALL=C python3 - --mocop-directory-disk <<'MOCOP_DISK_PY'\n"
+    + _DIRECTORY_DISK_PROGRAM
+    + "\nmain(False)\nMOCOP_DISK_PY\n"
+)
+DIRECTORY_DISK_SCRIPT = (
+    "LC_ALL=C python3 - --mocop-directory-disk <<'MOCOP_DISK_PY'\n"
+    + _DIRECTORY_DISK_PROGRAM
+    + "\nmain(True)\nMOCOP_DISK_PY\n"
+)
+
 _QUERY_FIELDS = (
     "index",
     "uuid",

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from . import __version__
 from .api_schema import BodyField, BodySchema, QueryParameter, QuerySchema
+from .api_schema import integer_parameter as _integer
 from .config import (
     HOST_GROUP_MAX_LENGTH,
     INCIDENT_ACTION_KEY_MAX_LENGTH,
@@ -19,6 +20,12 @@ from .config import (
     MAINTENANCE_REASON_MAX_LENGTH,
 )
 from .metrics import OPENMETRICS_CONTENT_TYPE
+from .observability_manifest import (
+    OBSERVABILITY_ERRORS,
+    OBSERVABILITY_QUERIES,
+    OBSERVABILITY_ROUTES,
+    OBSERVABILITY_WRITES,
+)
 
 API_VERSION = "2"
 API_SCHEMA_VERSION = 1
@@ -40,6 +47,7 @@ API_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/reports/usage", "authenticated"),
     ("GET", "/api/reports/utilization", "authenticated"),
     ("GET", "/api/brief", "authenticated"),
+    *OBSERVABILITY_ROUTES,
     ("GET", "/api/capacity", "authenticated"),
     ("GET", "/api/incidents", "authenticated"),
     ("GET", "/api/meta", "public"),
@@ -79,6 +87,7 @@ WRITE_BODY_LIMITS: dict[str, int] = {
     "/api/update/apply": 32,
     "/api/settings/incident-action": 1024,
     "/api/probe": 512,
+    "/api/terminal": 512,
     "/api/notifications/test": 32,
 }
 
@@ -88,19 +97,8 @@ RESPONSE_TYPES: dict[str, str] = {
 }
 
 
-def _integer(
-    minimum: int, maximum: int, default: int, invalid_code: str
-) -> QueryParameter:
-    return QueryParameter(
-        "integer",
-        minimum=minimum,
-        maximum=maximum,
-        default=default,
-        invalid_code=invalid_code,
-    )
-
-
 QUERY_SCHEMAS: dict[str, QuerySchema] = {
+    **OBSERVABILITY_QUERIES,
     "/api/history": QuerySchema(
         {
             "host": QueryParameter("alias", required=True),
@@ -239,6 +237,7 @@ WRITE_SCHEMAS: dict[str, BodySchema] = {
         }
     ),
     "/api/probe": BodySchema({"host": BodyField("alias")}),
+    **OBSERVABILITY_WRITES,
     "/api/service/restart": BodySchema({}, empty=True),
     "/api/update/apply": BodySchema({}, empty=True),
     "/api/notifications/test": BodySchema({}, empty=True),
@@ -274,6 +273,7 @@ ERROR_CODES: tuple[tuple[str, int], ...] = (
     ("PAYLOAD_TOO_LARGE", 413),
     ("UNSUPPORTED_MEDIA_TYPE", 415),
     ("RATE_LIMITED", 429),
+    *OBSERVABILITY_ERRORS,
     ("SERVICE_UNAVAILABLE", 503),
     ("METRICS_LIMIT_EXCEEDED", 503),
     ("NOTIFICATIONS_DISABLED", 503),

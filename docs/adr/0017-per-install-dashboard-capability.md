@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; browser retention superseded by [ADR-0035](0035-persistent-dashboard-capability.md).
 
 ## Context
 

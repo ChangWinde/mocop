@@ -1,9 +1,7 @@
 (() => {
   "use strict";
-
   const STORAGE_KEY = "mocop.dashboardAccessToken.v1";
   const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,192}$/;
-
   function create(browser) {
     if (!browser?.location || !browser?.history) {
       throw new TypeError("dashboard authentication requires a browser window");
@@ -12,39 +10,61 @@
     const fragmentParameters = new URLSearchParams(browser.location.hash.slice(1));
     const fragmentToken = fragmentParameters.get("access_token");
     const validFragmentToken = isValid(fragmentToken) ? fragmentToken : "";
+    const storageBackends = [];
     let storedToken = "";
     let invalidFragment = fragmentToken != null && !validFragmentToken;
 
-    try {
-      if (validFragmentToken) {
-        browser.sessionStorage.setItem(STORAGE_KEY, validFragmentToken);
-      } else if (fragmentToken == null) {
-        storedToken = browser.sessionStorage.getItem(STORAGE_KEY) || "";
-      } else {
-        browser.sessionStorage.removeItem(STORAGE_KEY);
+    for (const name of ["localStorage", "sessionStorage"]) {
+      try {
+        const storage = browser[name];
+        if (storage && !storageBackends.includes(storage)) storageBackends.push(storage);
+      } catch (_error) { /* Try the next storage backend. */ }
+    }
+    const clearStoredToken = () => {
+      for (const storage of storageBackends) {
+        try {
+          storage.removeItem(STORAGE_KEY);
+        } catch (_error) { /* Continue clearing the remaining backends. */ }
       }
-    } catch (_error) {
-      // The fragment still authenticates this document when privacy settings
-      // disable sessionStorage; a reload then requires the capability again.
+    };
+    const persistStoredToken = (candidate) => {
+      for (const storage of storageBackends) {
+        try {
+          storage.setItem(STORAGE_KEY, candidate);
+          return;
+        } catch (_error) { /* Fall back to the next storage backend. */ }
+      }
+    };
+    const readStoredToken = () => {
+      let validToken = "";
+      for (const storage of storageBackends) {
+        try {
+          const candidate = storage.getItem(STORAGE_KEY) || "";
+          if (!validToken && isValid(candidate)) validToken = candidate;
+          else if (candidate) storage.removeItem(STORAGE_KEY);
+        } catch (_error) { /* Try the next storage backend. */ }
+      }
+      return validToken;
+    };
+    if (validFragmentToken) {
+      clearStoredToken();
+      persistStoredToken(validFragmentToken);
+    } else if (fragmentToken == null) {
+      storedToken = readStoredToken();
+      if (storedToken) persistStoredToken(storedToken);
+    } else {
+      clearStoredToken();
     }
 
     let token = validFragmentToken || (isValid(storedToken) ? storedToken : "");
     const forget = () => {
       token = "";
-      try {
-        browser.sessionStorage.removeItem(STORAGE_KEY);
-      } catch (_error) {
-        // There is no persistent browser state to clear in this mode.
-      }
+      clearStoredToken();
     };
     const remember = (candidate) => {
       if (!isValid(candidate)) return false;
       token = candidate;
-      try {
-        browser.sessionStorage.setItem(STORAGE_KEY, candidate);
-      } catch (_error) {
-        // The current document remains authenticated without persistence.
-      }
+      persistStoredToken(candidate);
       return true;
     };
     if (fragmentToken != null) {

@@ -8,6 +8,7 @@
     <title>Mocop · GPU 集群实时监控</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/training_jobs.css">
   </head>
   <body>
     <div class="app-shell">
@@ -39,6 +40,8 @@
             <strong id="last-sync">等待数据</strong>
           </div>
           <button id="update-pill" class="update-pill current" type="button" hidden>检查更新中</button>
+          <button id="directory-disk-open" class="settings-toggle" type="button" aria-haspopup="dialog">目录空间</button>
+          <button id="user-memory-open" class="settings-toggle" type="button" aria-haspopup="dialog">用户内存</button>
           <button id="settings-toggle" class="settings-toggle" type="button" aria-haspopup="dialog" title="个性化设置">
             <span class="settings-glyph" aria-hidden="true"><i></i><i></i><i></i></span>
             <span>设置</span>
@@ -145,6 +148,24 @@
           <div id="incident-list" class="incident-list"></div>
         </section>
 
+        <section id="training-jobs" class="training-jobs" aria-labelledby="training-jobs-title">
+          <div class="tj-heading">
+            <div><h2 id="training-jobs-title">训练任务 <span class="tj-muted">/ ZENITH</span></h2><div id="training-jobs-summary" class="tj-muted">等待平台采集</div></div>
+            <div class="tj-toolbar">
+              <input id="training-jobs-search" type="search" aria-label="搜索训练任务" placeholder="搜索任务名称或 ID" maxlength="120">
+              <select id="training-jobs-filter" aria-label="训练任务筛选"><option value="active">活跃任务</option><option value="recent">最近 20 条</option><option value="failed">失败任务</option><option value="all">全部历史</option></select>
+              <button id="training-jobs-refresh" type="button">刷新观测</button>
+            </div>
+          </div>
+          <div id="training-overview"></div>
+          <div id="training-job-cards" class="tj-cards" aria-live="polite"><p class="tj-empty">正在读取训练任务…</p></div>
+          <p class="tj-footer tj-muted"><span id="training-jobs-status" role="status">等待连接</span> · 未提供开跑时间时，时长按提交起算并标明；GPU 观测按副本统计。</p>
+        </section>
+
+        <section id="storage-analysis" class="training-jobs" aria-labelledby="storage-analysis-title">
+          <div class="tj-heading"><div><h2 id="storage-analysis-title">我的存储</h2><p class="tj-muted">每 6 小时只读扫描 · 保留 30 天趋势 · 指定个人目录，不跟随软链接或自动删除文件</p></div><button id="storage-analysis-refresh" type="button">刷新快照</button></div>
+          <div id="storage-analysis-content" aria-live="polite"></div>
+        </section>
         <section class="workspace">
           <aside class="fleet-panel panel">
             <div class="panel-heading">
@@ -191,6 +212,8 @@
                 <button id="capacity-toggle" class="tool-button capacity-trigger" type="button" aria-haspopup="dialog">匹配算力</button>
                 <button id="owners-toggle" class="tool-button owners-trigger" type="button" aria-haspopup="dialog">使用者</button>
                 <button id="probe-now" class="tool-button probe-trigger" type="button" hidden>立即探测</button>
+                <select id="terminal-app" class="terminal-app-select" aria-label="打开终端使用的应用" hidden></select>
+                <button id="open-terminal" class="tool-button terminal-trigger" type="button" title="在本机打开一个已 SSH 到该节点的终端窗口，并先显示 df -h" hidden>打开终端</button>
                 <button id="export-csv" class="tool-button" type="button">导出当前结果</button>
                 <button id="toggle-groups" class="group-toggle" type="button" hidden>全部展开</button>
                 <label class="search-box">
@@ -301,7 +324,7 @@
         <button id="authentication-submit" class="primary-action" type="submit">验证并连接</button>
         <span id="authentication-status" class="authentication-status" role="alert" aria-live="polite"></span>
       </form>
-      <small class="authentication-privacy">验证成功后仅保存在当前标签页的会话存储中；关闭标签页即失效。</small>
+      <small class="authentication-privacy">验证成功后保存在当前浏览器的站点存储中；退出登录或清理站点数据后失效。</small>
     </dialog>
     <dialog id="settings-dialog" class="side-dialog settings-dialog" aria-labelledby="settings-title">
       <div class="dialog-heading">
@@ -717,6 +740,15 @@
         </section>
       </div>
     </dialog>
+    <dialog id="user-memory-dialog" class="user-memory-dialog" aria-labelledby="user-memory-title">
+      <header class="user-memory-heading">
+        <div class="um-heading-title"><span class="um-heading-icon" aria-hidden="true">▥</span><div><span class="um-eyebrow">RESOURCES / DAILY SNAPSHOT</span><h2 id="user-memory-title">用户内存</h2></div></div>
+        <div class="um-heading-actions"><span class="um-cadence"><i></i> 每 24 小时更新</span><button id="user-memory-close" type="button" aria-label="关闭用户内存面板">×</button></div>
+      </header>
+      <div id="user-memory-content" aria-live="polite"><p class="um-empty">正在读取每日快照…</p></div>
+      <footer class="um-footer"><span id="um-metric-note">系统 RAM · 包含 CPU 任务</span><details><summary>统计口径</summary><p>磁盘容量按实际挂载信息和 df 统计；点击盘卡片筛选该盘目录。同盘重复入口合并，内核虚拟盘和系统配置挂载不列出。目录按存储与 home 下一级目录的已分配空间统计，包含目录内隐藏文件；不跟随符号链接、不跨子挂载点。无权限或超时显示未知；相同共享存储在不同服务器的记录不去重，跨目录硬链接可能重复计入。RAM 按用户汇总可见进程的 RSS，共享页可能重复计入，因此不等于系统已用内存。容器仅统计当前进程命名空间；无进程的用户不列出。服务重启后重新采样，时间以本机时区显示。</p></details></footer>
+    </dialog>
+    <script src="/user-memory.js" defer></script>
     <script src="/format.js" defer></script>
     <script src="/incident-text.js" defer></script>
     <script src="/diagnosis-text.js" defer></script>
@@ -729,11 +761,21 @@
     <script src="/capacity-match.js" defer></script>
     <script src="/capacity-watch.js" defer></script>
     <script src="/update-pill.js" defer></script>
+    <script src="/terminal-launch.js" defer></script>
     <script src="/dashboard-auth.js" defer></script>
+    <script src="/dashboard_startup.js" defer></script>
     <script src="/background-asset.js" defer></script>
     <script src="/attention-groups.js" defer></script>
     <script src="/attention.js" defer></script>
     <script src="/owner-usage.js" defer></script>
+    <dialog id="training-job-dialog" class="tj-dialog" aria-labelledby="training-job-detail-title">
+      <header class="tj-detail-header"><div><h2 id="training-job-detail-title">训练任务详情</h2><span id="training-job-detail-status" class="tj-muted" role="status"></span></div><div class="tj-detail-actions"><button id="training-job-detail-refresh" type="button">刷新详情</button><button id="training-job-detail-close" type="button" aria-label="关闭训练任务详情">关闭</button></div></header>
+      <div id="training-job-detail-content"></div>
+    </dialog>
+    <script src="/storage_analysis.js" defer></script>
+    <script src="/training_overview.js" defer></script>
+    <script src="/training_summary.js" defer></script>
+    <script src="/training_jobs.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

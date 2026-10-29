@@ -203,10 +203,10 @@ writes, so only committed rows survive restart.
    present. If persistence is enabled, open a history view and check the snapshot's
    `persistence.healthy` value.
 5. Open the exact `Dashboard:` capability URL printed by the installer. The page
-   immediately removes the fragment and keeps the token in tab-scoped
-   `sessionStorage`. Reloads remain authenticated; a closed or independent tab
-   requires the printed URL again. A bare or forwarded dashboard URL instead
-   presents a token prompt; paste the contents of the sibling `access-token`
+   immediately removes the fragment and keeps the token in origin-scoped
+   `localStorage`. Reloads, new tabs, and browser restarts remain authenticated;
+   logging out or clearing site data removes it. A bare or forwarded dashboard URL
+   without a cached token instead presents a token prompt; paste the sibling `access-token`
    file. Use only a trusted TLS-terminating proxy because it carries subsequent
    Bearer-authenticated API traffic.
 
@@ -374,3 +374,77 @@ leaves the server's or the client's `{error, code}` envelope there
 - [HTTP API and Bearer examples](API.md)
 - [Security model](SECURITY.md)
 - [Capability decision](adr/0017-per-install-dashboard-capability.md)
+
+### Terminal compatibility
+
+For terminal sessions opened from the dashboard, Mocop checks the target's
+`infocmp` database before starting the login shell. A missing, empty or `dumb`
+TERM falls back to the first installed entry among `xterm-256color`, `xterm`
+and `vt100`. Supported native terminal types stay unchanged. Without `infocmp`
+or any supported fallback, TERM stays unchanged; install the terminal definition
+on the target. Existing terminal windows are unaffected: open a new window to
+use the compatibility check. This does not repair SSH host-key failures.
+
+### Daily user RAM panel
+
+Open **用户内存** in the dashboard header. The service samples each monitored
+host once per 24 hours, independently of GPU polling. Restarting clears the
+in-memory daily cache and requests fresh samples. No memory history file is
+created. Removed hosts disappear from the panel; new hosts are sampled by the
+next worker pass. Inspect `mocop api /api/user-memory` for per-host results.
+
+The dashboard **我的存储** section reports configured personal roots, disk capacity
+and changes. Remaining capacity reuses fresh online disk telemetry; personal
+directory accounting keeps its six-hour scan cadence. The **目录空间** dialog retains a compatible view of these snapshots.
+Create a private `~/.config/mocop/storage-policy.json` with `hosts` keyed by
+already enrolled SSH aliases. Each entry requires non-overlapping absolute
+`roots`; optional `label` and `priority` select display text and scan order.
+`excludeNames` is an optional list of literal directory names to omit throughout
+the scan (at most 32 names, ASCII letters/digits/underscores/dots/hyphens only).
+Keep deployment-specific exclusions in this private file.
+For example, a fictional entry is `"gpu-01": {"roots": ["/home/alice",
+"/data/alice"], "label": "Lab GPU", "priority": 100}`. No browser input can
+change this administrative file. The collector excludes another user's scope,
+credentials directories, symlink targets and other filesystems. It never deletes,
+migrates, vacuums, restarts jobs or changes proxy/SSH settings.
+
+The service schedules two low-priority workers every six hours while the Mac is
+awake. Each root has a 90-second `du` deadline, with 240 seconds per host and a
+260-second local process deadline. Results survive restart in private
+`~/.local/state/mocop/storage-history.json`; restore it with the policy when
+moving the monitor. At most 120 samples per host are retained for 30 days. A
+failed scan retries after fifteen minutes and preserves its last success.
+Read `mocop api /api/storage-analysis` for the current cache. The refresh button
+refreshes this cache view and does not start another recursive disk scan.
+
+Training observations require a private platform token at
+`~/.config/mocop/zenith/token` and its origin (scheme, hostname, optional port)
+in `~/.config/mocop/zenith/origin`, both owned by the service user with mode
+`0600`. Origins cannot contain credentials, paths, queries or fragments;
+missing or invalid configuration does not select a fallback platform. The optional Mac webpage metadata helper is
+`python -m mocop.training_browser_capture`; it reads only an already-open,
+logged-in platform tab. Chrome must explicitly allow JavaScript from Apple
+Events. The helper compiles a small reader with the system Swift SDK, returns
+only job ID, vendor, GPU requests and timing, and writes private
+`~/.local/state/mocop/training-browser.json`. It never exports cookies or login
+tokens. Without that browser permission or after the tab/session closes, the
+bridge reports unavailable and its metadata expires after ten minutes. The
+bridge opts out of the platform client's automatic authentication redirect,
+so an unsuccessful background read does not clear the browser login state.
+Stable Chrome window/tab IDs keep reads attached to the same tab after focus changes.
+The platform API still supplies metrics, billing and visible capacity. A local
+launchd schedule can invoke the helper every minute; removing that schedule
+disables browser observations without changing platform tasks.
+
+Training lists and platform summaries synchronize every minute independently
+of an open dashboard; metrics rotate every 30 seconds. The visible sync time
+describes the last completed list read, with upstream failures/backoff exposed.
+Missing task specifications require an authorized browser observation; logging
+in alone does not enable Chrome's Apple Events JavaScript permission. Capacity
+tables separate starting, running and remaining cards when the source supplies
+those states, and otherwise keep them unknown beside an allocated aggregate.
+
+Storage cards display full root and child paths. A configured NAS parent also
+inventories its child mounts instead of showing only the parent filesystem.
+Object-store mounts use logical file sizes and label virtual capacity explicitly.
+Updating roots invalidates the displayed old scope and requests a new scan.

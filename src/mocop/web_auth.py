@@ -10,7 +10,7 @@ from __future__ import annotations
 import hmac
 from email.message import Message
 
-from .api_manifest import DOCUMENTATION_URL
+from .api_manifest import DOCUMENTATION_URL, ROUTE_METHODS
 from .hostnames import is_trusted_request
 
 
@@ -46,3 +46,25 @@ def authentication_error(
         ),
         "documentation": DOCUMENTATION_URL,
     }
+
+
+def is_api_family_path(path: str) -> bool:
+    """Paths whose failures must stay JSON instead of the HTML error page."""
+    if path == "/api" or path.startswith("/api/"):
+        return True
+    return any(
+        path == prefix or path.startswith(prefix + "/")
+        for prefix in ("/healthz", "/readyz", "/metrics")
+    )
+
+
+def allowed_methods_header(path: str) -> str:
+    methods = ROUTE_METHODS[path]
+    allowed = []
+    if "GET" in methods:
+        allowed.append("GET")
+        if path != "/api/events":  # the event stream refuses HEAD
+            allowed.append("HEAD")
+    if "POST" in methods:
+        allowed.append("POST")
+    return ", ".join(allowed)

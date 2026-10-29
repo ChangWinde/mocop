@@ -67,7 +67,8 @@ webhook services, DNS/TLS infrastructure, and the browser. Exact hardening of SS
 servers, webhook receivers, and reverse proxies is **UNABLE TO DETERMINE** here.
 
 **Required properties:** never put credentials into source artifacts, configuration
-JSON, API payloads, persistent browser storage, or logs; keep resolved destinations and raw
+JSON, API payloads, cookies, IndexedDB, or logs; the dashboard Bearer capability is the
+sole browser-storage exception and stays in origin-scoped `localStorage`; keep resolved destinations and raw
 connection errors out of browser/support responses; authenticate every telemetry,
 metrics, SSE, and write request with exactly one Bearer capability in the default
 mode; in explicit `none` mode require a trusted Host and non-cross-site Fetch
@@ -83,7 +84,7 @@ output, CSV, and exposed-listener attacks; a remote process supplies excessive o
 control-character metadata; SQLite fills the operator's disk or blocks collection; a
 webhook URL targets loopback/cloud metadata, changes DNS after validation, stalls a
 sender, returns failures to amplify retries, or exposes a secret through configuration
-or status output; a capability is copied from its file, shell input, tab session storage,
+or status output; a capability is copied from its file, shell input, browser `localStorage`,
 or an injected same-origin script; a capability holder repeatedly requests service
 restarts, probes, or notification tests; a support bundle leaks aliases, GPU UUIDs,
 command lines, or raw connection errors.
@@ -145,6 +146,17 @@ It does not accept a target, query, or collection control and never starts remot
 Operators who expose Mocop beyond loopback must apply authenticated TLS or private-VPN
 transport to this route as well.
 
+`POST /api/terminal` is the one route that acts on the operator's desktop: it opens a
+terminal application with an interactive `ssh <alias>` session. It is offered only when
+the service runs on macOS with a supported application installed, follows the full
+write guard, and never takes a command from HTTP. The alias must be a current
+monitoring target and the `app` one of the advertised identifiers; the fixed launch
+script is written `0700` inside an owner-only, shell-safe directory and passed to the
+application by path, and repeated launches for one host are rate limited. Anyone who
+holds the Bearer capability on a loopback-only instance already controls that
+desktop session, so the route adds no principal; operators who expose the listener
+beyond loopback should treat this route like the restart and configuration writes.
+
 All remote values—including shared-storage devices, mountpoints and heatmap labels—enter the DOM only through `textContent` or property assignment. Shared-resource grouping and focus filters transform only the in-memory snapshot; they do not construct URLs, commands or HTML. CSV cells are always quoted, embedded quotes are doubled, and values whose trimmed form starts with `=`, `+`, `-` or `@` receive a leading apostrophe before the browser creates a short-lived object URL. OpenMetrics labels escape backslashes, quotes, and newlines; current GPU and system resource series omit stale hosts, and process names/PIDs are not exported. Browser-selected backgrounds accept only PNG, JPEG, WebP or AVIF sources up to 32 MiB, must match the declared container signature, and must decode within 8,192 pixels per side and 32 megapixels. Sources above 8 MiB are locally resized to at most 4,096 pixels per side and 12 megapixels, encoded as a static WebP no larger than 8 MiB, and revalidated before one IndexedDB `Blob` is replaced. SVG and animated formats are rejected before decode. Rendering uses a browser-generated, revocable `blob:` URL; CSP grants `blob:` only to `img-src`, and no upload endpoint exists.
 
 Aliases pass a strict grammar; remote aliases follow `--`, while the local target uses the constant `sh -s` argv. Both transports receive the same repository-owned fixed script through stdin. A selector drains stdout and stderr incrementally into buffers sharing the configured 64 KiB–16 MiB hard limit; crossing it kills the isolated process group and returns a finite error. The parser accepts only the current `MONITOR_V8` protocol version and rejects everything else, along with incomplete metric sections, conflicting sampled/skipped process states, missing fields, invalid GPU or health values, duplicate health UUIDs, oversized text and more than 256 GPU or health, 1,024 disk, or 4,096 GPU-process records per host. `MONITOR_V8` can explicitly skip the fixed process query between its bounded deadlines; no browser value controls that decision. Base GPU and health fields share one fixed query, but parsing still treats health as additive: malformed or unsupported health fields cannot suppress valid base telemetry, and an unsupported combined query falls back to the fixed base query. Strict host-key checking and batch mode are mandatory for remote targets; configured timeouts, worker bounds and jittered failure backoff isolate slow targets and disperse shared-path retries; security headers include a same-origin CSP. The default loopback bind reduces network reachability, while the Bearer capability isolates private HTTP surfaces from unrelated local users. Remote exposure requires authenticated TLS proxy/VPN controls.
@@ -202,9 +214,9 @@ The process inherits the operator's SSH environment so OpenSSH can use ssh-agent
 never opens private-key files itself. Raw SSH stderr is classified locally and is not
 stored or emitted. The managed dashboard capability is an owner-only regular file
 beside the selected configuration. The browser removes it from the URL fragment and
-keeps it in tab-scoped `sessionStorage` so an intentional reload remains authenticated;
-it is never stored in a cookie, persistent `localStorage`, or IndexedDB. Closing the
-tab ends that browser session. Webhook URLs and signing secrets are read from environment variables;
+keeps it in origin-scoped `localStorage` so reloads and browser restarts remain authenticated.
+It is never stored in a cookie or IndexedDB; logging out or clearing site data removes
+the cached capability. Webhook URLs and signing secrets are read from environment variables;
 for the generated service, place them in the optional private `environment` file next
 to `config.json`. They never enter the config API, snapshot, status, or logs.
 
@@ -234,3 +246,30 @@ authenticate the server. Put the service behind TLS plus authenticated authoriza
 anonymously. Capability rotation, viewer access review, proxy configuration, upgrade,
 and rollback are deployment responsibilities; see [OPERATIONS.md](OPERATIONS.md) and
 [ADR-0017](adr/0017-per-install-dashboard-capability.md).
+
+### Daily RAM accounting
+
+Usernames, UIDs, process counts and aggregate RSS are capability-protected
+telemetry. No command lines or environment variables are collected. Browser
+requests cannot choose a remote host or command, trigger sampling, or change
+cadence. The worker uses the monitored allowlist, strict SSH host-key checks,
+fixed shell text, bounded execution and output. Remote text is rendered through
+DOM text nodes. Samples remain in process memory and are discarded on restart.
+
+Directory storage scans use a fixed script in `remote_script.py` and local findmnt mount topology. Directory paths are passed as subprocess arguments after `--`, never interpolated into shell source. No file contents or recursive filenames are returned. Results require the dashboard bearer capability; API callers cannot select paths or initiate scans. GNU du does not follow symlinks and stays on one filesystem per directory; nested mounts are also explicitly excluded. Mount options and source strings are not returned to the browser. Paths discovered from mounts remain subprocess arguments. Per-directory and per-host time budgets plus a 256-directory limit bound scheduled work; inaccessible or incomplete sizes remain unknown.
+
+The disk producer emits JSON whitespace between directory probes to detect a closed SSH output pipe before starting another recursive scan; each active du still has its own 90-second deadline.
+
+
+### Personal storage and browser observations
+
+Storage roots are an owner-only administrative policy, restricted to enrolled
+SSH aliases, non-overlapping absolute paths and a bounded count. JSON travels on
+stdin to a fixed versioned program. No browser-controlled shell command or path
+is accepted; scans never follow symlinks or delete files. Unknown scan results
+remain unknown. Histories use private files and bounded retention. The optional
+Mac browser helper requires the user's browser permission and an authenticated
+platform tab; only GPU-request and timing fields leave the browser. Local
+observations join existing owned API jobs by exact vendor/job ID, expire after
+ten minutes, and cannot add another user's jobs. Browser closure or login expiry
+does not relax the personal API's permission boundary.

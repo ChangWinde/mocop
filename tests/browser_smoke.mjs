@@ -283,7 +283,7 @@ try {
   if (anonymousMode) {
     await waitForEvaluation(cdp, "document.querySelector('#server-ratio')?.textContent !== '— / —'");
     assert.equal(await cdp.evaluate("document.querySelector('#authentication-dialog').open"), false);
-    assert.equal(await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"), null);
+    assert.equal(await cdp.evaluate("window.localStorage.getItem('mocop.dashboardAccessToken.v1')"), null);
     const writeStatus = await cdp.evaluate(`(async () => {
       const response = await fetch('/api/settings/collector', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -297,7 +297,7 @@ try {
     await reloaded;
     await waitForEvaluation(cdp, "document.querySelector('#server-ratio')?.textContent !== '— / —'");
     assert.equal(await cdp.evaluate("document.querySelector('#authentication-dialog').open"), false);
-    assert.equal(await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"), null);
+    assert.equal(await cdp.evaluate("window.localStorage.getItem('mocop.dashboardAccessToken.v1')"), null);
   } else {
     // A bare forwarded URL cannot inherit a capability from another tab. It
     // must present an explicit, non-dismissible authentication flow instead of
@@ -307,7 +307,7 @@ try {
       open: document.querySelector("#authentication-dialog")?.open,
       focused: document.activeElement?.id,
       connection: document.querySelector("#connection-text")?.textContent,
-      stored: window.sessionStorage.getItem("mocop.dashboardAccessToken.v1"),
+      stored: window.localStorage.getItem("mocop.dashboardAccessToken.v1"),
     })`);
     assert.deepEqual(missingAuthentication, {
       open: true,
@@ -324,7 +324,7 @@ try {
       return {
         open: document.querySelector("#authentication-dialog").open,
         status: document.querySelector("#authentication-status").textContent,
-        stored: window.sessionStorage.getItem("mocop.dashboardAccessToken.v1"),
+        stored: window.localStorage.getItem("mocop.dashboardAccessToken.v1"),
       };
     })()`, true);
     assert.equal(invalidAuthentication.open, true);
@@ -342,7 +342,7 @@ try {
       "document.querySelector('#authentication-status')?.textContent.includes('不正确')",
     );
     assert.equal(
-      await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"),
+      await cdp.evaluate("window.localStorage.getItem('mocop.dashboardAccessToken.v1')"),
       null,
     );
 
@@ -353,7 +353,7 @@ try {
     })()`);
     await waitForEvaluation(
       cdp,
-      "!document.querySelector('#authentication-dialog')?.open && Boolean(window.sessionStorage.getItem('mocop.dashboardAccessToken.v1'))",
+      "!document.querySelector('#authentication-dialog')?.open && Boolean(window.localStorage.getItem('mocop.dashboardAccessToken.v1'))",
     );
     const authenticatedReload = cdp.waitFor("Page.loadEventFired", 30_000);
     await cdp.send("Page.reload", { ignoreCache: true });
@@ -368,7 +368,7 @@ try {
   // Keep the original capability-link path covered independently: a fragment
   // still auto-authenticates, is scrubbed immediately, and can perform the
   // pre-snapshot collector update without an unauthenticated request.
-  await cdp.evaluate("window.sessionStorage.clear()");
+  await cdp.evaluate("window.localStorage.clear()");
   const fragmentLoaded = cdp.waitFor("Page.loadEventFired", 30_000);
   await cdp.send("Page.navigate", {
     url: `http://127.0.0.1:${monitorPort}/?auth=fragment#access_token=${browserAccessToken}`,
@@ -376,7 +376,7 @@ try {
   await fragmentLoaded;
   assert.equal(await cdp.evaluate("window.location.hash"), "");
   assert.equal(
-    await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"),
+    await cdp.evaluate("window.localStorage.getItem('mocop.dashboardAccessToken.v1')"),
     browserAccessToken,
   );
 
@@ -394,7 +394,7 @@ try {
   assert.equal(initial.gpuMemoryCard, true);
   assert.equal(initial.overflow, false);
   assert.equal(
-    await cdp.evaluate("window.sessionStorage.getItem('mocop.dashboardAccessToken.v1')"),
+    await cdp.evaluate("window.localStorage.getItem('mocop.dashboardAccessToken.v1')"),
     browserAccessToken,
   );
 
@@ -1102,6 +1102,14 @@ try {
   assert.equal(frozenAttention.online.length, 1);
   assert.match(frozenAttention.online[0], /GPU 0 VRAM 95\.3%$/);
   assert.deepEqual(frozenAttention.restored, []);
+  await cdp.evaluate('document.querySelector("#user-memory-open").click()');
+  await waitForEvaluation(cdp, 'document.querySelector("#user-memory-dialog").open && document.querySelector("#user-memory-content").textContent.includes("等待服务器清单")');
+  if (process.env.MOCOP_MEMORY_SCREENSHOT) {
+    const memoryShot = await cdp.send("Page.captureScreenshot", { format: "png" });
+    await writeFile(process.env.MOCOP_MEMORY_SCREENSHOT, Buffer.from(memoryShot.data, "base64"));
+  }
+  await cdp.evaluate('document.querySelector("#user-memory-close").click()');
+  assert.equal(await cdp.evaluate('document.querySelector("#user-memory-dialog").open'), false);
 
   const screenshotPath = process.env.MOCOP_BROWSER_SCREENSHOT;
   if (screenshotPath) {
