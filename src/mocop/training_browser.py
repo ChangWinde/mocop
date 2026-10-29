@@ -16,6 +16,8 @@ def merge_browser_observations(jobs, *, path=OBSERVATIONS, now=None):
     now = time.time() * 1000 if now is None else now
     result = copy.deepcopy(jobs)
     for job in result:
+        job.pop("browser_execution_status", None)
+        job.pop("browser_status_sampled_at", None)
         if job.get("gpu_count_source") == "browser":
             job["gpu_count"] = job["gpu_model"] = job["gpu_count_source"] = None
         if job.pop("_browser_timing", False):
@@ -48,6 +50,29 @@ def merge_browser_observations(jobs, *, path=OBSERVATIONS, now=None):
             row = observations.get((job["vendor"], job["job_id"]))
             if row is None:
                 continue
+            status = row.get("status")
+            if (
+                isinstance(status, str)
+                and status
+                in {
+                    "RUNNING",
+                    "PROVISIONING",
+                    "STARTING",
+                    "INITIALIZING",
+                    "PENDING",
+                    "CREATED",
+                    "QUEUED",
+                    "SCHEDULING",
+                    "STOPPING",
+                    "FAILED",
+                    "SUCCEEDED",
+                    "STOPPED",
+                    "STARTUP_FAILED",
+                }
+                and now - sampled <= 120000
+            ):
+                job["browser_execution_status"] = status
+                job["browser_status_sampled_at"] = sampled
             count, model, _ = gpu_resources(row)
             if job.get("gpu_count") is None and count is not None:
                 job["gpu_count"] = count

@@ -5,24 +5,25 @@
   const node = (tag, cls, text) => { const e = document.createElement(tag); e.className = cls; if (text != null) e.textContent = text; return e; };
   const stats = snapshot => {
     const overview = snapshot.overview || {};
-    const bill = snapshot.platform?.card_hours;
-    const personal = bill?.personal;
-    const cards = overview.known_running_cards;
-    const cardText = snapshot.sampled_at === null ? "等待采集" : cards === 0 && overview.unknown_card_jobs ? "待同步" : `${fmt(cards)}${overview.unknown_card_jobs || snapshot.complete === false ? "+" : ""} 张`;
-    return [
-      ["运行中总卡数", cardText, `${overview.running_jobs || 0} 个运行任务${overview.unknown_card_jobs ? ` · ${overview.unknown_card_jobs} 个待补规格` : ""}`],
-      ["运行卡型", Object.entries(overview.models || {}).map(([model, count]) => `${model} × ${count}`).join(" · ") || "等待任务规格", "按任务申请卡数统计，不用副本数代替卡数"],
-      ["本周期原始卡时", `${fmt(personal?.raw_used_card_hours)} 卡·h`, "平台个人额度账单口径"],
-      ["折算用量 / 剩余", `${fmt(personal?.used_weighted_card_hours)} / ${fmt(personal?.remaining_card_hours)}`, bill?.error_status ? "账单读取异常，保留旧值" : "卡·h · 含平台优先级折算"],
-    ];
+    const states = overview.states || {};
+    const fallback = {running:{jobs:overview.running_jobs,cards:overview.known_running_cards,unknown_card_jobs:overview.unknown_card_jobs,models:overview.models},starting:{cards:overview.known_starting_cards},startup_failed:{cards:0}};
+    return [["running","我的运行中"],["starting","我的启动中"],["startup_failed","启动失败 · 近 24 小时"]].map(([key,label]) => {
+      const state = states[key] || fallback[key];
+      const value = snapshot.sampled_at === null ? "等待采集" : `${fmt(state.cards)}${state.unknown_card_jobs || snapshot.complete === false ? "+" : ""} 张`;
+      const models = Object.entries(state.models || {}).map(([model,count]) => `${model.replace(/^NVIDIA /, "")} × ${count}`).join(" · ");
+      return [label,value,`${state.jobs || 0} 个任务${models ? ` · ${models}` : ""}${state.unknown_card_jobs ? ` · ${state.unknown_card_jobs} 个任务待补卡数` : ""}${key === "startup_failed" ? " · 失败申请卡数，不计入运行占用" : ""}`];
+    });
   };
   const render = (snapshot, container) => {
     container.replaceChildren();
     const grid = node("div", "tj-overview-grid");
-    for (const [label, value, note] of stats(snapshot)) { const cell = node("div", "tj-overview-stat"); cell.append(node("small", "tj-muted", label), node("strong", "", value), node("small", "tj-muted", note)); grid.append(cell); }
+    for (const [index, [label, value, note]] of stats(snapshot).entries()) { const cell = node("div", `tj-overview-stat ${["running","starting","failed"][index]}`); cell.append(node("small", "tj-muted", label), node("strong", "", value), node("small", "tj-muted", note)); grid.append(cell); }
     container.append(grid);
     const overview = snapshot.overview || {};
-    container.append(node("p", "tj-muted", `我的活动任务申请合计 ${fmt(overview.known_active_cards)}${overview.unknown_active_card_jobs ? "+" : ""} 张 · 启动中 ${fmt(overview.known_starting_cards)} 张 · 排队 ${fmt(overview.known_queued_cards)} 张${overview.unknown_active_card_jobs ? `（${overview.unknown_active_card_jobs} 个任务缺规格，数字仅含已知部分）` : ""}`));
+    const uncertain = (overview.states?.mixed?.jobs || 0)+(overview.states?.unknown?.jobs || 0);
+    container.append(node("p", "tj-muted", `排队 ${fmt(overview.known_queued_cards)} 张 · 活动申请合计 ${fmt(overview.known_active_cards)}${overview.unknown_active_card_jobs ? "+" : ""} 张${uncertain ? ` · ${uncertain} 个任务状态混合或待确认，未分摊到运行 / 启动卡数` : ""}`));
+    const personal = snapshot.platform?.card_hours?.personal;
+    container.append(node("p", "tj-accounting-note tj-muted", `本周期原始卡时 ${fmt(personal?.raw_used_card_hours)} 卡·h · 折算用量 ${fmt(personal?.used_weighted_card_hours)} · 剩余额度 ${fmt(personal?.remaining_card_hours)} 卡·h`));
     if (snapshot.overview?.unknown_card_jobs) {
       const reasons = {browser_read_disabled_or_unavailable:"Chrome 网页读取尚未开启或暂不可用",platform_tab_closed:"请保持已登录的训练平台标签页打开",session_or_schema_unavailable:"网页登录已过期或平台数据格式变化",not_configured:"尚未连接网页规格观测"};
       container.append(node("p", "tj-warning", `${snapshot.overview.unknown_card_jobs} 个运行任务仍缺卡型/卡数：${reasons[snapshot.browser?.status] || "等待网页规格同步"}。未知部分未计入总卡数。`));

@@ -217,6 +217,7 @@ class TrainingInsightsTests(unittest.TestCase):
                     {
                         "vendor": "baidu",
                         "job_id": "my-job",
+                        "status": "PROVISIONING",
                         "resource_requests": [
                             {"gpu_type": "GPU A", "gpu_count": 4, "replicas": 2}
                         ],
@@ -227,6 +228,10 @@ class TrainingInsightsTests(unittest.TestCase):
             path.chmod(0o600)
             result = merge_browser_observations(jobs, path=path, now=2000)
             self.assertEqual(result[0]["gpu_count"], 8)
+            self.assertEqual(result[0]["browser_execution_status"], "PROVISIONING")
+            stale_status = merge_browser_observations(result, path=path, now=121001)
+            self.assertNotIn("browser_execution_status", stale_status[0])
+            self.assertEqual(stale_status[0]["gpu_count"], 8)
             self.assertIsNone(jobs[0]["gpu_count"])
             expired = merge_browser_observations(result, path=path, now=700000)
             self.assertIsNone(expired[0]["gpu_count"])

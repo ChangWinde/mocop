@@ -16,6 +16,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Changed
 
+- Separate personal running, starting and recent startup-failed GPU requests in
+  summary tiles and task filters, using the same execution-phase classification.
+- Replace expanded storage diagnostics with compact full-path tables showing
+  filesystem total, remaining space and directory usage; keep partial scans
+  explicit and collapse scan details.
+
 - Retain dashboard access capabilities in origin-scoped browser storage until
   logout or site-data clearing, including across browser restarts.
 

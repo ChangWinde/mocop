@@ -474,10 +474,13 @@ program registered in `remote_script.py`. Administrative root lists are JSON on
 stdin; no path or browser field enters remote shell text. The collector retains
 private bounded history independently of GPU polling. Its compatibility view
 preserves the directory dialog, while `storage_analysis.js` owns the main
-personal-storage cards and trend display. See the operations guide for cadence,
+compact directory/capacity tables and collapsed scan details. See the operations guide for cadence,
 limits and policy ownership.
 
-`zenith_monitor.py` owns independent training polling. `training_insights.py`
+`zenith_monitor.py` owns independent training polling. `training_execution.py`
+classifies execution phases using explicit ledger/browser states and fresh,
+complete replicas; mixed states and failures stay out of running totals.
+`training_insights.py`
 projects utilization, requested-card totals, personal billing and non-additive
 candidate capacity. `training_browser.py` joins fresh whitelisted webpage
 metadata; the optional Mac capture helper never returns a browser credential.

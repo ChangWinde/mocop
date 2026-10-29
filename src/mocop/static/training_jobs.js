@@ -1,7 +1,7 @@
 (() => {
   "use strict";
   const TERMINAL = new Set(["SUCCEEDED", "FAILED", "STOPPED", "CANCELED", "CANCELLED", "TERMINATED", "COMPLETED", "SUCCESS"]);
-  const LABELS = { RUNNING: "运行中", PENDING: "排队中", QUEUED: "排队中", CREATED: "已创建", STARTING: "启动中", PROVISIONING: "启动中", INITIALIZING: "启动中", SCHEDULING: "调度中", SUCCEEDED: "已完成", FAILED: "失败", STOPPED: "已停止", CANCELED: "已取消", CANCELLED: "已取消", STOPPING: "停止中", UNKNOWN: "未知" };
+  const LABELS = { RUNNING: "运行中", PENDING: "排队中", QUEUED: "排队中", CREATED: "已创建", STARTING: "启动中", PROVISIONING: "启动中", INITIALIZING: "启动中", SCHEDULING: "调度中", SUCCEEDED: "已完成", FAILED: "失败", STOPPED: "已停止", CANCELED: "已取消", CANCELLED: "已取消", STOPPING: "停止中", STARTUP_FAILED: "启动失败", MIXED: "部分运行 / 状态混合", UNKNOWN: "待确认" };
   const VENDORS = { baidu: "百度云", volcengine: "火山引擎", aliyun: "阿里云", ctyun: "天翼云", lanqi: "蓝耆" };
   const METRICS = { GpuUsage: "GPU 使用", GpuMemoryUsage: "显存使用", CpuUsage: "CPU 使用", MemoryUsage: "内存使用" };
   const node = (tag, className, text) => {
@@ -13,7 +13,7 @@
   const numeric = value => typeof value === "number" && Number.isFinite(value);
   const valueText = value => numeric(value) ? value.toLocaleString("zh-CN", { maximumFractionDigits: 1 }) : "未知";
   const timeText = value => numeric(value) ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "未知";
-  const tone = status => status === "FAILED" ? "failed" : status === "RUNNING" ? "running" : ["SUCCEEDED", "COMPLETED", "SUCCESS"].includes(status) ? "success" : "other";
+  const tone = status => ["FAILED", "STARTUP_FAILED"].includes(status) ? "failed" : status === "RUNNING" ? "running" : status === "STARTING" ? "starting" : ["SUCCEEDED", "COMPLETED", "SUCCESS"].includes(status) ? "success" : "other";
   const badge = status => node("span", `tj-badge ${tone(status)}`, LABELS[status] || status || "未知");
   const latest = points => [...(points || [])].filter(p => numeric(p.ts)).sort((a, b) => a.ts - b.ts).at(-1);
   const errorText = status => ({ 401: "平台令牌已失效", 403: "平台读取权限不足", 404: "任务不存在或已不可访问", 409: "当前厂商不支持", 429: "读取频率受限，请稍后重试", 501: "当前厂商不提供此数据" })[status] || "暂时无法读取";
@@ -112,15 +112,16 @@
       const jobs = snapshot.jobs || [];
       globalThis.MocopTrainingOverview.render(snapshot, document.querySelector("#training-overview"));
       const active = jobs.filter(j => !TERMINAL.has(j.status));
-      const failed = jobs.filter(j => j.status === "FAILED");
+      const phase = globalThis.MocopTrainingSummary.executionStatus;
+      const failed = jobs.filter(j => ["FAILED", "STARTUP_FAILED"].includes(phase(j)));
       summary.textContent = `${active.length} 个活跃 · ${snapshot.total} 条记录${snapshot.complete ? "" : "（列表未完整）"}`;
       status.textContent = snapshot.error_status ? `${errorText(snapshot.error_status)}${snapshot.sampled_at ? " · 保留上次观测" : ""}` : `每 ${snapshot.list_poll_interval_seconds || 60} 秒自动同步 · 任务列表 ${timeText(snapshot.list_sampled_at)} · 指标 ${timeText(snapshot.sampled_at)}`;
       status.classList.toggle("tj-warning", Boolean(snapshot.stale));
       if (snapshot.stale && !snapshot.error_status) status.textContent += " · 数据待更新";
       section.dataset.stale = String(Boolean(snapshot.stale));
       const terms = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-      let visible = filter.value === "active" ? active : filter.value === "failed" ? failed : filter.value === "recent" ? jobs.slice(0, 20) : jobs;
-      visible = visible.filter(j => terms.every(t => `${j.name} ${j.job_id} ${j.vendor} ${j.status}`.toLowerCase().includes(t)));
+      let visible = filter.value === "active" ? active : filter.value === "running" ? jobs.filter(j => phase(j) === "RUNNING") : filter.value === "starting" ? jobs.filter(j => phase(j) === "STARTING") : filter.value === "startup_failed" ? jobs.filter(j => globalThis.MocopTrainingSummary.recentStartupFailure(j)) : filter.value === "failed" ? failed : filter.value === "recent" ? jobs.slice(0, 20) : jobs;
+      visible = visible.filter(j => terms.every(t => `${j.name} ${j.job_id} ${j.vendor} ${j.status} ${phase(j)}`.toLowerCase().includes(t)));
       cards.replaceChildren();
       if (!visible.length) {
         cards.append(node("p", "tj-empty", snapshot.stale && !snapshot.sampled_at ? "训练平台暂不可用，等待采集" : "没有符合筛选条件的任务"));
@@ -135,7 +136,7 @@
       const duration = globalThis.MocopTrainingSummary.runtimeSummary(job);
       content.replaceChildren();
       const meta = node("div", "tj-detail-meta");
-      meta.append(badge(job.status), node("span", "tj-muted", `${VENDORS[job.vendor] || job.vendor} · ${job.execution_class} · 提交 ${timeText(job.created_at)}`));
+      meta.append(badge(globalThis.MocopTrainingSummary.executionStatus(job)), node("span", "tj-muted", `${VENDORS[job.vendor] || job.vendor} · ${job.execution_class} · 提交 ${timeText(job.created_at)}`));
       meta.append(node("span", "tj-muted", `GPU ${gpu.text}（${gpu.note}） · ${duration.note} ${duration.text}`));
       content.append(meta, node("p", "tj-muted", `任务 ID ${job.job_id} · 平台观测 ${timeText(job.updated_at)}`));
       content.append(node("h3", "tj-detail-heading", "副本状态"));

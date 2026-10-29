@@ -54,10 +54,14 @@ html[data-style="ledger"] .tj-badge.failed { color: #922331; background: #f5d9dc
 
 .tj-toolbar input:focus-visible, .tj-toolbar select:focus-visible, .tj-toolbar button:focus-visible, .tj-detail-button:focus-visible, .tj-detail-header button:focus-visible { outline: none; box-shadow: var(--focus); }
 
-.tj-overview-grid { display:grid; grid-template-columns:1fr 1.8fr 1fr 1.1fr; gap:10px; margin:12px 0 8px; }
+.tj-overview-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:12px 0 8px; }
 .tj-overview-stat { display:flex; flex-direction:column; gap:5px; padding:12px; border:1px solid var(--line); border-radius:12px; min-width:0; }
 .tj-overview-stat strong { font-size:18px; overflow-wrap:anywhere; }
-.tj-overview-stat:nth-child(2) strong { font-size:13px; line-height:1.55; }
+.tj-overview-stat.running strong { color:var(--green, #59b993); }
+.tj-overview-stat.starting strong { color:var(--amber); }
+.tj-overview-stat.failed strong { color:var(--red, #d66c7a); }
+.tj-badge.starting { color:#e5b86b; background:#493d27; }
+html[data-style="ledger"] .tj-badge.starting { color:#805415; background:#f4e6cc; }
 .tj-overview-stat small { font-size:11px; }
 .tj-accounting-note { font-size:11px; margin:8px 0; }
 .tj-capacity { margin:10px 0; padding:10px; border:1px solid var(--line); border-radius:10px; overflow:auto; }
@@ -66,7 +70,7 @@ html[data-style="ledger"] .tj-badge.failed { color: #922331; background: #f5d9dc
 @media(max-width:900px) { .tj-overview-grid { grid-template-columns:1fr 1fr; } }
 @media(max-width:500px) { .tj-overview-grid { grid-template-columns:1fr; } }
 
-.sa-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:10px; }
+.sa-grid { display:grid; grid-template-columns:1fr; gap:10px; }
 .sa-card { border:1px solid var(--line); border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:10px; min-width:0; }
 .sa-card-title { display:flex; justify-content:space-between; gap:10px; }
 .sa-total { font-size:18px; margin:0; }
@@ -84,3 +88,14 @@ html[data-style="ledger"] .tj-badge.failed { color: #922331; background: #f5d9dc
 .sa-trend {width:100%;height:42px;}
 
 .sa-more {margin-top:12px;} .sa-more > summary {cursor:pointer;padding:8px 0;font-size:12px;}
+
+.sa-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:12px; }
+.sa-table th { color:var(--muted); font-weight:500; text-align:right; padding:5px 8px; border-bottom:1px solid var(--line); }
+.sa-table td { padding:8px; border-bottom:1px solid var(--line); }
+.sa-table th:first-child { width:52%; text-align:left; }
+.sa-path { font-family:var(--mono,monospace); overflow-wrap:anywhere; }
+.sa-number { text-align:right; font-variant-numeric:tabular-nums; }
+.sa-number strong { font-weight:500; }
+.sa-number small { display:block; }
+.sa-footnote { margin:8px 0 0; font-size:11px; }
+@media(max-width:600px) { .sa-card { padding:8px; gap:6px; } .sa-card-title { flex-wrap:wrap; gap:4px; } .sa-table th:first-child { width:43%; } .sa-table th,.sa-table td { padding:7px 3px; font-size:11px; } .tj-overview-grid { grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; } .tj-overview-stat { padding:8px; border-radius:8px; } .tj-overview-stat strong { font-size:18px; } }

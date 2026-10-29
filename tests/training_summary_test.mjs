@@ -35,3 +35,11 @@ assert.equal(runtimeSummary({ status: "RUNNING", replicas_status: 200, replicas:
 assert.equal(submittedText(null), "未知");
 assert.match(submittedText(1900000000000), /^2030-03-\d{2} \d{2}:\d{2}$/);
 console.log("training summary contracts passed");
+
+const {executionStatus,recentStartupFailure}=globalThis.MocopTrainingSummary;
+assert.equal(executionStatus({status:"RUNNING",execution:{status:"STARTING"}}),"STARTING");
+assert.equal(runtimeSummary({status:"RUNNING",execution:{status:"STARTING"},created_at:1000},16000).note,"启动等待");
+assert.equal(runtimeSummary({status:"FAILED",execution:{status:"STARTUP_FAILED"}},16000).text,"未启动成功");
+assert.equal(recentStartupFailure({status:"FAILED",execution:{status:"STARTUP_FAILED"},updated_at:1000},16000),true);
+assert.equal(recentStartupFailure({status:"FAILED",execution:{status:"STARTUP_FAILED"},updated_at:1000},86401001),false);
+assert.equal(recentStartupFailure({status:"RUNNING",execution:{status:"STARTUP_FAILED"}},86401001),true);

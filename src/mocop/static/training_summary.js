@@ -1,10 +1,15 @@
 (() => {
   "use strict";
   const TERMINAL = new Set(["SUCCEEDED", "FAILED", "STOPPED", "CANCELED", "CANCELLED", "TERMINATED", "COMPLETED", "SUCCESS"]);
-  const WAITING = new Set(["PENDING", "QUEUED", "CREATED", "STARTING"]);
+  const WAITING = new Set(["PENDING", "QUEUED", "CREATED", "STARTING", "PROVISIONING", "INITIALIZING", "SCHEDULING"]);
   const numeric = value => typeof value === "number" && Number.isFinite(value);
   const timestamp = value => numeric(value) && value > 0 && Number.isFinite(new Date(value).getTime());
   const latest = samples => [...(samples || [])].filter(p => numeric(p.ts)).sort((a, b) => a.ts - b.ts).at(-1);
+  const executionStatus = job => job.execution?.status || job.status;
+  const recentStartupFailure = (job, now = Date.now()) => {
+    const at = job.ended_at || job.updated_at || job.created_at;
+    return executionStatus(job) === "STARTUP_FAILED" && (!TERMINAL.has(job.status) || (numeric(at) && now-at >= 0 && now-at <= 86400000));
+  };
   const gpuSummary = job => {
     if (Number.isInteger(job.gpu_count) && job.gpu_count >= 0) return { text: `${job.gpu_count} 张`, note: `${job.gpu_model || "平台规格"}${job.gpu_count_source === "browser" ? " · 网页观测" : ""}` };
     const sample = job.metrics_status === 200 && job.metrics?.source === "stored" ? latest(job.metrics.samples) : null;
@@ -19,9 +24,11 @@
   };
   const elapsed = (start, end) => !timestamp(start) || !timestamp(end) || end < start ? "未知" : duration((end - start) / 1000);
   const runtimeSummary = (job, now = Date.now()) => {
-    const terminal = TERMINAL.has(job.status);
+    const phase = executionStatus(job);
+    const terminal = TERMINAL.has(job.status) || ["STARTUP_FAILED", "FAILED"].includes(phase);
+    if (phase === "STARTUP_FAILED") return {text:"未启动成功",note:"启动失败"};
     const end = terminal ? job.ended_at : now;
-    if (WAITING.has(job.status)) return { text: elapsed(job.created_at, now), note: "排队等待" };
+    if (WAITING.has(phase) || phase === "QUEUED") return { text: elapsed(job.created_at, now), note: ["STARTING", "PROVISIONING", "INITIALIZING"].includes(phase) ? "启动等待" : "排队等待" };
     if (numeric(job.runtime_seconds) && job.runtime_seconds >= 0) return { text: duration(job.runtime_seconds), note: terminal ? "运行时长" : "已运行" };
     let start = job.started_at;
     let note = terminal ? "运行时长" : "已运行";
@@ -80,8 +87,9 @@
       const name = cell("tj-task", job.name || job.job_id, `${vendors[job.vendor] || job.vendor} · ${job.execution_class === "low_priority" ? "低优先级" : job.execution_class === "standard" ? "标准" : job.execution_class || "未知队列"} · ${job.replicas?.total != null ? `${job.replicas.total} 个副本` : "副本未知"}`);
       name.firstChild.className = "tj-name";
       name.title = `${job.name || job.job_id}\n${job.job_id}\n平台观测 ${timeText(job.updated_at)}`;
-      const status = element("td", "tj-state"); status.append(badge(job.status));
-      if (!TERMINAL.has(job.status) && timestamp(job.updated_at) && Date.now() - job.updated_at > 120_000) status.append(element("small", "tj-warning", "观测滞后"));
+      const status = element("td", "tj-state"); status.append(badge(executionStatus(job)));
+      if (job.execution?.source === "replicas") status.title = "依据完整副本观测";
+      if (job.execution?.source === "browser") status.title = "依据网页登录观测";
       const gpu = gpuSummary(job);
       const duration = runtimeSummary(job);
       const metrics = metricSummary(job, valueText);
@@ -97,5 +105,5 @@
     table.append(header, body);
     return table;
   };
-  globalThis.MocopTrainingSummary = Object.freeze({ gpuSummary, runtimeSummary, submittedText, metricSummary, table });
+  globalThis.MocopTrainingSummary = Object.freeze({ executionStatus, recentStartupFailure, gpuSummary, runtimeSummary, submittedText, metricSummary, table });
 })();

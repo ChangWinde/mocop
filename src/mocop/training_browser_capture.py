@@ -44,7 +44,7 @@ JAVASCRIPT = r"""
         if (!rows) throw new Error('unavailable');
         for (const row of rows) {
           const requests = Array.isArray(row.resource_requests) ? row.resource_requests : [];
-          jobs.push({vendor:row.vendor,job_id:row.job_id,gpu_count:row.gpu_count ?? null,gpu_model:row.gpu_model ?? null,
+          jobs.push({vendor:row.vendor,job_id:row.job_id,status:row.status,gpu_count:row.gpu_count ?? null,gpu_model:row.gpu_model ?? null,
             started_at:row.started_at ?? null,runtime_seconds:row.runtime_seconds ?? null,
             resource_requests:requests.slice(0,64).map(r=>({gpu_type:r.gpu_type,gpu_count:r.gpu_count,replicas:r.replicas}))});
         }

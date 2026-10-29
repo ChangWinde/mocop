@@ -1666,13 +1666,19 @@ per host for 30 days. Failures retain the previous success with explicit stale
 state. Initial and incomplete samples do not establish a growth trend.
 Filesystems marked `capacityVirtual` are object storage: reported statvfs
 capacity does not represent quota or remaining space and is hidden in the UI.
+The dashboard shows one compact table per prioritized server: full directory
+path, containing filesystem total, available space, and the directory scan size.
+A parent with child mounts has no combined capacity; child mount paths have
+separate rows. Completed children of an incomplete scan provide only a lower
+bound, marked `≥`. Shared directory sizes describe all accessible contents of
+the configured path, not exclusive ownership. Scan details start collapsed.
 
 ### GET /api/training-jobs
 
 Authenticated, cache-only and query-free. `jobs` contains only the token owner's
 platform jobs; `complete` and `total` describe bounded pagination (at most 2000
 rows). The list refreshes every 60 seconds. Up to eight active jobs per 30-second
-pass receive rotating resource observations, with five-minute replica caching;
+pass receive rotating resource observations, with 55-second replica caching;
 there is no permanent first-20 cutoff. Detail reads share the bounded request
 budget and may return a temporary rate limit.
 
@@ -1680,7 +1686,18 @@ budget and may return a temporary rate limit.
 card counts, known model totals and jobs with recent utilization. Separate
 `known_active_cards`, `known_starting_cards`, `known_queued_cards` and
 `unknown_active_card_jobs` describe nonterminal requests. Queued jobs
-are excluded from running totals. Unknown specifications are not inferred from
+are excluded from running totals. Each job adds `execution.status` and
+`execution.source`; the original `status` remains the ledger value. Fresh browser
+phases (two-minute TTL) and complete fresh replicas can distinguish deployment
+from running; mixed replicas stay `MIXED` rather than assigning all requested
+cards to running. Ledger terminal states take precedence. `overview.states`
+separately reports `running`, `starting`, `startup_failed`, `queued`, `mixed`
+and `unknown` jobs, known requested cards, missing counts and model totals.
+Startup failure requires an explicit startup error or an explicitly zero runtime
+with no start time; missing timing alone is insufficient. Terminal startup failures
+are counted for 24 hours (`startup_failure_window_hours`); active ledger failures
+remain visible until resolved. Failed requests never contribute to active cards.
+Unknown specifications are not inferred from
 job names, cloud vendors, metric series or replica counts. An optional Mac
 browser bridge joins authorized webpage metadata by exact vendor/job ID and
 expires it after ten minutes; credentials remain in the logged-in browser.

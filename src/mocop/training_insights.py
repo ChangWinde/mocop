@@ -3,6 +3,8 @@
 import math
 import time
 
+from .training_execution import TERMINAL, execution
+
 
 def finite(value):
     return (
@@ -164,53 +166,66 @@ def card_hours_projection(data):
 
 
 def overview(jobs, now=None):
-    running = [j for j in jobs if j.get("status") == "RUNNING"]
-    known = [
-        j
-        for j in running
-        if isinstance(j.get("gpu_count"), int)
-        and not isinstance(j["gpu_count"], bool)
-        and j["gpu_count"] >= 0
-    ]
-    models = {}
-    for job in known:
-        model = job.get("gpu_model") or "型号未提供"
-        models[model] = models.get(model, 0) + job["gpu_count"]
-    active_states = {
-        "RUNNING",
-        "STARTING",
-        "CREATED",
-        "PENDING",
-        "QUEUED",
-        "SCHEDULING",
-        "INITIALIZING",
-        "PROVISIONING",
-        "STOPPING",
+    now = time.time() * 1000 if now is None else now
+    groups = {}
+    for job in jobs:
+        phase = execution(job, now)["status"]
+        if phase == "STARTUP_FAILED":
+            timestamp = (
+                job.get("ended_at") or job.get("updated_at") or job.get("created_at")
+            )
+            # Active ledger failures stay visible; terminal failures use a 24-hour window.
+            if job.get("status") in TERMINAL and (
+                not finite(timestamp) or not 0 <= now - timestamp <= 86400000
+            ):
+                continue
+        groups.setdefault(phase, []).append(job)
+
+    def summary(rows):
+        known = [
+            j
+            for j in rows
+            if type(j.get("gpu_count")) is int and 0 <= j["gpu_count"] <= 16384
+        ]
+        models = {}
+        for job in known:
+            model = job.get("gpu_model") or "型号未提供"
+            models[model] = models.get(model, 0) + job["gpu_count"]
+        return {
+            "jobs": len(rows),
+            "cards": sum(j["gpu_count"] for j in known),
+            "unknown_card_jobs": len(rows) - len(known),
+            "models": models,
+        }
+
+    states = {
+        key.lower(): summary(groups.get(key, []))
+        for key in (
+            "RUNNING",
+            "STARTING",
+            "STARTUP_FAILED",
+            "QUEUED",
+            "MIXED",
+            "UNKNOWN",
+        )
     }
-    active = [j for j in jobs if j.get("status") in active_states]
-    known_active = [
-        j
-        for j in active
-        if type(j.get("gpu_count")) is int and 0 <= j["gpu_count"] <= 16384
+    running = states["running"]
+    active = [
+        j for phase, rows in groups.items() if phase not in TERMINAL for j in rows
     ]
+    active_summary = summary(active)
     return {
-        "running_jobs": len(running),
-        "known_running_cards": sum(j["gpu_count"] for j in known),
-        "unknown_card_jobs": len(running) - len(known),
-        "models": models,
-        "known_active_cards": sum(j["gpu_count"] for j in known_active),
-        "unknown_active_card_jobs": len(active) - len(known_active),
-        "known_starting_cards": sum(
-            j["gpu_count"]
-            for j in known_active
-            if j["status"] in {"STARTING", "INITIALIZING", "PROVISIONING"}
-        ),
-        "known_queued_cards": sum(
-            j["gpu_count"]
-            for j in known_active
-            if j["status"] in {"CREATED", "PENDING", "QUEUED", "SCHEDULING"}
-        ),
+        "states": states,
+        "startup_failure_window_hours": 24,
+        "running_jobs": running["jobs"],
+        "known_running_cards": running["cards"],
+        "unknown_card_jobs": running["unknown_card_jobs"],
+        "models": running["models"],
+        "known_active_cards": active_summary["cards"],
+        "unknown_active_card_jobs": active_summary["unknown_card_jobs"],
+        "known_starting_cards": states["starting"]["cards"],
+        "known_queued_cards": states["queued"]["cards"],
         "utilization_jobs": sum(
-            utilization(j, now)["pct"] is not None for j in running
+            utilization(j, now)["pct"] is not None for j in groups.get("RUNNING", [])
         ),
     }

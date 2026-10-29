@@ -18,6 +18,7 @@ from .api_manifest import QUERY_SCHEMAS
 from .api_schema import QueryError, parse_query
 from .platform_origin import ORIGIN
 from .training_browser import browser_status, merge_browser_observations
+from .training_execution import execution
 from .training_insights import (
     capacity_projection,
     card_hours_projection,
@@ -331,7 +332,7 @@ class TrainingMonitor:
                 break
             try:
                 cached = job.get(kind)
-                maximum_age = 300000 if kind == "replicas" else 55000
+                maximum_age = 55000
                 if (
                     cached
                     and time.time() * 1000 - (cached.get("fetched_at") or 0)
@@ -480,6 +481,8 @@ class TrainingMonitor:
 
     def snapshot(self):
         with self.lock:
+            now = time.time() * 1000
+            jobs = [{**job, "execution": execution(job, now)} for job in self.jobs]
             return copy.deepcopy(
                 {
                     "source": "Zenith",
@@ -497,10 +500,10 @@ class TrainingMonitor:
                     "list_poll_interval_seconds": 60,
                     "platform_poll_interval_seconds": 60,
                     "list_sampled_at": self.list_sampled_at,
-                    "overview": overview(self.jobs),
+                    "overview": overview(jobs, now),
                     "browser": browser_status(),
                     "platform": self.platform,
-                    "jobs": self.jobs,
+                    "jobs": jobs,
                 }
             )
 
@@ -531,6 +534,9 @@ class TrainingMonitor:
                 if cached and time.monotonic() - cached[0] < 30:
                     self.details.move_to_end(job_id)
                     result = copy.deepcopy(cached[1])
+                    actual["execution"] = execution(
+                        {**actual, **{k: v for k, v in result.items() if k != "job"}}
+                    )
                     result["job"] = actual
                     return result
             result = {"job": actual, "fetched_at": time.time() * 1000}
@@ -578,6 +584,9 @@ class TrainingMonitor:
                             self.details.pop(job_id, None)
                         raise
                     result[kind + "_status"] = error.status
+            actual["execution"] = execution(
+                {**actual, **{k: v for k, v in result.items() if k != "job"}}
+            )
             with self.lock:
                 self.details[job_id] = (time.monotonic(), copy.deepcopy(result))
                 while len(self.details) > 32:

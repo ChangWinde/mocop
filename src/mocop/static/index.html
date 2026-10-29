@@ -153,7 +153,7 @@
             <div><h2 id="training-jobs-title">训练任务 <span class="tj-muted">/ ZENITH</span></h2><div id="training-jobs-summary" class="tj-muted">等待平台采集</div></div>
             <div class="tj-toolbar">
               <input id="training-jobs-search" type="search" aria-label="搜索训练任务" placeholder="搜索任务名称或 ID" maxlength="120">
-              <select id="training-jobs-filter" aria-label="训练任务筛选"><option value="active">活跃任务</option><option value="recent">最近 20 条</option><option value="failed">失败任务</option><option value="all">全部历史</option></select>
+              <select id="training-jobs-filter" aria-label="训练任务筛选"><option value="active">活跃任务</option><option value="running">运行中</option><option value="starting">启动中</option><option value="startup_failed">启动失败（近 24 小时）</option><option value="recent">最近 20 条</option><option value="failed">失败任务</option><option value="all">全部历史</option></select>
               <button id="training-jobs-refresh" type="button">刷新观测</button>
             </div>
           </div>
@@ -163,7 +163,7 @@
         </section>
 
         <section id="storage-analysis" class="training-jobs" aria-labelledby="storage-analysis-title">
-          <div class="tj-heading"><div><h2 id="storage-analysis-title">我的存储</h2><p class="tj-muted">每 6 小时只读扫描 · 保留 30 天趋势 · 指定个人目录，不跟随软链接或自动删除文件</p></div><button id="storage-analysis-refresh" type="button">刷新快照</button></div>
+          <div class="tj-heading"><div><h2 id="storage-analysis-title">我的存储</h2><p class="tj-muted">指定目录：总容量 · 剩余容量 · 目录占用</p></div><button id="storage-analysis-refresh" type="button">刷新快照</button></div>
           <div id="storage-analysis-content" aria-live="polite"></div>
         </section>
         <section class="workspace">
