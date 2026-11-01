@@ -57,7 +57,7 @@ Mocop 是面向 NVIDIA GPU 集群的本地网页监控工具。它复用已有 O
 - 节点级独立调度、可能的共享链路聚合和可选 HTTPS Webhook
 - 基于配置的节点资产、预期 GPU 数、本机采集和节点分组
 - 单卡趋势和进程时间线，以及可选的有界 SQLite 留存与只读 Slurm/Kubernetes/Docker/Podman 上下文
-- 按使用者聚合的 GPU 占用与闲置占比账单（`GET /api/usage` 与使用者面板，窗口可选）
+- 按使用者聚合的 GPU 占用与闲置占比账单（`GET /api/usage` 与使用者面板，窗口可选）；另有可选训练任务健康检查和独立 Mac 巡检，支持有次数限制的自动恢复（见[运维说明](../../OPERATIONS.md#independent-training-guard-on-a-mac)）
 - 六种视觉风格、六种独立主题色、紧凑模式、排序记忆和经过校验的本地背景
 - 可选的版本检查与经过校验的控制台一键自更新（默认关闭）
 - 可供 Prometheus 和 Grafana 使用的 OpenMetrics 1.0 端点

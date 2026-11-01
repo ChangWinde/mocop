@@ -6,6 +6,11 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Added
 
+- Add shared training freshness health and an independent opt-in local guard
+  with persistent incidents, local notification attempts, bounded monitor
+  recovery and explicit default-profile browser reopening. Stale independent
+  checks and overwritten training extensions are detected as well.
+
 - Add minute-synchronized training jobs with requested GPU totals and models,
   per-task utilization, personal card-hours and visible candidate-pool capacity.
   Unknown startup/running pool counts remain distinct from allocated capacity.

@@ -32,3 +32,8 @@ assert.equal(globalThis.MocopTrainingOverview.stats({...snapshot,stale:true})[0]
 globalThis.MocopTrainingOverview.render({...snapshot,stale:true,list_sampled_at:1},container);
 assert.match(container.text,/同步已中断/);
 assert.match(container.text,/不能代表当前用卡/);
+
+globalThis.MocopTrainingOverview.render({...snapshot,health:{state:"critical",issues:[{severity:"critical",message:"平台地址已变化"}]},guard:{checked_at:1}},container);
+assert.match(container.text,/训练监管自检：异常/);
+assert.match(container.text,/独立巡检/);
+assert.match(container.text,/平台地址已变化/);

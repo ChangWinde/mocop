@@ -465,3 +465,61 @@ Storage cards display full root and child paths. A configured NAS parent also
 inventories its child mounts instead of showing only the parent filesystem.
 Object-store mounts use logical file sizes and label virtual capacity explicitly.
 Updating roots invalidates the displayed old scope and requests a new scan.
+
+### Independent training guard on a Mac
+
+The optional `training_guard.py` runs once per invocation and reads only the
+authenticated local `/api/training-jobs` cache. It does not query remote machines
+or the upstream platform. Copy `training_guard.py`, `training_health.py`, and
+`platform_origin.py` together to a private directory outside the installed
+package, for example `~/.local/libexec/mocop-training-guard/`, and schedule the
+standalone script with launchd `StartInterval=60` and `RunAtLoad=true`. Use an
+existing Python 3.10+ interpreter outside the tool's package environment so a
+Mocop package replacement does not also remove its watchdog. No third-party
+runtime package is needed.
+
+Create owner-only `~/.config/mocop/training-guard.json` (mode `0600`):
+
+```json
+{
+  "enabled": true,
+  "url": "http://127.0.0.1:8787",
+  "service_label": "com.example.mocop",
+  "browser_required": true,
+  "auto_restart_monitor": true,
+  "auto_open_browser": true,
+  "desktop_notifications": true
+}
+```
+
+Use the actual monitor's user launchd label; it is the only restart target. The
+URL must be a bare loopback HTTP origin, with no credentials or extra path.
+Absent policy disables the guard; invalid or public policy disables recovery.
+Run a manual check with `python3 /path/to/training_guard.py`; `--policy` and
+`--state` can select isolated files for a rehearsal. The script serializes runs
+with a private lock and writes `~/.local/state/mocop/training-guard.json`
+atomically at mode `0600`. The dashboard publishes a narrow read-only summary.
+
+Defaults are: list freshness 120 seconds, worker-attempt heartbeat 300 seconds,
+browser and independent-check freshness 180 seconds, startup grace 180 seconds,
+confirmation after two failing checks, recovery cooldown 900 seconds, local
+notification cooldown 1800 seconds, and at most three restart attempts and three browser-open attempts in a
+rolling day. These map to policy keys `list_stale_seconds`,
+`worker_stale_seconds`, `browser_stale_seconds`, `guard_stale_seconds`,
+`startup_grace_seconds`, `confirm_checks`, `recovery_cooldown_seconds`,
+`notification_cooldown_seconds`, `max_restarts_per_day`, and
+`max_browser_opens_per_day`. Failed actions also
+consume their reservation, preventing loops. Healthy recovery clears the
+incident and may issue one recovery notification. Local notification delivery
+still depends on the user's macOS settings.
+
+An unreachable process or stalled attempt heartbeat can restart only the
+configured local monitor. A closed platform tab may reopen in Chrome's default
+user profile, using the separately verified configured origin. Login failure,
+Apple Events denial, platform redirects, 401/403, 429, or an overwritten API
+extension are recorded and alarmed rather than treated as permission to change
+credentials, origin or browser security settings. Normal collector retries and
+upstream cooldowns remain in effect. A standalone guard can detect a missing
+training extension after a package upgrade; it never overlays old modules onto
+a new release automatically. Disable with `enabled=false` and remove its
+launchd schedule; no task, dataset or history is deleted.

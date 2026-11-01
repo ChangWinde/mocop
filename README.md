@@ -28,7 +28,7 @@
 
 Mocop is a local web dashboard for NVIDIA GPU clusters. It uses existing OpenSSH aliases to collect GPU, CPU, memory, swap, disk, and network data, then streams each host result to the browser as soon as it completes.
 
-Remote hosts need no agent, database, Python installation, or monitoring port. They need Linux `/proc`; `nvidia-smi` is required only for NVIDIA GPU data; a host without it stays online and reports `nvidia-smi is unavailable`. Mocop itself uses the Python standard library and the system OpenSSH client.
+Remote hosts need no agent, database, Python installation, or monitoring port. They need Linux `/proc`; `nvidia-smi` is required for NVIDIA GPU data; hosts without it stay online and report `nvidia-smi is unavailable`. Mocop uses Python's standard library and OpenSSH.
 
 Here, **AI-native** means that the interface is built around GPU capacity, task placement, and failure diagnosis. Mocop does not call an AI service or upload telemetry.
 
@@ -62,6 +62,7 @@ English README, API, operations, and engineering references remain maintained.
 - Per-GPU trends and process timelines, optional bounded SQLite retention, read-only Slurm/Kubernetes/Docker/Podman context
 - Per-owner GPU occupancy and idle-share rollups, and a situation brief
 - Six visual styles, six accents, compact mode, saved ordering, local backgrounds
+- Optional independent training watchdog ([operations](docs/OPERATIONS.md#independent-training-guard-on-a-mac))
 - Opt-in release checks and verified one-click self-update
 - OpenMetrics 1.0 endpoint for Prometheus and Grafana
 

@@ -20,6 +20,7 @@ from .platform_endpoint import API_PREFIX
 from .platform_origin import ORIGIN
 from .training_browser import browser_status, merge_browser_observations
 from .training_execution import execution
+from .training_health import evaluate_health, guard_status, load_policy
 from .training_insights import (
     capacity_projection,
     card_hours_projection,
@@ -84,6 +85,7 @@ class TrainingMonitor:
         self.jobs = []
         self.total = 0
         self.complete = False
+        self.monitor_started_at = time.time() * 1000
         self.sampled_at = None
         self.attempted_at = None
         self.error_status = None
@@ -485,10 +487,11 @@ class TrainingMonitor:
                 }
                 for job in self.jobs
             ]
-            return copy.deepcopy(
+            snapshot = copy.deepcopy(
                 {
                     "source": "Zenith",
                     "enabled": True,
+                    "monitor_started_at": self.monitor_started_at,
                     "poll_interval_seconds": 30,
                     "sampled_at": self.sampled_at,
                     "attempted_at": self.attempted_at,
@@ -513,6 +516,11 @@ class TrainingMonitor:
                     "jobs": jobs,
                 }
             )
+        snapshot["guard"] = guard_status()
+        snapshot["health"] = evaluate_health(
+            snapshot, load_policy(), now=now, include_guard=True
+        )
+        return snapshot
 
     def detail(self, job_id):
         if not ID.fullmatch(job_id):

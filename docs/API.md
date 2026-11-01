@@ -1736,6 +1736,23 @@ free, including startup and other occupancy, and must not be labeled running.
 Platform summaries refresh every 60 seconds and disclose fetch times and read
 errors. Backoff and upstream request duration can delay synchronization.
 
+`health` reports `state` (`healthy`, `warming`, `warning`, or `critical`),
+`checked_at`, `issues[]` with stable codes, severity and a display message,
+`list_age_seconds`, metric coverage, and bounded recovery recommendations.
+It checks source timestamps independently rather than trusting a cached stale
+flag. `monitor_started_at` supplies an initialization grace period. Error codes
+include `PLATFORM_MOVED`, `PLATFORM_AUTH_REQUIRED`, `PLATFORM_RATE_LIMITED`,
+`PLATFORM_UNAVAILABLE`, `TASK_LIST_STALE`, `COLLECTOR_STALLED`,
+`HISTORY_INCOMPLETE`, `GPU_METRICS_MISSING`, `GPU_SPECS_MISSING`,
+`BROWSER_OBSERVATION_UNAVAILABLE`, `GUARD_POLICY_INVALID`, and
+`INDEPENDENT_GUARD_STALE`. These are health-issue codes, not HTTP error codes.
+
+`guard` contains only the last independent `checked_at`, state, action results,
+notification attempt time and consecutive-failure count. Policy and capability
+values are never returned. A successful local notification command records
+acceptance by macOS, not proof that a notification was visible. Missing or stale
+independent checks are themselves highlighted when the guard is enabled.
+
 ### GET /api/training-job-detail
 
 Requires one `id` (the 25-character platform ledger ID). Ownership is revalidated

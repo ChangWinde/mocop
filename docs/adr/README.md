@@ -43,3 +43,4 @@ for status and superseding rules.
 | [0033](0033-optional-persistence-indexes.md) | Accepted | Optional indexes and retention with existing metadata |
 | [0034](0034-daily-user-memory.md) | Accepted | Daily user RAM snapshots |
 | [0035](0035-persistent-dashboard-capability.md) | Accepted | Persistent browser capability retention |
+| [0036](0036-independent-training-guard.md) | Accepted | Independent training freshness checks and bounded local recovery |

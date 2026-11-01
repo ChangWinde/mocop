@@ -18,6 +18,15 @@
   const render = (snapshot, container) => {
     container.replaceChildren();
     if (snapshot.stale && snapshot.sampled_at != null) container.append(node("p", "tj-sync-warning", `同步已中断 · 上次成功 ${new Date(snapshot.list_sampled_at || snapshot.sampled_at).toLocaleString("zh-CN", {hour12:false})}；以下为旧快照，不能代表当前用卡。`));
+    if (snapshot.health) {
+      const labels = {healthy:"正常",warming:"初始化中",warning:"需要关注",critical:"异常"};
+      const health = node("div", `tj-health ${snapshot.health.state}`);
+      health.append(node("strong", "", `训练监管自检：${labels[snapshot.health.state] || "待检查"}`));
+      const checked = snapshot.guard?.checked_at;
+      if (number(checked)) health.append(node("small", "tj-muted", `独立巡检 ${new Date(checked).toLocaleString("zh-CN", {hour12:false})}`));
+      for (const issue of snapshot.health.issues || []) health.append(node("span", issue.severity === "critical" ? "tj-warning" : "tj-muted", issue.message));
+      container.append(health);
+    }
     const grid = node("div", "tj-overview-grid");
     for (const [index, [label, value, note]] of stats(snapshot).entries()) { const cell = node("div", `tj-overview-stat ${["running","starting","failed"][index]}`); cell.append(node("small", "tj-muted", label), node("strong", "", value), node("small", "tj-muted", note)); grid.append(cell); }
     container.append(grid);

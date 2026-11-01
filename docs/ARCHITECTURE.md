@@ -502,3 +502,11 @@ remain beside route authentication in `web_auth.py`.
 
 [ADR-0035](adr/0035-persistent-dashboard-capability.md) supersedes the browser
 retention part of ADR-0017 while keeping its HTTP capability boundary.
+
+`training_health.py` projects task-list, worker, browser, specification and metric
+freshness independently of cached stale flags. `training_guard.py` is an optional
+standalone loopback reader: a separate scheduled process owns private incident
+state, local notification attempts and cooldown-limited Mac recovery. It does
+not import the installed package when run from its separate deployment directory.
+[ADR-0036](adr/0036-independent-training-guard.md) records the failure boundaries
+and rejected in-process-only alternative.

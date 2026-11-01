@@ -109,3 +109,8 @@ details.sa-card { display:block; }
 .sa-card > summary:focus-visible { outline:2px solid var(--accent); outline-offset:4px; border-radius:4px; }
 
 .tj-sync-warning { color:var(--amber); border:1px solid var(--amber); border-radius:8px; padding:10px; font-size:13px; line-height:1.6; }
+
+.tj-health { display:flex; flex-wrap:wrap; align-items:center; gap:6px 14px; border:1px solid var(--line); border-radius:8px; padding:9px 10px; font-size:12px; }
+.tj-health.healthy strong { color:var(--green,#59b993); }
+.tj-health.warning,.tj-health.critical { border-color:var(--amber); }
+.tj-health > span { flex-basis:100%; }
