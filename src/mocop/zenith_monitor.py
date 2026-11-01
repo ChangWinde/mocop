@@ -16,6 +16,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from .api_manifest import QUERY_SCHEMAS
 from .api_schema import QueryError, parse_query
+from .platform_endpoint import API_PREFIX
 from .platform_origin import ORIGIN
 from .training_browser import browser_status, merge_browser_observations
 from .training_execution import execution
@@ -25,6 +26,7 @@ from .training_insights import (
     overview,
     utilization,
 )
+from .training_listing import collect_listing
 from .training_resources import gpu_resources
 
 TOKEN_PATH = Path.home() / ".config/mocop/zenith/token"
@@ -89,6 +91,7 @@ class TrainingMonitor:
         self.thread = None
         self.list_collected_at = 0
         self.list_sampled_at = None
+        self.full_list_collected_at = float("-inf")
         self.platform_collected_at = float("-inf")
         self.platform = {}
         if start:
@@ -139,7 +142,7 @@ class TrainingMonitor:
         }:
             raise ReadError(400)
         token = self.token()
-        if ORIGIN is None:
+        if ORIGIN is None or API_PREFIX is None:
             raise ReadError(503)
         now = time.monotonic()
         with self.lock:
@@ -147,12 +150,12 @@ class TrainingMonitor:
                 self.requests.popleft()
             if now < self.cooldown_until:
                 raise ReadError(429, self.cooldown_until - now)
-            if len(self.requests) >= 60:
+            if len(self.requests) >= 90:
                 raise ReadError(429, max(1, 60 - (now - self.requests[0])))
             self.requests.append(now)
         opener = build_opener(ProxyHandler({}), NoRedirect())
         req = Request(
-            ORIGIN + path,
+            ORIGIN + API_PREFIX + path.removeprefix("/pt/api"),
             headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
         )
         try:
@@ -345,9 +348,11 @@ class TrainingMonitor:
                 result[kind] = getattr(self, kind)(job["id"])
                 result[kind + "_status"] = 200
             except ReadError as error:
-                if error.status in (401, 403):
+                if error.status == 401:
                     raise
                 result[kind + "_status"] = error.status
+                if error.status in (403, 404):
+                    result[kind] = None
         return result
 
     def collect_platform(self):
@@ -386,23 +391,10 @@ class TrainingMonitor:
         self.collect_platform()
         refresh_list = not self.jobs or started - self.list_collected_at >= 60
         if refresh_list:
-            rows = []
-            complete = False
-            total = 0
-            for page in range(1, 21):
-                if self.stop.is_set():
-                    return
-                data = self.read(f"/pt/api/ai/jobs?page={page}&page_size=100")
-                if (
-                    not isinstance(data.get("jobs"), list)
-                    or number(data.get("total")) is None
-                ):
-                    raise ReadError(502)
-                total = int(data["total"])
-                rows.extend(self.job(row) for row in data["jobs"][:100])
-                if len(rows) >= total or len(data["jobs"]) < 100:
-                    complete = len(rows) >= total
-                    break
+            listing = collect_listing(self, started, TERMINAL, ReadError)
+            if listing is None:
+                return
+            rows, complete, total = listing
             self.list_collected_at = started
             list_sampled_at = time.time() * 1000
         else:
@@ -420,7 +412,9 @@ class TrainingMonitor:
             previous = {row["id"]: row for row in self.jobs}
         active = [job for job in rows if job["status"] not in TERMINAL]
         active.sort(
-            key=lambda j: previous.get(j["id"], {}).get("metrics", {}).get("fetched_at")
+            key=lambda j: (previous.get(j["id"], {}).get("metrics") or {}).get(
+                "fetched_at"
+            )
             or 0
         )
         active = active[:8]
@@ -464,6 +458,7 @@ class TrainingMonitor:
                         self.jobs = []
                         self.platform = {}
                         self.list_collected_at = 0
+                        self.full_list_collected_at = float("-inf")
                         self.details.clear()
                         self.total = 0
                         self.complete = False
@@ -482,7 +477,14 @@ class TrainingMonitor:
     def snapshot(self):
         with self.lock:
             now = time.time() * 1000
-            jobs = [{**job, "execution": execution(job, now)} for job in self.jobs]
+            jobs = [
+                {
+                    **job,
+                    "execution": execution(job, now),
+                    "gpu_utilization": utilization(job, now),
+                }
+                for job in self.jobs
+            ]
             return copy.deepcopy(
                 {
                     "source": "Zenith",
@@ -494,6 +496,11 @@ class TrainingMonitor:
                     or self.sampled_at is None
                     or time.time() * 1000 - self.sampled_at > 120_000,
                     "error_status": self.error_status,
+                    "list_age_seconds": max(0, (now - self.list_sampled_at) / 1000)
+                    if self.list_sampled_at is not None
+                    else None,
+                    "history_limit": 5000,
+                    "history_poll_interval_seconds": 900,
                     "total": self.total,
                     "complete": self.complete,
                     "enriched_active_limit": 8,

@@ -1678,11 +1678,21 @@ remains expanded when the cache view refreshes. The UI labels directory sizes
 ### GET /api/training-jobs
 
 Authenticated, cache-only and query-free. `jobs` contains only the token owner's
-platform jobs; `complete` and `total` describe bounded pagination (at most 2000
-rows). The list refreshes every 60 seconds. Up to eight active jobs per 30-second
+platform jobs; `complete` and `total` describe bounded pagination (at most 5000
+rows). Recent tasks and all previously active tasks refresh every 60 seconds;
+long-running tasks outside recent pages are revalidated individually. Complete
+history is bootstrapped once and reconciled every 15 minutes or after a size
+mismatch, reducing repeated history reads that compete with metrics.
+`history_poll_interval_seconds` publishes this separate history cadence. Up to eight active jobs per 30-second
 pass receive rotating resource observations, with 55-second replica caching;
 there is no permanent first-20 cutoff. Detail reads share the bounded request
-budget and may return a temporary rate limit.
+budget of 90 reads per sliding minute and may return a temporary rate limit. `history_limit` publishes the
+bound; an incomplete history remains explicitly incomplete. `list_age_seconds`
+reports the age of the last successful list read. Utilization projections expire
+old points on every snapshot read, including during an upstream outage. A
+forbidden metric on one job clears that observation without freezing the list.
+The dashboard labels stale snapshots as old records and replaces current-card
+totals with a pending-update state until synchronization recovers.
 
 `overview` reports running jobs, known requested running cards, jobs with unknown
 card counts, known model totals and jobs with recent utilization. Separate

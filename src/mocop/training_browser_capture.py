@@ -36,7 +36,7 @@ JAVASCRIPT = r"""
       if (typeof get !== 'function') throw new Error('unavailable');
       const jobs = [];
       let complete = false;
-      for (let page=1; page<=20; page++) {
+      for (let page=1; page<=50; page++) {
         const response = await get('/pt/api/job-summaries', {scope:'mine',page,page_size:100}, {skipAuthRedirect:true,timeoutMs:10000});
         if (!response.ok) throw new Error('unavailable');
         const payload = response.data;
@@ -77,7 +77,7 @@ def tabs():
         pid = int(parts[0])
         source = r"""ObjC.import('ScriptingBridge');
 var a=$.SBApplication.applicationWithProcessIdentifier(PID),w=a.valueForKey('windows'),out=[];
-for(var i=0;i<w.count;i++){var v=w.objectAtIndex(i),t=v.valueForKey('tabs');for(var j=0;j<t.count;j++){var x=t.objectAtIndex(j),u=ObjC.unwrap(x.valueForKey('URL'));if(u && new URL(u).origin===PLATFORM_ORIGIN)out.push({pid:PID,window:ObjC.unwrap(v.valueForKey('id')),tab:ObjC.unwrap(x.valueForKey('id'))});}} JSON.stringify(out);
+for(var i=0;i<w.count;i++){var v=w.objectAtIndex(i),t=v.valueForKey('tabs');for(var j=0;j<t.count;j++){var x=t.objectAtIndex(j),u=ObjC.unwrap(x.valueForKey('URL'));if(u && (u===PLATFORM_ORIGIN || u.indexOf(PLATFORM_ORIGIN+'/')===0))out.push({pid:PID,window:ObjC.unwrap(v.valueForKey('id')),tab:ObjC.unwrap(x.valueForKey('id'))});}} JSON.stringify(out);
 """.replace("PID", str(pid)).replace("PLATFORM_ORIGIN", json.dumps(ORIGIN))
         try:
             result = subprocess.run(

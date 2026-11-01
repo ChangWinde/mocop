@@ -43,7 +43,7 @@ def merge_browser_observations(jobs, *, path=OBSERVATIONS, now=None):
             return result
         observations = {
             (r["vendor"], r["job_id"]): r
-            for r in data["jobs"][:2000]
+            for r in data["jobs"][:5000]
             if isinstance(r, dict)
             and isinstance(r.get("vendor"), str)
             and isinstance(r.get("job_id"), str)

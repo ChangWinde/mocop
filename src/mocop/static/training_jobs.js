@@ -16,7 +16,7 @@
   const tone = status => ["FAILED", "STARTUP_FAILED"].includes(status) ? "failed" : status === "RUNNING" ? "running" : status === "STARTING" ? "starting" : ["SUCCEEDED", "COMPLETED", "SUCCESS"].includes(status) ? "success" : "other";
   const badge = status => node("span", `tj-badge ${tone(status)}`, LABELS[status] || status || "未知");
   const latest = points => [...(points || [])].filter(p => numeric(p.ts)).sort((a, b) => a.ts - b.ts).at(-1);
-  const errorText = status => ({ 401: "平台令牌已失效", 403: "平台读取权限不足", 404: "任务不存在或已不可访问", 409: "当前厂商不支持", 429: "读取频率受限，请稍后重试", 501: "当前厂商不提供此数据" })[status] || "暂时无法读取";
+  const errorText = status => ({ 302: "平台地址已迁移，采集配置需要更新", 301: "平台地址已迁移，采集配置需要更新", 401: "平台令牌已失效", 403: "平台读取权限不足", 404: "任务不存在或已不可访问", 409: "当前厂商不支持", 429: "读取频率受限，请稍后重试", 501: "当前厂商不提供此数据" })[status] || "暂时无法读取";
 
   const chart = points => {
     const canvas = node("canvas", "tj-sparkline");
@@ -114,7 +114,7 @@
       const active = jobs.filter(j => !TERMINAL.has(j.status));
       const phase = globalThis.MocopTrainingSummary.executionStatus;
       const failed = jobs.filter(j => ["FAILED", "STARTUP_FAILED"].includes(phase(j)));
-      summary.textContent = `${active.length} 个活跃 · ${snapshot.total} 条记录${snapshot.complete ? "" : "（列表未完整）"}`;
+      summary.textContent = `${snapshot.stale ? "上次记录 · " : ""}${active.length} 个活跃 · ${snapshot.total} 条记录${snapshot.complete ? "" : "（列表未完整）"}`;
       status.textContent = snapshot.error_status ? `${errorText(snapshot.error_status)}${snapshot.sampled_at ? " · 保留上次观测" : ""}` : `每 ${snapshot.list_poll_interval_seconds || 60} 秒自动同步 · 任务列表 ${timeText(snapshot.list_sampled_at)} · 指标 ${timeText(snapshot.sampled_at)}`;
       status.classList.toggle("tj-warning", Boolean(snapshot.stale));
       if (snapshot.stale && !snapshot.error_status) status.textContent += " · 数据待更新";
@@ -127,7 +127,7 @@
         cards.append(node("p", "tj-empty", snapshot.stale && !snapshot.sampled_at ? "训练平台暂不可用，等待采集" : "没有符合筛选条件的任务"));
         return;
       }
-      cards.append(globalThis.MocopTrainingSummary.table(visible, { vendors: VENDORS, badge, openDetail, valueText, timeText }));
+      cards.append(globalThis.MocopTrainingSummary.table(visible, { vendors: VENDORS, badge, openDetail, valueText, timeText, snapshotStale:snapshot.stale }));
     };
 
     const renderDetail = data => {

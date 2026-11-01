@@ -477,7 +477,9 @@ preserves the directory dialog, while `storage_analysis.js` owns the main
 compact directory/capacity tables and collapsed scan details. See the operations guide for cadence,
 limits and policy ownership.
 
-`zenith_monitor.py` owns independent training polling. `training_execution.py`
+`zenith_monitor.py` owns independent training polling. `training_listing.py`
+separates minute-level recent/active refresh from periodic terminal history
+reconciliation so old records do not consume each metrics read budget. `training_execution.py`
 classifies execution phases using explicit ledger/browser states and fresh,
 complete replicas; mixed states and failures stay out of running totals.
 `training_insights.py`
@@ -491,7 +493,9 @@ prompt/control wiring outside the app module's line budget.
 The additive observer schemas live in `observability_manifest.py` and compose
 into the canonical manifest. `observability_web.py` publishes their metadata
 and dispatch after shared authentication. `observability_sources.py` owns
-source startup/shutdown; `platform_origin.py` reads the private origin with no
+source startup/shutdown; `platform_endpoint.py` selects the explicitly configured
+API version while preserving authenticated redirect rejection.
+`platform_origin.py` reads the private origin with no
 deployment address in source. Generic integer query construction lives with
 `QueryParameter` in `api_schema.py`. API-family and allowed-method recognition
 remain beside route authentication in `web_auth.py`.

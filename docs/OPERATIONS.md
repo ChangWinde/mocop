@@ -421,7 +421,17 @@ Training observations require a private platform token at
 `~/.config/mocop/zenith/token` and its origin (scheme, hostname, optional port)
 in `~/.config/mocop/zenith/origin`, both owned by the service user with mode
 `0600`. Origins cannot contain credentials, paths, queries or fragments;
-missing or invalid configuration does not select a fallback platform. The optional Mac webpage metadata helper is
+missing or invalid configuration does not select a fallback platform.
+The optional private `~/.config/mocop/zenith/api-prefix` selects `/pt/api`
+(legacy default when absent) or `/pt/api2`. Invalid, public, or linked files fail
+closed. After a platform migration, verify its HTTPS origin and personal OpenAPI
+before updating these private files; authenticated redirects remain blocked so
+credentials are never automatically forwarded to another destination. Restart
+the monitor after configuration changes. The collector allows 90 reads per
+sliding minute, leaving headroom below the platform’s documented 120-read
+account limit; upstream 429 responses still enforce their cooldown. A persistent 3xx response is shown as a
+migration/configuration failure with the last successful list time.
+The optional Mac webpage metadata helper is
 `python -m mocop.training_browser_capture`; it reads only an already-open,
 logged-in platform tab. Chrome must explicitly allow JavaScript from Apple
 Events. The helper compiles a small reader with the system Swift SDK, returns
@@ -436,6 +446,9 @@ expires after ten minutes. The
 bridge opts out of the platform client's automatic authentication redirect,
 so an unsuccessful background read does not clear the browser login state.
 Stable Chrome window/tab IDs keep reads attached to the same tab after focus changes.
+Tab discovery uses macOS scripting primitives rather than the DOM-only `URL`
+constructor. In deployments with several Chrome profiles, open the platform in
+the user profile that has the logged-in session and Apple Events permission.
 The platform API still supplies metrics, billing and visible capacity. A local
 launchd schedule can invoke the helper every minute; removing that schedule
 disables browser observations without changing platform tasks.

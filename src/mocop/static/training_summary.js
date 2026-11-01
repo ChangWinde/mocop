@@ -68,11 +68,11 @@
       for (const gpu of sample?.gpus || []) raw.push({ ts: sample.ts, value: gpu.util_pct, label: `GPU ${gpu.index}` });
     }
     const valid = raw.filter(p => numeric(p.value) && p.value >= 0 && p.value <= 100 && Date.now() - p.ts <= 180000 && p.ts <= Date.now()+60000);
-    if (!valid.length) return { text: "—", note: raw.length ? "样本已过期" : "等待利用率采样", title: "缺失或过期数据不计为零" };
+    if (!valid.length) return { text: "—", note: ({429:"平台限流，等待重试",403:"平台不允许读取此指标",501:"厂商未提供此指标",503:"平台指标暂不可用"})[job.metrics_status] || (raw.length ? "样本已过期" : "等待利用率采样"), title: "缺失或过期数据不计为零" };
     const mean = valid.reduce((n,p) => n+p.value,0)/valid.length;
     return { text: `${valueText(mean)}%`, note: `${metrics.source === "provider" ? "副本均值" : "逐卡均值"} · ${valid.length}/${raw.length} 观测`, title: raw.map(p => `${p.label}: ${valueText(p.value)}% · ${new Date(p.ts).toLocaleString("zh-CN", {hour12:false})}`).join("\n") };
   };
-  const table = (jobs, { vendors, badge, openDetail, valueText, timeText }) => {
+  const table = (jobs, { vendors, badge, openDetail, valueText, timeText, snapshotStale }) => {
     const table = element("table", "tj-table");
     const header = element("thead", "");
     const labels = element("tr", "");
@@ -88,6 +88,7 @@
       name.firstChild.className = "tj-name";
       name.title = `${job.name || job.job_id}\n${job.job_id}\n平台观测 ${timeText(job.updated_at)}`;
       const status = element("td", "tj-state"); status.append(badge(executionStatus(job)));
+      if (snapshotStale) status.append(element("small", "tj-warning", "上次记录"));
       if (job.execution?.source === "replicas") status.title = "依据完整副本观测";
       if (job.execution?.source === "browser") status.title = "依据网页登录观测";
       const gpu = gpuSummary(job);

@@ -27,3 +27,8 @@ assert.match(container.text,/原始卡时 20/);
 assert.match(container.text,/剩余额度 0/);
 assert.match(container.text,/已分配合计为总卡减剩余/);
 console.log("Training overview contracts passed");
+
+assert.equal(globalThis.MocopTrainingOverview.stats({...snapshot,stale:true})[0][1],"待更新");
+globalThis.MocopTrainingOverview.render({...snapshot,stale:true,list_sampled_at:1},container);
+assert.match(container.text,/同步已中断/);
+assert.match(container.text,/不能代表当前用卡/);

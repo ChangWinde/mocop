@@ -45,3 +45,5 @@ assert.equal(recentStartupFailure({status:"FAILED",execution:{status:"STARTUP_FA
 assert.equal(recentStartupFailure({status:"RUNNING",execution:{status:"STARTUP_FAILED"}},86401001),true);
 
 assert.match(gpuSummary({gpu_count:4,gpu_model:"Example GPU",gpu_count_source:"browser",gpu_spec_stale:true}).note,/已保存规格/);
+
+assert.equal(globalThis.MocopTrainingSummary.metricSummary({metrics_status:429},String).note,"平台限流，等待重试");

@@ -27,6 +27,17 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Restore training synchronization after an explicit platform origin/API-version
+  migration while keeping credential-bearing redirects blocked. Read bounded
+  histories up to 5000 records instead of stopping at 2000, and reserve a
+  bounded 90-read budget for overlapping history and observation batches.
+- Refresh recent and long-running tasks independently from cached terminal
+  history, avoiding repeated full-history reads that compete with live metrics.
+- Repair Mac platform-tab discovery in the non-DOM scripting environment.
+- Expire utilization on snapshot reads, isolate per-job observation denials, and
+  clearly label disconnected task snapshots instead of showing old current-card
+  totals.
+
 - Preserve previously read GPU request specifications when the platform browser
   tab closes; expire live browser status and timing separately. Unknown card
   totals show a pending state instead of a misleading zero-plus count.
