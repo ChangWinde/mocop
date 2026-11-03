@@ -329,6 +329,167 @@ class TrainingInsightsTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_disappearing_memory_mount_does_not_discard_disk_statistics(self):
+        from mocop import storage_probe
+
+        with tempfile.TemporaryDirectory() as directory:
+            memory = str(Path(directory) / "runtime")
+            mounts = [
+                {"target": directory, "fstype": "ext4", "source": "disk"},
+                {"target": memory, "fstype": "tmpfs", "source": "tmpfs"},
+            ]
+            original = os.statvfs
+
+            def statvfs(path):
+                if path == memory:
+                    raise FileNotFoundError()
+                return original(path)
+
+            output = io.StringIO()
+            with (
+                patch.object(storage_probe, "mount_inventory", return_value=mounts),
+                patch.object(storage_probe.os, "statvfs", side_effect=statvfs),
+                patch.object(
+                    storage_probe,
+                    "scan",
+                    return_value={
+                        "path": directory,
+                        "status": "ok",
+                        "bytes": 42,
+                        "children": [],
+                    },
+                ),
+                patch("sys.stdin", io.StringIO(json.dumps({"roots": [directory]}))),
+                contextlib.redirect_stdout(output),
+            ):
+                storage_probe.main()
+            row = json.loads(output.getvalue())["directories"][0]
+            self.assertEqual(row["status"], "ok")
+            self.assertEqual(row["bytes"], 42)
+
+    def test_changed_personal_scope_invalidates_old_totals_and_growth(self):
+        old = self.sample()
+        old.update(epoch=1000, directoryOptions={})
+        sample = copy.deepcopy(old)
+        options = {
+            "/data/alice": {"usagePath": "/data/alice/project", "limitBytes": 1000}
+        }
+        sample.update(epoch=2000, directoryOptions=options)
+        self.assertFalse(
+            PersonalStorageMonitor.matches_policy(
+                old, {"roots": ["/data/alice"], "directoryOptions": options}
+            )
+        )
+        self.assertIsNone(analysis(sample, [old])["directories"][0]["changeBytes"])
+
+    def test_personal_scope_cannot_traverse_a_symlink(self):
+        from mocop import storage_probe
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shared"
+            root.mkdir()
+            outside = Path(directory) / "outside"
+            (outside / "secret").mkdir(parents=True)
+            (root / "alias").symlink_to(outside, target_is_directory=True)
+            request = {
+                "roots": [str(root)],
+                "directoryOptions": {
+                    str(root): {"usagePath": str(root / "alias/secret")}
+                },
+            }
+            output = io.StringIO()
+            with (
+                patch.object(storage_probe, "mount_inventory", return_value=[]),
+                patch.object(storage_probe, "scan") as scan,
+                patch("sys.stdin", io.StringIO(json.dumps(request))),
+                contextlib.redirect_stdout(output),
+            ):
+                storage_probe.main()
+            scan.assert_not_called()
+            self.assertEqual(
+                json.loads(output.getvalue())["directories"][0]["status"], "linked"
+            )
+
+    def test_personal_scope_gets_its_deadline_and_tmpfs_is_not_disk_usage(self):
+        from mocop import storage_probe
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = str(Path(directory) / "shared")
+            scope = str(Path(root) / "alice")
+            memory = str(Path(scope) / "runtime")
+            Path(memory).mkdir(parents=True)
+            options = {root: {"usagePath": scope, "scanSeconds": 900}}
+            mounts = [
+                {"target": directory, "fstype": "ext4", "source": "disk"},
+                {"target": memory, "fstype": "tmpfs", "source": "tmpfs"},
+            ]
+            output = io.StringIO()
+            with (
+                patch.object(storage_probe, "mount_inventory", return_value=mounts),
+                patch.object(
+                    storage_probe,
+                    "scan",
+                    return_value={
+                        "path": scope,
+                        "status": "ok",
+                        "bytes": 777,
+                        "children": [],
+                    },
+                ) as scan,
+                patch(
+                    "sys.stdin",
+                    io.StringIO(
+                        json.dumps({"roots": [root], "directoryOptions": options})
+                    ),
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                storage_probe.main()
+            scan.assert_called_once()
+            self.assertEqual(scan.call_args.args[0], scope)
+            self.assertGreater(scan.call_args.args[1], 899)
+            self.assertIn(memory, scan.call_args.kwargs["excluded"])
+            result = validate_sample(json.loads(output.getvalue()), [root], options)
+            row = result["directories"][0]
+            self.assertEqual(row["path"], root)
+            self.assertEqual(row["usagePath"], scope)
+            self.assertEqual(row["bytes"], 777)
+            self.assertEqual(result["filesystems"][1]["kind"], "memory")
+
+    def test_storage_options_are_bounded_and_confined_to_configured_roots(self):
+        from mocop.storage_probe import valid_options
+
+        roots = ["/shared", "/home/alice"]
+        options = {
+            "/shared": {
+                "usagePath": "/shared/alice",
+                "scanSeconds": 900,
+                "purpose": "Temporary files",
+                "limitBytes": 100_000_000_000,
+            }
+        }
+        self.assertTrue(valid_options(roots, options))
+        for invalid in (
+            {"/shared": {"usagePath": "/home/bob"}},
+            {"/shared": {"usagePath": "/shared/../bob"}},
+            {"/shared": {"scanSeconds": 99999}},
+            {"/shared": {"scanSeconds": True}},
+            {"/shared": {"limitBytes": -1}},
+            {"/shared": {"unknown": 1}},
+            {"/other": {}},
+        ):
+            self.assertFalse(valid_options(roots, invalid))
+
+    def test_partial_root_summary_is_a_lower_bound_not_a_complete_total(self):
+        from mocop.storage_probe import scan
+
+        result = SimpleNamespace(returncode=1, stdout=b"123\t/data/alice\0")
+        with patch("mocop.storage_probe.subprocess.run", return_value=result):
+            row = scan("/data/alice", 900)
+        self.assertIsNone(row["bytes"])
+        self.assertEqual(row["observedBytes"], 123)
+        self.assertEqual(row["status"], "unreadable")
+
     def test_private_exclusions_are_literal_names_and_reach_du_as_arguments(self):
         from mocop.storage_probe import scan, valid_exclusions
 

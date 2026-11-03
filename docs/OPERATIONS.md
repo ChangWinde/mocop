@@ -393,6 +393,8 @@ in-memory daily cache and requests fresh samples. No memory history file is
 created. Removed hosts disappear from the panel; new hosts are sampled by the
 next worker pass. Inspect `mocop api /api/user-memory` for per-host results.
 
+### Personal storage panel
+
 The dashboard **我的存储** section reports configured personal roots, disk capacity
 and changes. Remaining capacity reuses fresh online disk telemetry; personal
 directory accounting keeps its six-hour scan cadence. The **目录空间** dialog retains a compatible view of these snapshots.
@@ -402,6 +404,13 @@ already enrolled SSH aliases. Each entry requires non-overlapping absolute
 `excludeNames` is an optional list of literal directory names to omit throughout
 the scan (at most 32 names, ASCII letters/digits/underscores/dots/hyphens only).
 Keep deployment-specific exclusions in this private file.
+`directoryOptions` optionally maps configured roots to `purpose` (up to 160
+characters), `usagePath` (that root or a descendant), `scanSeconds` (30–1200,
+default 90), and `limitBytes` (a positive byte count). A shared pool can keep its
+full root in the main table while measuring only `/shared/alice` through
+`usagePath`; the UI discloses that scope. Symlink scopes are not followed.
+Limits are advisory warnings, not filesystem quotas or cleanup instructions.
+Use `100000000000` for a conservative 100 GB limit (decimal bytes).
 For example, a fictional entry is `"gpu-01": {"roots": ["/home/alice",
 "/data/alice"], "label": "Lab GPU", "priority": 100}`. No browser input can
 change this administrative file. The collector excludes another user's scope,
@@ -409,8 +418,12 @@ credentials directories, symlink targets and other filesystems. It never deletes
 migrates, vacuums, restarts jobs or changes proxy/SSH settings.
 
 The service schedules two low-priority workers every six hours while the Mac is
-awake. Each root has a 90-second `du` deadline, with 240 seconds per host and a
-260-second local process deadline. Results survive restart in private
+awake. Each root has a 90-second `du` deadline unless explicitly configured for
+a larger directory. Root budgets sum to at most 3600 seconds per host; the local
+process gets an additional 30 seconds for SSH and inventory. Memory-backed
+`tmpfs`/`devtmpfs` mounts are inventoried in collapsed details and excluded from
+disk accounting. Permission errors with a readable `du` summary preserve that
+summary as a lower bound; they never establish a complete total. Results survive restart in private
 `~/.local/state/mocop/storage-history.json`; restore it with the policy when
 moving the monitor. At most 120 samples per host are retained for 30 days. A
 failed scan retries after fifteen minutes and preserves its last success.

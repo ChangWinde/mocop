@@ -33,7 +33,7 @@ def private_json(path, maximum):
     return json.loads(path.read_text())
 
 
-def validate_sample(data, roots):
+def validate_sample(data, roots, options=None):
     if not isinstance(data, dict) or data.get("protocol") != "PERSONAL_STORAGE_V1":
         raise ValueError("invalid storage protocol")
     rows, filesystems = data.get("directories"), data.get("filesystems")
@@ -45,10 +45,20 @@ def validate_sample(data, roots):
     ):
         raise ValueError("invalid storage result")
     seen = set()
+    options = {} if options is None else options
     for row in rows:
         if row.get("path") not in roots or row["path"] in seen:
             raise ValueError("unexpected storage root")
         seen.add(row["path"])
+        if row.get("usagePath", row["path"]) != options.get(row["path"], {}).get(
+            "usagePath", row["path"]
+        ):
+            raise ValueError("unexpected storage usage scope")
+        if row.get("observedBytes") is not None and (
+            type(row["observedBytes"]) is not int
+            or not 0 <= row["observedBytes"] <= 2**60
+        ):
+            raise ValueError("invalid incomplete storage total")
         if row.get("status") not in (
             "ok",
             "missing",
@@ -110,6 +120,7 @@ def analysis(sample, history):
                 if r.get("path") == row["path"]
                 and r.get("status") == "ok"
                 and s.get("excludeNames", []) == sample.get("excludeNames", [])
+                and s.get("directoryOptions", {}) == sample.get("directoryOptions", {})
             ),
             None,
         )
@@ -225,11 +236,18 @@ class PersonalStorageMonitor:
             roots = config.get("roots")
             if not isinstance(roots, list) or not roots or len(roots) > 16:
                 raise ValueError("invalid personal root policy")
-            from .storage_probe import valid_exclusions, valid_path
+            from .storage_probe import valid_exclusions, valid_options, valid_path
 
             excluded_names = config.get("excludeNames", [])
             if not valid_exclusions(excluded_names):
                 raise ValueError("invalid storage exclusions")
+            options = config.get("directoryOptions", {})
+            if not valid_options(roots, options) or any(
+                c in settings.get("usagePath", path).split("/")
+                for path, settings in options.items()
+                for c in (".ssh", ".gnupg", *excluded_names)
+            ):
+                raise ValueError("invalid storage directory options")
 
             if not all(
                 valid_path(p)
@@ -302,6 +320,12 @@ class PersonalStorageMonitor:
                     }
                 )
         for row in rows:
+            options = priorities.get(row["host"], {}).get("directoryOptions", {})
+            for directory in row["directories"]:
+                settings = options.get(directory["path"], {})
+                for key in ("usagePath", "purpose", "limitBytes"):
+                    if key in settings:
+                        directory[key] = settings[key]
             row["priority"] = -priorities.get(row["host"], {}).get("priority", 0)
             row["stale"] = row.get("status") == "error" or (
                 row.get("epoch") is not None
@@ -412,6 +436,8 @@ class PersonalStorageMonitor:
                 "-o",
                 "BatchMode=yes",
                 "-o",
+                "ClearAllForwardings=yes",
+                "-o",
                 "StrictHostKeyChecking=yes",
                 "-o",
                 "ConnectionAttempts=1",
@@ -435,9 +461,16 @@ class PersonalStorageMonitor:
                     {
                         "roots": policy["roots"],
                         "excludeNames": policy.get("excludeNames", []),
+                        "directoryOptions": policy.get("directoryOptions", {}),
                     }
                 ),
-                timeout_seconds=260,
+                timeout_seconds=30
+                + sum(
+                    policy.get("directoryOptions", {})
+                    .get(root, {})
+                    .get("scanSeconds", 90)
+                    for root in policy["roots"]
+                ),
                 max_output_bytes=1024**2,
                 environment=ssh_environment(),
                 cancel_event=self.stop_event,
@@ -445,9 +478,14 @@ class PersonalStorageMonitor:
             )
             if output.returncode:
                 raise ValueError("storage SSH scan failed")
-            sample = validate_sample(json.loads(output.stdout), policy["roots"])
+            sample = validate_sample(
+                json.loads(output.stdout),
+                policy["roots"],
+                policy.get("directoryOptions", {}),
+            )
             sample.update(
                 excludeNames=policy.get("excludeNames", []),
+                directoryOptions=policy.get("directoryOptions", {}),
                 host=host,
                 label=policy.get("label", host),
                 priority=-policy.get("priority", 0),
@@ -497,9 +535,12 @@ class PersonalStorageMonitor:
 
     @staticmethod
     def matches_policy(record, policy):
-        return [r.get("path") for r in record.get("directories", [])] == policy.get(
-            "roots"
-        ) and record.get("excludeNames", []) == policy.get("excludeNames", [])
+        return (
+            [r.get("path") for r in record.get("directories", [])]
+            == policy.get("roots")
+            and record.get("excludeNames", []) == policy.get("excludeNames", [])
+            and record.get("directoryOptions", {}) == policy.get("directoryOptions", {})
+        )
 
 
 def merge_live_capacity(storage, fleet):

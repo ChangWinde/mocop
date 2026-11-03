@@ -476,6 +476,11 @@ private bounded history independently of GPU polling. Its compatibility view
 preserves the directory dialog, while `storage_analysis.js` owns the main
 compact directory/capacity tables and collapsed scan details. See the operations guide for cadence,
 limits and policy ownership.
+Per-root private options bound scan time, disclose a personal subdirectory of a
+shared pool and supply advisory limits. `storage_probe.py` validates the same
+options remotely, preserves readable partial summaries and excludes memory
+mounts from disk accounting. Main rows correspond only to configured roots;
+mount inventories remain available in collapsed details.
 
 `zenith_monitor.py` owns independent training polling. `training_listing.py`
 separates minute-level recent/active refresh from periodic terminal history

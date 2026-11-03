@@ -94,6 +94,7 @@ html[data-style="ledger"] .tj-badge.starting { color:#805415; background:#f4e6cc
 .sa-table td { padding:8px; border-bottom:1px solid var(--line); }
 .sa-table th:first-child { width:52%; text-align:left; }
 .sa-path { font-family:var(--mono,monospace); overflow-wrap:anywhere; }
+.sa-table td small { display:block; margin-top:4px; font-family:var(--font, sans-serif); }
 .sa-number { text-align:right; font-variant-numeric:tabular-nums; }
 .sa-number strong { font-weight:500; }
 .sa-number small { display:block; }

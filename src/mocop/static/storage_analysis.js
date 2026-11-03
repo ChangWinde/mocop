@@ -10,21 +10,24 @@
     if (root.status === "ok" && numeric(root.bytes)) return {text:size(root.bytes),note:"完整统计"};
     const known = (root.children || []).filter(c => numeric(c.bytes));
     const note = ({timeout:"扫描未完成",partial:"部分统计",unreadable:"权限不足 / 扫描失败",missing:"目录不存在",linked:"链接目录，未重复统计"})[root.status] || "等待统计";
-    return {text:known.length ? `≥ ${size(known.reduce((sum,c) => sum+c.bytes,0))}` : "待统计",note};
+    const observed = numeric(root.observedBytes) ? root.observedBytes : known.length ? known.reduce((sum,c) => sum+c.bytes,0) : null;
+    return {text:numeric(observed) ? `≥ ${size(observed)}` : "待统计",note};
+  };
+  const budget = root => {
+    if (!numeric(root.limitBytes)) return "";
+    const limit = root.limitBytes / 1e9;
+    const measured = root.status === "ok" ? root.bytes : numeric(root.observedBytes) ? root.observedBytes : (root.children || []).reduce((sum,child) => sum+(numeric(child.bytes) ? child.bytes : 0),0);
+    return numeric(measured) && measured > root.limitBytes ? `超出 ${limit} GB 上限 · 至少超出 ${((measured-root.limitBytes)/1e9).toFixed(1)} GB` : `上限 ${limit} GB${root.status === "ok" && numeric(measured) ? " · 未超限" : " · 待完整统计"}`;
   };
   const directoryRows = server => {
     const filesystems = server.filesystems || [];
-    return (server.directories || []).flatMap(root => {
-      const nested = filesystems.filter(fs => fs.mountPoint !== root.path && within(fs.mountPoint,root.path));
+    return (server.directories || []).map(root => {
+      const path = root.usagePath || root.path;
+      const nested = filesystems.filter(fs => fs.kind !== "memory" && fs.mountPoint !== path && within(fs.mountPoint,path));
       const fs = filesystems.find(fs => fs.key && fs.key === root.filesystemKey) ||
         filesystems.filter(fs => within(root.path,fs.mountPoint)).sort((a,b) => b.mountPoint.length-a.mountPoint.length)[0];
       // A directory containing mounts has no single capacity. Never assign the OS disk's capacity to NAS.
-      const rows = [{path:root.path,usage:usage(root),fs:nested.length ? null : fs,nested:nested.length}];
-      for (const mount of nested) {
-        const child = (root.children || []).find(c => c.path === mount.mountPoint);
-        rows.push({path:mount.mountPoint,usage:usage(child || {status:"pending"}),fs:mount,nested:0});
-      }
-      return rows;
+      return {path:root.path,root,usage:usage(root),fs:nested.length ? null : fs,nested:nested.length};
     });
   };
   const serverCard = server => {
@@ -38,12 +41,17 @@
     const body = node("tbody", "");
     for (const row of directoryRows(server)) {
       const tr = node("tr", "");
-      tr.append(node("td", "sa-path", row.path));
-      const total = row.fs?.capacityVirtual ? "额度未知" : row.nested ? `${row.nested} 个挂载 ↓` : size(row.fs?.totalBytes);
-      const free = row.fs?.capacityVirtual ? "额度未知" : row.nested ? "分别见下" : size(row.fs?.availableBytes);
+      const pathCell = node("td", "sa-path", row.path);
+      if (row.root.purpose) pathCell.append(node("small", "tj-muted", row.root.purpose));
+      if (row.root.usagePath && row.root.usagePath !== row.path) pathCell.append(node("small", "tj-muted", `统计范围：${row.root.usagePath}`));
+      tr.append(pathCell);
+      const total = row.fs?.capacityVirtual ? "额度未知" : row.nested ? `${row.nested} 个挂载` : size(row.fs?.totalBytes);
+      const free = row.fs?.capacityVirtual ? "额度未知" : row.nested ? "见扫描详情" : size(row.fs?.availableBytes);
       const totalCell = node("td", "sa-number", total), freeCell = node("td", `sa-number ${row.fs?.pressure === "critical" ? "tj-warning" : ""}`, free);
       const used = node("td", "sa-number"); used.append(node("strong", "", row.usage.text));
       if (row.usage.note !== "完整统计") used.append(node("small", "tj-muted", row.usage.note));
+      const limit = budget(row.root);
+      if (limit) used.append(node("small", "tj-warning", limit));
       const capacityNote = row.fs?.capacityVirtual ? "对象存储：平台未提供真实额度" : `所在盘 / 共享池容量，不能跨目录相加；容量观测 ${date(row.fs?.capacitySampledAt || server.sampledAt)}`;
       totalCell.title = freeCell.title = capacityNote;
       tr.append(totalCell,freeCell,used); body.append(tr);
@@ -57,6 +65,10 @@
       detail.append(block);
     }
     detail.append(node("p", "tj-muted", `下次目录扫描 ${date(server.nextAttemptAt)} · 容量每分钟刷新 · 目录每 6 小时统计`));
+    for (const fs of server.filesystems || []) {
+      const capacity = fs.capacityVirtual ? "对象存储额度未知" : `总 ${size(fs.totalBytes)} · 剩余 ${size(fs.availableBytes)}`;
+      detail.append(node("p", "tj-muted", `${fs.mountPoint} · ${capacity}${fs.kind === "memory" ? " · 内存临时盘，不计入磁盘占用" : ""}`));
+    }
     if (server.message) detail.append(node("p", "tj-warning", server.message));
     card.append(detail); return card;
   };
@@ -88,5 +100,5 @@
     document.addEventListener("visibilitychange", () => {if (!document.hidden && started) load();});
     return {start:() => {started=true;load();}};
   };
-  globalThis.MocopStorageAnalysis = Object.freeze({size, delta, usage, directoryRows, render, create});
+  globalThis.MocopStorageAnalysis = Object.freeze({size, delta, usage, budget, directoryRows, render, create});
 })();

@@ -1640,6 +1640,10 @@ Authenticated, cache-only and query-free. `intervalSeconds` is 21600 and
 workers; an HTTP read never launches SSH. Each server publishes `host`, `label`,
 `status`, `sampledAt`, `nextAttemptAt`, `stale`, `complete`, `knownBytes`,
 `directories`, `filesystems`, and a compact `history` array.
+Directory rows may include an administrative `usagePath`, `purpose` and
+`limitBytes`. `usagePath` identifies the actual measured subdirectory of a
+configured shared root. All personal byte values refer to that disclosed scope.
+`limitBytes` produces a display warning, never a hard quota or an automatic move.
 
 Directory sizes use allocated bytes from `du -P -x -B1`; object-store FUSE
 mounts use apparent file sizes. Source symlinks are not followed. Child mounts
@@ -1651,7 +1655,10 @@ last successful observation of the same path. Personal totals cover configured
 roots, not every file owned by the account or filesystem-wide used space. Hard
 links are deduplicated within one root; links shared across separately scanned
 roots can appear in both path totals. These are directory accounting figures,
-not a storage invoice. A timeout retains completed child observations while
+not a storage invoice. `observedBytes`, when present on an incomplete root,
+is the readable `du` summary or a lower bound from completed mount scans; it is
+never added to complete `knownBytes`. Permission failures do not discard a
+readable root summary or convert it to a complete sample. A timeout retains completed child observations while
 leaving the root total unknown. A changed root policy schedules a fresh scan
 and stops showing old roots and incompatible total-history samples.
 
@@ -1668,12 +1675,18 @@ Filesystems marked `capacityVirtual` are object storage: reported statvfs
 capacity does not represent quota or remaining space and is hidden in the UI.
 The dashboard shows one compact table per prioritized server: full directory
 path, containing filesystem total, available space, and the directory scan size.
-A parent with child mounts has no combined capacity; child mount paths have
-separate rows. Completed children of an incomplete scan provide only a lower
+A parent with persistent child mounts has no combined capacity; mount paths and
+capacities are in the collapsed scan details. The main table has exactly one row
+per configured root. Memory-backed mounts have `kind: memory`, are shown in
+details and are excluded from disk totals. Completed children of an incomplete scan provide only a lower
 bound, marked `≥`. Shared directory sizes describe all accessible contents of
 the configured path, not exclusive ownership. Each server table and its scan details start collapsed. A user-opened server
 remains expanded when the cache view refreshes. The UI labels directory sizes
 “我占用的”; shared paths still account for their accessible contents.
+Only a complete sample below `limitBytes` can be labeled within the advisory
+limit. An incomplete lower bound above the limit can establish overuse, but an
+incomplete low number cannot establish compliance. Changed directory options
+invalidate incompatible samples just as changed root lists do.
 
 ### GET /api/training-jobs
 

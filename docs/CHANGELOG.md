@@ -32,6 +32,12 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Personal storage keeps readable root summaries after permission errors, with
+  explicit lower bounds. Private per-root scan budgets support large trees;
+  shared pools can measure a disclosed personal subdirectory and show advisory
+  byte limits. Memory mounts and mount inventories stay in scan details rather
+  than expanding the main table or inflating disk use.
+
 - Restore training synchronization after an explicit platform origin/API-version
   migration while keeping credential-bearing redirects blocked. Read bounded
   histories up to 5000 records instead of stopping at 2000, and reserve a
