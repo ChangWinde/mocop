@@ -30,7 +30,10 @@ without this option retain the bounded synchronous scanner.
 
 Receipt-enabled hosts poll every minute and never launch `du`, even when a
 receipt fails validation. Failure retains the last successful observation with
-explicit stale status. The server and UI retain the actual measurement end time;
+explicit stale status. Two receipt workers are separate from the two recursive
+scan workers, so slow scans cannot hold up the receipt polling queue. Each host
+has at most one queued or running collection.
+The server and UI retain the actual measurement end time;
 polling cannot renew it. Identical measurements replace the latest history entry
 rather than consuming a sample per minute. Counts for different scopes or sources
 are never mixed. The administrator owns the counter's exclusion policy and its

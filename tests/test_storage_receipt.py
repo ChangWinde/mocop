@@ -4,6 +4,7 @@ import io
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -14,6 +15,44 @@ from mocop import storage_probe
 
 
 class StorageReceiptTests(unittest.TestCase):
+    def test_slow_recursive_scans_do_not_block_receipt_reads(self):
+        from mocop.storage_analysis import PersonalStorageMonitor
+
+        monitor = PersonalStorageMonitor(
+            SimpleNamespace(),
+            lambda: [],
+            policy_path=Path("/absent"),
+            history_path=Path("/absent"),
+        )
+        items = {
+            "slow-a": {"priority": 100},
+            "slow-b": {"priority": 99},
+            "receipt": {"priority": 90, "measurementFile": "/private/count.json"},
+        }
+        monitor.policy = lambda: items
+        monitor.matches_policy = lambda *args: True
+        release = threading.Event()
+        observed = threading.Event()
+
+        def collect(item):
+            if item[0] == "receipt":
+                observed.set()
+            else:
+                release.wait(2)
+
+        monitor.collect = collect
+        worker = threading.Thread(target=monitor.run)
+        worker.start()
+        try:
+            self.assertTrue(
+                observed.wait(0.5), "receipt read queued behind slow recursive scans"
+            )
+        finally:
+            monitor.stop_event.set()
+            release.set()
+            worker.join(3)
+        self.assertFalse(worker.is_alive())
+
     def test_minute_polls_preserve_measurement_age_and_do_not_fill_history(self):
         from mocop.storage_analysis import PersonalStorageMonitor
 

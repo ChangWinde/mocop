@@ -432,7 +432,9 @@ refreshes this cache view and does not start another recursive disk scan.
 
 For trees with an existing long-running counter, set per-host `measurementFile`
 to an absolute remote path of its owner-private JSON receipt. This opt-in mode
-reads results every minute and does not run `du`. The receipt must have
+reads results every minute and does not run `du`.
+Receipt reads use two separate workers so a backlog of recursive scans cannot
+delay them. Each host has at most one queued or running collection. The receipt must have
 `complete: true`, positive finite Unix-second `started_at` and `finished_at`
 timestamps, and `root_allocated_bytes` mapping exact measured paths to
 nonnegative integer bytes. Optional `top_directories` has `path` and

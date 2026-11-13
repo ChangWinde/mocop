@@ -566,22 +566,32 @@ class PersonalStorageMonitor:
                 self.deadlines[host] = time.monotonic() + 60
 
     def run(self):
-        while not self.stop_event.is_set():
-            try:
-                items = sorted(
-                    self.policy().items(), key=lambda x: -x[1].get("priority", 0)
-                )
-                due = [
-                    item
-                    for item in items
-                    if time.monotonic() >= self.deadlines.get(item[0], 0)
-                    or not self.matches_policy(self.records.get(item[0], {}), item[1])
-                ]
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    list(pool.map(self.collect, due))
-            except (OSError, ValueError, TypeError):
-                pass
-            self.stop_event.wait(30)
+        # Receipt reads have separate capacity; recursive scans may take hours.
+        with (
+            ThreadPoolExecutor(max_workers=2) as scans,
+            ThreadPoolExecutor(max_workers=2) as receipts,
+        ):
+            pending = {}
+            while not self.stop_event.is_set():
+                pending = {
+                    host: future
+                    for host, future in pending.items()
+                    if not future.done()
+                }
+                try:
+                    items = sorted(
+                        self.policy().items(), key=lambda x: -x[1].get("priority", 0)
+                    )
+                    for host, policy in items:
+                        due = time.monotonic() >= self.deadlines.get(
+                            host, 0
+                        ) or not self.matches_policy(self.records.get(host, {}), policy)
+                        if host not in pending and due:
+                            pool = receipts if policy.get("measurementFile") else scans
+                            pending[host] = pool.submit(self.collect, (host, policy))
+                except (OSError, ValueError, TypeError):
+                    pass
+                self.stop_event.wait(5)
 
     @staticmethod
     def matches_policy(record, policy):
