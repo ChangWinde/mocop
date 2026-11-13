@@ -430,6 +430,26 @@ failed scan retries after fifteen minutes and preserves its last success.
 Read `mocop api /api/storage-analysis` for the current cache. The refresh button
 refreshes this cache view and does not start another recursive disk scan.
 
+For trees with an existing long-running counter, set per-host `measurementFile`
+to an absolute remote path of its owner-private JSON receipt. This opt-in mode
+reads results every minute and does not run `du`. The receipt must have
+`complete: true`, positive finite Unix-second `started_at` and `finished_at`
+timestamps, and `root_allocated_bytes` mapping exact measured paths to
+nonnegative integer bytes. Optional `top_directories` has `path` and
+`allocated_bytes`; it is for details, never the root total. Optional
+`archive_changed_during_measurement: true` discloses concurrent changes.
+Only the matching root or its configured `usagePath` is used. The file must be
+regular, owned by the SSH account, mode `0600`, at most 1 MiB, and not a symlink.
+
+The administrator must keep that producer scheduled and serialized; the reader
+never starts or modifies it. Publish the receipt atomically after a successful
+whole count, retaining the previous success when a new scan is incomplete.
+Polling retains the source end time, so a stalled producer cannot look fresh.
+Counts older than nine hours are marked stale. Duplicate minute reads do not
+fill history. A bad or unavailable receipt retains previous data with an error;
+it never triggers a duplicate recursive scan. Disconnected mounts are shown as
+unavailable rather than absent, and do not become zero-byte observations.
+
 Training observations require a private platform token at
 `~/.config/mocop/zenith/token` and its origin (scheme, hostname, optional port)
 in `~/.config/mocop/zenith/origin`, both owned by the service user with mode

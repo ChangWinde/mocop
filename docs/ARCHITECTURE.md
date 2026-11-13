@@ -481,6 +481,11 @@ shared pool and supply advisory limits. `storage_probe.py` validates the same
 options remotely, preserves readable partial summaries and excludes memory
 mounts from disk accounting. Main rows correspond only to configured roots;
 mount inventories remain available in collapsed details.
+`storage_receipt.py` optionally reads complete directory measurements from a
+private remote receipt, independently of the producer's lifetime. The fixed
+program composes this module with `storage_probe.py`; minute polls preserve
+measurement age and never start a competing scan. [ADR-0037](adr/0037-complete-storage-receipts.md)
+records the choice over longer SSH scans or another resumable crawler.
 
 `zenith_monitor.py` owns independent training polling. `training_listing.py`
 separates minute-level recent/active refresh from periodic terminal history

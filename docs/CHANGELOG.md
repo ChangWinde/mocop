@@ -32,6 +32,11 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Read complete external storage count receipts without repeating short scans.
+  Preserve real scan timestamps, stale status and deduplicated history across
+  minute reads. Disconnected mounts are explicitly unavailable rather than
+  missing; complete local directory counts remain independently visible.
+
 - Personal storage keeps readable root summaries after permission errors, with
   explicit lower bounds. Private per-root scan budgets support large trees;
   shared pools can measure a disclosed personal subdirectory and show advisory

@@ -44,3 +44,4 @@ for status and superseding rules.
 | [0034](0034-daily-user-memory.md) | Accepted | Daily user RAM snapshots |
 | [0035](0035-persistent-dashboard-capability.md) | Accepted | Persistent browser capability retention |
 | [0036](0036-independent-training-guard.md) | Accepted | Independent training freshness checks and bounded local recovery |
+| [0037](0037-complete-storage-receipts.md) | Accepted | Read complete storage measurements independently of scan deadlines |

@@ -1635,6 +1635,24 @@ units, completeness, changes and history.
 
 ### GET /api/storage-analysis
 
+An optional administrative `measurementFile` switches a host to minute polling
+of complete external root-count receipts. No recursive scan starts in this mode.
+`sourceEpoch` and `sampledAt` identify the source's actual completion time, while
+`epoch` identifies the read attempt. Repeated reads never renew measurement age;
+failed receipt reads keep the last success with an error. Identical receipt reads
+do not add history entries. Changing the measurement source invalidates cached
+scope and comparisons.
+
+Receipt-backed directory rows add `source: complete_receipt`, `sampleEpoch`,
+`sampledAt`, `scanDurationSeconds` and `liveChanges` (the producer observed
+archiving during the scan). Directory `stale` also reflects failed source reads.
+`completedDirectories` counts complete rows; `unavailableDirectories` counts
+mount failures. `mount_unavailable` with `errorCode` ENOTCONN, ESTALE, EIO or
+ENODEV means disconnected or inaccessible storage, not a missing directory or
+zero usage. A host can have complete local rows and an unavailable object row;
+its overall `complete` remains false. The UI reports both per-root completion
+and the unavailable count.
+
 Authenticated, cache-only and query-free. `intervalSeconds` is 21600 and
 `retentionDays` is 30. The service scans configured personal roots with two
 workers; an HTTP read never launches SSH. Each server publishes `host`, `label`,

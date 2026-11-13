@@ -7,9 +7,9 @@
   const date = text => text ? new Date(text).toLocaleString("zh-CN", {hour12:false}) : "等待首次扫描";
   const within = (path, parent) => path === parent || path.startsWith(parent === "/" ? "/" : `${parent}/`);
   const usage = root => {
-    if (root.status === "ok" && numeric(root.bytes)) return {text:size(root.bytes),note:"完整统计"};
+    if (root.status === "ok" && numeric(root.bytes)) return {text:size(root.bytes),note:root.stale ? "上次完整统计 · 待更新" : root.source === "complete_receipt" ? `完整统计 · ${date(root.sampledAt)}` : "完整统计"};
     const known = (root.children || []).filter(c => numeric(c.bytes));
-    const note = ({timeout:"扫描未完成",partial:"部分统计",unreadable:"权限不足 / 扫描失败",missing:"目录不存在",linked:"链接目录，未重复统计"})[root.status] || "等待统计";
+    const note = ({timeout:"扫描未完成",partial:"部分统计",unreadable:"权限不足 / 扫描失败",missing:"目录不存在",mount_unavailable:"挂载连接断开，无法读取；不是 0 占用",linked:"链接目录，未重复统计"})[root.status] || "等待统计";
     const observed = numeric(root.observedBytes) ? root.observedBytes : known.length ? known.reduce((sum,c) => sum+c.bytes,0) : null;
     return {text:numeric(observed) ? `≥ ${size(observed)}` : "待统计",note};
   };
@@ -17,7 +17,7 @@
     if (!numeric(root.limitBytes)) return "";
     const limit = root.limitBytes / 1e9;
     const measured = root.status === "ok" ? root.bytes : numeric(root.observedBytes) ? root.observedBytes : (root.children || []).reduce((sum,child) => sum+(numeric(child.bytes) ? child.bytes : 0),0);
-    return numeric(measured) && measured > root.limitBytes ? `超出 ${limit} GB 上限 · 至少超出 ${((measured-root.limitBytes)/1e9).toFixed(1)} GB` : `上限 ${limit} GB${root.status === "ok" && numeric(measured) ? " · 未超限" : " · 待完整统计"}`;
+    return numeric(measured) && measured > root.limitBytes ? `超出 ${limit} GB 上限 · 至少超出 ${((measured-root.limitBytes)/1e9).toFixed(1)} GB` : `上限 ${limit} GB${root.status === "ok" && !root.stale && numeric(measured) ? " · 未超限" : " · 待完整统计"}`;
   };
   const directoryRows = server => {
     const filesystems = server.filesystems || [];
@@ -33,7 +33,9 @@
   const serverCard = server => {
     const card = node("details", "sa-card"); card.dataset.host = server.host;
     const title = node("summary", "sa-card-title");
-    title.append(node("strong", "", server.label || server.host),node("small", server.stale || server.status === "error" ? "tj-warning" : "tj-muted", `${server.status === "collecting" ? "采集中 · " : ""}目录统计 ${date(server.sampledAt)}${server.stale ? " · 待更新" : ""}`)); card.append(title);
+    const completed = (server.directories || []).filter(d => d.status === "ok").length;
+    const unavailable = (server.directories || []).filter(d => d.status === "mount_unavailable").length;
+    title.append(node("strong", "", server.label || server.host),node("small", server.stale || server.status === "error" ? "tj-warning" : "tj-muted", `${server.status === "collecting" ? "采集中 · " : ""}${completed}/${(server.directories || []).length} 目录完整${unavailable ? ` · ${unavailable} 处挂载不可用` : ""} · ${date(server.sampledAt)}${server.stale ? " · 待更新" : ""}`)); card.append(title);
     const table = node("table", "sa-table");
     const head = node("thead", ""), header = node("tr", "");
     for (const text of ["完整目录路径", "总容量", "剩余容量", "我占用的"]) header.append(node("th", "", text));
@@ -44,6 +46,7 @@
       const pathCell = node("td", "sa-path", row.path);
       if (row.root.purpose) pathCell.append(node("small", "tj-muted", row.root.purpose));
       if (row.root.usagePath && row.root.usagePath !== row.path) pathCell.append(node("small", "tj-muted", `统计范围：${row.root.usagePath}`));
+      if (row.root.liveChanges) pathCell.append(node("small", "tj-muted", "扫描期间仍有写入或归档；不是同一时刻快照"));
       tr.append(pathCell);
       const total = row.fs?.capacityVirtual ? "额度未知" : row.nested ? `${row.nested} 个挂载` : size(row.fs?.totalBytes);
       const free = row.fs?.capacityVirtual ? "额度未知" : row.nested ? "见扫描详情" : size(row.fs?.availableBytes);
@@ -64,7 +67,7 @@
       for (const child of root.children || []) block.append(node("div", "sa-child", `${child.path}  ${numeric(child.bytes) ? size(child.bytes) : "待统计"}`));
       detail.append(block);
     }
-    detail.append(node("p", "tj-muted", `下次目录扫描 ${date(server.nextAttemptAt)} · 容量每分钟刷新 · 目录每 6 小时统计`));
+    detail.append(node("p", "tj-muted", server.measurementFile ? `完整计数结果每分钟同步 · 统计时间以上次完整扫描结束为准 · 下次同步 ${date(server.nextAttemptAt)}` : `下次目录扫描 ${date(server.nextAttemptAt)} · 容量每分钟刷新 · 目录每 6 小时统计`));
     for (const fs of server.filesystems || []) {
       const capacity = fs.capacityVirtual ? "对象存储额度未知" : `总 ${size(fs.totalBytes)} · 剩余 ${size(fs.availableBytes)}`;
       detail.append(node("p", "tj-muted", `${fs.mountPoint} · ${capacity}${fs.kind === "memory" ? " · 内存临时盘，不计入磁盘占用" : ""}`));

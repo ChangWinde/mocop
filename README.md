@@ -62,7 +62,7 @@ English README, API, operations, and engineering references remain maintained.
 - Per-GPU trends and process timelines, optional bounded SQLite retention, read-only Slurm/Kubernetes/Docker/Podman context
 - Per-owner GPU occupancy and idle-share rollups, and a situation brief
 - Six visual styles, six accents, compact mode, saved ordering, local backgrounds
-- Independent training watchdog; personal storage limits ([operations](docs/OPERATIONS.md#personal-storage-panel))
+- Training watchdog; complete storage receipts ([operations](docs/OPERATIONS.md#personal-storage-panel))
 - Opt-in release checks and verified one-click self-update
 - OpenMetrics 1.0 endpoint for Prometheus and Grafana
 

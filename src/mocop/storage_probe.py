@@ -1,11 +1,16 @@
 """Fixed remote program. Input is JSON on stdin, never shell text."""
 
+import errno
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
+
+if __package__:
+    from .storage_receipt import measurement_row, read_measurement
 
 
 def valid_path(path):
@@ -134,6 +139,8 @@ def main():
     roots = policy["roots"]
     excluded_names = policy.get("excludeNames", [])
     options = policy.get("directoryOptions", {})
+    measurement_file = policy.get("measurementFile")
+    assert measurement_file is None or valid_path(measurement_file)
     assert valid_exclusions(excluded_names)
     assert (
         isinstance(roots, list)
@@ -147,6 +154,13 @@ def main():
         "filesystems": [],
         "notes": [],
     }
+    measurement = None
+    if measurement_file is not None:
+        try:
+            measurement = read_measurement(measurement_file)
+            result["sourceEpoch"] = measurement["finished_at"]
+        except (OSError, ValueError, UnicodeError):
+            result["measurementError"] = "完整统计文件暂不可用或未通过校验"
     started = time.monotonic()
     budget = sum(options.get(root, {}).get("scanSeconds", 90) for root in roots)
     seen_roots = {}
@@ -204,10 +218,24 @@ def main():
             row["status"] = "linked"
             result["directories"].append(row)
             continue
-        if not os.path.isdir(target):
+        try:
+            info = os.stat(target)
+        except OSError as error:
+            row.update(
+                status="mount_unavailable"
+                if error.errno
+                in (errno.ENOTCONN, errno.ESTALE, errno.EIO, errno.ENODEV)
+                else "missing"
+                if error.errno in (errno.ENOENT, errno.ENOTDIR)
+                else "unreadable",
+                errorCode=errno.errorcode.get(error.errno, "IO_ERROR"),
+            )
             result["directories"].append(row)
             continue
-        identity = (os.stat(target).st_dev, os.stat(target).st_ino)
+        if not stat.S_ISDIR(info.st_mode):
+            result["directories"].append(row)
+            continue
+        identity = (info.st_dev, info.st_ino)
         if identity in seen_roots:
             row.update(status="linked", duplicateOf=seen_roots[identity])
             result["directories"].append(row)
@@ -239,6 +267,10 @@ def main():
                         raise
         except (OSError, ValueError, KeyError, IndexError):
             row["status"] = "inventory_error"
+            result["directories"].append(row)
+            continue
+        if measurement_file is not None:
+            row.update(measurement_row(measurement, root, target))
             result["directories"].append(row)
             continue
         # Each root has its own administrative deadline, within a one-hour host cap.

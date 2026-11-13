@@ -9,7 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 
 PERSONAL_STORAGE_SCRIPT = (
-    Path(__file__).with_name("storage_probe.py").read_text(encoding="utf-8")
+    Path(__file__).with_name("storage_receipt.py").read_text(encoding="utf-8")
+    + "\n"
+    + Path(__file__).with_name("storage_probe.py").read_text(encoding="utf-8")
 )
 
 # TERMINAL_ENV_V1: keep native capabilities when the target has their entry.

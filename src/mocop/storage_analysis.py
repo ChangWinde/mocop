@@ -44,6 +44,16 @@ def validate_sample(data, roots, options=None):
         or len(filesystems) > 64
     ):
         raise ValueError("invalid storage result")
+    for epoch in [
+        data.get("sourceEpoch"),
+        *(r.get("sampleEpoch") for r in rows if isinstance(r, dict)),
+    ]:
+        if epoch is not None and (
+            type(epoch) not in (int, float)
+            or not math.isfinite(epoch)
+            or not 0 < epoch <= time.time() + 60
+        ):
+            raise ValueError("invalid storage measurement time")
     seen = set()
     options = {} if options is None else options
     for row in rows:
@@ -68,6 +78,7 @@ def validate_sample(data, roots, options=None):
             "timeout",
             "unreadable",
             "partial",
+            "mount_unavailable",
         ):
             raise ValueError("invalid storage state")
         if row["status"] == "ok":
@@ -121,6 +132,7 @@ def analysis(sample, history):
                 and r.get("status") == "ok"
                 and s.get("excludeNames", []) == sample.get("excludeNames", [])
                 and s.get("directoryOptions", {}) == sample.get("directoryOptions", {})
+                and s.get("measurementFile") == sample.get("measurementFile")
             ),
             None,
         )
@@ -208,6 +220,8 @@ class PersonalStorageMonitor:
                     self.records[host] = analysis(records[-1], records[:-1])
                     age = time.time() - records[-1]["epoch"]
                     self.deadlines[host] = time.monotonic() + max(0, INTERVAL - age)
+                    if records[-1].get("measurementFile"):
+                        self.deadlines[host] = time.monotonic() + 60
         except (OSError, ValueError, KeyError, TypeError):
             self.histories = {}
 
@@ -237,6 +251,13 @@ class PersonalStorageMonitor:
             if not isinstance(roots, list) or not roots or len(roots) > 16:
                 raise ValueError("invalid personal root policy")
             from .storage_probe import valid_exclusions, valid_options, valid_path
+
+            measurement = config.get("measurementFile")
+            if measurement is not None and (
+                not valid_path(measurement)
+                or any(c in measurement.split("/") for c in (".ssh", ".gnupg"))
+            ):
+                raise ValueError("invalid storage measurement file")
 
             excluded_names = config.get("excludeNames", [])
             if not valid_exclusions(excluded_names):
@@ -326,10 +347,20 @@ class PersonalStorageMonitor:
                 for key in ("usagePath", "purpose", "limitBytes"):
                     if key in settings:
                         directory[key] = settings[key]
+                directory["stale"] = row.get("status") == "error" or (
+                    directory.get("sampleEpoch") is not None
+                    and time.time() - directory["sampleEpoch"] > INTERVAL * 1.5
+                )
+            row["completedDirectories"] = sum(
+                d.get("status") == "ok" for d in row["directories"]
+            )
+            row["unavailableDirectories"] = sum(
+                d.get("status") == "mount_unavailable" for d in row["directories"]
+            )
             row["priority"] = -priorities.get(row["host"], {}).get("priority", 0)
             row["stale"] = row.get("status") == "error" or (
                 row.get("epoch") is not None
-                and time.time() - row["epoch"] > INTERVAL * 1.5
+                and time.time() - row.get("sourceEpoch", row["epoch"]) > INTERVAL * 1.5
             )
             row["nextAttemptAt"] = timestamp(
                 time.time()
@@ -462,9 +493,16 @@ class PersonalStorageMonitor:
                         "roots": policy["roots"],
                         "excludeNames": policy.get("excludeNames", []),
                         "directoryOptions": policy.get("directoryOptions", {}),
+                        **(
+                            {"measurementFile": policy["measurementFile"]}
+                            if policy.get("measurementFile")
+                            else {}
+                        ),
                     }
                 ),
                 timeout_seconds=30
+                if policy.get("measurementFile")
+                else 30
                 + sum(
                     policy.get("directoryOptions", {})
                     .get(root, {})
@@ -483,22 +521,32 @@ class PersonalStorageMonitor:
                 policy["roots"],
                 policy.get("directoryOptions", {}),
             )
+            if sample.get("measurementError"):
+                raise ValueError("storage measurement receipt unavailable")
             sample.update(
                 excludeNames=policy.get("excludeNames", []),
                 directoryOptions=policy.get("directoryOptions", {}),
+                measurementFile=policy.get("measurementFile"),
                 host=host,
                 label=policy.get("label", host),
                 priority=-policy.get("priority", 0),
                 status="ok",
-                sampledAt=timestamp(time.time()),
+                sampledAt=timestamp(sample.get("sourceEpoch", time.time())),
                 epoch=time.time(),
             )
             with self.lock:
                 history = self.histories.get(host, [])
                 row = analysis(sample, history)
-                self.histories[host] = [
+                retained = [
                     r for r in history if r["epoch"] >= time.time() - 30 * 86400
-                ][-119:] + [sample]
+                ][-119:]
+                if (
+                    retained
+                    and sample.get("measurementFile")
+                    and retained[-1].get("sourceEpoch") == sample.get("sourceEpoch")
+                ):
+                    retained.pop()
+                self.histories[host] = retained + [sample]
                 self.records[host] = row
                 self.persist()
         except Exception:
@@ -514,6 +562,8 @@ class PersonalStorageMonitor:
         finally:
             failed = self.records.get(host, {}).get("status") == "error"
             self.deadlines[host] = time.monotonic() + (900 if failed else INTERVAL)
+            if policy.get("measurementFile"):
+                self.deadlines[host] = time.monotonic() + 60
 
     def run(self):
         while not self.stop_event.is_set():
@@ -540,6 +590,7 @@ class PersonalStorageMonitor:
             == policy.get("roots")
             and record.get("excludeNames", []) == policy.get("excludeNames", [])
             and record.get("directoryOptions", {}) == policy.get("directoryOptions", {})
+            and record.get("measurementFile") == policy.get("measurementFile")
         )
 
 
