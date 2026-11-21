@@ -373,6 +373,8 @@ rejected notification-only and bootstrap-script alternatives.
 - SSE sends a named heartbeat every 15 seconds. The dashboard consumes it through
   fetch streaming because native `EventSource` cannot attach the Bearer capability;
   the same parser serves the explicit `authentication: "none"` mode without a header.
+  A stream that delivers no byte for 35 seconds is treated as half-open and
+  aborted; the dashboard then polls snapshots and reconnects.
 - `/healthz` reports process liveness; `/readyz` requires a discovered target and one successful sample.
 - The default listener is loopback. Remote access requires external TLS and authenticated authorization.
 - A fatal collector scheduler failure exits the process non-zero so the user service restarts it.
@@ -431,6 +433,7 @@ by `tests/<leaf>_test.mjs`:
 | `incident-text.js` | the operator-facing wording for collector failures (the exact probe vocabulary, kept aligned by a repository test), incident conditions, state labels, and evidence |
 | `diagnosis-text.js` | the incident dialog's guidance: fixed title, summary, and next steps per condition category, with the first connectivity step chosen by the failure classification |
 | `keyed-loader.js` | bounded-backoff loading of one keyed resource: single flight, success-confirmed keys, one 4–30 s retry timer, stale-response rejection |
+| `event-stream.js` | one authenticated read of `/api/events`: SSE framing over fetch streaming, a 35 s idle watchdog that aborts a half-open stream so the dashboard falls back to polling, and the 1.2–30 s reconnect backoff after failed or refused streams |
 | `api-contracts.js` | payload contracts: bounded normalizers for snapshot, incidents, inventory, collector, maintenance, group, and topology responses that throw on anything malformed |
 | `process-search.js` | NFKC term normalization, bounded process/GPU matching, ranking and memory ordering |
 | `process-inventory.js` | selected-server process listing and truthful empty-state copy for unavailable samples |
