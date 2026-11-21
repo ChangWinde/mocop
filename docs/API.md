@@ -1243,7 +1243,7 @@ Success `202`: `{"status": "updating"}`; follow
 progress through `GET /api/update` and treat a new snapshot `startedAt` as
 the completed switch. `409 UPDATE_NOT_APPLICABLE` when self-update is not
 enabled, the service is not supervised, no newer release exists, or an
-update is already running. A failed attempt reports `state: "failed"`
+update is already running or restarting into the new version. A failed attempt reports `state: "failed"`
 without restarting, and the running version keeps serving.
 
 ## Webhook deliveries
