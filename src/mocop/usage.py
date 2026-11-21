@@ -61,8 +61,9 @@ def _classify(
     if len(point_epochs) < 2 or not intervals:
         return
     # Sorting also makes live behavior match SQLite restoration after an
-    # NTP wall-clock correction.  Duplicate timestamps carry no duration.
-    samples = sorted(zip(point_epochs, point_idle, strict=True))
+    # NTP wall-clock correction.  Duplicate timestamps carry no duration; the
+    # stable sort keeps the later one last, the row SQLite keeps for them.
+    samples = sorted(zip(point_epochs, point_idle, strict=True), key=lambda s: s[0])
     segment_starts: list[float] = []
     segment_ends: list[float] = []
     segment_idle: list[bool] = []

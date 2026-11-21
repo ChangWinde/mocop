@@ -236,6 +236,40 @@ class AggregateUsageTests(unittest.TestCase):
         self.assertEqual([entry["owner"] for entry in limited["owners"]], ["bob"])
         self.assertEqual(limited["totalOwners"], 2)
 
+    def test_same_second_samples_with_unknown_utilization(self) -> None:
+        # A manual probe queued right after a scheduled one can land in the
+        # same wall-clock second; one of the two may lack utilization. The
+        # later sample of that second classifies the segment it opens, as the
+        # history database keeps only the later row for a repeated second.
+        events = [
+            Transition(_at(10), "started", 1, "train", {"owner": "dana"}),
+            Transition(_at(8), "stopped", 1, "train", {"owner": "dana"}),
+        ]
+        # Minute 10 to 9 is idle either way; minute 9 to 8 takes the later
+        # sample of minute 9: busy when it is 90%, unclassified when unknown.
+        for later, sampled in ((90.0, 120.0), (None, 60.0)):
+            with self.subTest(later=later):
+                earlier = None if later is not None else 90.0
+                samples = [
+                    (_at(10), 0.0),
+                    (_at(9), earlier),
+                    (_at(9), later),
+                    (_at(8), 0.0),
+                ]
+                usage = aggregate_usage(
+                    now=NOW,
+                    window_hours=1,
+                    owner_limit=10,
+                    busy_pct=20.0,
+                    events_by_gpu={GPU: events},
+                    active_by_gpu={},
+                    utilization_by_gpu={GPU: samples},
+                )
+                (owner,) = usage["owners"]
+                self.assertEqual(owner["gpuSeconds"], 120.0)
+                self.assertEqual(owner["sampledSeconds"], sampled)
+                self.assertEqual(owner["idleSeconds"], 60.0)
+
     def test_window_clipping_and_stale_sample_gaps(self) -> None:
         events = [
             Transition(_at(180), "started", 1, "long", {"owner": "carol"}),
