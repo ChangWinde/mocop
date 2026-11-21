@@ -69,6 +69,17 @@
           "GPU 温度超过配置的警告阈值。",
           ["检查散热、风扇和相邻设备温度。", "继续长任务前确认硬件降频状态。"],
         ],
+        gpu_availability: condition.detail === "nvidia-smi is stuck in the NVIDIA driver"
+          ? ["NVIDIA 驱动已挂起", "此前的 nvidia-smi 卡在 NVIDIA 驱动中（不可中断睡眠，状态 D）。在它消失前，Mocop 不在该节点启动任何 NVIDIA 命令；系统指标照常更新。", [
+            "重启节点：状态 D 的进程不响应任何信号，SIGKILL 也无法结束它。",
+            "重启前保存内核日志（dmesg），查找指明故障 GPU 的 NVRM 或 Xid 消息。",
+            "先排空或保存 GPU 任务；重启前这些 GPU 不受监控。",
+          ]]
+          : ["NVIDIA 遥测不可用", "节点在线，但 nvidia-smi 没有返回可用的 GPU 数据。", ["在节点上运行 nvidia-smi，检查退出码与输出。", "确认 NVIDIA 驱动已加载，且与安装的 nvidia-smi 版本一致。"]],
+        disk_availability: ["文件系统已挂起", "df 卡在挂起的文件系统上（不可中断睡眠，状态 D），通常是无响应的 NFS、CIFS 或 Lustre 挂载。在它消失前，Mocop 不再运行 df，磁盘数据与磁盘告警暂停更新。", [
+          "在节点上查看 /proc/mounts 中的网络文件系统，并检查对应存储服务器是否可达。",
+          "存储恢复后卡住的 df 会自行退出；无法恢复时用 umount -f -l 卸载该挂载，或重启节点。",
+        ]],
         gpu_count: [
           "GPU 数量与配置不一致",
           "当前可见 GPU 数量与 expected_gpu_counts 不一致。",

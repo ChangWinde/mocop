@@ -65,9 +65,10 @@ interfaces without a runtime plugin registry.
 | `capacity.py` | server-side twin of the browser capacity matcher behind `GET /api/capacity` |
 | `brief.py` | the situation brief behind `GET /api/brief` and `mocop brief`: fleet status, actionable conditions with shared filesystems collapsed, changes and recurring conditions over a window, idle capacity, per-owner usage with idle share, composed from the projections the dashboard already shows, plus its text rendering |
 | `ssh_failures.py` | sanitized classification of OpenSSH client failures into the published `servers[].message` vocabulary, and the stale-multiplex retry decision |
-| `probe.py` | fixed remote probe, protocol parsing, metric baselines |
+| `probe.py` | fixed remote probe, protocol section parsing, metric baselines |
+| `nvidia_csv.py` | field validation and the nvidia-smi GPU, process, health, and combined CSV parsers, each bounded and raising on malformed input |
 | `probe_process.py` | collector process ownership and cancellation, with script delivery and output collection sharing one deadline and selector |
-| `remote_script.py` | the fixed `MONITOR_V8` collection script: protocol constants, template, rendering |
+| `remote_script.py` | the fixed `MONITOR_V9` collection script: protocol constants, template, the guard against stuck `nvidia-smi` and `df`, rendering |
 | `doctor.py` | read-only SSH reachability, connection-reuse, and collection diagnosis |
 | `workloads.py` | strict workload-identity record parsing, including per-PID CPU/memory footprint |
 | `service.py` | thread-safe current-state store and public service interfaces |
@@ -83,6 +84,7 @@ interfaces without a runtime plugin registry.
 | `incident_types.py` | the incident vocabulary: conditions, transition events, restored open incidents, the policy protocol |
 | `incidents.py` | condition evaluation, bounded transition history, restored generations, and raw/actionable counts |
 | `incident_rules.py` | pure rules the tracker applies: the duration floor, the critical-severity hold inside the recovery margin, the first transition id after a start, and whether restored transitions show a generation ended |
+| `incident_availability.py` | the conditions that name an unavailable telemetry source on an online host: a failed or stuck `nvidia-smi`, and a `df` stuck on a hung filesystem |
 | `incident_domains.py` | which telemetry domains a condition's recovery needs and when a sample is blind to them |
 | `incident_health.py` | GPU hardware-health conditions (ECC, pending memory repair, slowdown) derived per device from a sample's health block |
 | `correlation.py` | possible shared-path grouping without changing incident truth |
@@ -142,7 +144,9 @@ resolved discovery.
 
 Collection produces immutable `ProbeResult`, `SystemMetrics`, `DiskMetrics`,
 `GpuMetrics`, `GpuHealthMetrics`, `GpuProcess`, and optional `WorkloadMetadata`
-values. The system section uses the versioned `MONITOR_V8` tab-separated protocol.
+values. The system section uses the versioned `MONITOR_V9` tab-separated protocol;
+up to 64 lines that the remote login shell's startup files print before the
+protocol line are skipped.
 The parser accepts only that current version: the fixed script and its parser ship
 in one process and the script is re-sent on every probe, so no emitter of an older
 version can exist ([ADR-0016](adr/0016-single-version-protocol-and-agent-api.md)
@@ -152,7 +156,15 @@ a second query on the independent, config-bounded process cadence; skipped sampl
 reuse the last successful process snapshot and preserve its observation time. Optional workload mode reads
 bounded `/proc` metadata only for those returned PIDs and recognizes Slurm or Kubernetes
 identity without calling their control APIs. If the combined query is unsupported, the
-fixed script falls back to base GPU fields and marks health unavailable. All sections
+fixed script falls back to base GPU fields and marks health unavailable. Before any NVIDIA
+command, the script reads `/proc` for an `nvidia-smi` that has stayed in uninterruptible
+sleep (state D) for at least ten seconds without a context switch across a one-second
+recheck. Such a process means the driver hung and survives SIGKILL, so the script then
+starts no NVIDIA command and reports the hung driver as a GPU availability condition
+instead of adding one more stuck process per probe. The same scan finds a `df` stuck
+on a hung NFS, CIFS, or Lustre mount; the script then skips the disk pass and reports
+`DISKS_HUNG`, which opens a `disk_availability` condition and freezes disk conditions
+until `df` runs again. All sections
 and record counts are bounded. [ADR-0003](adr/0003-gpu-reliability-and-authoritative-incidents.md)
 and [ADR-0011](adr/0011-bounded-operations-extensions.md) record the health and workload
 decisions. [ADR-0014](adr/0014-tiered-gpu-process-telemetry.md) records process pacing.

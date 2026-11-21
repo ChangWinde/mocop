@@ -11,6 +11,26 @@ All notable changes are documented here. This project follows Semantic Versionin
   transition that is persisted and delivered to webhooks. Before, the
   conditions disappeared without a transition, so webhook receivers kept those
   alerts open forever, and the history database kept them open.
+- A host whose NVIDIA driver hung no longer collects one stuck `nvidia-smi` per
+  probe. Before any NVIDIA command, the fixed script (now `MONITOR_V9`) checks
+  `/proc` for an `nvidia-smi` that has stayed in uninterruptible sleep (state D)
+  for at least ten seconds without being rescheduled, and then starts none; the
+  host stays online with the message `nvidia-smi is stuck in the NVIDIA driver`,
+  a GPU availability incident whose diagnosis says to reboot the node, and the
+  same skip and warning in `mocop doctor --profile`. Before, SIGKILL could not
+  end the stuck processes, so every probe added one more process and one more
+  unit of load until the node was rebooted.
+- A host with a hung NFS, CIFS, or Lustre mount no longer collects one stuck
+  `df` per probe. The same `/proc` check that guards `nvidia-smi` now finds a
+  `df` stuck in state D; the script then skips the disk pass and reports
+  `DISKS_HUNG`. The host stays online with `system.disks_hung` above 0, a
+  critical `disk_availability` condition names the hung filesystem and how to
+  release it, and disk usage conditions stay open instead of recovering on the
+  empty disk list. `mocop doctor --profile` skips `df` the same way.
+- A host whose login shell prints text from `~/.bashrc` or `~/.zshenv` (a
+  banner, an environment notice) is collected again. The parser skips up to
+  64 such lines before the protocol line; before, every sample from that host
+  failed as an unknown protocol version.
 - Integer query parameters (`limit`, `hours`) accept only ASCII digits. Before,
   `1_0`, surrounding spaces, a `+` sign, and full-width digits were read as
   numbers, unlike the documented contract.
@@ -24,6 +44,18 @@ All notable changes are documented here. This project follows Semantic Versionin
 - `POST /api/update/apply` now answers `409` while the service restarts into
   an installed update, instead of starting a second reinstall that systemd
   would stop half-way when the old process exits.
+- An SSH banner timeout (`Connection timed out during banner exchange`) now
+  reports `SSH connection closed during key exchange` with the sshd-load
+  guidance, instead of `SSH connection timed out`, whose routing and firewall
+  advice does not apply once the TCP connection was accepted.
+- The fixed script no longer uses POSIX character classes such as
+  `[[:space:]]` in awk. mawk 1.3.3, the default awk on Ubuntu 18.04 and
+  Debian 10, reads `[[:space:]]` as a set of letters followed by a literal
+  `]`, so those hosts reported no disks and did not strip control characters
+  from hostnames and workload labels.
+- The incident dialog shows Chinese guidance for GPU availability conditions,
+  including the reboot instruction for a hung NVIDIA driver, instead of the
+  server's English text.
 - A webhook delivery that waits in the queue while other hosts produce more
   than 1,024 transitions (a receiver outage, or an endpoint subscribed to only
   some states) is still delivered. Before, the service forgot which host

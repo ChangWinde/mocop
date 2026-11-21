@@ -64,4 +64,43 @@ const { localizedDiagnosis } = globalThis.MocopDiagnosisText.create({ incidentCo
   assert.equal(localizedDiagnosis({ category: "connectivity", resource: "SSH" })[2].length, 2);
 }
 
+{
+  // GPU availability has fixed Chinese guidance instead of the server's
+  // English text; a hung driver says why the node must be rebooted.
+  const [title, summary, steps] = localizedDiagnosis({
+    category: "gpu_availability",
+    resource: "NVIDIA telemetry",
+    detail: "nvidia-smi query failed",
+    diagnosis: { title: "NVIDIA telemetry is unavailable", summary: "English", nextSteps: ["English"] },
+  });
+  assert.equal(title, "NVIDIA 遥测不可用");
+  assert.match(summary, /nvidia-smi/);
+  assert.equal(steps.length, 2);
+  const hungDetail = "nvidia-smi is stuck in the NVIDIA driver";
+  assert.ok(hungDetail in globalThis.MocopIncidentText.FAILURE_TEXT);
+  const [hungTitle, hungSummary, hungSteps] = localizedDiagnosis({
+    category: "gpu_availability",
+    resource: "NVIDIA telemetry",
+    detail: hungDetail,
+  });
+  assert.equal(hungTitle, "NVIDIA 驱动已挂起");
+  assert.match(hungSummary, /状态 D/);
+  assert.match(hungSteps[0], /重启节点/);
+  assert.match(hungSteps[0], /SIGKILL/);
+}
+
+{
+  // A hung filesystem names the stuck df and the ways out of it.
+  const [title, summary, steps] = localizedDiagnosis({
+    category: "disk_availability",
+    resource: "Filesystems",
+    value: 2,
+    detail: "df is stuck on a hung filesystem",
+  });
+  assert.equal(title, "文件系统已挂起");
+  assert.match(summary, /状态 D/);
+  assert.match(steps[0], /\/proc\/mounts/);
+  assert.ok(steps.some((step) => /umount -f -l/.test(step)));
+}
+
 console.log("diagnosis-text contract ok");

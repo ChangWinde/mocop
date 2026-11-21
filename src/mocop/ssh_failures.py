@@ -33,6 +33,13 @@ def classify_ssh_failure(stderr: str) -> str:
             "SSH jump host could not reach the target",
         ),
         (("connection refused",), "SSH connection was refused"),
+        # TCP connected but sshd sent no banner: OpenSSH words this
+        # "Connection timed out during banner exchange", which must not
+        # read as the TCP connect timeout matched just below.
+        (
+            ("timed out during banner exchange",),
+            "SSH connection closed during key exchange",
+        ),
         (("connection timed out", "operation timed out"), "SSH connection timed out"),
         (("no route to host", "network is unreachable"), "SSH network is unreachable"),
         (

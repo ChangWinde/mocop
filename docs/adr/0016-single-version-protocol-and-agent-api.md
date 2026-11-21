@@ -41,7 +41,7 @@ signal that changes collection cadence.
 Two related policies:
 
 - **Single-version collection protocol.** The parser accepts exactly the
-  current protocol version (`MONITOR_V8`)
+  current protocol version (`MONITOR_V9`)
   and rejects everything else. Because the script and parser ship in one
   process and the script is re-sent on every probe, an older emitter cannot
   exist; read compatibility for the V4 through V6 payloads is removed rather
@@ -82,6 +82,7 @@ Two related policies:
 
 > **Update:** the registry itself was removed in 0.9.0, so no collector name
 > exists any more; the entrypoint constructs `OpenSshLinuxResourceProbe`
-> directly. The protocol also advanced through `MONITOR_V7` between this
-> decision and the current `MONITOR_V8`, so the removed compatibility range is
+> directly. The protocol also advanced through `MONITOR_V7` and `MONITOR_V8`
+> between this decision and the current `MONITOR_V9`, so the removed
+> compatibility range is
 > V4 through V7 as the Changelog records.

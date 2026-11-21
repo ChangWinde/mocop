@@ -34,6 +34,7 @@
     "nvidia-smi is unavailable": "系统在线，但未安装 nvidia-smi",
     "nvidia-smi query failed": "系统在线，但 GPU 查询失败",
     "nvidia-smi output was malformed": "系统在线，但 GPU 数据格式异常",
+    "nvidia-smi is stuck in the NVIDIA driver": "系统在线，但 NVIDIA 驱动已挂起（nvidia-smi 卡死），需重启节点",
   };
 
   // Messages carrying a dynamic exit code only match by prefix; the original
@@ -84,6 +85,9 @@
       const resource = condition.resource || "资源";
       if (condition.category === "connectivity") return failureText(condition.detail);
       if (condition.category === "gpu_availability") return failureText(condition.detail);
+      if (condition.category === "disk_availability") {
+        return `文件系统挂起：${format(value)} 个 df 卡住，磁盘数据暂停更新`;
+      }
       if (condition.category === "gpu_count") {
         return `GPU 数量 ${format(value)} / 预期 ${format(expected)}`;
       }

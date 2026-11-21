@@ -34,6 +34,14 @@ const NOW = Date.parse("2026-08-14T03:00:00Z");
   });
   assert.equal(message("connectivity"), "SSH 连接被拒绝");
   assert.equal(message("gpu_availability", { detail: "nvidia-smi is unavailable" }), "系统在线，但未安装 nvidia-smi");
+  assert.equal(
+    message("gpu_availability", { detail: "nvidia-smi is stuck in the NVIDIA driver" }),
+    "系统在线，但 NVIDIA 驱动已挂起（nvidia-smi 卡死），需重启节点",
+  );
+  assert.equal(
+    message("disk_availability", { resource: "Filesystems", value: 2, threshold: null }),
+    "文件系统挂起：2 个 df 卡住，磁盘数据暂停更新",
+  );
   assert.equal(message("gpu_count", { value: 6 }), "GPU 数量 6 / 预期 8");
   assert.equal(message("gpu_processes"), "GPU 3 数据不可用");
   assert.equal(message("gpu_ecc", { value: 2 }), "GPU 3 · 2 个未纠正错误");
