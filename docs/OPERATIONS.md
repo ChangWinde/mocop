@@ -170,7 +170,9 @@ can still restore history; if metadata cannot fit, incident and GPU writes are
 rejected and counted until a later restart can create it after space is freed.
 The persistence status reports that rollups are waiting for retention space.
 GPU sample writes also fail when hourly rollups are unavailable, so replacements
-cannot change raw rows without updating their aggregate contributions.
+cannot change raw rows without updating their aggregate contributions. Only the
+rejected writes are counted and dropped; host history queued in the same batch
+is still committed.
 Retention captures expired memory maxima and commits their archive with raw
 deletion, even when only some companion tables exist. It can delete raw rows
 before inserting the archive so the archive can reuse pages at the size cap.
