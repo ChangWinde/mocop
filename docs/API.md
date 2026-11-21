@@ -880,13 +880,15 @@ Response fields:
 | `maintenanceSilenced` | bool | Host is inside an active maintenance window. |
 | `silenced` | bool | `maintenanceSilenced` **or** an active `silenced` action on this condition. |
 | `acknowledged` | bool | An active `acknowledged` action exists on this condition. |
-| `actionable` | bool | **Exactly:** `not (silenced or acknowledged)`. This is what counts toward the `actionable*` stats and what webhooks/correlation consume. |
+| `actionable` | bool | **Exactly:** `not (silenced or acknowledged)`. This is what counts toward the `actionable*` stats and what correlation consumes. Webhooks skip only silenced conditions and hosts in maintenance; see [Webhook deliveries](#webhook-deliveries). |
 | `action` | string \| null | `acknowledged`, `silenced`, or `null`. |
 | `actionUntil`, `actionReason` | timestamp/string \| null | Expiry and reason of the active action. |
 | `maintenanceUntil`, `maintenanceReason` | timestamp/string | Present only while `maintenanceSilenced` is true. |
 | `diagnosis` | object | `{title, summary, evidence[], nextSteps[], targetGpuIndex}` — deterministic guidance, at most 8 evidence items and 4 steps. |
 
-`events[]` carry the same condition fields plus `eventId` (monotonic int),
+`events[]` carry the same condition fields plus `eventId` (an increasing
+integer that does not repeat across restarts; see
+[Webhook deliveries](#webhook-deliveries)),
 `state` (`opened`, `resolved`, `escalated`, `deescalated`), and
 `observedAt`. `correlations[]` items are `{correlationKey, kind, anchor,
 hosts[], severity, confidence: "possible", detail}` and group **actionable
@@ -1123,7 +1125,8 @@ Add or remove one monitored host. Tier W. Body cap 512 bytes. Body: exactly
 - `remove` requires the alias to be in the active inventory; it also clears
   that host's expected GPU count, overrides, maintenance window, actions,
   group, and topology links, and adds it to `exclude_hosts` when discovery
-  is on.
+  is on. Each open condition of the host is resolved with a `resolved`
+  transition, which webhooks deliver like any recovery.
 
 Response `200`: the full inventory snapshot (same shape as
 `GET /api/inventory`). Errors: `INVALID_SCHEMA`, `INVALID_SETTINGS`
@@ -1312,11 +1315,19 @@ shared-path or simultaneous-loss group (`GET /api/incidents`
   ends the attempt as a permanent failure. Consecutive deliveries to one
   endpoint are at least `min_interval_seconds` apart.
 - `eventId` is the idempotency key: a retry resends the identical body and
-  signature, so a receiver that recorded the id can drop the duplicate.
-- Only actionable transitions are sent (`actionable` under
-  `GET /api/incidents`); an event that is silenced or acknowledged while it
-  waits is withdrawn, incrementing `suppressedDeliveries` without changing
-  `droppedDeliveries` or `lastError`. Exhausted retries and permanent delivery
+  signature, so a receiver that recorded the id can drop the duplicate. Ids
+  increase and are not reused after a restart, with or without history
+  persistence: a starting service numbers from the larger of the last
+  persisted id + 1 and the current Unix time in milliseconds. A wall clock
+  set backwards between two starts can break this; keep NTP running.
+- Transitions of silenced conditions and of hosts in a maintenance window are
+  not sent; acknowledged conditions keep their notifications. A queued event
+  is withdrawn when, before its delivery, its condition is silenced or no
+  longer open, its host enters maintenance, or its host is removed. A
+  withdrawal increments `suppressedDeliveries` without changing
+  `droppedDeliveries` or `lastError`. `resolved` is never withdrawn this way. Removing a host (through `POST /api/settings/hosts`, a configuration
+  reload, or SSH discovery) resolves each of its open conditions with a
+  `resolved` transition at the removal time, so receivers close those alerts. Exhausted retries and permanent delivery
   failures still increment `droppedDeliveries` and set `lastError`. A service restart
   does not repeat `opened` for incidents that were open before it when history
   persistence is enabled; their later `resolved` is still delivered. When an endpoint

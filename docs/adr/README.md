@@ -41,3 +41,4 @@ for status and superseding rules.
 | [0031](0031-compatible-persistence-metadata.md) | Accepted | Compatible persistence metadata and retention |
 | [0032](0032-incident-criteria-and-expiry-order.md) | Accepted | Criterion-only incident updates and atomic expiry ordering |
 | [0033](0033-optional-persistence-indexes.md) | Accepted | Optional indexes and retention with existing metadata |
+| [0034](0034-event-ids-unique-across-restarts.md) | Accepted | Transition ids do not repeat across restarts |

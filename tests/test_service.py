@@ -21,6 +21,7 @@ from mocop.config import (
 )
 from mocop.discovery import HostDiscoverySnapshot, OpenSshConfigHostSource
 from mocop.discovery_policy import SshDiscoveryConfig
+from mocop.incident_types import IncidentCondition, IncidentEvent, OpenIncident
 from mocop.maintenance import MaintenanceWindowConfig
 from mocop.models import (
     DiskMetrics,
@@ -114,6 +115,101 @@ class StateStoreTests(unittest.TestCase):
         persistence.record_history.assert_not_called()
         persistence.record_gpu_telemetry.assert_not_called()
         persistence.record_incidents.assert_not_called()
+
+    def test_event_ids_do_not_repeat_across_restarts_without_persistence(
+        self,
+    ) -> None:
+        # Webhook receivers deduplicate on eventId. Without persistence every
+        # restart numbered transitions from 1 again, so a receiver that kept
+        # the ids of the previous run dropped the new run's alerts.
+        started = datetime(2026, 11, 20, 13, 41, 44, tzinfo=timezone.utc)
+        down = ProbeResult(
+            "gpu-1", "unreachable", 5000, message="SSH connection timed out"
+        )
+        ids = []
+        for restart in range(2):
+            moment = started + timedelta(seconds=restart)
+            store = StateStore(5, utc_clock=lambda moment=moment: moment)
+            store.set_hosts(("gpu-1",))
+            store.apply(down)
+            (event,) = store.incidents(10)["events"]
+            ids.append(event["eventId"])
+        self.assertLess(ids[0], ids[1])
+        self.assertGreaterEqual(ids[0], int(started.timestamp() * 1000))
+
+    def test_queued_webhook_stays_deliverable_after_many_later_transitions(
+        self,
+    ) -> None:
+        # An endpoint that subscribes to one state, or a receiver outage,
+        # keeps an event queued while other hosts publish many transitions.
+        # The store used to forget the event's host incarnation after 1,024
+        # later transitions and withdrew the delivery as suppressed.
+        notifications = _RecordingNotifications()
+        store = StateStore(5, incident_history_points=20, notifications=notifications)
+        store.set_hosts(("gpu-1", "gpu-2"))
+        store.apply(ProbeResult("gpu-1", "unreachable", 1, message="SSH failed"))
+        ((first, *_), _correlations) = notifications.published[0]
+        self.assertEqual(first.state, "opened")
+        self.assertTrue(notifications.actionable_check(first))
+
+        down = ProbeResult("gpu-2", "unreachable", 1, message="SSH failed")
+        up = ProbeResult("gpu-2", "online", 1)
+        for _cycle in range(560):
+            for result in (down, up, up):
+                store.apply(result)
+        published = sum(len(events) for events, _ in notifications.published)
+        self.assertGreater(published, 1_100)
+        self.assertTrue(notifications.actionable_check(first))
+
+        # A removed and re-added host still invalidates its earlier events.
+        store.set_hosts(("gpu-2",))
+        store.set_hosts(("gpu-1", "gpu-2"))
+        store.apply(ProbeResult("gpu-1", "unreachable", 1, message="SSH failed"))
+        self.assertFalse(notifications.actionable_check(first))
+
+    def test_removing_a_host_resolves_its_open_incidents(self) -> None:
+        # A removed host's open conditions used to vanish without a resolved
+        # transition, so a webhook receiver kept that alert open forever.
+        removed_at = datetime(2026, 11, 21, 4, 0, tzinfo=timezone.utc)
+        notifications = _RecordingNotifications()
+        persistence = Mock()
+        persistence.is_enabled.return_value = True
+        store = StateStore(
+            5,
+            notifications=notifications,
+            persistence=persistence,
+            utc_clock=lambda: removed_at,
+        )
+        store.set_hosts(("gpu-1", "gpu-2"))
+        for host in ("gpu-1", "gpu-2"):
+            store.apply(ProbeResult(host, "unreachable", 1, message="SSH failed"))
+        notifications.published.clear()
+        persistence.record_incident_state.reset_mock()
+
+        store.set_hosts(("gpu-2",))
+
+        ((events, _correlations),) = notifications.published
+        (event,) = events
+        self.assertEqual((event.host, event.state), ("gpu-1", "resolved"))
+        self.assertEqual(event.condition.key, "connectivity")
+        self.assertEqual(event.observed_at, "2026-11-21T04:00:00Z")
+        persistence.record_incident_state.assert_called_once_with("gpu-1", events, ())
+        incidents = store.incidents(10)
+        self.assertEqual([item["host"] for item in incidents["active"]], ["gpu-2"])
+        self.assertEqual(incidents["events"][0]["state"], "resolved")
+        # The second host resolves on its removal; a host without open
+        # conditions, and a repeated inventory, publish nothing.
+        store.set_hosts(("gpu-3",))
+        store.set_hosts(())
+        store.set_hosts(())
+        self.assertEqual(
+            [
+                (e.host, e.state)
+                for events, _ in notifications.published
+                for e in events
+            ],
+            [("gpu-1", "resolved"), ("gpu-2", "resolved")],
+        )
 
     def test_restart_resumes_open_incidents_instead_of_reopening_them(self) -> None:
         # A live deployment re-emitted "opened" for every persisting condition
@@ -343,6 +439,109 @@ class StateStoreTests(unittest.TestCase):
         recurrent = store.incidents(10)["active"][0]
         self.assertFalse(recurrent["silenced"])
         self.assertTrue(recurrent["actionable"])
+
+    def test_restored_recurrence_does_not_inherit_an_earlier_generation_action(
+        self,
+    ) -> None:
+        # The silence was bound to the outage that began at midnight. That
+        # outage resolved and a new one began at 02:00 before the restart, so
+        # persistence restores the 02:00 generation. The first live sample
+        # must not rebind the old silence to it.
+        recurrence_at = "2026-08-10T02:00:00Z"
+        silence = IncidentActionConfig(
+            host="offline",
+            condition_key="connectivity",
+            action="silenced",
+            until=datetime(2026, 8, 11, tzinfo=timezone.utc),
+            reason="first outage",
+            incident_started_at="2026-08-10T00:00:00Z",
+        )
+        restored = LoadedTelemetry(
+            {},
+            (),
+            open_incidents=(
+                OpenIncident(
+                    "offline",
+                    IncidentCondition(
+                        key="connectivity",
+                        category="connectivity",
+                        resource="SSH",
+                        severity="critical",
+                        value=None,
+                        threshold=None,
+                        observed_at=recurrence_at,
+                    ),
+                    recurrence_at,
+                ),
+            ),
+        )
+        notifications = _RecordingNotifications()
+        store = StateStore(
+            5,
+            restored=restored,
+            incident_actions=(silence,),
+            notifications=notifications,
+            utc_clock=lambda: datetime(2026, 8, 10, 3, tzinfo=timezone.utc),
+        )
+        store.set_hosts(("offline",))
+        store.apply(
+            ProbeResult("offline", "unreachable", 1, observed_at="2026-08-10T03:00:00Z")
+        )
+
+        (condition,) = store.incidents(10)["active"]
+        self.assertEqual(condition["firstObservedAt"], recurrence_at)
+        self.assertFalse(condition["silenced"])
+        self.assertTrue(condition["actionable"])
+        self.assertIsNone(condition["action"])
+        self.assertEqual(store.snapshot()["stats"]["actionableIncidents"], 1)
+
+    def test_resolved_generation_action_does_not_bind_after_restart(self) -> None:
+        # The silence was bound to the midnight outage, which resolved at 01:00
+        # before the restart; the history database says so. A new outage after
+        # the restart is a new generation and must not inherit the silence.
+        started_at = "2026-08-10T00:00:00Z"
+        silence = IncidentActionConfig(
+            host="offline",
+            condition_key="connectivity",
+            action="silenced",
+            until=datetime(2026, 8, 11, tzinfo=timezone.utc),
+            reason="first outage",
+            incident_started_at=started_at,
+        )
+
+        def transition(event_id: int, state: str, at: str) -> IncidentEvent:
+            condition = IncidentCondition(
+                key="connectivity",
+                category="connectivity",
+                resource="SSH",
+                severity="critical",
+                value=None,
+                threshold=None,
+                observed_at=at,
+            )
+            return IncidentEvent(event_id, "offline", condition, state, at)
+
+        restored = LoadedTelemetry(
+            {},
+            (
+                transition(1, "opened", started_at),
+                transition(2, "resolved", "2026-08-10T01:00:00Z"),
+            ),
+        )
+        store = StateStore(
+            5,
+            restored=restored,
+            incident_actions=(silence,),
+            utc_clock=lambda: datetime(2026, 8, 10, 3, tzinfo=timezone.utc),
+        )
+        store.set_hosts(("offline",))
+        store.apply(
+            ProbeResult("offline", "unreachable", 1, observed_at="2026-08-10T03:00:00Z")
+        )
+
+        (condition,) = store.incidents(10)["active"]
+        self.assertFalse(condition["silenced"])
+        self.assertTrue(condition["actionable"])
 
     def test_unknown_gpu_telemetry_does_not_consume_startup_action_binding(
         self,
