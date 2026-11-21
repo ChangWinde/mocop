@@ -508,6 +508,25 @@ class UpdateManagerTests(unittest.TestCase):
         block.set()
         self.wait_for_state(manager, "restarting", "failed")
 
+    def test_apply_is_refused_while_the_service_restarts_into_the_update(
+        self,
+    ) -> None:
+        # The process keeps serving until its shutdown completes. A second
+        # apply in that window must not start another --force-reinstall that
+        # systemd would kill half-way when it stops the old unit's cgroup.
+        restarted = threading.Event()
+        manager, _, runner = self.manager(restart=restarted.set)
+        manager.check_now()
+        self.assertEqual(self.finish_apply(manager)["state"], "restarting")
+        self.assertTrue(restarted.is_set())
+        installs = sum("install" in command for command in runner.commands)
+
+        self.assertEqual(manager.apply(), (False, "an update is already in progress"))
+        self.assertEqual(manager.status()["state"], "restarting")
+        self.assertEqual(
+            sum("install" in command for command in runner.commands), installs
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

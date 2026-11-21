@@ -253,7 +253,10 @@ class UpdateManager:
         if self._restart is None:
             return False, "self-update requires the managed service"
         with self._lock:
-            if self._state == "updating":
+            # "restarting" is still in flight: the process serves requests
+            # until shutdown completes, and a second install started then
+            # would be killed with the old unit's cgroup half-way through.
+            if self._state in {"updating", "restarting"}:
                 return False, "an update is already in progress"
             if not self._update_available_locked():
                 return False, "no newer release is available"

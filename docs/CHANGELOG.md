@@ -21,6 +21,9 @@ All notable changes are documented here. This project follows Semantic Versionin
 - With history persistence, an incident action whose generation resolved before
   a restart no longer binds to the first new occurrence of that condition after
   the restart. Before, such a recurrence started out silenced or acknowledged.
+- `POST /api/update/apply` now answers `409` while the service restarts into
+  an installed update, instead of starting a second reinstall that systemd
+  would stop half-way when the old process exits.
 - A webhook delivery that waits in the queue while other hosts produce more
   than 1,024 transitions (a receiver outage, or an endpoint subscribed to only
   some states) is still delivered. Before, the service forgot which host
