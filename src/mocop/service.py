@@ -22,6 +22,7 @@ from .config import (
 from .correlation import create_incident_correlator
 from .diagnostics import diagnose_condition, sanitized_bundle
 from .fleet_stats import fleet_stats
+from .incident_rules import generation_ended
 from .incident_types import IncidentPolicy
 from .incidents import IncidentTracker, ThresholdIncidentPolicy
 from .maintenance import MaintenanceWindowConfig
@@ -197,25 +198,26 @@ class StateStore:
         ):
             self._gpu_identities.setdefault(host, {})[gpu_id] = None
         self._process_event_points = incident_history_points
+        self._utc_clock = utc_clock or (lambda: datetime.now(timezone.utc))
         self._incidents = IncidentTracker(
             selected_policy,
             incident_history_points,
             historical_events=restored_telemetry.incident_events,
             open_incidents=restored_telemetry.open_incidents,
+            started_at=self._utc_clock(),
         )
-        self._utc_clock = utc_clock or (lambda: datetime.now(timezone.utc))
         self._maintenance_windows = dict(maintenance_windows)
         self._incident_actions = {
             (action.host, action.condition_key): action for action in incident_actions
         }
-        # Active incident state is intentionally not restored. A durable,
-        # generation-scoped action may nevertheless bind once to the first
-        # matching live condition after startup. Recovery consumes that
-        # allowance, so a later recurrence cannot inherit the old action.
+        # Restored or resolved generations match exactly; others rebind once.
+        resumed = {(o.host, o.condition.key) for o in restored_telemetry.open_incidents}
         self._startup_action_candidates = {
             key
             for key, action in self._incident_actions.items()
-            if action.incident_started_at is not None
+            if (started := action.incident_started_at) is not None
+            and key not in resumed
+            and not generation_ended(restored_telemetry.incident_events, *key, started)
         }
         self._startup_action_bindings: dict[tuple[str, str], str] = {}
         self._host_groups = dict(host_groups)
@@ -235,9 +237,9 @@ class StateStore:
             repr(initial_persistence_status),
             repr(initial_notification_status),
         )
-        self._notification_event_incarnations: dict[int, int] = {}
-        self._notification_event_order: deque[int] = deque()
-        self._notification_event_capacity = max(1_024, incident_history_points * 4)
+        # First transition id of each host's current incarnation: a queued
+        # event below it predates the host's removal and is withdrawn.
+        self._host_event_floors: dict[str, int] = {}
 
         def _notification_event_actionable(event) -> bool:
             with self._condition:
@@ -245,12 +247,10 @@ class StateStore:
                     # The worker independently requires a successfully delivered
                     # open before sending a resolve, so preserve that pairing.
                     return True
-                expected_incarnation = self._notification_event_incarnations.get(
-                    event.event_id
-                )
+                floor = self._host_event_floors.get(event.host)
                 return (
-                    expected_incarnation is not None
-                    and self._host_incarnations.get(event.host) == expected_incarnation
+                    floor is not None
+                    and event.event_id >= floor
                     and self._incidents.has_active_condition(
                         event.host, event.condition.key
                     )
@@ -275,6 +275,8 @@ class StateStore:
 
     def set_hosts(self, hosts: tuple[str, ...]) -> None:
         desired = set(hosts)
+        removed_at = self._utc_clock().isoformat(timespec="seconds")
+        removed_at = removed_at.replace("+00:00", "Z")
         with self._condition:
             changed = False
             initial_inventory = not self._inventory_initialized
@@ -282,6 +284,7 @@ class StateStore:
             for host in removed_hosts:
                 del self._servers[host]
                 self._host_incarnations.pop(host, None)
+                self._host_event_floors.pop(host, None)
                 self._history.pop(host, None)
                 changed = True
             if initial_inventory or removed_hosts:
@@ -329,6 +332,7 @@ class StateStore:
                     self._servers[host] = ServerState(host=host)
                     self._host_incarnations[host] = self._next_host_incarnation
                     self._next_host_incarnation += 1
+                    self._host_event_floors[host] = self._incidents.next_event_id
                     self._history[host] = deque(
                         (
                             HostHistoryPoint.from_dict(point)
@@ -337,11 +341,18 @@ class StateStore:
                         maxlen=self._history_points,
                     )
                     changed = True
-            self._incidents.remove_hosts(desired)
+            # Receivers must not keep an alert open for a host no longer watched.
+            resolved = self._incidents.remove_hosts(desired, removed_at)
+            for host in {event.host for event in resolved}:
+                persist_incidents(
+                    self, host, tuple(e for e in resolved if e.host == host)
+                )
             self._incident_policy.retain_hosts(desired)
             self._sync_tracker_revision_locked()
-            if changed:
+            if changed or resolved:
                 self._publish_locked()
+        if resolved:
+            self._notifications.publish(resolved, ())
 
     def host_incarnation(self, host: str) -> int | None:
         with self._condition:
@@ -594,17 +605,6 @@ class StateStore:
                         )
                     )
                 )
-            if notification_events:
-                incarnation = self._host_incarnations[result.host]
-                for event in notification_events:
-                    self._notification_event_incarnations[event.event_id] = incarnation
-                    self._notification_event_order.append(event.event_id)
-                while (
-                    len(self._notification_event_order)
-                    > self._notification_event_capacity
-                ):
-                    expired_id = self._notification_event_order.popleft()
-                    self._notification_event_incarnations.pop(expired_id, None)
                 # The correlator consumes only actionable conditions, so this
                 # list carries the same maintenance/silence/acknowledge
                 # decoration as the incident views.

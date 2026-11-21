@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 
 from mocop.config import IncidentConfig, IncidentScopeOverrideConfig, ThresholdConfig
 from mocop.incident_types import IncidentCondition, IncidentEvent, OpenIncident
@@ -283,6 +284,38 @@ class IncidentTrackerTests(unittest.TestCase):
             [8, 7],
         )
 
+    def test_event_ids_start_at_the_later_of_history_and_start_time(self) -> None:
+        # Restored ids win while they are ahead of the start time; otherwise
+        # Unix milliseconds at startup keep a restart from reusing ids that a
+        # previous run delivered but never persisted.
+        started = datetime(2026, 11, 20, 13, 41, 44, tzinfo=timezone.utc)
+        floor = int(started.timestamp() * 1000)
+        historical = IncidentEvent(
+            event_id=0,
+            host="old-node",
+            condition=IncidentCondition(
+                key="connectivity",
+                category="connectivity",
+                resource="SSH",
+                severity="critical",
+                value=None,
+                threshold=None,
+                observed_at="2026-11-20T13:00:00Z",
+            ),
+            state="opened",
+            observed_at="2026-11-20T13:00:00Z",
+        )
+        for restored_id, expected in ((7, floor), (floor + 41, floor + 42)):
+            with self.subTest(restored_id=restored_id):
+                tracker = IncidentTracker(
+                    ThresholdIncidentPolicy(ThresholdConfig(), incidents=cycles_only()),
+                    history_points=20,
+                    historical_events=(replace(historical, event_id=restored_id),),
+                    started_at=started,
+                )
+                created = tracker.update(ProbeResult("new-node", "unreachable", 1))
+                self.assertEqual([event.event_id for event in created], [expected])
+
     def test_resource_conditions_must_be_sustained_by_the_clock(self) -> None:
         # Live evidence: at a five-second cadence, VRAM spiking above 90% for
         # ten to fifteen seconds satisfied two confirming samples and opened
@@ -540,8 +573,8 @@ class IncidentTrackerTests(unittest.TestCase):
             sorted((event.condition.key, event.state) for event in events),
             [("disk:/dev/a:/", "resolved"), ("gpu_temperature:GPU-1", "opened")],
         )
-        # A host no longer configured drops its restored conditions.
-        tracker.remove_hosts({"node-b"})
+        # A host no longer configured resolves its restored conditions.
+        tracker.remove_hosts({"node-b"}, "2026-08-09T01:00:20Z")
         self.assertEqual(tracker.snapshot(20)["active"], [])
 
         # The persisted transition carries no cycle counts, so recovery of a
@@ -663,7 +696,9 @@ class IncidentTrackerTests(unittest.TestCase):
         events = tracker.snapshot(20)["events"]
         self.assertEqual([event["eventId"] for event in events], [3, 2])
 
-    def test_removing_a_host_invalidates_the_active_incident_revision(self) -> None:
+    def test_removing_a_host_resolves_its_conditions_and_bumps_the_revision(
+        self,
+    ) -> None:
         self.tracker.update(
             ProbeResult("node-a", "online", 1, (gpu(82),), system=system(90, 90))
         )
@@ -672,13 +707,20 @@ class IncidentTrackerTests(unittest.TestCase):
         )
         previous_version = self.tracker.version
         previous_events = self.tracker.snapshot(20)["events"]
+        active_keys = sorted(
+            item["conditionKey"] for item in self.tracker.snapshot(20)["active"]
+        )
+        self.assertTrue(active_keys)
 
-        self.tracker.remove_hosts(set())
+        resolved = self.tracker.remove_hosts(set(), "2026-08-09T02:00:00Z")
 
         snapshot = self.tracker.snapshot(20)
-        self.assertEqual(snapshot["version"], previous_version + 1)
+        self.assertEqual(snapshot["version"], previous_version + len(resolved))
         self.assertEqual(snapshot["active"], [])
-        self.assertEqual(snapshot["events"], previous_events)
+        self.assertEqual(sorted(event.condition.key for event in resolved), active_keys)
+        self.assertEqual({event.state for event in resolved}, {"resolved"})
+        self.assertEqual(snapshot["events"][len(resolved) :], previous_events)
+        self.assertEqual(self.tracker.remove_hosts(set(), "2026-08-09T02:00:01Z"), ())
 
     def test_requires_stable_open_and_recovery_samples(self) -> None:
         self.tracker.update(
@@ -1278,6 +1320,44 @@ class IncidentDetectionRegressionTests(unittest.TestCase):
             60,
             health=GpuHealthMetrics(errors, False, False, False, False, "Disabled"),
         )
+
+    def test_incident_severity_flapping_streak_still_opens(self) -> None:
+        # CPU alternating around the 95% critical line is over the 85% warning
+        # line on every sample: the condition is sustained even though neither
+        # severity is. It opens at warning once the samples span the floor and
+        # escalates only once critical readings span the floor as well.
+        tracker = self.tracker(IncidentConfig())
+        for second in range(0, 60, 5):
+            cpu = 96 if second % 10 == 0 else 94
+            self.assertEqual(tracker.update(self.sample(second, cpu=cpu)), (), second)
+        opened = tracker.update(self.sample(60, cpu=96))
+        self.assertEqual(
+            [(e.state, e.condition.severity) for e in opened], [("opened", "warning")]
+        )
+        for second in range(65, 120, 5):
+            self.assertEqual(tracker.update(self.sample(second, cpu=96)), (), second)
+        escalated = tracker.update(self.sample(120, cpu=96))
+        self.assertEqual(
+            [(e.state, e.condition.severity) for e in escalated],
+            [("escalated", "critical")],
+        )
+
+    def test_incident_severity_flapping_streak_opens_on_a_warning_sample(
+        self,
+    ) -> None:
+        tracker = self.tracker(IncidentConfig())
+        for second in range(0, 60, 5):
+            cpu = 94 if second % 10 == 0 else 96
+            self.assertEqual(tracker.update(self.sample(second, cpu=cpu)), (), second)
+        opened = tracker.update(self.sample(60, cpu=94))
+        self.assertEqual(
+            [(e.state, e.condition.severity) for e in opened], [("opened", "warning")]
+        )
+        # The flapping that follows is debounced like any severity change.
+        for second in range(65, 180, 5):
+            cpu = 96 if second % 10 else 94
+            self.assertEqual(tracker.update(self.sample(second, cpu=cpu)), (), second)
+        self.assertEqual(tracker.snapshot(20)["active"][0]["severity"], "warning")
 
     def test_incident_duration_floor_first_sample(self) -> None:
         tracker = self.tracker(

@@ -6,6 +6,11 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Removing a host, through the dashboard, a configuration reload, or SSH
+  discovery, now resolves each of its open conditions with a `resolved`
+  transition that is persisted and delivered to webhooks. Before, the
+  conditions disappeared without a transition, so webhook receivers kept those
+  alerts open forever, and the history database kept them open.
 - Integer query parameters (`limit`, `hours`) accept only ASCII digits. Before,
   `1_0`, surrounding spaces, a `+` sign, and full-width digits were read as
   numbers, unlike the documented contract.
@@ -13,11 +18,32 @@ All notable changes are documented here. This project follows Semantic Versionin
   hourly rollups, only the incident and GPU writes it cannot store are
   dropped. Before, any such write failed the whole write batch, so host
   history queued beside it was lost too.
+- With history persistence, an incident action whose generation resolved before
+  a restart no longer binds to the first new occurrence of that condition after
+  the restart. Before, such a recurrence started out silenced or acknowledged.
+- A webhook delivery that waits in the queue while other hosts produce more
+  than 1,024 transitions (a receiver outage, or an endpoint subscribed to only
+  some states) is still delivered. Before, the service forgot which host
+  incarnation the event belonged to and withdrew it as suppressed. An event is
+  now withdrawn only when its host was removed after the event.
+- Incident transition ids (`eventId`, the webhook idempotency key) no longer
+  repeat after a restart. Before, a service without history persistence
+  numbered from 1 after every restart, so a receiver that deduplicated on
+  `eventId` dropped the new run's alerts. A starting service now numbers from
+  the larger of the last persisted id + 1 and the Unix time in milliseconds
+  ([ADR-0034](adr/0034-event-ids-unique-across-restarts.md)).
 - `GET /api/brief` and `mocop brief` no longer fail with an error when an
   owner's GPU usage has no classified utilization samples, for example in the
   first minute after a start or at a cadence slower than 60 seconds. Such an
   owner reports `idleSharePct: null`, and hours without utilization samples are
   left out of `busySharePct`.
+- A resource condition whose readings alternate around its critical line now
+  opens at warning once the readings meet the cycle count and duration floor.
+  Previously each severity change restarted confirmation, so such a condition
+  never opened. It escalates once critical readings alone meet both.
+- After a restart with history persistence, an incident action bound to an
+  earlier generation of a condition no longer silences or acknowledges the
+  restored newer generation at the first live sample.
 - `GET /api/usage` no longer fails when two samples of one GPU share a second
   and only one of them reports utilization. The later sample of that second
   classifies the following segment, matching the row the history database keeps.
@@ -45,8 +71,9 @@ All notable changes are documented here. This project follows Semantic Versionin
   1.2 s, doubling to at most 30 s. Before, it retried every 1.2 s, each time
   with an extra snapshot request, for as long as the limit held.
 - Public requests with the dashboard marker no longer enable attended collection.
-- Webhooks withdrawn after acknowledgement or silencing now count as suppressed
-  deliveries, preserving the dropped count and last delivery error.
+- Webhooks withdrawn before delivery (silenced, recovered, in maintenance, or
+  host removed) now count as suppressed deliveries, preserving the dropped
+  count and last delivery error.
 - Self-update apply refreshes release metadata before downloading, installing a
   newly published release and refusing a withdrawn release with nothing newer.
 

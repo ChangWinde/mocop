@@ -104,6 +104,9 @@ conditions open immediately regardless. `0` confirms by sample count alone.
 Setting `resource_open_cycles` to `1` still requires the duration floor:
 the first resource sample starts confirmation and cannot open an incident
 when `resource_open_seconds` is nonzero.
+Every reading over the threshold confirms the condition, whatever its severity.
+When readings alternate around the critical line, the condition opens at
+warning; it escalates once critical readings alone meet the cycle count and floor.
 `incidents.gpu_idle_memory_seconds` (300, same range) is the corresponding
 floor for the idle-VRAM condition, which also needs `gpu_idle_memory_cycles`
 samples: checkpoint and evaluation pauses idle a GPU for a minute or two and
@@ -174,7 +177,10 @@ accepted; the dashboard normally owns these records.
 
 With history persistence enabled, conditions that were open at shutdown resume
 their generation after a restart — same `firstObservedAt`, no repeated `opened`
-transition — so a bound action keeps applying directly. Without persistence,
+transition — so a bound action keeps applying directly. An action bound to an
+earlier generation of a restored condition does not apply to it, and an action
+whose generation the history database shows as resolved does not bind to a new
+condition after the restart. Without persistence,
 active state is re-established from live probes: a pre-existing bound action may
 bind once to the first matching condition confirmed after startup, an initial
 healthy sample consumes that allowance, and any later recurrence is actionable.

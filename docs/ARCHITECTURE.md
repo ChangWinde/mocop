@@ -82,6 +82,7 @@ interfaces without a runtime plugin registry.
 | `models.py` | immutable resource result types |
 | `incident_types.py` | the incident vocabulary: conditions, transition events, restored open incidents, the policy protocol |
 | `incidents.py` | condition evaluation, bounded transition history, restored generations, and raw/actionable counts |
+| `incident_rules.py` | pure rules the tracker applies: the duration floor, the critical-severity hold inside the recovery margin, the first transition id after a start, and whether restored transitions show a generation ended |
 | `incident_domains.py` | which telemetry domains a condition's recovery needs and when a sample is blind to them |
 | `incident_health.py` | GPU hardware-health conditions (ECC, pending memory repair, slowdown) derived per device from a sample's health block |
 | `correlation.py` | possible shared-path grouping without changing incident truth |
@@ -366,7 +367,7 @@ rejected notification-only and bootstrap-script alternatives.
 - A measured slow host may use a bounded longer timeout and slower cadence without changing the browser-controlled fleet cadence.
 - A persisted cadence change wakes the scheduler and rebases existing retry deadlines; timeout and worker changes apply to future probe cycles.
 - A manual probe advances one known host's deadline without changing cadence, never overlaps an in-flight probe, coalesces duplicate requests, and enforces a per-host cooldown.
-- Removing a host clears its retry, manual-probe cooldown, GPU-process and rate baselines, and restored-history state before the alias can be added again.
+- Removing a host clears its retry, manual-probe cooldown, GPU-process and rate baselines, and restored-history state before the alias can be added again, and resolves its open conditions with `resolved` transitions.
 - Maintenance windows never change scheduling; their UTC expiry automatically restores active conditions to the actionable view.
 - Raw SSH stderr is classified locally and never crosses the browser boundary.
 - Failed hosts keep their last successful data, marked stale and excluded from current totals.

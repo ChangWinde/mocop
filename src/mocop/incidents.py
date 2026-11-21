@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import replace
+from datetime import datetime
 
 from .config import IncidentConfig, IncidentScopeOverrideConfig, ThresholdConfig
 from .incident_domains import condition_domains, telemetry_unknown
 from .incident_health import gpu_health_conditions
+from .incident_rules import event_id_floor, holds_severity, sustained
 from .incident_types import (
     IncidentCondition,
     IncidentEvent,
@@ -28,6 +30,8 @@ _GPU_QUERY_FAILURE_MESSAGES = frozenset(
         "nvidia-smi output was malformed",
     }
 )
+# Pending condition: latest reading, streak count and start, severity run count/start.
+_Candidate = tuple[IncidentCondition, int, str, int, str]
 
 
 class ThresholdIncidentPolicy:
@@ -449,38 +453,6 @@ class ThresholdIncidentPolicy:
         )
 
 
-def _holds_severity(new: IncidentCondition, previous: IncidentCondition) -> bool:
-    """Whether an established critical severity survives a warning reading.
-
-    The reading must sit inside the recovery margin below the critical line,
-    and the escalation criterion must be unchanged: a filesystem that was
-    critical for lack of absolute headroom, not percentage, de-escalates by
-    the usual confirmation once headroom returns.
-    """
-    return (
-        previous.severity == "critical"
-        and new.severity == "warning"
-        and new.value is not None
-        and new.critical_at is not None
-        and previous.critical_at == new.critical_at
-        and new.value >= new.critical_at - new.recovery_margin
-    )
-
-
-def _sustained(since: str, condition: IncidentCondition) -> bool:
-    """Whether the condition has been observed for its required duration.
-
-    Unparsable timestamps fall back to confirmation by cycles alone.
-    """
-    if condition.open_after_seconds <= 0:
-        return True
-    started = epoch_seconds(since)
-    now = epoch_seconds(condition.observed_at)
-    if started is None or now is None:
-        return True
-    return now - started >= condition.open_after_seconds
-
-
 class IncidentTracker:
     """Tracks active conditions and a bounded transition log.
 
@@ -495,10 +467,11 @@ class IncidentTracker:
         history_points: int,
         historical_events: tuple[IncidentEvent, ...] = (),
         open_incidents: tuple[OpenIncident, ...] = (),
+        started_at: datetime | None = None,
     ) -> None:
         self._policy = policy
         self._active: dict[str, dict[str, IncidentCondition]] = {}
-        self._candidates: dict[str, dict[str, tuple[IncidentCondition, int, str]]] = {}
+        self._candidates: dict[str, dict[str, _Candidate]] = {}
         self._recoveries: dict[str, dict[str, int]] = {}
         self._severity_changes: dict[
             str, dict[str, tuple[IncidentSeverity, int, str]]
@@ -511,7 +484,8 @@ class IncidentTracker:
         )
         last_event_id = max((event.event_id for event in retained_events), default=0)
         self._version = last_event_id
-        self._next_event_id = last_event_id + 1
+        floor = 1 if started_at is None else event_id_floor(started_at)
+        self._next_event_id = max(last_event_id + 1, floor)
         # Conditions open at shutdown resume their generation instead of
         # opening again: no duplicate transition, firstObservedAt survives,
         # and the first live sample confirms, recovers, or freezes them under
@@ -533,17 +507,25 @@ class IncidentTracker:
     def version(self) -> int:
         return self._version
 
-    def remove_hosts(self, desired: set[str]) -> None:
-        for host in set(self._active) - desired:
-            had_active_conditions = bool(self._active[host])
-            del self._active[host]
+    @property
+    def next_event_id(self) -> int:
+        """Id of the next transition; ids only increase."""
+        return self._next_event_id
+
+    def remove_hosts(
+        self, desired: set[str], observed_at: str
+    ) -> tuple[IncidentEvent, ...]:
+        """Forget hosts outside ``desired``; each open condition resolves."""
+        resolved: list[IncidentEvent] = []
+        for host in sorted(set(self._active) - desired):
+            for _key, condition in sorted(self._active.pop(host).items()):
+                resolved.append(self._append(host, condition, "resolved", observed_at))
             self._candidates.pop(host, None)
             self._recoveries.pop(host, None)
             self._severity_changes.pop(host, None)
             self._opened_at.pop(host, None)
             self._last_observed_at.pop(host, None)
-            if had_active_conditions:
-                self._version += 1
+        return tuple(resolved)
 
     def update(self, result: ProbeResult) -> tuple[IncidentEvent, ...]:
         created: list[IncidentEvent] = []
@@ -587,7 +569,7 @@ class IncidentTracker:
             if old is not None:
                 candidates.pop(key, None)
                 last_observed_at[key] = new.observed_at
-                if _holds_severity(new, old):
+                if holds_severity(new, old):
                     new = replace(new, severity=old.severity)
                 if old.severity == new.severity:
                     severity_changes.pop(key, None)
@@ -599,7 +581,7 @@ class IncidentTracker:
                 if pending_severity != new.severity:
                     count, since = 0, new.observed_at
                 count += 1
-                if count < new.open_after_cycles or not _sustained(since, new):
+                if count < new.open_after_cycles or not sustained(since, new):
                     # Debounce severity flapping: keep the confirmed severity
                     # until the change is sustained, mirroring open cycles. The
                     # criterion it was established under travels with it, so
@@ -621,12 +603,19 @@ class IncidentTracker:
 
             if new.below_threshold:
                 continue
-            candidate, count, since = candidates.get(key, (new, 0, new.observed_at))
-            if candidate.severity != new.severity:
-                count, since = 0, new.observed_at
-            count += 1
-            if count >= new.open_after_cycles and _sustained(since, new):
+            at = new.observed_at
+            prior, count, since, run, run_at = candidates.get(key, (new, 0, at, 0, at))
+            if prior.severity != new.severity:
+                run, run_at = 0, at
+            count, run = count + 1, run + 1
+            if count >= new.open_after_cycles and sustained(since, new):
                 candidates.pop(key, None)
+                if new.severity == "critical" and (
+                    run < new.open_after_cycles or not sustained(run_at, new)
+                ):
+                    # Confirmed, but not yet critical: open at warning, keep the run.
+                    severity_changes[key] = (new.severity, run, run_at)
+                    new = replace(new, severity="warning")
                 current[key] = new
                 opened_at[key] = new.observed_at
                 last_observed_at[key] = new.observed_at
@@ -634,7 +623,7 @@ class IncidentTracker:
                     self._append(result.host, new, "opened", result.observed_at)
                 )
             else:
-                candidates[key] = (new, count, since)
+                candidates[key] = (new, count, since, run, run_at)
 
         if result.status == "online":
             sample_time = epoch_seconds(result.observed_at)
