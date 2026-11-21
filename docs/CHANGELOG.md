@@ -9,6 +9,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Integer query parameters (`limit`, `hours`) accept only ASCII digits. Before,
   `1_0`, surrounding spaces, a `+` sign, and full-width digits were read as
   numbers, unlike the documented contract.
+- `GET /api/brief` and `mocop brief` no longer fail with an error when an
+  owner's GPU usage has no classified utilization samples, for example in the
+  first minute after a start or at a cadence slower than 60 seconds. Such an
+  owner reports `idleSharePct: null`, and hours without utilization samples are
+  left out of `busySharePct`.
+- `GET /api/usage` no longer fails when two samples of one GPU share a second
+  and only one of them reports utilization. The later sample of that second
+  classifies the following segment, matching the row the history database keeps.
 - Configuration values of the wrong JSON type for `workloads.mode`,
   `ssh_discovery.mode`, `updates.mode`, and `incident_actions[].action`, and
   integers too large for a float in `incidents` durations or

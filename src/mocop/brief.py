@@ -305,7 +305,8 @@ def _usage(
 ) -> dict[str, object]:
     busy_share = None
     if utilization is not None:
-        hours = utilization["fleet"]
+        # An hour without utilization samples has a null busy share.
+        hours = [h for h in utilization["fleet"] if h["busyShare"] is not None]
         samples = sum(int(hour["samples"]) for hour in hours)
         if samples > 0:
             busy_share = round(
@@ -317,17 +318,17 @@ def _usage(
     owners = []
     for owner in usage["owners"][:ITEM_LIMIT]:
         gpu_hours = float(owner["gpuSeconds"]) / 3600
-        idle_share = float(owner["idleShare"])
+        # Null without classified utilization samples: unknown, not idle.
+        share = owner["idleShare"]
+        idle_heavy = share is not None and share >= IDLE_HEAVY_SHARE
         owners.append(
             {
                 "owner": owner["owner"],
                 "gpuHours": round(gpu_hours, 1),
-                "idleSharePct": round(idle_share * 100, 1),
+                "idleSharePct": None if share is None else round(share * 100, 1),
                 "gpus": owner["gpus"],
                 "hosts": len(owner["hosts"]),
-                "idleHeavy": (
-                    idle_share >= IDLE_HEAVY_SHARE and gpu_hours >= IDLE_HEAVY_GPU_HOURS
-                ),
+                "idleHeavy": idle_heavy and gpu_hours >= IDLE_HEAVY_GPU_HOURS,
             }
         )
     # The in-memory timeline carries no source or coverage marker: it is the
@@ -476,11 +477,12 @@ def render_brief(brief: dict[str, Any]) -> str:
         )
     )
     for owner in usage["owners"]:
+        idle = owner["idleSharePct"]
         lines.append(
             f"  {'*' if owner['idleHeavy'] else ' '} "
             f"{_owner_label(owner['owner'])}: {owner['gpuHours']:g} GPU-h, "
-            f"idle {owner['idleSharePct']:g}%, {_count(owner['gpus'], 'GPU')} on "
-            f"{_count(owner['hosts'], 'host')}"
+            + ("" if idle is None else f"idle {idle:g}%, ")
+            + f"{_count(owner['gpus'], 'GPU')} on {_count(owner['hosts'], 'host')}"
         )
     if usage["idleHeavyOwners"]:
         lines.append(

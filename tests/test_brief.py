@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 
-from mocop.brief import build_brief, fleet_status, render_brief
+from mocop.brief import brief_from_state, build_brief, fleet_status, render_brief
+from mocop.models import GpuMetrics, GpuProcess, ProbeResult
+from mocop.service import StateStore
 
 GENERATED_AT = "2026-09-07T09:00:00Z"
 
@@ -474,6 +477,52 @@ class BuildBriefTests(unittest.TestCase):
         )
         self.assertIn("  !! gpu-02 gpu_memory GPU-0 93/90 · 3h\n", text)
 
+    def test_owners_and_hours_without_utilization_samples_stay_unknown(self) -> None:
+        # The usage reports publish idleShare and busyShare as null when no
+        # utilization sample classified the time: a GPU reporting [N/A]
+        # utilization, a cadence slower than the one-minute sample gap, or the
+        # first minute after a restart. The brief must say "unknown", not fail.
+        usage = _usage()
+        usage["owners"] = [
+            {
+                "owner": "dave",
+                "gpuSeconds": 3_600.0 * 10,
+                "idleSeconds": 0.0,
+                "idleShare": None,
+                "hosts": ["gpu-01"],
+                "gpus": 1,
+            }
+        ]
+        utilization = _utilization()
+        utilization["fleet"].append(
+            {
+                "hour": "2026-09-07T06:00:00Z",
+                "gpus": 2,
+                "samples": 400,
+                "busyShare": None,
+            }
+        )
+        brief = _brief(usage=usage, utilization=utilization)
+        self.assertEqual(
+            brief["usage"]["owners"],
+            [
+                {
+                    "owner": "dave",
+                    "gpuHours": 10.0,
+                    "idleSharePct": None,
+                    "gpus": 1,
+                    "hosts": 1,
+                    "idleHeavy": False,
+                }
+            ],
+        )
+        self.assertEqual(brief["usage"]["idleHeavyOwners"], [])
+        # Hours without utilization samples are left out of the weighting.
+        self.assertEqual(brief["usage"]["busySharePct"], 80.0)
+        self.assertIn("    dave: 10 GPU-h, 1 GPU on 1 host\n", render_brief(brief))
+        utilization["fleet"] = utilization["fleet"][-1:]
+        self.assertIsNone(_brief(utilization=utilization)["usage"]["busySharePct"])
+
     def test_short_idle_reservations_are_not_flagged(self) -> None:
         usage = _usage()
         usage["owners"] = [
@@ -487,6 +536,42 @@ class BuildBriefTests(unittest.TestCase):
             }
         ]
         self.assertEqual(_brief(usage=usage)["usage"]["idleHeavyOwners"], [])
+
+
+class BriefFromStateTests(unittest.TestCase):
+    def test_first_sample_with_a_gpu_process_produces_a_brief(self) -> None:
+        # One sample cannot classify any utilization segment, so the
+        # in-memory usage reports the occupancy with a null idleShare.
+        gpu = GpuMetrics(
+            index=0,
+            uuid="GPU-1",
+            name="H100",
+            driver_version="550",
+            pstate="P0",
+            temperature_c=40,
+            utilization_gpu_pct=3,
+            utilization_memory_pct=1,
+            memory_total_mib=81_920,
+            memory_used_mib=40_960,
+            memory_free_mib=40_960,
+            power_draw_w=80,
+            power_limit_w=700,
+            processes=(GpuProcess(4242, "python", 40_960),),
+        )
+        store = StateStore(
+            5,
+            utc_clock=lambda: datetime(2026, 9, 7, 9, 0, 30, tzinfo=timezone.utc),
+        )
+        store.set_hosts(("gpu-01",))
+        store.apply(
+            ProbeResult(
+                "gpu-01", "online", 1, (gpu,), observed_at="2026-09-07T09:00:00Z"
+            )
+        )
+
+        (owner,) = brief_from_state(store, 24)["usage"]["owners"]
+        self.assertEqual((owner["owner"], owner["idleSharePct"]), (None, None))
+        self.assertFalse(owner["idleHeavy"])
 
 
 class RenderBriefTests(unittest.TestCase):
