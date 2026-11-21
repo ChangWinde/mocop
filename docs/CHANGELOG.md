@@ -9,6 +9,10 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Integer query parameters (`limit`, `hours`) accept only ASCII digits. Before,
   `1_0`, surrounding spaces, a `+` sign, and full-width digits were read as
   numbers, unlike the documented contract.
+- While a legacy history database waits for space to create its metadata or
+  hourly rollups, only the incident and GPU writes it cannot store are
+  dropped. Before, any such write failed the whole write batch, so host
+  history queued beside it was lost too.
 - `GET /api/brief` and `mocop brief` no longer fail with an error when an
   owner's GPU usage has no classified utilization samples, for example in the
   first minute after a start or at a cadence slower than 60 seconds. Such an

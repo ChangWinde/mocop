@@ -26,6 +26,11 @@ def commit_batch(
 ) -> bool:
     from .persistence import _is_size_error, datetime
 
+    # Without companion metadata, incident and GPU writes cannot be stored, and
+    # without rollups neither can GPU samples; reject only those writes so the
+    # host history queued beside them in the same batch is still committed.
+    rejected = sum(1 for item in writes if not _writable(self, item))
+    writes = tuple(item for item in writes if _writable(self, item))
     pruned = False
     while True:
         try:
@@ -33,19 +38,6 @@ def commit_batch(
             written_records = 0
             dropped_writes = 0
             with connection:
-                if not self._companions_enabled and any(
-                    isinstance(
-                        item,
-                        _GpuTelemetryWrite | _IncidentWrite | _IncidentStateWrite,
-                    )
-                    for item in writes
-                ):
-                    raise sqlite3.OperationalError("history metadata waits for space")
-                if not self._rollups_enabled and any(
-                    isinstance(item, _GpuTelemetryWrite) and item.points
-                    for item in writes
-                ):
-                    raise sqlite3.OperationalError("hourly rollups are unavailable")
                 cutoff = None
                 if any(
                     isinstance(item, _GpuTelemetryWrite) and item.points
@@ -79,14 +71,31 @@ def commit_batch(
                 if self._prune_batch(connection):
                     continue
             with self._status_lock:
-                self._dropped_writes += len(writes)
+                self._dropped_writes += len(writes) + rejected
                 self._last_error = "history database write failed"
             return False
         self._incident_criteria = criteria_cache
         with self._status_lock:
             self._written_records += written_records
-            self._dropped_writes += dropped_writes
+            self._dropped_writes += dropped_writes + rejected
             self._last_error = (
-                "history write outside retention window" if dropped_writes else None
+                "history database write failed"
+                if rejected
+                else "history write outside retention window"
+                if dropped_writes
+                else None
             )
-        return True
+        return not rejected
+
+
+def _writable(self: SqliteTelemetryPersistence, item: _Write) -> bool:
+    companion = isinstance(
+        item, _GpuTelemetryWrite | _IncidentWrite | _IncidentStateWrite
+    )
+    if companion and not self._companions_enabled:
+        return False
+    return not (
+        isinstance(item, _GpuTelemetryWrite)
+        and item.points
+        and not self._rollups_enabled
+    )

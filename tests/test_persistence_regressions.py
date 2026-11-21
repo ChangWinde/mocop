@@ -19,6 +19,7 @@ from mocop.incidents import IncidentTracker, ThresholdIncidentPolicy
 from mocop.models import ProbeResult
 from mocop.persistence import SqliteTelemetryPersistence, _Flush
 from mocop.persistence_gpu import write_gpu_points
+from mocop.persistence_records import _GpuTelemetryWrite, _HistoryWrite
 from mocop.persistence_rollups import ROLLUP_STATEMENTS
 
 from .test_incidents import gpu, system
@@ -714,6 +715,30 @@ class PersistenceRegressionTests(unittest.TestCase):
         self.assertEqual(store.status()["droppedWrites"], 1)
         self.assertEqual(self.hourly(), expected)
         self.assertEqual(store.load(20, 20).gpu_history[("gpu-01", "GPU-1")], (point,))
+
+    def test_unavailable_rollups_reject_only_the_gpu_write_of_a_batch(self) -> None:
+        # The writer batches whatever is queued; a GPU write that rollups
+        # cannot accept used to fail the whole batch, dropping host history
+        # that merely shared it.
+        store = self.store()
+        store.close()
+        with mock.patch(
+            "mocop.persistence.ensure_rollups",
+            return_value="hourly rollups wait for retention to free space",
+        ):
+            store = self.store()
+        history = history_point(utc_text(self.now), 10)
+        writes = (
+            _HistoryWrite("gpu-01", history),
+            _GpuTelemetryWrite("gpu-01", (gpu_point(utc_text(self.now), 90),), ()),
+        )
+        with closing(store._connect()) as connection:
+            self.assertFalse(store._commit_batch(connection, writes))
+        status = store.status()
+        self.assertEqual(status["droppedWrites"], 1)
+        self.assertEqual(status["writtenRecords"], 1)
+        self.assertEqual(store.load(20, 20).history["gpu-01"], (history,))
+        self.assertEqual(store.load(20, 20).gpu_history, {})
 
     def test_persistence_rollup_replace_retention_frees_pages_before_archiving(
         self,
