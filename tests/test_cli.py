@@ -656,6 +656,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(failure["code"], "INVALID_CONFIG")
         self.assertIn("missing config keys", failure["error"])
 
+    def test_config_check_json_reports_type_confused_sections(self) -> None:
+        # A list where a mode string belongs is a rejected configuration, not
+        # a traceback: the refusal is still one JSON document with exit 2.
+        broken = write_config(self.root / "config.json", workloads={"mode": ["auto"]})
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            result = main(["config", "check", "--json", "--config", str(broken)])
+        self.assertEqual(result, 2)
+        failure = json.loads(stdout.getvalue())
+        self.assertEqual((failure["ok"], failure["code"]), (False, "INVALID_CONFIG"))
+        self.assertIn("workloads.mode", failure["error"])
+
     @patch("mocop.__main__.read_access_token", return_value="A" * 43)
     @patch("mocop.__main__.UserServiceManager")
     def test_install_verifies_activation_and_prints_dashboard(

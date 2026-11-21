@@ -1779,6 +1779,11 @@ class WebTests(unittest.TestCase):
 
         self.assert_http_error(f"{self.base}/api/incidents?limit=201", 400)
         self.assert_http_error(f"{self.base}/api/incidents?debug=true", 400)
+        # Only ASCII digits: int() also accepted digit separators, padding,
+        # a sign, and full-width digits, which the manifest does not allow.
+        for limit in ("1_0", "%2010", "10%20", "+10", "%EF%BC%91%EF%BC%90"):
+            with self.subTest(limit=limit):
+                self.assert_http_error(f"{self.base}/api/incidents?limit={limit}", 400)
 
     def test_scans_and_changes_the_constrained_host_inventory(self) -> None:
         scan = Request(
@@ -2819,6 +2824,19 @@ class WebTests(unittest.TestCase):
             huge_number, origin=self.base, path="/api/settings/collector"
         )
         self.assert_http_error(huge_case, 400)
+
+    def test_deeply_nested_json_body_is_invalid_json_not_a_crash(self) -> None:
+        # The 1024-byte incident-action cap holds enough brackets to exhaust
+        # the JSON decoder's recursion limit on Python 3.10 and 3.11, which
+        # used to drop the connection without a response. The patched decoder
+        # makes the same failure deterministic on every interpreter.
+        deep = self.write_request(
+            b"[" * 1000, origin=self.base, path="/api/settings/incident-action"
+        )
+        self.assert_json_error(deep, 400, "INVALID_JSON")
+        with patch("mocop.web.decode_json_body", side_effect=RecursionError):
+            nested = self.write_request(b"{}", origin=self.base, path="/api/probe")
+            self.assert_json_error(nested, 400, "INVALID_JSON")
 
     def test_head_mirrors_get_and_event_stream_rejects_head(self) -> None:
         conn = self.open_connection(self.server.server_port)

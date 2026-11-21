@@ -111,10 +111,11 @@ def parse_query(schema: QuerySchema, query: str) -> dict[str, object]:
             continue
         assert parameter.invalid_code is not None
         assert parameter.minimum is not None and parameter.maximum is not None
-        try:
-            number = int(supplied[name])
-        except ValueError:
-            number = parameter.minimum - 1
+        text = supplied[name]
+        # ASCII digits only: int() also takes "1_0", padding, signs, and
+        # non-ASCII digits, none of which the manifest's integer allows.
+        valid = text.isascii() and text.isdigit() and len(text) <= 9
+        number = int(text) if valid else parameter.minimum - 1
         if not parameter.minimum <= number <= parameter.maximum:
             raise QueryError(
                 f"{name} must be between {parameter.minimum} and {parameter.maximum}",

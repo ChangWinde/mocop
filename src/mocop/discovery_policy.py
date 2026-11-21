@@ -29,7 +29,7 @@ def parse_ssh_discovery_config(raw: object) -> SshDiscoveryConfig:
             "resolve_timeout_seconds"
         )
     mode = raw.get("mode", "aliases")
-    if mode not in _SSH_DISCOVERY_MODES:
+    if not isinstance(mode, str) or mode not in _SSH_DISCOVERY_MODES:
         raise SshDiscoveryPolicyError("ssh_discovery.mode must be aliases or topology")
     refresh = raw.get("refresh_seconds", 300)
     if (
@@ -44,8 +44,8 @@ def parse_ssh_discovery_config(raw: object) -> SshDiscoveryConfig:
     if (
         isinstance(timeout, bool)
         or not isinstance(timeout, int | float)
-        or not math.isfinite(timeout)
         or not 1 <= timeout <= 30
+        or not math.isfinite(timeout)
     ):
         raise SshDiscoveryPolicyError(
             "ssh_discovery.resolve_timeout_seconds must be between 1 and 30"

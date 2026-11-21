@@ -6,6 +6,25 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Integer query parameters (`limit`, `hours`) accept only ASCII digits. Before,
+  `1_0`, surrounding spaces, a `+` sign, and full-width digits were read as
+  numbers, unlike the documented contract.
+- Configuration values of the wrong JSON type for `workloads.mode`,
+  `ssh_discovery.mode`, `updates.mode`, and `incident_actions[].action`, and
+  integers too large for a float in `incidents` durations or
+  `ssh_discovery.resolve_timeout_seconds`, are now rejected as configuration
+  errors. Before, `mocop config check --json` and startup failed with a
+  traceback instead of the documented refusal.
+- A write body nested deeper than the JSON decoder's recursion limit now
+  answers `400 INVALID_JSON`; before, Python 3.10 and 3.11 dropped the
+  connection without a response.
+- `mocop api` refuses a target containing spaces, control characters, or
+  non-ASCII text with `INVALID_TARGET` and exit code 2; percent-encode them
+  instead. Before, the command failed with a traceback.
+- `mocop api` and `mocop brief` reject a `--timeout` that is not above 0 and
+  at most 3600 seconds as a usage error. Before, a negative, non-finite, or
+  huge value failed with a traceback, and 0 was reported as an unreachable
+  service.
 - Public requests with the dashboard marker no longer enable attended collection.
 - Webhooks withdrawn after acknowledgement or silencing now count as suppressed
   deliveries, preserving the dropped count and last delivery error.

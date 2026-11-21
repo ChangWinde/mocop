@@ -88,10 +88,23 @@ def request(
     server; HTTP error statuses come back as a normal :class:`ApiResponse`
     so the caller can print the server's own JSON error envelope.
     """
-    parsed = urlsplit(target)
-    if parsed.scheme or parsed.netloc or parsed.fragment or not target.startswith("/"):
+    try:
+        parsed = urlsplit(target)
+    except ValueError:
+        parsed = None
+    if (
+        parsed is None
+        or parsed.scheme
+        or parsed.netloc
+        or parsed.fragment
+        or not target.startswith("/")
+        # The request line carries the target verbatim, so http.client
+        # refuses spaces, control characters, and non-ASCII text mid-send.
+        or not all("!" <= character <= "~" for character in target)
+    ):
         raise ApiClientError(
-            "target must be an absolute API path such as /api/snapshot",
+            "target must be an absolute API path such as /api/snapshot, with "
+            "spaces and non-ASCII characters percent-encoded",
             "INVALID_TARGET",
         )
     access = route_access(parsed.path)

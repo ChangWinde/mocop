@@ -859,7 +859,8 @@ def _incident_cycles(data: dict[str, Any]) -> IncidentConfig:
         if (
             isinstance(value, bool)
             or not isinstance(value, int | float)
-            or not math.isfinite(value)
+            # Only floats can be non-finite; isfinite() overflows on huge ints.
+            or (isinstance(value, float) and not math.isfinite(value))
         ):
             raise ConfigError(f"incidents.{name} must be a number")
         if not 0 <= value <= maximum:
@@ -908,7 +909,7 @@ def _incident_actions(
             raise ConfigError(f"{label}.host must reference an active explicit host")
         if not is_valid_incident_condition_key(condition_key):
             raise ConfigError(f"{label}.condition_key is invalid")
-        if action not in _INCIDENT_ACTIONS:
+        if not isinstance(action, str) or action not in _INCIDENT_ACTIONS:
             raise ConfigError(f"{label}.action must be acknowledged or silenced")
         if not is_valid_incident_action_reason(reason):
             raise ConfigError(

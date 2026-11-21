@@ -172,7 +172,7 @@ def workload_config(data: dict[str, Any]) -> WorkloadConfig:
     if unknown:
         raise ConfigError(f"unknown workloads keys: {', '.join(unknown)}")
     mode = raw.get("mode")
-    if mode not in _WORKLOAD_MODES:
+    if not isinstance(mode, str) or mode not in _WORKLOAD_MODES:
         raise ConfigError("workloads.mode must be disabled, identity, or auto")
     return WorkloadConfig(mode=mode)
 

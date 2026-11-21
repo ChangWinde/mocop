@@ -34,8 +34,8 @@ def add_client_commands(
             "DASHBOARD_ONLY because their marker changes the collection "
             "cadence. /api/events streams until interrupted. Exit 0 on a 2xx, "
             "1 on any other HTTP status or an unreachable service, 2 on a usage "
-            "or configuration problem; a non-zero exit always leaves a JSON "
-            "error envelope on stdout."
+            "or configuration problem; a non-zero exit leaves a JSON error "
+            "envelope on stdout, except for an invalid flag, reported on stderr."
         ),
     )
     api_parser.add_argument(
@@ -96,11 +96,19 @@ def _add_client_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--timeout",
-        type=float,
+        type=_timeout_seconds,
         default=10.0,
         metavar="SECONDS",
-        help="socket timeout for the request (default: 10)",
+        help="socket timeout for the request, above 0 and at most 3600 (default: 10)",
     )
+
+
+def _timeout_seconds(value: str) -> float:
+    seconds = float(value)
+    # Sockets reject NaN, negatives, and huge values; 0 means non-blocking.
+    if not 0 < seconds <= 3600:
+        raise argparse.ArgumentTypeError("timeout must be above 0 and at most 3600")
+    return seconds
 
 
 def _window_hours(value: str) -> int:

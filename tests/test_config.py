@@ -878,6 +878,48 @@ else:
                 with self.assertRaisesRegex(ConfigError, "incidents.recovery_cycles"):
                     load_config(self.write(value))
 
+    def test_type_confused_values_are_configuration_errors(self) -> None:
+        # Startup, `mocop config check --json`, and the dashboard configuration
+        # controller report only ConfigError; an unhashable enum value or an
+        # integer too large for a float must not escape as a traceback.
+        huge = 10**400
+        action = {
+            "host": "gpu-1",
+            "condition_key": "connectivity",
+            "action": ["silenced"],
+            "until": "2031-01-01T00:00:00Z",
+            "reason": "",
+        }
+        cases = (
+            ("workloads.mode", "workloads", {"mode": ["identity"]}),
+            ("ssh_discovery.mode", "ssh_discovery", {"mode": ["topology"]}),
+            (
+                "ssh_discovery.resolve_timeout_seconds",
+                "ssh_discovery",
+                {"resolve_timeout_seconds": huge},
+            ),
+            ("updates.mode", "updates", {"mode": {"check": True}}),
+            ("incident_actions[0].action", "incident_actions", [action]),
+            (
+                "incidents.resource_open_seconds",
+                "incidents",
+                {"resource_open_seconds": huge},
+            ),
+            (
+                "incidents.gpu_idle_memory_seconds",
+                "incidents",
+                {"gpu_idle_memory_seconds": huge},
+            ),
+            ("incidents.recovery_margin", "incidents", {"recovery_margin": huge}),
+        )
+        for field, key, section in cases:
+            with self.subTest(field=field):
+                value = valid_config()
+                value["hosts"] = ["gpu-1"]
+                value[key] = section
+                with self.assertRaisesRegex(ConfigError, field.replace("[", r"\[")):
+                    load_config(self.write(value))
+
     def test_validates_per_host_collection_overrides(self) -> None:
         value = valid_config()
         value["auto_discover"] = False

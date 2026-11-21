@@ -67,7 +67,7 @@ def parse_updates_config(raw: object) -> UpdatesConfig:
             "updates must contain only mode and check_interval_seconds"
         )
     mode = raw.get("mode", "off")
-    if mode not in _UPDATE_MODES:
+    if not isinstance(mode, str) or mode not in _UPDATE_MODES:
         raise UpdatesPolicyError("updates.mode must be off, check, or self-update")
     interval = raw.get("check_interval_seconds", 21_600)
     if (

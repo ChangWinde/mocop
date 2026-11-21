@@ -608,7 +608,7 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             if len(body) != content_length:
                 return
             payload = decode_json_body(body)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             self._send_error(
                 "invalid JSON body", HTTPStatus.BAD_REQUEST, code="INVALID_JSON"
             )

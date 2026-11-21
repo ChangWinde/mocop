@@ -240,8 +240,8 @@ any out-of-band knowledge; the capability value itself is never included.
 | `QUERY_NOT_ALLOWED` | 400 | This route accepts no query parameters (every GET whose manifest `query` is empty, and every POST). |
 | `UNKNOWN_QUERY_PARAMETER` | 400 | A query parameter outside the route's allowlist. |
 | `INVALID_QUERY` | 400 | A malformed `host`, `gpu`, or `limit` query value. |
-| `INVALID_LIMIT` | 400 | `limit` is not an integer within the route's bounds. |
-| `INVALID_HOURS` | 400 | `hours` is not an integer within the route's bounds. |
+| `INVALID_LIMIT` | 400 | `limit` is not an integer of ASCII digits (no sign, spaces, or `_`) within the route's bounds. |
+| `INVALID_HOURS` | 400 | `hours` is not an integer of ASCII digits (no sign, spaces, or `_`) within the route's bounds. |
 | `INVALID_CAPACITY_REQUEST` | 400 | `gpus`, `min_vram_gib`, or `model` on `/api/capacity` is malformed or out of bounds. |
 | `INVALID_HOST` | 400 | The `host` query value is not a safe alias. |
 | `INVALID_JSON` | 400 | The body is not valid strict JSON (duplicate keys and non-finite numbers included). |

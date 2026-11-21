@@ -342,8 +342,8 @@ to the default monitor command.
 | `mocop deploy` | Create a private config and install the verified user service on a fresh host | `--host ALIAS` (repeatable), `--local-host ALIAS` / `--no-local`, `--display-name`, `--ssh-config`, `--auto-discover` / `--no-auto-discover`, `--json` |
 | `mocop init` | Create a private config only, never overwriting one | `--host ALIAS` (repeatable), `--json` |
 | `mocop migrate` | Generate a new private config from another installation's config | `--from-config PATH` (required), the same identity flags as `deploy`, `--drop-local-host`, `--json` |
-| `mocop api PATH` | GET one public or authenticated route from the running service, or POST `--data` to a writer route, and write the body to stdout; reader routes are refused (`DASHBOARD_ONLY`), a writer route without a body with `BODY_REQUIRED` | `--data JSON` (`@FILE`, `@-` for stdin), `--token-file PATH` (default: the access-token file beside the config), `--timeout SECONDS` |
-| `mocop brief` | Print the situation brief of the running service (`GET /api/brief`) as one screen of text: fleet status, actionable conditions worst first with correlations and shared filesystems collapsed, openings and recoveries over the window with recurring conditions, idle GPUs by host, per-owner GPU-hours with idle share; exit codes follow `mocop api` | `--hours N` (1–168, default 24), `--json` (the service's document unchanged), `--token-file PATH`, `--timeout SECONDS` |
+| `mocop api PATH` | GET one public or authenticated route from the running service, or POST `--data` to a writer route, and write the body to stdout; reader routes are refused (`DASHBOARD_ONLY`), a writer route without a body with `BODY_REQUIRED` | `--data JSON` (`@FILE`, `@-` for stdin), `--token-file PATH` (default: the access-token file beside the config), `--timeout SECONDS` (above 0, at most 3600, default 10) |
+| `mocop brief` | Print the situation brief of the running service (`GET /api/brief`) as one screen of text: fleet status, actionable conditions worst first with correlations and shared filesystems collapsed, openings and recoveries over the window with recurring conditions, idle GPUs by host, per-owner GPU-hours with idle share; exit codes follow `mocop api` | `--hours N` (1–168, default 24), `--json` (the service's document unchanged), `--token-file PATH`, `--timeout SECONDS` (as for `api`) |
 | `mocop config check` | Validate the configuration without a web server or SSH | `--json` (one JSON document on stdout, also for a rejected configuration) |
 | `mocop doctor` | Read-only SSH reachability and connection-reuse diagnosis | `--host ALIAS` (repeatable filter), `--no-connect`, `--probe` (one production collection per alias), `--profile` (latency breakdown), `--json` |
 | `mocop service install` | Generate, enable, start, and verify the unit; print the capability URL | `--json` |
@@ -356,7 +356,7 @@ Exit codes are stable for automation:
 |---|---|
 | `0` | Success; for `doctor`, every selected alias is usable; for `api`, a 2xx response |
 | `1` | Runtime failure: `doctor` found at least one unusable alias, `--once --strict` found a host without an online sample, the listener could not bind, the collector stopped, `service install` could not verify the service, or `api` received a non-2xx status or could not connect |
-| `2` | Configuration or usage error: invalid or unreadable configuration, a `doctor` flag conflict or unknown `--host`, a lifecycle refusal (existing files, invalid alias), a managed unit missing its generated arguments, or an `api` target that is malformed, dashboard-only, or has no readable capability |
+| `2` | Configuration or usage error: invalid or unreadable configuration, a `doctor` flag conflict or unknown `--host`, a lifecycle refusal (existing files, invalid alias), a managed unit missing its generated arguments, or an `api` target that is malformed (including unencoded spaces, control characters, or non-ASCII text), dashboard-only, or has no readable capability, or an invalid `--timeout` |
 | `75` | Supervised restart requested from the dashboard or self-update; systemd's restart policy starts the replacement |
 
 Every `--json` command writes one `{ok, ...}` document to stdout, including
@@ -366,7 +366,10 @@ refusals (`ok: false` plus a stable `code`). `config check`, `doctor`, `init`,
 machine-readable: stdout is the server's response body, and a non-zero exit
 leaves the server's or the client's `{error, code}` envelope there
 (`INVALID_TARGET`, `DASHBOARD_ONLY`, `BODY_REQUIRED`, `METHOD_NOT_ALLOWED`,
-`TOKEN_UNAVAILABLE`, `CONNECTION_FAILED`, or the configuration code). Text-mode diagnostics stay on stderr.
+`TOKEN_UNAVAILABLE`, `CONNECTION_FAILED`, or the configuration code). An
+invalid flag value, such as a `--timeout` outside its range, is a usage error:
+exit `2` with the message on stderr and nothing on stdout. Text-mode
+diagnostics stay on stderr.
 
 ## Related references
 

@@ -6,7 +6,7 @@ import os
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -160,6 +160,39 @@ class ApiClientTests(unittest.TestCase):
                 code, body = self.run_api(target)
                 self.assertEqual(code, 2)
                 self.assertEqual(json.loads(body)["code"], "INVALID_TARGET")
+
+    def test_targets_and_timeouts_that_cannot_form_a_request_are_usage_errors(
+        self,
+    ) -> None:
+        # urllib refuses spaces, control characters, and non-ASCII text only
+        # while writing the request line; that must be the documented
+        # INVALID_TARGET envelope with exit 2, not a traceback.
+        for target in (
+            "/api/capacity?model=RTX 4090",
+            "/api/capacity?model=Ü",
+            "/api/capacity?model=a\tb",
+            "/api/capacity?model=a\x01b",
+            "//[gpu/api/meta",
+        ):
+            with self.subTest(target=target):
+                code, body = self.run_api(target)
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(body)["code"], "INVALID_TARGET")
+        # The percent-encoded spelling reaches the server unchanged.
+        code, body = self.run_api("/api/capacity?model=RTX%204090")
+        self.assertEqual(code, 0, body)
+        self.assertEqual(json.loads(body)["request"]["model"], "RTX 4090")
+
+        # A socket timeout must be a positive finite number of seconds; the
+        # socket layer otherwise raises ValueError or turns 0 into a
+        # non-blocking connect that is misreported as an unreachable service.
+        for timeout in ("-1", "0", "nan", "inf", "1e12", "soon"):
+            with self.subTest(timeout=timeout):
+                stderr = io.StringIO()
+                with redirect_stderr(stderr), self.assertRaises(SystemExit) as exit:
+                    self.run_api("/api/meta", "--timeout", timeout)
+                self.assertEqual(exit.exception.code, 2)
+                self.assertIn("--timeout", stderr.getvalue())
 
     def test_writer_routes_take_a_json_body_and_reach_the_handler(self) -> None:
         # The CLI presents the listener's own origin and the same-origin
