@@ -610,11 +610,15 @@ rejected with `405`.
   `event: heartbeat` / `data: {}` — a **named event**, so streaming clients
   can observe liveness and reconnect on stall.
 - At most 16 concurrent stream clients; the next connect receives
-  `503 SERVICE_UNAVAILABLE`.
+  `503 SERVICE_UNAVAILABLE`. The dashboard then polls snapshots and retries
+  the stream after 1.2 s, doubling to at most 30 s while it stays refused.
 
 The dashboard uses `fetch()` and incrementally decodes the SSE stream because
-the browser `EventSource` API cannot attach an `Authorization` header. Every
-Mocop server requires the capability, so there is no unauthenticated stream.
+the browser `EventSource` API cannot attach an `Authorization` header. The
+stream requires the capability unless the configuration sets
+`authentication: "none"`. The dashboard aborts a stream that delivers no byte
+for 35 seconds, shows 轮询同步 while it polls `GET /api/snapshot`, and then
+reconnects.
 
 ### GET /api/history
 

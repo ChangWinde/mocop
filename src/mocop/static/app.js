@@ -5200,35 +5200,26 @@ function acceptStreamFrame(frame, markLive) {
 }
 
 async function connectAuthenticatedStream() {
+  let failures = 0;
   while (view.dashboardStarted) {
     try {
-      const response = await fetch("/api/events", {
-        headers: { Accept: "text/event-stream" },
+      // A stream silent past the idle limit is aborted and rejects here.
+      await globalThis.MocopEventStream.read({
+        request: (signal) =>
+          fetch("/api/events", { headers: { Accept: "text/event-stream" }, signal }),
+        appendChunk: appendStreamChunk,
+        active: () => view.dashboardStarted,
+        onOpen: () => {
+          failures = 0;
+          setConnection("live", "实时连接");
+          // A healthy stream is as good as a successful poll: clear the failure
+          // streak so a later brief drop does not inherit a stale backoff.
+          view.snapshotFailureStreak = 0;
+        },
+        onFrame: (frame) => acceptStreamFrame(frame, () => setConnection("live", "实时连接")),
       });
-      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
-      setConnection("live", "实时连接");
-      // A healthy stream is as good as a successful poll: clear the failure
-      // streak so a later brief drop does not inherit a stale backoff.
-      view.snapshotFailureStreak = 0;
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (view.dashboardStarted) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer = appendStreamChunk(
-          buffer,
-          decoder.decode(value, { stream: true }),
-        );
-        let boundary = buffer.indexOf("\n\n");
-        while (boundary >= 0) {
-          const frame = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary + 2);
-          acceptStreamFrame(frame, () => setConnection("live", "实时连接"));
-          boundary = buffer.indexOf("\n\n");
-        }
-      }
     } catch (_error) {
+      failures += 1;
       const reachable = await fetchSnapshot();
       if (view.authenticationFailed) {
         // A future re-authentication must be able to establish a new stream.
@@ -5240,9 +5231,10 @@ async function connectAuthenticatedStream() {
         reachable ? "轮询同步" : "服务不可达",
       );
     }
-    // Downtime uses the shared snapshot backoff so an unreachable service is
-    // not hammered at a fixed rate, matching the auxiliary channels.
-    if (view.dashboardStarted) await wait(Math.max(1200, snapshotBackoffMs()));
+    // Refused streams back off on their own; downtime also uses the shared
+    // snapshot backoff so an unreachable service is not hammered.
+    const delay = globalThis.MocopEventStream.reconnectDelayMs(failures);
+    if (view.dashboardStarted) await wait(Math.max(delay, snapshotBackoffMs()));
   }
 }
 

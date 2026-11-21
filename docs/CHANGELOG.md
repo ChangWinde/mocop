@@ -25,6 +25,13 @@ All notable changes are documented here. This project follows Semantic Versionin
   at most 3600 seconds as a usage error. Before, a negative, non-finite, or
   huge value failed with a traceback, and 0 was reported as an unreachable
   service.
+- The dashboard aborts an event stream that delivers no byte for 35 seconds
+  and falls back to polling, then reconnects. Before, a half-open connection
+  (a sleeping laptop, a dropped NAT flow) kept the status at 实时连接 forever
+  while data refreshed only through the 16-second snapshot poll.
+- A dashboard refused at the 16-stream limit retries the event stream after
+  1.2 s, doubling to at most 30 s. Before, it retried every 1.2 s, each time
+  with an extra snapshot request, for as long as the limit held.
 - Public requests with the dashboard marker no longer enable attended collection.
 - Webhooks withdrawn after acknowledgement or silencing now count as suppressed
   deliveries, preserving the dropped count and last delivery error.
