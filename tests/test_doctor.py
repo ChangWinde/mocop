@@ -19,6 +19,7 @@ from mocop.diagnostics import diagnose_condition
 from mocop.doctor import run_doctor
 from mocop.models import GpuMetrics, GpuProcess, ProbeResult, WorkloadMetadata
 from mocop.probe import _BoundedProcessResult, _ProcessOutputLimitExceeded
+from tests.test_probe import fake_process, run_with_fake_proc
 
 
 def config(
@@ -111,10 +112,15 @@ def profile_marker(
     script_ns: int = 270_000_000,
     nvidia_ns: int = 420_000_000,
     nvidia_status: int = 0,
+    stuck: int = 0,
+    df_stuck: int = 0,
 ) -> str:
     t1 = start_ns + script_ns
     t2 = t1 + nvidia_ns
-    return f"MOCOP_PROFILE_V1\t{start_ns}\t{t1}\t{t2}\t{nvidia_status}\n"
+    return (
+        f"MOCOP_PROFILE_V3\t{start_ns}\t{t1}\t{t2}\t{nvidia_status}\t{stuck}"
+        f"\t{df_stuck}\n"
+    )
 
 
 class DoctorTests(unittest.TestCase):
@@ -616,7 +622,7 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("/proc/uptime", script)
         self.assertNotIn("date +%s%N", script)
         self.assertIn("nvidia-smi --query-gpu=", script)
-        self.assertIn("MOCOP_PROFILE_V1", script)
+        self.assertIn("MOCOP_PROFILE_V3", script)
 
     def test_profile_script_uses_a_busybox_compatible_monotonic_clock(self) -> None:
         completed = subprocess.run(
@@ -630,6 +636,67 @@ class DoctorTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0)
         self.assertIsNotNone(doctor._parse_profile_marker(completed.stdout))
+
+    def test_profile_starts_no_nvidia_smi_while_one_is_stuck(self) -> None:
+        # Profiling a node whose driver hung must not add the next stuck
+        # nvidia-smi, exactly like the collection script it reproduces.
+        completed, calls = run_with_fake_proc(
+            doctor._PROFILE_SCRIPT,
+            {4242: fake_process("nvidia-smi", "D", start_ticks=100)},
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(calls, [])
+        stages = doctor._parse_profile_marker(completed.stdout)
+        self.assertIsNotNone(stages)
+        self.assertEqual(stages[3], 1)
+
+    def test_profile_starts_no_df_while_one_is_stuck(self) -> None:
+        # A hung mount leaves df in state D; profiling must not add another.
+        df_calls: list[str] = []
+        completed, calls = run_with_fake_proc(
+            doctor._PROFILE_SCRIPT,
+            {31: fake_process("df", "D", start_ticks=100)},
+            df_calls=df_calls,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(df_calls, [])
+        self.assertEqual(len(calls), 1)
+        stages = doctor._parse_profile_marker(completed.stdout)
+        self.assertEqual(stages[3:], (0, 1))
+
+    @patch("mocop.doctor._run_remote")
+    def test_profile_names_a_hung_mount(self, run_remote) -> None:
+        run_remote.return_value = (
+            300.0,
+            _BoundedProcessResult(0, stdout=profile_marker(df_stuck=2), stderr=""),
+            None,
+        )
+
+        profile = doctor._profile_host("gpu-1", config(), timeout_seconds=12.0)
+
+        self.assertIn("hung mount (2 in state D)", profile["diskFailure"])
+        self.assertNotIn("nvidiaFailure", profile)
+
+    @patch("mocop.doctor._run_remote")
+    def test_profile_names_the_stuck_driver_and_the_reboot(self, run_remote) -> None:
+        run_remote.return_value = (
+            300.0,
+            _BoundedProcessResult(
+                0,
+                stdout=profile_marker(nvidia_ns=0, nvidia_status=127, stuck=2),
+                stderr="",
+            ),
+            None,
+        )
+
+        profile = doctor._profile_host("gpu-1", config(), timeout_seconds=12.0)
+
+        failure = profile["nvidiaFailure"]
+        self.assertIn("stuck in the NVIDIA driver (2 in state D)", failure)
+        self.assertIn("reboot", failure)
+        self.assertNotIn("unavailable", failure)
 
     @patch("mocop.probe._run_bounded_process")
     def test_profile_runs_one_instrumented_remote_call(self, run) -> None:
@@ -652,7 +719,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(run.call_count, 4)
         profile_call = run.call_args_list[3]
         self.assertEqual(profile_call.args[0][-2:], ["sh", "-s"])
-        self.assertIn("MOCOP_PROFILE_V1", profile_call.kwargs["input_text"])
+        self.assertIn("MOCOP_PROFILE_V3", profile_call.kwargs["input_text"])
 
     @patch("mocop.probe._run_bounded_process")
     def test_profile_is_skipped_when_transport_failed(self, run) -> None:
@@ -1252,6 +1319,51 @@ class DiagnosticsTests(unittest.TestCase):
         )
         self.assertIn("jump host", jump["nextSteps"][0])
         self.assertIn("AllowTcpForwarding", jump["nextSteps"][0])
+
+    def test_hung_filesystem_diagnosis_names_the_mount_and_the_way_out(self) -> None:
+        hung = diagnose_condition(
+            {
+                "category": "disk_availability",
+                "conditionKey": "disk_availability",
+                "resource": "Filesystems",
+                "value": 2.0,
+                "detail": "df is stuck on a hung filesystem",
+            },
+            {"disks": [], "disks_hung": 2},
+        )
+        self.assertIn("hung", hung["title"])
+        self.assertIn("state D", hung["summary"])
+        self.assertIn("/proc/mounts", hung["nextSteps"][0])
+        self.assertIn("umount -f -l", " ".join(hung["nextSteps"]))
+        self.assertNotIn("threshold", hung["summary"])
+
+    def test_hung_driver_diagnosis_names_the_driver_and_the_reboot(self) -> None:
+        # The operator must learn from the incident itself that the driver
+        # hung and that only a reboot helps; killing the processes cannot.
+        hung = diagnose_condition(
+            {
+                "category": "gpu_availability",
+                "conditionKey": "gpu_availability",
+                "resource": "NVIDIA telemetry",
+                "detail": "nvidia-smi is stuck in the NVIDIA driver",
+            },
+            {"gpus": []},
+        )
+        self.assertIn("NVIDIA driver", hung["title"])
+        self.assertIn("state D", hung["summary"])
+        self.assertIn("Reboot", hung["nextSteps"][0])
+        self.assertIn("SIGKILL", hung["nextSteps"][0])
+        self.assertNotIn("threshold", hung["summary"])
+        failed = diagnose_condition(
+            {
+                "category": "gpu_availability",
+                "resource": "NVIDIA telemetry",
+                "detail": "nvidia-smi query failed",
+            },
+            None,
+        )
+        self.assertNotIn("Reboot", " ".join(failed["nextSteps"]))
+        self.assertNotIn("threshold", failed["summary"])
 
     def test_disk_evidence_reports_absolute_headroom(self) -> None:
         server = {

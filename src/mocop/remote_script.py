@@ -32,7 +32,8 @@ _HEALTH_QUERY_FIELDS = (
     "mig.mode.current",
 )
 _COMBINED_QUERY_FIELDS = _QUERY_FIELDS + _HEALTH_QUERY_FIELDS[1:]
-_PROTOCOL_VERSION = "MONITOR_V8"
+_PROTOCOL_PREFIX = "MONITOR_V"
+_PROTOCOL_VERSION = f"{_PROTOCOL_PREFIX}9"
 # The fixed script and its parser ship inside one process and are re-sent on
 # every probe, so no deployed emitter of an older protocol version can exist;
 # accepting only the current version keeps the parser honest and small.
@@ -80,9 +81,93 @@ _CONTAINER_IDENTITY_AWK = r"""
   }
 """
 
+# A hung NVIDIA driver leaves nvidia-smi in uninterruptible sleep (state D),
+# and a hung NFS, CIFS, or Lustre mount does the same to df. SIGKILL cannot end
+# such a process, so every further run would only add one more stuck process
+# and one more unit of load. This /proc-only pass sets gpu_hung and disk_hung
+# to the number of stuck nvidia-smi and df processes, from any user; the script
+# then starts no NVIDIA command, or no df. A process counts only when it is at
+# least ten seconds old and stays in state D without a single context switch
+# across a one-second recheck: a healthy query, even a looping one that is
+# briefly in state D during a driver call, is either younger or rescheduled
+# within that second, so it never suppresses telemetry. The comm field
+# can hold spaces, parentheses and newlines, so the stat line is split after
+# its last ")". The doctor's profiling script reuses this exact text.
+_HUNG_PROCESS_GUARD = r"""
+hung_counts=$(printf '%s\n' /proc/[0-9]*/comm | awk '
+  function stat_comm(path, fields,    line, text, open_at) {
+    text = ""
+    while ((getline line < path) > 0) text = text line "\n"
+    close(path)
+    open_at = index(text, "(")
+    if (open_at == 0 || !match(text, /\)[^)]*$/)) return ""
+    # fields[1] is the state and fields[20] the start time in clock ticks.
+    split(substr(text, RSTART + 1), fields, " ")
+    return substr(text, open_at + 1, RSTART - open_at - 1)
+  }
+  function switches(path,    line, parts, total, seen) {
+    total = 0
+    seen = 0
+    while ((getline line < path) > 0) {
+      if (line ~ /^(voluntary|nonvoluntary)_ctxt_switches:/) {
+        split(line, parts, " ")
+        total += parts[2]
+        seen++
+      }
+    }
+    close(path)
+    return seen == 2 ? total : ""
+  }
+  BEGIN {
+    if ((getline line < "/proc/uptime") > 0) {
+      split(line, parts, " ")
+      uptime = parts[1] + 0
+    }
+    close("/proc/uptime")
+  }
+  {
+    name = ""
+    comm = $0
+    getline name < comm
+    close(comm)
+    if (name != "nvidia-smi" && name != "df") next
+    stat = $0
+    sub(/comm$/, "stat", stat)
+    if (stat_comm(stat, fields) != name || fields[1] != "D" || fields[20] !~ /^[0-9]+$/) next
+    if (hz == "") {
+      "getconf CLK_TCK" | getline hz
+      close("getconf CLK_TCK")
+      if (hz !~ /^[0-9]+$/ || hz + 0 == 0) hz = 100
+    }
+    if (uptime - fields[20] / hz < 10) next
+    status = $0
+    sub(/comm$/, "status", status)
+    count = switches(status)
+    if (count == "") next
+    candidates++
+    names[candidates] = name
+    stat_path[candidates] = stat
+    status_path[candidates] = status
+    started[candidates] = fields[20]
+    before[candidates] = count
+  }
+  END {
+    if (candidates) system("sleep 1")
+    for (i = 1; i <= candidates; i++) {
+      if (stat_comm(stat_path[i], fields) == names[i] && fields[1] == "D" && fields[20] == started[i] && switches(status_path[i]) == before[i]) hung[names[i]]++
+    }
+    print hung["nvidia-smi"] + 0, hung["df"] + 0
+  }
+' 2>/dev/null)
+gpu_hung=${hung_counts% *}
+disk_hung=${hung_counts#* }
+case "$gpu_hung" in ''|*[!0-9]*) gpu_hung=0 ;; esac
+case "$disk_hung" in ''|*[!0-9]*) disk_hung=0 ;; esac
+"""
+
 # The hostname is read inside the system awk pass with a bounded getline, so
-# the default sample runs five external commands instead of six. A missing or
-# unreadable hostname file degrades to "unknown" without aborting the pass.
+# it costs no external command of its own. A missing or unreadable hostname
+# file degrades to "unknown" without aborting the pass.
 _REMOTE_SCRIPT_TEMPLATE = r"""
 LC_ALL=C
 export LC_ALL
@@ -121,7 +206,7 @@ awk '
   BEGIN {
     host = ""
     if ((getline host_line < "/proc/sys/kernel/hostname") > 0) {
-      gsub(/[[:cntrl:]]/, " ", host_line)
+      gsub(/[\001-\037\177]/, " ", host_line)
       host = substr(host_line, 1, 255)
     }
     close("/proc/sys/kernel/hostname")
@@ -171,12 +256,16 @@ awk '
     printf "IO\t%.0f\t%.0f\n", read_bytes, write_bytes
   }
 ' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/net/dev "$@" 2>/dev/null
+__HUNG_PROCESS_GUARD__
 printf 'DISKS_BEGIN\n'
+if [ "$disk_hung" -gt 0 ]; then
+  printf 'DISKS_HUNG\t%s\n' "$disk_hung"
+else
 df -PTk 2>/dev/null | awk '
   NR > 1 {
     # Locate the type and numeric columns without splitting the source or
     # mount point: both can contain spaces, including repeated spaces.
-    if (!match($0, /[[:space:]]+[^[:space:]]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+%[[:space:]]+/)) next
+    if (!match($0, /[ \t]+[^ \t]+[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+[0-9]+%[ \t]+/)) next
     source = substr($0, 1, RSTART - 1)
     mountpoint = substr($0, RSTART + RLENGTH)
     split(substr($0, RSTART, RLENGTH), columns, " ")
@@ -190,10 +279,13 @@ df -PTk 2>/dev/null | awk '
       printf "DISK\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", source, type, columns[2], columns[3], columns[4], pct, mountpoint
   }
 '
+fi
 printf 'DISKS_END\n'
 printf 'GPUS_BEGIN\n'
 gpu_health_inline=0
-if command -v nvidia-smi >/dev/null 2>&1; then
+if [ "$gpu_hung" -gt 0 ]; then
+  printf 'GPU_HUNG\t%s\n' "$gpu_hung"
+elif command -v nvidia-smi >/dev/null 2>&1; then
   combined_output=$(nvidia-smi --query-gpu=__COMBINED_QUERY__ --format=csv,noheader,nounits 2>/dev/null)
   combined_status=$?
   if [ "$combined_status" -eq 0 ]; then
@@ -217,6 +309,8 @@ process_output=''
 process_status=0
 if [ "$process_enabled" -eq 0 ]; then
   printf 'PROCESS_SKIPPED\n'
+elif [ "$gpu_hung" -gt 0 ]; then
+  printf 'PROCESS_ERROR\thung\n'
 elif command -v nvidia-smi >/dev/null 2>&1; then
   process_output=$(nvidia-smi --query-compute-apps=__PROCESS_QUERY__ --format=csv,noheader,nounits 2>/dev/null)
   process_status=$?
@@ -237,7 +331,7 @@ if [ "$workload_tier" -ge 1 ] && [ "$process_status" -eq 0 ] && [ -n "$process_o
   process_pids=$(printf '%s\n' "$process_output" | awk -F, '
     {
       pid=$2
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", pid)
+      gsub(/^[ \t]+|[ \t]+$/, "", pid)
       if (pid ~ /^[0-9]+$/ && !seen[pid]++ && ++emitted <= 512) print pid
     }
   ')
@@ -270,7 +364,7 @@ __CONTAINER_IDENTITY_AWK__
         environment=""
       }
       function clean(value) {
-        gsub(/[[:cntrl:]]/, " ", value)
+        gsub(/[\001-\037\177]/, " ", value)
         return substr(value, 1, 255)
       }
       {
@@ -394,6 +488,7 @@ def _render_remote_script(workload_tier: int, process_enabled: bool) -> str:
         .replace("__WORKLOAD_TIER__", str(workload_tier))
         .replace("__PROCESS_ENABLED__", "1" if process_enabled else "0")
         .replace("__CONTAINER_IDENTITY_AWK__", _CONTAINER_IDENTITY_AWK)
+        .replace("__HUNG_PROCESS_GUARD__", _HUNG_PROCESS_GUARD.strip("\n"))
         .replace("__PROTOCOL_VERSION__", _PROTOCOL_VERSION)
     )
 

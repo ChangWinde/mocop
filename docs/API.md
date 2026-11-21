@@ -16,7 +16,7 @@ the tier its handler enforces. Field-level examples are maintained by hand.
 - **Schema version:** `1` (`schemaVersion` in `GET /api/meta`) tracks the
   shape of the payloads themselves.
 - **Collection protocol:** the bundled remote script and parser accept only
-  current `MONITOR_V8`. It is an internal single-version contract, distinct
+  current `MONITOR_V9`. It is an internal single-version contract, distinct
   from the HTTP API/schema versions; see [ADR-0016](adr/0016-single-version-protocol-and-agent-api.md).
 - **Deprecation policy:** a deprecated endpoint keeps working for at least
   two minor releases and answers with a `Deprecation: true` response header.
@@ -519,7 +519,7 @@ this table aligned.
 | `SSH connection was refused` | TCP connection refused. |
 | `SSH connection timed out` | TCP connection timed out. |
 | `SSH network is unreachable` | No route to host or network unreachable. |
-| `SSH connection closed during key exchange` | The peer closed or reset the connection before the banner or key exchange completed (overloaded `sshd`, `MaxStartups`, a ban, or a proxy). |
+| `SSH connection closed during key exchange` | The peer closed or reset the connection before the banner or key exchange completed, or sent no banner within the connect timeout (overloaded `sshd`, `MaxStartups`, a ban, or a proxy). |
 | `SSH transport stopped responding` | Keepalives went unanswered. |
 | `SSH connection failed` | Any other SSH client failure. |
 | `SSH produced no output before the collection timeout` | The session opened but the remote never wrote a byte. |
@@ -535,6 +535,7 @@ this table aligned.
 | `nvidia-smi is unavailable` | The host is `online` but has no `nvidia-smi`; system metrics remain valid. |
 | `nvidia-smi query failed` | `nvidia-smi` exited non-zero; system metrics remain valid. |
 | `nvidia-smi output was malformed` | `nvidia-smi` output did not parse; system metrics remain valid. |
+| `nvidia-smi is stuck in the NVIDIA driver` | An earlier `nvidia-smi` has stayed in uninterruptible sleep (state D) inside a hung NVIDIA driver, so the probe started no NVIDIA command; system metrics remain valid. Only a reboot ends the stuck processes. |
 
 `servers[].system` (snake_case): `hostname`, `uptime_seconds`, `load_1m`,
 `load_5m`, `load_15m`, `cpu_cores`, `cpu_usage_pct` (null on first sample),
@@ -543,7 +544,9 @@ this table aligned.
 `network_rx_bps`, `network_tx_bps`, `disk_read_bps`, `disk_write_bps`
 (rates null on first sample), `disks[]` with `device`,
 `filesystem_type`, `mountpoint`, `total_mib`, `used_mib`, `available_mib`,
-`used_pct`, and `pressure` (null on kernels without PSI) with per-resource
+`used_pct`, `disks_hung` (the number of `df` processes stuck on a hung
+filesystem; when above 0 the disk pass was skipped, so `disks[]` is empty and
+the disk totals are 0), and `pressure` (null on kernels without PSI) with per-resource
 `cpu`/`memory`/`io` objects of `some_avg10`, `some_avg60`, `full_avg10`,
 `full_avg60` — the percentage of the trailing 10/60 seconds during which at
 least one task (`some`) or every task (`full`, nullable) was stalled on
@@ -868,7 +871,7 @@ Response fields:
 |---|---|---|
 | `host` | string | Affected host alias. |
 | `conditionKey` | string | Stable key, e.g. `cpu`, `disk:/dev/sda1:/`, `gpu_temperature:<uuid>`. |
-| `category` | string | `connectivity`, `cpu`, `memory`, `swap`, `disk`, `pressure`, `gpu_availability`, `gpu_count`, `gpu_processes`, `gpu_temperature`, `gpu_memory`, `gpu_idle_memory`, `gpu_ecc`, `gpu_memory_repair`, `gpu_slowdown`. |
+| `category` | string | `connectivity`, `cpu`, `memory`, `swap`, `disk`, `disk_availability`, `pressure`, `gpu_availability`, `gpu_count`, `gpu_processes`, `gpu_temperature`, `gpu_memory`, `gpu_idle_memory`, `gpu_ecc`, `gpu_memory_repair`, `gpu_slowdown`. |
 | `resource` | string | Human-readable subject, e.g. `GPU 3 VRAM`. |
 | `severity` | string | `warning` or `critical`. |
 | `value`, `threshold` | number \| null | Measured value and configured threshold, when numeric. |

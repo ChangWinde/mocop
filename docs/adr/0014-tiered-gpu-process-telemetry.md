@@ -74,4 +74,4 @@ queries and complete probe failures invalidate its comparison baseline.
 
 > **Update:** the compatibility statement above records the historical decision and
 > is superseded by [ADR-0016](0016-single-version-protocol-and-agent-api.md). The
-> parser now accepts only current `MONITOR_V8`.
+> parser now accepts only current `MONITOR_V9`.

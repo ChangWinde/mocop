@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime
 
 from .config import IncidentConfig, IncidentScopeOverrideConfig, ThresholdConfig
+from .incident_availability import GPU_QUERY_FAILURE_MESSAGES, availability_conditions
 from .incident_domains import condition_domains, telemetry_unknown
 from .incident_health import gpu_health_conditions
 from .incident_rules import event_id_floor, holds_severity, sustained
@@ -18,18 +19,6 @@ from .incident_types import (
 )
 from .models import ProbeResult, epoch_seconds
 
-# Every probe message that means "this sample cannot speak for the GPUs" must
-# be listed here. A malformed nvidia-smi payload degrades to zero GPUs with
-# this message; omitting it would let the empty inventory look authoritative
-# and, via the absence-recovery rule, silently resolve every per-GPU hardware
-# incident without opening a availability alert.
-_GPU_QUERY_FAILURE_MESSAGES = frozenset(
-    {
-        "nvidia-smi is unavailable",
-        "nvidia-smi query failed",
-        "nvidia-smi output was malformed",
-    }
-)
 # Pending condition: latest reading, streak count and start, severity run count/start.
 _Candidate = tuple[IncidentCondition, int, str, int, str]
 
@@ -159,21 +148,8 @@ class ThresholdIncidentPolicy:
                 )
             }
 
-        conditions: dict[str, IncidentCondition] = {}
-        gpu_query_failed = result.message in _GPU_QUERY_FAILURE_MESSAGES
-        if gpu_query_failed:
-            conditions["gpu_availability"] = IncidentCondition(
-                key="gpu_availability",
-                category="gpu_availability",
-                resource="NVIDIA telemetry",
-                severity="critical",
-                value=None,
-                threshold=None,
-                observed_at=result.observed_at,
-                detail=result.message,
-                open_after_cycles=1,
-                recovery_cycles=self._incidents.recovery_cycles,
-            )
+        conditions = availability_conditions(result, self._incidents.recovery_cycles)
+        gpu_query_failed = "gpu_availability" in conditions
         expected_count = self._expected_gpu_counts.get(result.host)
         if (
             not gpu_query_failed
@@ -382,7 +358,9 @@ class ThresholdIncidentPolicy:
                     domains.add("pressure:memory")
                 if result.system.pressure.io is not None:
                     domains.add("pressure:io")
-        if result.message not in _GPU_QUERY_FAILURE_MESSAGES:
+        if result.system is not None and not result.system.disks_hung:
+            domains.add("disks")
+        if result.message not in GPU_QUERY_FAILURE_MESSAGES:
             domains.add("gpu_query")
             domains.add("gpu_inventory")
             if all(gpu.processes_sampled for gpu in result.gpus):

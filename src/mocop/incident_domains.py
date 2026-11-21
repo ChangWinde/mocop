@@ -9,7 +9,9 @@ domains are among them.
 
 from __future__ import annotations
 
-_SYSTEM_CATEGORIES = frozenset({"cpu", "memory", "swap", "disk", "pressure"})
+_SYSTEM_CATEGORIES = frozenset(
+    {"cpu", "memory", "swap", "disk", "disk_availability", "pressure"}
+)
 _GPU_HEALTH_CATEGORIES = frozenset({"gpu_ecc", "gpu_memory_repair", "gpu_slowdown"})
 
 
@@ -19,6 +21,9 @@ def condition_domains(category: str, key: str) -> tuple[str, ...]:
         return ("system", "system_cpu")
     if category == "pressure":
         return ("system", key)
+    if category == "disk":
+        # A sample whose disk pass was skipped (a stuck df) is blind to disks.
+        return ("system", "disks")
     if category in _SYSTEM_CATEGORIES:
         return ("system",)
     if category in {"gpu_availability", "gpu_count"}:

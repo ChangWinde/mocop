@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import csv
-import io
-import math
 import os
 import subprocess
 import threading
@@ -23,6 +20,16 @@ from .models import (
     SystemMetrics,
     utc_now,
 )
+from .nvidia_csv import (
+    _UNAVAILABLE,
+    _csv_rows,
+    _finite_number,
+    _required_number,
+    parse_nvidia_combined_csv,
+    parse_nvidia_health_csv,
+    parse_nvidia_processes_csv,
+    parse_nvidia_smi_csv,
+)
 from .probe_process import (
     _ActiveProcessRegistry,
     _ProcessCancelled,
@@ -34,9 +41,7 @@ from .probe_process import (
 )
 from .remote_script import (
     _COMBINED_QUERY_FIELDS,
-    _HEALTH_QUERY_FIELDS,
-    _PROCESS_QUERY_FIELDS,
-    _QUERY_FIELDS,
+    _PROTOCOL_PREFIX,
     _SUPPORTED_PROTOCOL_VERSIONS,
     _remote_script,
 )
@@ -47,14 +52,12 @@ from .ssh_failures import (
 )
 from .workloads import parse_workload_records
 
-_UNAVAILABLE = {"", "n/a", "[n/a]", "not supported", "[not supported]"}
-_MAX_GPUS_PER_HOST = 256
 _MAX_DISKS_PER_HOST = 1_024
+_MAX_PREAMBLE_LINES = 64
 # Single-file mounts injected by Docker, containerd and Kubernetes.
 _CONTAINER_FILE_BIND_MOUNTS = frozenset(
     {"/etc/hosts", "/etc/hostname", "/etc/resolv.conf"}
 )
-_MAX_PROCESSES_PER_HOST = 4_096
 
 
 class ResourceProbe(Protocol):
@@ -87,156 +90,6 @@ def ssh_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment["LC_ALL"] = "C"
     return environment
-
-
-def _finite_number(normalized: str) -> float | None:
-    try:
-        result = float(normalized)
-    except ValueError:
-        return None
-    return result if math.isfinite(result) else None
-
-
-def _number(value: str) -> float | None:
-    normalized = value.strip().lower()
-    return None if normalized in _UNAVAILABLE else _finite_number(normalized)
-
-
-def _required_number(value: str, label: str, minimum: float = 0) -> float:
-    result = _number(value)
-    if result is None or result < minimum:
-        raise ValueError(f"invalid {label}")
-    return result
-
-
-def _optional_number(
-    value: str,
-    label: str,
-    *,
-    minimum: float = 0,
-    maximum: float | None = None,
-) -> float | None:
-    normalized = value.strip().lower()
-    if normalized in _UNAVAILABLE:
-        return None
-    result = _finite_number(normalized)
-    if result is None or result < minimum or (maximum is not None and result > maximum):
-        raise ValueError(f"nvidia-smi returned an invalid {label}")
-    return result
-
-
-def _bounded_text(value: str, label: str, maximum: int, fallback: str = "") -> str:
-    result = value.strip()
-    if len(result) > maximum:
-        raise ValueError(f"nvidia-smi returned an oversized {label}")
-    return result or fallback
-
-
-def _parse_nvidia_smi_row(row: list[str], row_number: int) -> GpuMetrics:
-    if len(row) != len(_QUERY_FIELDS):
-        raise ValueError(
-            f"nvidia-smi returned {len(row)} columns on row {row_number}; "
-            f"expected {len(_QUERY_FIELDS)}"
-        )
-    index = _number(row[0])
-    if index is None or not index.is_integer() or not 0 <= index <= 65_535:
-        raise ValueError(
-            f"nvidia-smi returned an invalid GPU index on row {row_number}"
-        )
-    return GpuMetrics(
-        index=int(index),
-        uuid=_bounded_text(row[1], "GPU UUID", 128),
-        name=_bounded_text(row[2], "GPU name", 256, fallback="Unknown NVIDIA GPU"),
-        driver_version=_bounded_text(row[3], "driver version", 64),
-        pstate=(
-            None
-            if row[4].strip().lower() in _UNAVAILABLE
-            else _bounded_text(row[4], "performance state", 32)
-        ),
-        temperature_c=_optional_number(
-            row[5], "GPU temperature", minimum=-100, maximum=250
-        ),
-        utilization_gpu_pct=_optional_number(row[6], "GPU utilization", maximum=100),
-        utilization_memory_pct=_optional_number(
-            row[7], "memory utilization", maximum=100
-        ),
-        memory_total_mib=_optional_number(
-            row[8], "total GPU memory", maximum=1_000_000_000
-        ),
-        memory_used_mib=_optional_number(
-            row[9], "used GPU memory", maximum=1_000_000_000
-        ),
-        memory_free_mib=_optional_number(
-            row[10], "free GPU memory", maximum=1_000_000_000
-        ),
-        power_draw_w=_optional_number(row[11], "GPU power draw", maximum=1_000_000),
-        power_limit_w=_optional_number(row[12], "GPU power limit", maximum=1_000_000),
-    )
-
-
-def _csv_rows(payload: str):
-    """Yield CSV rows while mapping csv-module errors to protocol errors.
-
-    A NUL byte or an oversized field raises ``csv.Error``, which is not a
-    ``ValueError`` and would otherwise escape the payload classification.
-    """
-    try:
-        yield from csv.reader(io.StringIO(payload), skipinitialspace=True)
-    except csv.Error as exc:
-        raise ValueError(f"nvidia-smi returned unparseable CSV: {exc}") from exc
-
-
-def parse_nvidia_smi_csv(payload: str) -> tuple[GpuMetrics, ...]:
-    rows = _csv_rows(payload)
-    gpus: list[GpuMetrics] = []
-    for row_number, row in enumerate(rows, start=1):
-        if not row or not any(cell.strip() for cell in row):
-            continue
-        if len(gpus) >= _MAX_GPUS_PER_HOST:
-            raise ValueError("nvidia-smi returned too many GPU records")
-        gpu = _parse_nvidia_smi_row(row, row_number)
-        if any(existing.index == gpu.index for existing in gpus):
-            raise ValueError("nvidia-smi returned duplicate GPU indices")
-        gpus.append(gpu)
-    return tuple(gpus)
-
-
-def parse_nvidia_processes_csv(payload: str) -> dict[str, tuple[GpuProcess, ...]]:
-    rows = _csv_rows(payload)
-    processes: dict[str, list[GpuProcess]] = {}
-    count = 0
-    for row_number, row in enumerate(rows, start=1):
-        if not row or not any(cell.strip() for cell in row):
-            continue
-        if count >= _MAX_PROCESSES_PER_HOST:
-            raise ValueError("nvidia-smi returned too many GPU process records")
-        if len(row) != len(_PROCESS_QUERY_FIELDS):
-            raise ValueError(
-                f"nvidia-smi returned {len(row)} process columns on row {row_number}; "
-                f"expected {len(_PROCESS_QUERY_FIELDS)}"
-            )
-        gpu_uuid = _bounded_text(row[0], "process GPU UUID", 128)
-        pid = _number(row[1])
-        if pid is None or not pid.is_integer() or not 1 <= pid <= 2_147_483_647:
-            raise ValueError(
-                f"nvidia-smi returned an invalid process PID on row {row_number}"
-            )
-        process = GpuProcess(
-            pid=int(pid),
-            name=_bounded_text(
-                row[2], "GPU process name", 512, fallback="unknown process"
-            ),
-            used_memory_mib=_optional_number(
-                row[3], "GPU process memory", maximum=1_000_000_000
-            ),
-        )
-        gpu_processes = processes.get(gpu_uuid)
-        if gpu_processes is None:
-            gpu_processes = []
-            processes[gpu_uuid] = gpu_processes
-        gpu_processes.append(process)
-        count += 1
-    return {gpu_uuid: tuple(items) for gpu_uuid, items in processes.items()}
 
 
 _PSI_RESOURCES = ("cpu", "memory", "io")
@@ -280,98 +133,6 @@ def _parse_psi_records(rows: list[list[str]]) -> PressureStallMetrics | None:
     )
 
 
-def _optional_health_boolean(value: str) -> bool | None:
-    normalized = value.strip().lower()
-    if normalized in _UNAVAILABLE:
-        return None
-    if normalized in {"yes", "active", "enabled"}:
-        return True
-    if normalized in {"no", "not active", "disabled"}:
-        return False
-    raise ValueError("nvidia-smi returned an invalid health boolean")
-
-
-def _parse_nvidia_health_row(
-    row: list[str], row_number: int
-) -> tuple[str, GpuHealthMetrics]:
-    if len(row) != len(_HEALTH_QUERY_FIELDS):
-        raise ValueError(
-            f"nvidia-smi returned {len(row)} health columns on row {row_number}; "
-            f"expected {len(_HEALTH_QUERY_FIELDS)}"
-        )
-    gpu_uuid = _bounded_text(row[0], "health GPU UUID", 128)
-    ecc_value = _optional_number(
-        row[1], "uncorrected ECC count", maximum=9_007_199_254_740_991
-    )
-    if ecc_value is not None and not ecc_value.is_integer():
-        raise ValueError("nvidia-smi returned an invalid uncorrected ECC count")
-    mig_value = (
-        None
-        if row[6].strip().lower() in _UNAVAILABLE
-        else _bounded_text(row[6], "MIG mode", 64)
-    )
-    return gpu_uuid, GpuHealthMetrics(
-        ecc_uncorrected_volatile=int(ecc_value) if ecc_value is not None else None,
-        retired_pages_pending=_optional_health_boolean(row[2]),
-        remapped_rows_pending=_optional_health_boolean(row[3]),
-        thermal_slowdown=_optional_health_boolean(row[4]),
-        power_brake_slowdown=_optional_health_boolean(row[5]),
-        mig_mode=mig_value,
-    )
-
-
-def parse_nvidia_health_csv(payload: str) -> dict[str, GpuHealthMetrics]:
-    rows = _csv_rows(payload)
-    health: dict[str, GpuHealthMetrics] = {}
-    for row_number, row in enumerate(rows, start=1):
-        if not row or not any(cell.strip() for cell in row):
-            continue
-        if len(health) >= _MAX_GPUS_PER_HOST:
-            raise ValueError("nvidia-smi returned too many GPU health records")
-        gpu_uuid, metrics = _parse_nvidia_health_row(row, row_number)
-        if gpu_uuid in health:
-            raise ValueError("nvidia-smi returned duplicate GPU health records")
-        health[gpu_uuid] = metrics
-    return health
-
-
-def parse_nvidia_combined_csv(
-    payload: str,
-) -> tuple[tuple[GpuMetrics, ...], dict[str, GpuHealthMetrics]]:
-    """Parse one query containing base GPU and additive health fields."""
-    gpus: list[GpuMetrics] = []
-    health: dict[str, GpuHealthMetrics] = {}
-    health_valid = True
-    rows = _csv_rows(payload)
-    for row_number, row in enumerate(rows, start=1):
-        if not row or not any(cell.strip() for cell in row):
-            continue
-        if len(gpus) >= _MAX_GPUS_PER_HOST:
-            raise ValueError("nvidia-smi returned too many GPU records")
-        if len(row) != len(_COMBINED_QUERY_FIELDS):
-            raise ValueError(
-                f"nvidia-smi returned {len(row)} combined GPU columns on row "
-                f"{row_number}; expected {len(_COMBINED_QUERY_FIELDS)}"
-            )
-        gpu = _parse_nvidia_smi_row(row[: len(_QUERY_FIELDS)], row_number)
-        if any(existing.index == gpu.index for existing in gpus):
-            raise ValueError("nvidia-smi returned duplicate GPU indices")
-        gpus.append(gpu)
-        if health_valid:
-            try:
-                gpu_uuid, metrics = _parse_nvidia_health_row(
-                    [row[1], *row[len(_QUERY_FIELDS) :]], row_number
-                )
-                if gpu_uuid in health:
-                    raise ValueError("nvidia-smi returned duplicate GPU health records")
-                health[gpu_uuid] = metrics
-            except ValueError:
-                # Optional health fields cannot hide otherwise valid GPU metrics.
-                health.clear()
-                health_valid = False
-    return tuple(gpus), health
-
-
 @dataclass(frozen=True, slots=True)
 class _RawSystemSample:
     hostname: str
@@ -392,6 +153,8 @@ class _RawSystemSample:
     disk_write_bytes: float
     disks: tuple[DiskMetrics, ...]
     pressure: PressureStallMetrics | None
+    # Stuck df processes that made the script skip the disk pass; 0 otherwise.
+    disks_hung: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,11 +172,23 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
     # process name must stay inside their field instead of forging a record
     # separator or a premature section marker.
     lines = payload.split("\n")
-    if not lines or lines[0].strip() not in _SUPPORTED_PROTOCOL_VERSIONS:
+    # ssh starts "sh -s" through the login shell, whose startup files
+    # (~/.bashrc, ~/.zshenv) may print first; skip a bounded preamble.
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines[: _MAX_PREAMBLE_LINES + 1])
+            if line.strip().startswith(_PROTOCOL_PREFIX)
+        ),
+        None,
+    )
+    if start is None or lines[start].strip() not in _SUPPORTED_PROTOCOL_VERSIONS:
         raise ValueError("resource payload has an unknown protocol version")
+    lines = lines[start:]
 
     values: dict[str, list[str]] = {}
     disks: list[DiskMetrics] = []
+    disks_hung = 0
     psi_rows: list[list[str]] = []
     gpu_lines: list[str] = []
     process_lines: list[str] = []
@@ -532,6 +307,8 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
                 gpu_message = "nvidia-smi is unavailable"
             elif line.startswith("GPU_ERROR\t"):
                 gpu_message = "nvidia-smi query failed"
+            elif line.startswith("GPU_HUNG\t"):
+                gpu_message = "nvidia-smi is stuck in the NVIDIA driver"
             elif line.strip():
                 gpu_lines.append(line)
             continue
@@ -601,6 +378,11 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
                     used_pct=min(100, used_pct),
                 )
             )
+        elif in_disks and parts[0] == "DISKS_HUNG":
+            # The script skipped df because one is stuck on a hung mount.
+            if len(parts) != 2 or not parts[1].isdigit() or int(parts[1]) < 1:
+                raise ValueError("resource payload has an invalid DISKS_HUNG record")
+            disks_hung = int(parts[1])
         elif in_disks:
             # Rows the fixed script never emits (foreign columns, truncated
             # fields) are dropped; section markers still bound the payload.
@@ -680,7 +462,10 @@ def _parse_resource_payload(payload: str) -> _ParsedResource:
         disk_write_bytes=_required_number(values["IO"][1], "disk write bytes"),
         disks=tuple(disks),
         pressure=pressure,
+        disks_hung=disks_hung,
     )
+    if disks_hung and disks:
+        raise ValueError("resource payload has disk records beside DISKS_HUNG")
     gpu_payload = "\n".join(gpu_lines)
     first_gpu_row = next(
         (
@@ -942,6 +727,7 @@ class OpenSshLinuxResourceProbe:
             disk_write_bps=disk_write_bps,
             disks=raw.disks,
             pressure=raw.pressure,
+            disks_hung=raw.disks_hung,
         )
 
     def _processes_due(

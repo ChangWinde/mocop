@@ -15,8 +15,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import call, patch
 
-from mocop.config import HostOverrideConfig, MonitorConfig
-from mocop.models import GpuHealthMetrics, GpuMetrics
+from mocop.config import HostOverrideConfig, MonitorConfig, ThresholdConfig
+from mocop.incidents import ThresholdIncidentPolicy
+from mocop.models import GpuHealthMetrics, GpuMetrics, ProbeResult
 from mocop.probe import (
     OpenSshLinuxResourceProbe,
     _ActiveProcessRegistry,
@@ -33,7 +34,11 @@ from mocop.probe import (
     parse_nvidia_smi_csv,
     parse_workload_records,
 )
-from mocop.remote_script import _CONTAINER_IDENTITY_AWK
+from mocop.remote_script import (
+    _COMBINED_QUERY_FIELDS,
+    _CONTAINER_IDENTITY_AWK,
+    _PROCESS_QUERY_FIELDS,
+)
 from mocop.ssh_failures import classify_ssh_failure
 
 
@@ -61,7 +66,7 @@ def config() -> MonitorConfig:
 
 def resource_payload(
     *,
-    protocol: str = "MONITOR_V8",
+    protocol: str = "MONITOR_V9",
     cpu_total: int = 1000,
     cpu_idle: int = 800,
     rx_bytes: int = 10000,
@@ -76,6 +81,7 @@ def resource_payload(
     process_payload: str = "GPU-abc, 4242, python, 2048",
     health_payload: str = "GPU-abc, 0, No, No, Not Active, Not Active, Disabled",
     workload_payload: str = "",
+    disk_payload: str = "DISK\t/dev/sda1\text4\t104857600\t52428800\t52428800\t50\t/",
 ) -> str:
     psi_lines = f"{psi_payload}\n" if psi_payload else ""
     return (
@@ -90,7 +96,7 @@ def resource_payload(
         f"NET\t{rx_bytes}\t{tx_bytes}\n"
         f"IO\t{disk_read_bytes}\t{disk_write_bytes}\n"
         "DISKS_BEGIN\n"
-        "DISK\t/dev/sda1\text4\t104857600\t52428800\t52428800\t50\t/\n"
+        f"{disk_payload}\n"
         "DISKS_END\n"
         "GPUS_BEGIN\n"
         f"{gpu_payload}\n"
@@ -136,7 +142,7 @@ class ProbeTests(unittest.TestCase):
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = (
-            "MONITOR_V8\n"
+            "MONITOR_V9\n"
             + completed.stdout
             + "DISKS_BEGIN"
             + resource_payload().split("DISKS_BEGIN", 1)[1]
@@ -172,7 +178,10 @@ class ProbeTests(unittest.TestCase):
 
     def _disk_fixture_sample(self, fixture: str) -> _RawSystemSample:
         script = _remote_script("disabled", False)
-        fragment = script[script.index("df -PTk") : script.index("printf 'DISKS_END")]
+        # The df pass alone, without the hung-filesystem branch around it.
+        fragment = script[
+            script.index("df -PTk") : script.index("\nfi\nprintf 'DISKS_END")
+        ]
         fragment = fragment.replace("df -PTk 2>/dev/null", "cat")
         completed = subprocess.run(
             ["sh", "-c", fragment],
@@ -216,6 +225,26 @@ class ProbeTests(unittest.TestCase):
         self._assert_disk_spaces(
             "df-both", "archive:/training  data 2026", "/mnt/training  data 2026"
         )
+
+    def test_fixed_script_uses_no_posix_character_classes(self) -> None:
+        # mawk 1.3.3 (Ubuntu 18.04, Debian 10) reads [[:space:]] as a set of
+        # letters followed by a literal "]": every df row stopped matching, and
+        # [[:cntrl:]] no longer stripped control characters from hostnames.
+        for workloads in ("disabled", "identity", "auto"):
+            for processes in (False, True):
+                script = _remote_script(workloads, processes)
+                with self.subTest(workloads=workloads, processes=processes):
+                    self.assertNotIn("[[:", script)
+                    self.assertNotIn("[^[:", script)
+        sanitized = subprocess.run(
+            ["awk", r'{ gsub(/[\001-\037\177]/, " "); print }'],
+            input="control\x01node\x7f\n",
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        self.assertEqual(sanitized.stdout, "control node \n")
 
     def test_probe_disk_spaces_skips_nonnumeric_and_incomplete_rows(self) -> None:
         raw = self._disk_fixture_sample("df-invalid")
@@ -454,7 +483,7 @@ class ProbeTests(unittest.TestCase):
     def test_parses_an_explicitly_skipped_process_sample(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V8",
+                protocol="MONITOR_V9",
                 process_payload="PROCESS_SKIPPED",
             )
         )
@@ -466,7 +495,7 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflicting process telemetry"):
             parse_linux_resource_payload(
                 resource_payload(
-                    protocol="MONITOR_V8",
+                    protocol="MONITOR_V9",
                     process_payload=("PROCESS_SKIPPED\nGPU-abc, 4242, python, 2048"),
                 )
             )
@@ -475,6 +504,40 @@ class ProbeTests(unittest.TestCase):
         for retired in ("MONITOR_V7", "MONITOR_V6", "MONITOR_V5", "MONITOR_V4"):
             with self.assertRaisesRegex(ValueError, "protocol version"):
                 parse_linux_resource_payload(resource_payload(protocol=retired))
+
+    def test_shell_startup_output_before_the_protocol_line_is_skipped(self) -> None:
+        # ssh runs "sh -s" through the login shell, which sources ~/.bashrc
+        # (bash) or ~/.zshenv (zsh) first; a banner printed there used to
+        # reject every sample from that host as an unknown protocol version.
+        banner = "Welcome to node-a\r\nconda: base activated\n\n"
+        system, gpus, _message = parse_linux_resource_payload(
+            banner + resource_payload()
+        )
+        self.assertEqual((system.cpu_cores, len(gpus)), (8, 1))
+        # The preamble is bounded, and a retired version found after it is
+        # still rejected instead of being skipped as preamble.
+        for payload in (
+            "noise\n" * 65 + resource_payload(),
+            "noise\n" + resource_payload(protocol="MONITOR_V8"),
+            "noise only\n",
+        ):
+            with (
+                self.subTest(lines=payload.count("\n")),
+                self.assertRaisesRegex(ValueError, "protocol version"),
+            ):
+                parse_linux_resource_payload(payload)
+        # The real fixed script behind a shell that prints first still parses.
+        completed = _run_bounded_process(
+            ["sh", "-c", "echo 'Last login: never'; echo; exec sh -s"],
+            input_text=_remote_script("disabled", False),
+            timeout_seconds=10,
+            max_output_bytes=2_097_152,
+            environment={**os.environ, "LC_ALL": "C"},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertGreater(
+            _parse_resource_payload(completed.stdout).system.cpu_cores, 0
+        )
 
     def test_maps_gpu_processes_to_read_only_slurm_and_kubernetes_metadata(
         self,
@@ -627,7 +690,7 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("ServerAliveCountMax=2", arguments)
         self.assertEqual(arguments[arguments.index("--") + 1], "gpu-1")
         self.assertEqual(arguments[-2:], ["sh", "-s"])
-        self.assertIn("MONITOR_V8", run.call_args.kwargs["input_text"])
+        self.assertIn("MONITOR_V9", run.call_args.kwargs["input_text"])
         self.assertIn("--query-compute-apps", run.call_args.kwargs["input_text"])
         self.assertIn(
             "ecc.errors.uncorrected.volatile.total",
@@ -826,12 +889,12 @@ class ProbeTests(unittest.TestCase):
             if "process_enabled=1" in script:
                 pid = next(due_processes)
                 payload = resource_payload(
-                    protocol="MONITOR_V8",
+                    protocol="MONITOR_V9",
                     process_payload=f"GPU-abc, {pid}, python, 2048",
                 )
             else:
                 payload = resource_payload(
-                    protocol="MONITOR_V8",
+                    protocol="MONITOR_V9",
                     process_payload="PROCESS_SKIPPED",
                 )
             return _BoundedProcessResult(0, payload, "")
@@ -894,13 +957,13 @@ class ProbeTests(unittest.TestCase):
         run.side_effect = (
             _BoundedProcessResult(
                 0,
-                resource_payload(protocol="MONITOR_V8"),
+                resource_payload(protocol="MONITOR_V9"),
                 "",
             ),
             _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V8",
+                    protocol="MONITOR_V9",
                     process_payload="PROCESS_ERROR\t1",
                 ),
                 "",
@@ -908,7 +971,7 @@ class ProbeTests(unittest.TestCase):
             _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V8",
+                    protocol="MONITOR_V9",
                     process_payload="GPU-abc, 4343, python, 1024",
                 ),
                 "",
@@ -1068,6 +1131,28 @@ class ProbeTests(unittest.TestCase):
                 self.assertNotIn("192.0.2.9", message)
                 self.assertNotIn("user@", message)
 
+    def test_banner_timeout_is_not_reported_as_a_tcp_timeout(self) -> None:
+        # The TCP connection was accepted, but sshd sent no banner within
+        # ConnectTimeout: an overloaded or wedged node (or the proxy leg in
+        # front of it), never the routing or firewall problem that a TCP
+        # connect timeout points the operator at.
+        for stderr in (
+            "Connection timed out during banner exchange",
+            "Connection timed out during banner exchange\n"
+            "Connection to UNKNOWN port 65535 timed out",
+        ):
+            with self.subTest(stderr=stderr.splitlines()[-1]):
+                self.assertEqual(
+                    classify_ssh_failure(stderr),
+                    "SSH connection closed during key exchange",
+                )
+        self.assertEqual(
+            classify_ssh_failure(
+                "ssh: connect to host 192.0.2.9 port 22: Connection timed out"
+            ),
+            "SSH connection timed out",
+        )
+
     @patch("mocop.probe.time.monotonic", side_effect=(0.0, 1.0, 2.0))
     @patch("mocop.probe._run_bounded_process")
     def test_retries_stale_multiplexed_connection_within_total_timeout(
@@ -1119,7 +1204,7 @@ class ProbeTests(unittest.TestCase):
             return _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V8",
+                    protocol="MONITOR_V9",
                     gpu_payload=idle_gpu,
                     process_payload="",
                 ),
@@ -1158,7 +1243,7 @@ class ProbeTests(unittest.TestCase):
             return _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V8",
+                    protocol="MONITOR_V9",
                     gpu_payload=next(payloads),
                     process_payload="",
                 ),
@@ -1215,7 +1300,7 @@ class ProbeTests(unittest.TestCase):
         )
 
         run.side_effect = subprocess.TimeoutExpired(
-            ["ssh"], 12, output=b"MONITOR_V8\nHOST\tnode-a\n"
+            ["ssh"], 12, output=b"MONITOR_V9\nHOST\tnode-a\n"
         )
         stalled = OpenSshLinuxResourceProbe().probe("gpu-1", config())
         # Partial output proves the transport reached the host, so a remote
@@ -1645,7 +1730,7 @@ class ProbeTests(unittest.TestCase):
             return _BoundedProcessResult(
                 0,
                 resource_payload(
-                    protocol="MONITOR_V8",
+                    protocol="MONITOR_V9",
                     gpu_payload=next(payloads),
                     process_payload="",
                 ),
@@ -1721,7 +1806,7 @@ class ProbeTests(unittest.TestCase):
             )
             _, gpus, _ = parse_linux_resource_payload(
                 resource_payload(
-                    protocol="MONITOR_V8",
+                    protocol="MONITOR_V9",
                     gpu_payload=gpu,
                     process_payload="",
                 )
@@ -1741,7 +1826,7 @@ class ProbeTests(unittest.TestCase):
         # view while the core sample stays online.
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V8",
+                protocol="MONITOR_V9",
                 process_payload='GPU-abc, 4242, "' + "x" * 200_000 + '", 2048',
             )
         )
@@ -1761,7 +1846,7 @@ class ProbeTests(unittest.TestCase):
         # A container's overlay root is real capacity; the single-file mounts
         # a runtime injects report the host's filesystem and must not appear.
         payload = resource_payload(
-            protocol="MONITOR_V8",
+            protocol="MONITOR_V9",
             process_payload="",
         ).replace(
             "DISK\t/dev/sda1\text4\t104857600\t52428800\t52428800\t50\t/\n",
@@ -1877,7 +1962,7 @@ class ProbeTests(unittest.TestCase):
     def test_malformed_process_row_keeps_the_core_sample_online(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V8",
+                protocol="MONITOR_V9",
                 process_payload="GPU-abc, 0, python, 10",
             )
         )
@@ -2021,7 +2106,7 @@ class ProbeTests(unittest.TestCase):
     def test_malformed_workload_row_keeps_processes(self) -> None:
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V8",
+                protocol="MONITOR_V9",
                 workload_payload="WORKLOAD\t4242\tbad-kind\t1\tx\troot\t\t",
             )
         )
@@ -2038,7 +2123,7 @@ class ProbeTests(unittest.TestCase):
         )
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V8",
+                protocol="MONITOR_V9",
                 gpu_payload=two,
                 process_payload="GPU-dup, 4242, python, 2048",
                 health_payload="",
@@ -2056,7 +2141,7 @@ class ProbeTests(unittest.TestCase):
         )
         _, gpus, _ = parse_linux_resource_payload(
             resource_payload(
-                protocol="MONITOR_V8",
+                protocol="MONITOR_V9",
                 gpu_payload=gpu,
                 process_payload="[N/A], 4242, python, 2048",
                 health_payload="",
@@ -2205,6 +2290,297 @@ class ProbeTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         self.assertLessEqual(started, now)
         self.assertGreater(started, now - timedelta(days=1))
+
+
+HUNG_DRIVER_MESSAGE = "nvidia-smi is stuck in the NVIDIA driver"
+COMBINED_QUERY = "--query-gpu=" + ",".join(_COMBINED_QUERY_FIELDS)
+PROCESS_QUERY = "--query-compute-apps=" + ",".join(_PROCESS_QUERY_FIELDS)
+
+
+def fake_process(
+    comm: str, state: str, *, start_ticks: int, switches: int = 7
+) -> dict[str, str]:
+    """One fake /proc/<pid> entry: comm, stat (starttime is field 22), status."""
+    return {
+        "comm": f"{comm}\n",
+        "stat": (
+            f"PID ({comm}) {state} 1 1 1 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 "
+            f"{start_ticks} 1000 100 18446744073709551615\n"
+        ),
+        "status": (
+            f"Name:\t{comm}\nState:\t{state}\n"
+            f"voluntary_ctxt_switches:\t{switches}\n"
+            "nonvoluntary_ctxt_switches:\t3\n"
+        ),
+    }
+
+
+FAKE_GPU_ROW = (
+    "0, GPU-abc, NVIDIA A100, 550.54, P0, 61, 93, 34, 81920, 40960, 40960, "
+    "287.5, 400, 0, No, No, Not Active, Not Active, Disabled"
+)
+
+
+def run_with_fake_proc(
+    script: str,
+    processes: dict[int, dict[str, str]],
+    *,
+    during_recheck: str = "",
+    df_calls: list[str] | None = None,
+) -> tuple[_BoundedProcessResult, list[str]]:
+    """Run a fixed script whose /proc process scan and uptime read use a fake tree.
+
+    Uptime is 5000 s, so a start of 100 ticks is an hour-old process. A fake
+    nvidia-smi records every invocation. The recheck waits through ``sleep``;
+    this stand-in returns at once after running ``during_recheck`` inside the
+    fake tree, the way the tree could change while a second elapses. With
+    ``df_calls``, a fake df reports one filesystem and each run is appended.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        proc = root / "proc"
+        tools = root / "bin"
+        proc.mkdir()
+        tools.mkdir()
+        (proc / "uptime").write_text("5000.00 9000.00\n", encoding="utf-8")
+        for pid, files in processes.items():
+            (proc / str(pid)).mkdir()
+            for name, content in files.items():
+                text = content.replace("PID", str(pid), 1)
+                (proc / str(pid) / name).write_text(text, encoding="utf-8")
+        log = root / "nvidia-smi.log"
+        (tools / "nvidia-smi").write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$1\" >> '{log}'\n"
+            'case "$1" in\n'
+            f"  --query-gpu=*) printf '%s\\n' '{FAKE_GPU_ROW}' ;;\n"
+            "  --query-compute-apps=*) printf '%s\\n' 'GPU-abc, 4242, python, 2048' ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (tools / "sleep").write_text(
+            f"#!/bin/sh\ncd '{proc}' || exit 1\n{during_recheck}\n",
+            encoding="utf-8",
+        )
+        df_log = root / "df.log"
+        if df_calls is not None:
+            (tools / "df").write_text(
+                f"#!/bin/sh\nprintf 'df\\n' >> '{df_log}'\n"
+                "printf '%s\\n' 'Filesystem Type 1024-blocks Used Available "
+                "Capacity Mounted on' '/dev/sda1 ext4 100 50 50 50% /'\n",
+                encoding="utf-8",
+            )
+            (tools / "df").chmod(0o700)
+        for tool in ("nvidia-smi", "sleep"):
+            (tools / tool).chmod(0o700)
+        rendered = script.replace("/proc/[0-9]*/", f"{proc}/[0-9]*/").replace(
+            "/proc/uptime", f"{proc}/uptime"
+        )
+        completed = _run_bounded_process(
+            ["sh", "-s"],
+            input_text=rendered,
+            timeout_seconds=10,
+            max_output_bytes=2_097_152,
+            environment={
+                **os.environ,
+                "LC_ALL": "C",
+                "PATH": f"{tools}:{os.environ['PATH']}",
+            },
+        )
+        calls = log.read_text(encoding="utf-8").split() if log.exists() else []
+        if df_calls is not None and df_log.exists():
+            df_calls.extend(df_log.read_text(encoding="utf-8").split())
+    return completed, calls
+
+
+class HungNvidiaDriverTests(unittest.TestCase):
+    """A hung NVIDIA driver leaves nvidia-smi in uninterruptible sleep (state D).
+
+    SIGKILL cannot end such a process, so every further query adds one more
+    stuck process and the load climbs without bound. The fixed script must
+    detect a stuck nvidia-smi from /proc and start no NVIDIA command at all.
+    """
+
+    def run_script(
+        self,
+        processes: dict[int, dict[str, str]],
+        *,
+        during_recheck: str = "",
+    ) -> tuple[str, list[str]]:
+        completed, calls = run_with_fake_proc(
+            _remote_script("disabled", True),
+            processes,
+            during_recheck=during_recheck,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout, calls
+
+    def test_stuck_nvidia_smi_skips_every_nvidia_query(self) -> None:
+        stdout, calls = self.run_script(
+            {4242: fake_process("nvidia-smi", "D", start_ticks=100)}
+        )
+
+        self.assertEqual(calls, [])
+        self.assertIn("GPU_HUNG\t1\n", stdout)
+        parsed = _parse_resource_payload(stdout)
+        self.assertEqual(parsed.gpus, ())
+        self.assertEqual(parsed.gpu_message, HUNG_DRIVER_MESSAGE)
+        self.assertFalse(parsed.processes_available)
+        self.assertGreater(parsed.system.cpu_cores, 0)
+
+    def test_counts_only_genuinely_stuck_nvidia_smi_processes(self) -> None:
+        # The comm field may hold spaces and parentheses: a 15-byte name that
+        # imitates "(nvidia-smi) D" must not be read as a stuck nvidia-smi.
+        stdout, calls = self.run_script(
+            {
+                11: fake_process("nvidia-smi", "D", start_ticks=100),
+                12: fake_process("nvidia-smi", "D", start_ticks=200),
+                13: fake_process("nvidia-smi) D x", "S", start_ticks=100),
+                17: fake_process("nvidia-smi\n) D", "S", start_ticks=100),
+                14: fake_process("nvidia-smi", "S", start_ticks=100),
+                15: fake_process("nvidia-smi-x", "D", start_ticks=100),
+                16: fake_process("jbd2/nvme0n1p2", "D", start_ticks=100),
+            }
+        )
+
+        self.assertEqual(calls, [])
+        self.assertIn("GPU_HUNG\t2\n", stdout)
+
+    def test_healthy_or_progressing_queries_are_not_stuck(self) -> None:
+        # A concurrent query is briefly in state D during a driver call. Too
+        # young, rescheduled during the one-second recheck, or gone by then:
+        # none of them may suppress GPU telemetry or open a false incident.
+        cases = {
+            "younger than ten seconds": (
+                {21: fake_process("nvidia-smi", "D", start_ticks=499_500)},
+                "",
+            ),
+            "rescheduled during the recheck": (
+                {22: fake_process("nvidia-smi", "D", start_ticks=100)},
+                "sed 's/^voluntary_ctxt_switches:.*/voluntary_ctxt_switches:\t8/'"
+                " 22/status > 22/next && mv 22/next 22/status",
+            ),
+            "exited before the recheck": (
+                {23: fake_process("nvidia-smi", "D", start_ticks=100)},
+                "rm -r 23",
+            ),
+            "pid reused by a new process": (
+                {24: fake_process("nvidia-smi", "D", start_ticks=100)},
+                "sed 's/ 100 1000 / 300 1000 /' 24/stat > 24/next && mv 24/next 24/stat",
+            ),
+        }
+        for label, (processes, during_recheck) in cases.items():
+            with self.subTest(label):
+                stdout, calls = self.run_script(
+                    processes, during_recheck=during_recheck
+                )
+                self.assertNotIn("GPU_HUNG", stdout)
+                self.assertEqual(calls, [COMBINED_QUERY, PROCESS_QUERY])
+                parsed = _parse_resource_payload(stdout)
+                self.assertEqual(len(parsed.gpus), 1)
+                self.assertIsNone(parsed.gpu_message)
+
+    def test_parser_maps_the_hung_marker_to_gpu_unavailability(self) -> None:
+        system, gpus, message = parse_linux_resource_payload(
+            resource_payload(
+                gpu_payload="GPU_HUNG\t3",
+                process_payload="PROCESS_ERROR\thung",
+                health_payload="GPU_HEALTH_ERROR\t1",
+            )
+        )
+        self.assertEqual(gpus, ())
+        self.assertEqual(message, HUNG_DRIVER_MESSAGE)
+        self.assertEqual(system.cpu_cores, 8)
+        with self.assertRaises(ValueError):
+            _parse_resource_payload(
+                resource_payload(gpu_payload=f"GPU_HUNG\t1\n{FAKE_GPU_ROW}")
+            )
+
+    def test_hung_driver_opens_gpu_availability_not_a_gpu_count_incident(
+        self,
+    ) -> None:
+        # A stuck driver is not evidence that GPUs disappeared: the condition
+        # names the driver, and GPU hardware incidents freeze instead of
+        # recovering on an empty inventory.
+        policy = ThresholdIncidentPolicy(
+            ThresholdConfig(), expected_gpu_counts=(("gpu-1", 8),)
+        )
+        result = ProbeResult(
+            host="gpu-1",
+            status="online",
+            latency_ms=1,
+            message=HUNG_DRIVER_MESSAGE,
+            observed_at="2026-11-20T00:00:00Z",
+        )
+
+        conditions = policy.conditions(result)
+
+        self.assertEqual(conditions["gpu_availability"].detail, HUNG_DRIVER_MESSAGE)
+        self.assertNotIn("gpu_count", conditions)
+        self.assertNotIn("gpu_query", policy.observed_domains(result))
+
+
+class HungFilesystemTests(unittest.TestCase):
+    """A hung NFS, CIFS, or Lustre mount leaves df in uninterruptible sleep.
+
+    Like nvidia-smi on a hung driver, every further df adds one more stuck
+    process. The fixed script must detect a stuck df from /proc, skip the
+    disk pass, and say why, while every other section stays current.
+    """
+
+    def run_script(
+        self, processes: dict[int, dict[str, str]]
+    ) -> tuple[str, list[str], list[str]]:
+        df_calls: list[str] = []
+        completed, calls = run_with_fake_proc(
+            _remote_script("disabled", True), processes, df_calls=df_calls
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout, calls, df_calls
+
+    def test_stuck_df_skips_the_disk_pass_only(self) -> None:
+        stdout, calls, df_calls = self.run_script(
+            {
+                31: fake_process("df", "D", start_ticks=100),
+                32: fake_process("df", "D", start_ticks=100),
+            }
+        )
+
+        self.assertEqual(df_calls, [])
+        self.assertIn("DISKS_HUNG\t2\n", stdout)
+        self.assertEqual(calls, [COMBINED_QUERY, PROCESS_QUERY])
+        parsed = _parse_resource_payload(stdout)
+        self.assertEqual(parsed.system.disks, ())
+        self.assertEqual(parsed.system.disks_hung, 2)
+        self.assertEqual(len(parsed.gpus), 1)
+
+    def test_healthy_df_runs_and_one_scan_serves_both_guards(self) -> None:
+        stdout, calls, df_calls = self.run_script(
+            {
+                41: fake_process("df", "S", start_ticks=100),
+                42: fake_process("df", "D", start_ticks=499_500),
+                43: fake_process("nvidia-smi", "D", start_ticks=100),
+            }
+        )
+
+        self.assertEqual(df_calls, ["df"])
+        self.assertNotIn("DISKS_HUNG", stdout)
+        self.assertIn("GPU_HUNG\t1\n", stdout)
+        self.assertEqual(calls, [])
+        parsed = _parse_resource_payload(stdout)
+        self.assertEqual(parsed.system.disks_hung, 0)
+        self.assertEqual([disk.mountpoint for disk in parsed.system.disks], ["/"])
+
+    def test_parser_rejects_disk_rows_beside_the_hung_marker(self) -> None:
+        parsed = _parse_resource_payload(resource_payload(disk_payload="DISKS_HUNG\t3"))
+        self.assertEqual((parsed.system.disks, parsed.system.disks_hung), ((), 3))
+        for payload in (
+            "DISKS_HUNG\t0",
+            "DISKS_HUNG\tx",
+            "DISKS_HUNG\t1\nDISK\t/dev/sda1\text4\t100\t50\t50\t50\t/",
+        ):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                _parse_resource_payload(resource_payload(disk_payload=payload))
 
 
 if __name__ == "__main__":

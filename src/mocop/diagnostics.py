@@ -182,6 +182,20 @@ def diagnose_condition(
             "Confirm whether data loading or preprocessing is limiting GPU work.",
             "Compare CPU load with GPU utilization over the same interval.",
         ]
+    elif category == "disk_availability":
+        title = "A filesystem is hung"
+        summary = (
+            "df is stuck in uninterruptible sleep (state D) on a filesystem that "
+            "stopped responding, usually an NFS, CIFS, or Lustre mount. Mocop runs "
+            "no df on this node until the stuck process is gone, so disk usage "
+            "and disk incidents pause; other metrics stay current."
+        )
+        next_steps = [
+            "List network filesystems in /proc/mounts on the node and check that "
+            "their storage servers are reachable.",
+            "A stuck df exits once its storage responds again; otherwise detach "
+            "the mount with umount -f -l, or reboot the node.",
+        ]
     elif category.startswith("gpu_"):
         gpus = server.get("gpus", []) if isinstance(server, dict) else []
         identity = str(condition.get("conditionKey") or "").rsplit(":", 1)[-1]
@@ -247,6 +261,28 @@ def diagnose_condition(
                 "Review the GPU health fields and preserve the workload context.",
                 "Follow the hardware maintenance policy for this cluster.",
             ]
+        elif category == "gpu_availability":
+            title = "NVIDIA telemetry is unavailable"
+            summary = "The node is online, but nvidia-smi returned no usable GPU data."
+            next_steps = [
+                "Run nvidia-smi on the node and check its exit status and output.",
+                "Confirm the NVIDIA driver is loaded and matches the installed nvidia-smi.",
+            ]
+            if condition.get("detail") == "nvidia-smi is stuck in the NVIDIA driver":
+                title = "NVIDIA driver is hung"
+                summary = (
+                    "An earlier nvidia-smi is stuck in uninterruptible sleep (state D) "
+                    "inside the NVIDIA driver. Mocop starts no NVIDIA command on this "
+                    "node until the stuck process is gone; system metrics stay current."
+                )
+                next_steps = [
+                    "Reboot the node: a process in state D ignores every signal, "
+                    "including SIGKILL, so the stuck nvidia-smi cannot be killed.",
+                    "Before rebooting, save the kernel log (dmesg) and look for NVRM "
+                    "or Xid messages that name the failing GPU.",
+                    "Drain or checkpoint GPU jobs first; their GPUs stay unmonitored "
+                    "until the reboot.",
+                ]
         elif category == "gpu_count":
             title = "GPU inventory differs from configuration"
             summary = "The observed GPU count does not match the expected count."

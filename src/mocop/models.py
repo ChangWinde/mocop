@@ -38,6 +38,7 @@ SERVER_MESSAGES: tuple[str, ...] = (
     "nvidia-smi is unavailable",
     "nvidia-smi query failed",
     "nvidia-smi output was malformed",
+    "nvidia-smi is stuck in the NVIDIA driver",
 )
 # Messages that end in the fixed script's exit status, e.g. "(exit 137)".
 SERVER_MESSAGE_PREFIXES: tuple[str, ...] = (
@@ -267,6 +268,9 @@ class SystemMetrics:
     # None when the kernel does not expose /proc/pressure (pre-4.20 or
     # CONFIG_PSI disabled); consumers must treat absence as "unknown".
     pressure: PressureStallMetrics | None = None
+    # Stuck df processes (a hung mount): the disk pass was skipped, so disks
+    # and disk totals say nothing about capacity. 0 when disks were sampled.
+    disks_hung: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -289,6 +293,7 @@ class SystemMetrics:
             "disk_read_bps": self.disk_read_bps,
             "disk_write_bps": self.disk_write_bps,
             "disks": [disk.to_dict() for disk in self.disks],
+            "disks_hung": self.disks_hung,
             "pressure": self.pressure.to_dict() if self.pressure else None,
         }
 

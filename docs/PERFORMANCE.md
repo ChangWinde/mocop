@@ -50,7 +50,8 @@ re-run of the runtime profile against the current tree.
 - The fixed Linux sample combines CPU, memory, load, uptime, network, block-I/O, and
   hostname reads in one `awk` pass (the hostname arrives through a bounded in-process
   `getline`, not a second `awk`). On the default no-workload path this reduces
-  external utility invocations from 14 to 5 per host sample. Active process groups
+  external utility invocations from 14 to 5 per host sample, plus one `awk` for
+  the hung-process scan below. Active process groups
   accept a lifecycle cancellation signal delivered through a wake-up descriptor
   registered in the probe selector, so a service restart interrupts waits immediately
   instead of polling four times per second.
@@ -60,6 +61,14 @@ re-run of the runtime profile against the current tree.
   compact immutable records. Optional SQLite persistence receives non-blocking inserts
   through a bounded queue and batches writes on one dedicated thread; when persistence
   is disabled, collection performs no persistence serialization or write call.
+- Before `df` and any NVIDIA command, one `awk` reads `/proc/<pid>/comm` for every
+  process and opens `stat` and `status` only for processes named `nvidia-smi` or
+  `df`. A stuck one (state D, at least ten seconds old) costs a one-second recheck
+  and then replaces both NVIDIA queries, or the `df` pass, so a hung driver or a
+  hung mount stops collecting stuck processes instead of adding one per probe. On 2026-11-21 the scan took
+  2.51 ms median and 3.83 ms P95 over 40 runs under `dash` and `mawk` on a
+  725-process host, against 0.26 ms for an empty `dash`; time one run with
+  `python3 -c 'from mocop.remote_script import _HUNG_NVIDIA_SMI_GUARD as g; print(g)' | time sh`.
 - Optional workload identity adds bounded `/proc` reads only for active GPU PIDs
   (at most the first 512 distinct PIDs per sample) and is disabled by default. One
   awk per PID owns the `status` and `stat` reads through in-process `getline`, with

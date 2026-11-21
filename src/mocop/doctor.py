@@ -34,7 +34,7 @@ from .probe import (
     _ProcessOutputLimitExceeded,
     ssh_environment,
 )
-from .remote_script import _COMBINED_QUERY_FIELDS
+from .remote_script import _COMBINED_QUERY_FIELDS, _HUNG_PROCESS_GUARD
 from .ssh_failures import classify_ssh_failure
 from .ssh_topology import resolve_ssh_options
 
@@ -61,7 +61,7 @@ _REUSE_MODES = frozenset({"auto", "autoask", "yes", "ask"})
 _SERVER_ALIVE_COUNT_MAX = 2
 _CONTROL_PERSIST_MARGIN_SECONDS = 2.0
 _BUDGET_EXHAUSTED = "host diagnosis time budget exhausted"
-_PROFILE_MARKER = "MOCOP_PROFILE_V1"
+_PROFILE_MARKER = "MOCOP_PROFILE_V3"
 
 _QUERY_KEYS = frozenset(
     {
@@ -75,10 +75,12 @@ _QUERY_KEYS = frozenset(
 
 # Doctor-owned, self-contained profiling script. It reproduces the fixed
 # collection script's non-NVIDIA passes (same files and external commands,
-# output discarded) and the combined NVIDIA telemetry query, bracketing each
-# stage with Linux monotonic timestamps. The stages are mutually exclusive,
-# so the transport share is the locally measured total minus the remote time.
-_PROFILE_SCRIPT = r"""
+# output discarded, the same hung-process guard) and the combined NVIDIA
+# telemetry query, bracketing each stage with Linux monotonic timestamps. The
+# stages are mutually exclusive, so the transport share is the locally
+# measured total minus the remote time.
+_PROFILE_SCRIPT = (
+    r"""
 LC_ALL=C
 export LC_ALL
 monotonic_ns() {
@@ -86,18 +88,19 @@ monotonic_ns() {
 }
 t0=$(monotonic_ns)
 awk '{ next }' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/net/dev /sys/block/*/stat >/dev/null 2>&1
-df -PTk 2>/dev/null | awk 'NR > 1 { next }' >/dev/null 2>&1
+nvidia_status=127
+__HUNG_PROCESS_GUARD__
+[ "$disk_hung" -gt 0 ] || df -PTk 2>/dev/null | awk 'NR > 1 { next }' >/dev/null 2>&1
 t1=$(monotonic_ns)
-if command -v nvidia-smi >/dev/null 2>&1; then
+if [ "$gpu_hung" -eq 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi --query-gpu=__COMBINED_QUERY__ --format=csv,noheader,nounits >/dev/null 2>&1
   nvidia_status=$?
-else
-  nvidia_status=127
 fi
 t2=$(monotonic_ns)
-printf '__MARKER__\t%s\t%s\t%s\t%s\n' "$t0" "$t1" "$t2" "$nvidia_status"
-""".replace("__COMBINED_QUERY__", ",".join(_COMBINED_QUERY_FIELDS)).replace(
-    "__MARKER__", _PROFILE_MARKER
+printf '__MARKER__\t%s\t%s\t%s\t%s\t%s\t%s\n' "$t0" "$t1" "$t2" "$nvidia_status" "$gpu_hung" "$disk_hung"
+""".replace("__COMBINED_QUERY__", ",".join(_COMBINED_QUERY_FIELDS))
+    .replace("__MARKER__", _PROFILE_MARKER)
+    .replace("__HUNG_PROCESS_GUARD__", _HUNG_PROCESS_GUARD.strip("\n"))
 )
 
 
@@ -269,18 +272,18 @@ def _timed_probe(
     )
 
 
-def _parse_profile_marker(stdout: str) -> tuple[float, float, int] | None:
-    """Extract (script_ms, nvidia_ms, nvidia_status) from the marker line."""
+def _parse_profile_marker(stdout: str) -> tuple[float, float, int, int, int] | None:
+    """Extract (script_ms, nvidia_ms, nvidia_status, stuck, df_stuck)."""
     for line in stdout.splitlines():
         if not line.startswith(f"{_PROFILE_MARKER}\t"):
             continue
         fields = line.split("\t")
-        if len(fields) != 5 or not all(field.isdigit() for field in fields[1:]):
+        if len(fields) != 7 or not all(field.isdigit() for field in fields[1:]):
             return None
-        t0, t1, t2, nvidia_status = (int(field) for field in fields[1:])
+        t0, t1, t2, nvidia_status, stuck, df_stuck = map(int, fields[1:])
         if not t0 <= t1 <= t2:
             return None
-        return (t1 - t0) / 1e6, (t2 - t1) / 1e6, nvidia_status
+        return (t1 - t0) / 1e6, (t2 - t1) / 1e6, nvidia_status, stuck, df_stuck
     return None
 
 
@@ -317,15 +320,24 @@ def _profile_host(
     if stages is None:
         profile["failure"] = "remote profiling output was not recognized"
         return profile
-    script_ms, nvidia_ms, nvidia_status = stages
+    script_ms, nvidia_ms, nvidia_status, stuck, df_stuck = stages
     assert total_ms is not None
     profile["transportMs"] = round(max(0.0, total_ms - script_ms - nvidia_ms), 1)
     profile["scriptMs"] = round(script_ms, 1)
     profile["nvidiaQueryMs"] = round(nvidia_ms, 1)
-    if nvidia_status == 127:
+    if stuck:
+        profile["nvidiaFailure"] = (
+            f"nvidia-smi is stuck in the NVIDIA driver ({stuck} in state D); "
+            "the query was skipped, and only a reboot ends stuck processes"
+        )
+    elif nvidia_status == 127:
         profile["nvidiaFailure"] = "nvidia-smi is unavailable"
     elif nvidia_status != 0:
         profile["nvidiaFailure"] = f"nvidia-smi query failed (exit {nvidia_status})"
+    if df_stuck:
+        profile["diskFailure"] = (
+            f"df is stuck on a hung mount ({df_stuck} in state D); disk pass skipped"
+        )
     return profile
 
 
@@ -940,9 +952,9 @@ def _write_text_report(report: dict[str, object], stdout: TextIO) -> None:
             stdout.write(f"  profile failure: {failure}\n")
         else:
             stdout.write(f"  profile: {_format_profile(profile)}\n")
-            nvidia_failure = profile.get("nvidiaFailure")
-            if nvidia_failure:
-                stdout.write(f"  profile warning: {nvidia_failure}\n")
+            for key in ("nvidiaFailure", "diskFailure"):
+                if profile.get(key):
+                    stdout.write(f"  profile warning: {profile[key]}\n")
     collection = report.get("probe")
     if isinstance(collection, dict):
         failure = collection.get("failure")

@@ -89,6 +89,37 @@ class IncidentTrackerTests(unittest.TestCase):
             history_points=20,
         )
 
+    def test_hung_filesystem_opens_disk_availability_and_freezes_disks(self) -> None:
+        # A stuck df skips the disk pass, so the empty disk list is a blind
+        # spot: an open disk condition must not recover on it, and the host
+        # gets one condition that names the hung filesystem instead.
+        full = ProbeResult("node-a", "online", 1, system=system(20, 99))
+        self.tracker.update(full)
+        self.tracker.update(full)
+        self.assertIn("disk:/dev/a:/", self.active_keys())
+        blind = replace(full, system=replace(system(20, 99), disks=(), disks_hung=2))
+
+        for _sample in range(4):
+            self.tracker.update(blind)
+
+        self.assertIn("disk:/dev/a:/", self.active_keys())
+        (condition,) = [
+            item
+            for item in self.tracker.snapshot(20)["active"]
+            if item["conditionKey"] == "disk_availability"
+        ]
+        self.assertEqual(condition["category"], "disk_availability")
+        self.assertEqual(condition["severity"], "critical")
+        self.assertEqual(condition["value"], 2.0)
+        self.assertEqual(condition["detail"], "df is stuck on a hung filesystem")
+        for _sample in range(2):
+            self.tracker.update(full)
+        self.assertNotIn("disk_availability", self.active_keys())
+        self.assertIn("disk:/dev/a:/", self.active_keys())
+
+    def active_keys(self) -> set[str]:
+        return {item["conditionKey"] for item in self.tracker.snapshot(20)["active"]}
+
     def test_disk_severity_accounts_for_absolute_headroom(self) -> None:
         policy = ThresholdIncidentPolicy(ThresholdConfig(), incidents=cycles_only())
 
