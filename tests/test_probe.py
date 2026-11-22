@@ -1554,7 +1554,10 @@ class ProbeTests(unittest.TestCase):
     def test_probe_cancel_terminates_an_active_child_immediately(self) -> None:
         probe = OpenSshLinuxResourceProbe()
         local_config = replace(
-            config(), hosts=("monitor-0",), local_host="monitor-0", probe_timeout_seconds=5
+            config(),
+            hosts=("monitor-0",),
+            local_host="monitor-0",
+            probe_timeout_seconds=5,
         )
         entered_select = threading.Event()
         results = []
