@@ -1,0 +1,51 @@
+{
+  "comment": "Shared contract for mocop/storage_totals.py and static/fleet-state.js storageTotals(). Local filesystems count once per host and device; a shared filesystem counts once per device across the fleet; offline hosts are skipped. Change this file and both implementations together.",
+  "filesystems": {
+    "shared": ["nfs", "nfs4", "cifs", "smb3", "smbfs", "lustre", "gpfs", "ceph", "cephfs", "glusterfs", "beegfs", "9p", "afs", "ocfs2", "gfs2", "orangefs", "pvfs2", "fuse.juicefs", "fuse.aliyun-alinas-efc", "nfs3"],
+    "local": ["ext4", "xfs", "btrfs", "zfs", "overlay", "virtiofs", "vfat", "f2fs"]
+  },
+  "cases": [
+    {
+      "name": "a shared volume mounted on two hosts counts once",
+      "servers": [
+        {"status": "online", "system": {"disks": [
+          {"device": "/dev/sda1", "filesystem_type": "ext4", "total_mib": 100, "used_mib": 10},
+          {"device": "lfs@tcp:/share", "filesystem_type": "lustre", "total_mib": 1000, "used_mib": 500}
+        ]}},
+        {"status": "online", "system": {"disks": [
+          {"device": "/dev/sda1", "filesystem_type": "ext4", "total_mib": 200, "used_mib": 20},
+          {"device": "lfs@tcp:/share", "filesystem_type": "lustre", "total_mib": 1000, "used_mib": 500}
+        ]}}
+      ],
+      "expected": {"local": {"usedMiB": 30, "totalMiB": 300}, "shared": {"volumes": 1, "usedMiB": 500, "totalMiB": 1000}}
+    },
+    {
+      "name": "the same local device name on two hosts is two disks; a repeated device on one host is one",
+      "servers": [
+        {"status": "online", "system": {"disks": [
+          {"device": "/dev/nvme0n1p2", "filesystem_type": "ext4", "total_mib": 400, "used_mib": 40},
+          {"device": "/dev/nvme0n1p2", "filesystem_type": "ext4", "total_mib": 400, "used_mib": 40}
+        ]}},
+        {"status": "online", "system": {"disks": [
+          {"device": "/dev/nvme0n1p2", "filesystem_type": "ext4", "total_mib": 400, "used_mib": 80}
+        ]}}
+      ],
+      "expected": {"local": {"usedMiB": 120, "totalMiB": 800}, "shared": {"volumes": 0, "usedMiB": 0, "totalMiB": 0}}
+    },
+    {
+      "name": "offline hosts, hosts without a sample, and FUSE network mounts",
+      "servers": [
+        {"status": "unreachable", "stale": true, "system": {"disks": [
+          {"device": "/dev/sdb", "filesystem_type": "ext4", "total_mib": 999, "used_mib": 1}
+        ]}},
+        {"status": "online", "system": null},
+        {"status": "online", "system": {"disks": [
+          {"device": "overlay", "filesystem_type": "overlay", "total_mib": 50, "used_mib": 5},
+          {"device": "nas-a:/", "filesystem_type": "fuse.aliyun-alinas-efc", "total_mib": 300, "used_mib": 30},
+          {"device": "nas-b:/", "filesystem_type": "fuse.aliyun-alinas-efc", "total_mib": 300, "used_mib": 30}
+        ]}}
+      ],
+      "expected": {"local": {"usedMiB": 5, "totalMiB": 50}, "shared": {"volumes": 2, "usedMiB": 60, "totalMiB": 600}}
+    }
+  ]
+}

@@ -475,7 +475,9 @@ Timestamp disambiguation (frequently confused):
 | `gpus`, `busyGpus` | GPUs on online hosts; busy means utilization ≥ `gpu_busy_pct`. |
 | `memoryTotalMiB`, `memoryUsedMiB` | Cluster VRAM (MiB). |
 | `cpuAveragePct` | Mean host CPU percent, `null` before first deltas. |
-| `cpuCores`, `systemMemoryTotalMiB`, `systemMemoryUsedMiB`, `swapTotalMiB`, `swapUsedMiB`, `diskTotalMiB`, `diskUsedMiB` | System capacity aggregates. |
+| `cpuCores`, `systemMemoryTotalMiB`, `systemMemoryUsedMiB`, `swapTotalMiB`, `swapUsedMiB` | System capacity aggregates. |
+| `diskTotalMiB`, `diskUsedMiB` | Local filesystems on online hosts, each host's devices once. Shared filesystems are excluded: they appear on every host that mounts them. |
+| `sharedDisks`, `sharedDiskTotalMiB`, `sharedDiskUsedMiB` | Distinct shared filesystems (NFS, CIFS, Lustre, GPFS, Ceph, FUSE, and similar) on online hosts, each device once across the fleet. One volume reached through two different mount sources counts twice. |
 | `networkRxBps`, `networkTxBps`, `diskReadBps`, `diskWriteBps` | Rate aggregates (bytes/second). |
 
 `servers[]` fields:

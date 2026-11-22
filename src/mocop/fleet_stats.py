@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from .storage_totals import storage_totals
+
 
 def fleet_stats(
     servers: list[dict[str, object]],
@@ -38,8 +40,7 @@ def fleet_stats(
     system_memory_used = sum(float(system["memory_used_mib"]) for system in systems)
     swap_total = sum(float(system["swap_total_mib"]) for system in systems)
     swap_used = sum(float(system["swap_used_mib"]) for system in systems)
-    disk_total = sum(float(system["disk_total_mib"]) for system in systems)
-    disk_used = sum(float(system["disk_used_mib"]) for system in systems)
+    storage = storage_totals(servers)
     network_rx = sum(float(system["network_rx_bps"] or 0) for system in systems)
     network_tx = sum(float(system["network_tx_bps"] or 0) for system in systems)
     disk_read = sum(float(system["disk_read_bps"] or 0) for system in systems)
@@ -94,8 +95,11 @@ def fleet_stats(
         "systemMemoryUsedMiB": round(system_memory_used, 1),
         "swapTotalMiB": round(swap_total, 1),
         "swapUsedMiB": round(swap_used, 1),
-        "diskTotalMiB": round(disk_total, 1),
-        "diskUsedMiB": round(disk_used, 1),
+        "diskTotalMiB": round(storage["local"]["totalMiB"], 1),
+        "diskUsedMiB": round(storage["local"]["usedMiB"], 1),
+        "sharedDisks": storage["shared"]["volumes"],
+        "sharedDiskTotalMiB": round(storage["shared"]["totalMiB"], 1),
+        "sharedDiskUsedMiB": round(storage["shared"]["usedMiB"], 1),
         "networkRxBps": round(network_rx, 1),
         "networkTxBps": round(network_tx, 1),
         "diskReadBps": round(disk_read, 1),
