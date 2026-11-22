@@ -65,6 +65,15 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- The snapshot `stats.diskTotalMiB` and `stats.diskUsedMiB` now cover local
+  filesystems only. Before, they also included every shared filesystem
+  (NFS, Lustre, GPFS, FUSE), once per host that mounts it, so a cluster
+  filesystem dominated the total and a volume mounted on several hosts was
+  counted several times. On one 10-host deployment, 4,646.5 TiB of the
+  4,707.0 TiB total were five shared volumes, against 60.5 TiB of local
+  disks. The new `stats.sharedDisks`, `stats.sharedDiskTotalMiB`, and
+  `stats.sharedDiskUsedMiB` count each shared volume once, and the dashboard
+  self-check compares its own disk totals with these fields.
 - Conditions of the `gpu_processes`, `gpu_memory`, and `pressure` categories
   now carry Chinese titles and next steps in the dashboard; they showed the
   server's English diagnosis before.

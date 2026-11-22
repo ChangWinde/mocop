@@ -25,9 +25,23 @@ const gpu = (utilization, memory, processes = []) => ({
 });
 const snapshot = {
   thresholds,
-  stats: { gpus: 3, busyGpus: 1, onlineServers: 1, memoryUsedMiB: 3072.0, cpuAveragePct: 25, activeIncidents: 2, criticalIncidents: 1 },
+  stats: {
+    gpus: 3, busyGpus: 1, onlineServers: 1, memoryUsedMiB: 3072.0, cpuAveragePct: 25, activeIncidents: 2, criticalIncidents: 1,
+    diskTotalMiB: 100, sharedDisks: 1,
+  },
   servers: [
-    { host: "a", status: "online", system: { cpu_usage_pct: 25 }, gpus: [gpu(90, 1024), gpu(0, 1024), gpu(5, 1024)] },
+    {
+      host: "a",
+      status: "online",
+      system: {
+        cpu_usage_pct: 25,
+        disks: [
+          { device: "/dev/sda1", filesystem_type: "ext4", total_mib: 100, used_mib: 10 },
+          { device: "lfs@tcp:/share", filesystem_type: "lustre", total_mib: 1000, used_mib: 500 },
+        ],
+      },
+      gpus: [gpu(90, 1024), gpu(0, 1024), gpu(5, 1024)],
+    },
     { host: "b", status: "offline", system: { cpu_usage_pct: 99 }, gpus: [gpu(100, 9999)] },
   ],
 };
@@ -40,12 +54,19 @@ const rows = check.reconcile({
 });
 assert.deepEqual(rows.filter((item) => !item.ok), [], "a consistent snapshot passes every row");
 assert.deepEqual(rows.map((item) => item.id), [
-  "gpus", "busy-gpus", "online-servers", "gpu-memory", "cpu", "incidents", "critical", "capacity-gpus", "capacity-hosts",
+  "gpus", "busy-gpus", "online-servers", "gpu-memory", "cpu", "disk-local", "disk-shared", "incidents", "critical",
+  "capacity-gpus", "capacity-hosts",
 ]);
 
 // Every row must be able to fail: a check that cannot fail proves nothing.
 const drifted = check.reconcile({
-  snapshot: { ...snapshot, stats: { ...snapshot.stats, busyGpus: 2, gpus: 4, onlineServers: 2, memoryUsedMiB: 9, cpuAveragePct: 26, activeIncidents: 3, criticalIncidents: 0 } },
+  snapshot: {
+    ...snapshot,
+    stats: {
+      ...snapshot.stats, busyGpus: 2, gpus: 4, onlineServers: 2, memoryUsedMiB: 9, cpuAveragePct: 26,
+      activeIncidents: 3, criticalIncidents: 0, diskTotalMiB: 1100, sharedDisks: 2,
+    },
+  },
   activeIncidents: [{ severity: "critical" }, { severity: "warning" }],
   browserCapacity: capacity([1, 2]),
   serverCapacity: { candidates: [{ host: "a", available: [{ index: 1 }] }, { host: "c", available: [{ index: 0 }, { index: 1 }] }] },
@@ -53,7 +74,7 @@ const drifted = check.reconcile({
 assert.deepEqual(drifted.filter((item) => item.ok).map((item) => item.id), [], "every row detects drift");
 
 const partial = check.reconcile({ snapshot, activeIncidents: null, browserCapacity: null, serverCapacity: null });
-assert.deepEqual(partial.map((item) => item.id), ["gpus", "busy-gpus", "online-servers", "gpu-memory", "cpu"],
+assert.deepEqual(partial.map((item) => item.id), ["gpus", "busy-gpus", "online-servers", "gpu-memory", "cpu", "disk-local", "disk-shared"],
   "rows without an independent referee are omitted, not passed");
 
 const contrast = check.contrastRows([{ id: "muted", label: "说明文字", ratio: 4.51 }, { id: "faint", label: "最淡", ratio: 2.7 }, { id: "x", label: "?", ratio: NaN }]);

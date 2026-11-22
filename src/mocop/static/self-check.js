@@ -69,6 +69,7 @@
       const counts = fleetState.breakdown(servers, thresholds.gpu_busy_pct);
       const cpuValues = online.map((server) => server.system?.cpu_usage_pct).filter(finite);
       const cpuMean = cpuValues.length ? cpuValues.reduce((sum, value) => sum + value, 0) / cpuValues.length : null;
+      const storage = fleetState.storageTotals(servers);
       const rows = [
         exact("gpus", "在线 GPU", stats.gpus, counts.online, "stats.gpus"),
         exact("busy-gpus", "计算中 GPU", stats.busyGpus, counts.compute, "stats.busyGpus"),
@@ -80,6 +81,8 @@
         stats.cpuAveragePct == null && cpuMean == null
           ? row("cpu", "集群 CPU 平均 %", null, null, true, "stats.cpuAveragePct")
           : near("cpu", "集群 CPU 平均 %", stats.cpuAveragePct, cpuMean, 0.01, "stats.cpuAveragePct"),
+        near("disk-local", "本地磁盘 MiB", stats.diskTotalMiB, storage.local.totalMiB, 1, "stats.diskTotalMiB"),
+        exact("disk-shared", "共享卷", stats.sharedDisks, storage.shared.volumes, "stats.sharedDisks"),
       ];
       if (Array.isArray(activeIncidents)) {
         rows.push(

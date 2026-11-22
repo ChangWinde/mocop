@@ -67,6 +67,7 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/service_scheduler.py": 655,
     "src/mocop/process_transitions.py": 150,
     "src/mocop/fleet_stats.py": 125,
+    "src/mocop/storage_totals.py": 70,
     "src/mocop/telemetry_points.py": 250,
     "src/mocop/usage.py": 250,
     "src/mocop/usage_views.py": 110,

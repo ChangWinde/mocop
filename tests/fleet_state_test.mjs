@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 await import("../src/mocop/static/fleet-state.js");
 
@@ -69,5 +70,15 @@ const storage = state.storageTotals([
 ]);
 assert.deepEqual({ ...storage.local }, { usedMiB: 30, totalMiB: 300 });
 assert.deepEqual({ ...storage.shared }, { volumes: 1, usedMiB: 500, totalMiB: 1000 });
+
+// The fixture is the contract shared with mocop/storage_totals.py.
+const fixture = JSON.parse(readFileSync(new URL("./fixtures/storage_totals.json", import.meta.url), "utf-8"));
+for (const kind of fixture.filesystems.shared) assert.equal(state.isShared(kind), true, kind);
+for (const kind of fixture.filesystems.local) assert.equal(state.isShared(kind), false, kind);
+for (const kind of state.SHARED_FILESYSTEMS) assert(fixture.filesystems.shared.includes(kind), `${kind} is missing from the fixture`);
+for (const { name, servers: cases, expected } of fixture.cases) {
+  const totals = state.storageTotals(cases);
+  assert.deepEqual({ local: { ...totals.local }, shared: { ...totals.shared } }, expected, name);
+}
 
 console.log("fleet-state tests passed");

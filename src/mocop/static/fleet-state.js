@@ -6,7 +6,8 @@
 // a process holds at least HOLDER_MIN_MIB of its memory: desktop helpers and
 // codec probes hold a few MiB and leave the card schedulable. Storage totals
 // count a shared filesystem (NFS, Lustre, GPFS, FUSE, ...) once per device,
-// because every host that mounts it reports the same volume.
+// because every host that mounts it reports the same volume; mocop/storage_totals.py
+// is the server twin, and tests/fixtures/storage_totals.json pins both.
 (() => {
   "use strict";
 
@@ -87,7 +88,7 @@
 
   function create() {
     return Object.freeze({
-      HOLDER_MIN_MIB, ACTIVITY_KEYS, holdsGpu, holders, activity, breakdown, isShared, storageTotals,
+      HOLDER_MIN_MIB, ACTIVITY_KEYS, SHARED_FILESYSTEMS, holdsGpu, holders, activity, breakdown, isShared, storageTotals,
     });
   }
 
