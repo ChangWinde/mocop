@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-style="carbon" data-scheme="dark" data-density="comfortable">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="dark">
+    <meta name="color-scheme" content="dark light">
     <meta name="description" content="Mocop：GPU 集群实时监控">
     <title>Mocop · GPU 集群实时监控</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -12,285 +12,432 @@
   <body>
     <div class="app-shell">
       <header class="app-header">
-        <div class="identity">
-          <div class="logo" aria-hidden="true">
-            <i></i><i></i><i></i><i></i>
-          </div>
-          <div>
-            <div class="product-line">Mocop <span>/</span> GPU 集群监控</div>
-            <h1>GPU 集群实时监控</h1>
-          </div>
-        </div>
-        <div class="header-status">
-          <label class="refresh-control">
-            <span>采集频率</span>
-            <select id="refresh-interval" aria-label="采集频率">
-              <option value="2">2 秒</option>
-              <option value="5" selected>5 秒</option>
-              <option value="10">10 秒</option>
-              <option value="30">30 秒</option>
-              <option value="60">60 秒</option>
-            </select>
-            <i aria-hidden="true"></i>
-            <em id="refresh-feedback" class="refresh-feedback" role="status"></em>
-          </label>
-          <div class="sync-time">
-            <span>最近采集</span>
-            <strong id="last-sync">等待数据</strong>
-          </div>
-          <button id="update-pill" class="update-pill current" type="button" hidden>检查更新中</button>
-          <button id="settings-toggle" class="settings-toggle" type="button" aria-haspopup="dialog" title="个性化设置">
-            <span class="settings-glyph" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span>设置</span>
-          </button>
-          <div id="connection" class="connection connecting" role="status">
-            <i></i><span id="connection-text">连接中</span>
+        <div class="app-header-inner">
+          <a class="brand" href="#/overview" aria-label="Mocop 总览">
+            <span class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+            <strong>Mocop</strong>
+          </a>
+          <nav class="page-nav" aria-label="页面">
+            <a data-page-link="overview" href="#/overview" aria-current="page">总览</a>
+            <a data-page-link="find" href="#/find">找卡</a>
+            <a data-page-link="jobs" href="#/jobs">任务</a>
+            <a data-page-link="alerts" href="#/alerts">告警<span id="alerts-badge" class="count-badge alert" hidden>0</span></a>
+            <a data-page-link="usage" href="#/usage">用量</a>
+          </nav>
+          <div class="header-status">
+            <button id="palette-toggle" class="command-trigger" type="button" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K">
+              <span class="search-symbol" aria-hidden="true"></span><span>搜索</span><kbd aria-hidden="true">⌘K</kbd>
+            </button>
+            <label class="refresh-control" title="采集周期，写入本地配置">
+              <span>采集</span>
+              <select id="refresh-interval" aria-label="采集频率">
+                <option value="2">2 秒</option>
+                <option value="5" selected>5 秒</option>
+                <option value="10">10 秒</option>
+                <option value="30">30 秒</option>
+                <option value="60">60 秒</option>
+              </select>
+              <em id="refresh-feedback" class="refresh-feedback" role="status"></em>
+            </label>
+            <button id="update-pill" class="update-pill current" type="button" hidden>检查更新中</button>
+            <div id="connection" class="connection connecting" role="status">
+              <i></i><span id="connection-text">连接中</span><span class="sync-time" aria-label="最近采集"><strong id="last-sync">等待数据</strong></span>
+            </div>
+            <button id="settings-toggle" class="icon-button settings-toggle" type="button" aria-haspopup="dialog" aria-label="设置" title="设置">
+              <span class="settings-glyph" aria-hidden="true"><i></i><i></i><i></i></span>
+            </button>
           </div>
         </div>
       </header>
 
       <main>
-        <section class="metrics-grid" aria-label="集群概览">
-          <article id="server-card" class="metric-card primary">
-            <div class="metric-top">
-              <span class="metric-name">节点健康</span>
-              <span id="server-health" class="health-badge">—</span>
-            </div>
-            <div class="metric-number"><strong id="server-ratio">— / —</strong></div>
-            <div id="server-detail" class="metric-foot">等待首次探测</div>
-            <div class="track"><i id="server-bar"></i></div>
-          </article>
-          <article id="gpu-card" class="metric-card gpu-card">
-            <div class="metric-top">
-              <span class="metric-name">GPU 资源</span>
-              <span class="metric-icon gpu-icon" aria-hidden="true"></span>
-            </div>
-            <div class="metric-number"><strong id="total-gpus">—</strong><small>张</small></div>
-            <div class="metric-foot"><span id="active-gpus">—</span> 张正在计算</div>
-            <div class="track"><i id="gpu-bar"></i></div>
-          </article>
-          <article id="gpu-memory-card" class="metric-card gpu-memory-card">
-            <div class="metric-top">
-              <span class="metric-name">GPU 显存</span>
-              <span id="gpu-memory-percent" class="metric-side">—</span>
-            </div>
-            <div class="metric-number compact"><strong id="gpu-memory-used">—</strong><small id="gpu-memory-total">/ —</small></div>
-            <div class="metric-foot">当前在线 GPU 显存占用</div>
-            <div class="track"><i id="gpu-memory-bar"></i></div>
-          </article>
-          <article id="cpu-card" class="metric-card">
-            <div class="metric-top">
-              <span class="metric-name">集群平均 CPU</span>
-              <span id="cpu-health" class="metric-side">—</span>
-            </div>
-            <div class="metric-number"><strong id="average-cpu">—</strong><small>%</small></div>
-            <div class="metric-foot"><span id="cpu-cores">—</span> 个逻辑核心</div>
-            <div class="track"><i id="cpu-bar"></i></div>
-          </article>
-          <article id="memory-card" class="metric-card memory-card">
-            <div class="metric-top">
-              <span class="metric-name">系统内存</span>
-              <span id="memory-percent" class="metric-side">—</span>
-            </div>
-            <div class="metric-number compact"><strong id="memory-used">—</strong><small id="memory-total">/ —</small></div>
-            <div class="track"><i id="memory-bar"></i></div>
-          </article>
-          <article class="metric-card network-card">
-            <div class="metric-top">
-              <span class="metric-name">集群网络吞吐</span>
-              <span class="metric-side">合计</span>
-            </div>
-            <div class="network-values">
-              <div><span>↓</span><strong id="network-rx">—</strong></div>
-              <div><span>↑</span><strong id="network-tx">—</strong></div>
-            </div>
-            <div class="metric-foot">接收 / 发送速率</div>
-          </article>
-        </section>
-
-        <div id="capacity-watch-banner" class="capacity-watch-banner" role="status" aria-live="polite" hidden>
-          <strong id="capacity-watch-banner-text">GPU 已就绪</strong>
-          <span class="capacity-watch-banner-actions">
-            <button id="capacity-watch-banner-open" class="inline-action" type="button">查看匹配</button>
-            <button id="capacity-watch-banner-dismiss" class="inline-action" type="button">知道了</button>
-            <button id="capacity-watch-banner-stop" class="inline-action" type="button">停止守望</button>
-          </span>
-        </div>
-        <div id="collector-error" class="alert" hidden></div>
-        <section id="attention-panel" class="attention-panel" aria-label="需要关注的服务器" hidden>
-          <div class="attention-heading">
-            <div>
-              <span class="section-kicker">需要关注</span>
-              <strong id="attention-summary">需要关注</strong>
-            </div>
-            <div class="attention-filters" role="group" aria-label="问题类型筛选">
-              <button class="attention-filter active" data-attention-filter="all" type="button" aria-pressed="true">全部 <span>0</span></button>
-              <button class="attention-filter" data-attention-filter="connection" type="button" aria-pressed="false">连接 <span>0</span></button>
-              <button class="attention-filter" data-attention-filter="storage" type="button" aria-pressed="false">存储 <span>0</span></button>
-              <button class="attention-filter" data-attention-filter="compute" type="button" aria-pressed="false">算力 <span>0</span></button>
-            </div>
-            <span>点击问题可定位服务器</span>
-          </div>
-          <div id="attention-list" class="attention-list"></div>
-        </section>
-
-        <section id="incident-panel" class="incident-panel" aria-label="近期状态变化" hidden>
-          <div class="incident-heading">
-            <div>
-                <span class="section-kicker">近期事件</span>
-              <strong id="incident-summary">近期状态变化</strong>
-            </div>
-            <button id="toggle-incidents" type="button" hidden>展开全部</button>
-          </div>
-          <div id="incident-list" class="incident-list"></div>
-        </section>
-
-        <section class="workspace">
-          <aside class="fleet-panel panel">
-            <div class="panel-heading">
-              <div>
-                <span class="section-kicker">服务器</span>
-                <h2>服务器</h2>
+        <section id="page-overview" class="page" data-page="overview" aria-labelledby="overview-title">
+          <h1 id="overview-title" class="sr-only">GPU 集群实时监控</h1>
+          <section class="metrics-grid" aria-label="集群概览">
+            <article id="server-card" class="metric-card primary">
+              <div class="metric-top">
+                <span class="metric-name">节点健康</span>
+                <span id="server-health" class="health-badge">—</span>
               </div>
-              <span id="server-count" class="count-badge">0</span>
-            </div>
-            <div class="fleet-filters" role="group" aria-label="服务器快速筛选">
-              <button class="fleet-filter active" data-server-filter="all" type="button" aria-pressed="true">全部</button>
-              <button class="fleet-filter" data-server-filter="issues" type="button" aria-pressed="false">异常</button>
-              <button class="fleet-filter" data-server-filter="busy" type="button" aria-pressed="false">计算中</button>
-              <button class="fleet-filter" data-server-filter="available" type="button" aria-pressed="false">有空闲卡</button>
-              <button class="fleet-filter" data-server-filter="stale" type="button" aria-pressed="false">陈旧</button>
-            </div>
-            <nav id="server-list" class="server-list" aria-label="服务器列表"></nav>
-            <span id="server-order-status" class="sr-only" aria-live="polite"></span>
-          </aside>
+              <div class="metric-number"><strong id="server-ratio">— / —</strong><small>台在线</small></div>
+              <div id="server-detail" class="metric-foot">等待首次探测</div>
+              <div class="track"><i id="server-bar"></i></div>
+            </article>
+            <article id="gpu-card" class="metric-card gpu-card">
+              <div class="metric-top">
+                <span class="metric-name">GPU 资源</span>
+                <span class="metric-side"><span id="active-gpus">—</span> 张计算中</span>
+              </div>
+              <div class="metric-number"><strong id="total-gpus">—</strong><small>张在线</small></div>
+              <div id="gpu-bar" class="activity-stack" role="img" aria-label="GPU 状态分布">
+                <i data-activity="compute"></i><i data-activity="occupied"></i><i data-activity="free"></i><i data-activity="unknown"></i><i data-activity="offline"></i>
+              </div>
+              <div id="gpu-legend" class="activity-legend">
+                <span data-activity="compute" title="负载达到忙碌阈值，与服务端 busyGpus 一致"><i></i>计算 <b>—</b></span>
+                <span data-activity="occupied" title="有进程占用 256 MiB 以上显存，但负载低于忙碌阈值"><i></i>占用 <b>—</b></span>
+                <span data-activity="free" title="负载低于忙碌阈值且没有占卡进程"><i></i>空闲 <b>—</b></span>
+                <span data-activity="unknown" title="缺少负载或进程读数"><i></i>无读数 <b>—</b></span>
+                <span data-activity="offline" title="所在主机失联，显示最后一次读数"><i></i>离线 <b>—</b></span>
+              </div>
+            </article>
+            <article id="gpu-memory-card" class="metric-card gpu-memory-card">
+              <div class="metric-top">
+                <span class="metric-name">GPU 显存</span>
+                <span id="gpu-memory-percent" class="metric-side">—</span>
+              </div>
+              <div class="metric-number compact"><strong id="gpu-memory-used">—</strong><small id="gpu-memory-total">/ —</small></div>
+              <div class="track"><i id="gpu-memory-bar"></i></div>
+            </article>
+            <article id="cpu-card" class="metric-card">
+              <div class="metric-top">
+                <span class="metric-name">集群平均 CPU</span>
+                <span id="cpu-health" class="metric-side">—</span>
+              </div>
+              <div class="metric-number"><strong id="average-cpu">—</strong><small>%</small></div>
+              <div class="metric-foot"><span id="cpu-cores">—</span> 个逻辑核心</div>
+              <div class="track"><i id="cpu-bar"></i></div>
+            </article>
+            <article id="memory-card" class="metric-card memory-card">
+              <div class="metric-top">
+                <span class="metric-name">系统内存</span>
+                <span id="memory-percent" class="metric-side">—</span>
+              </div>
+              <div class="metric-number compact"><strong id="memory-used">—</strong><small id="memory-total">/ —</small></div>
+              <div class="track"><i id="memory-bar"></i></div>
+            </article>
+            <article class="metric-card network-card">
+              <div class="metric-top">
+                <span class="metric-name">网络吞吐</span>
+                <span class="metric-side">合计</span>
+              </div>
+              <div class="network-values">
+                <div><span>↓</span><strong id="network-rx">—</strong></div>
+                <div><span>↑</span><strong id="network-tx">—</strong></div>
+              </div>
+            </article>
+          </section>
 
-          <section class="inventory-panel panel">
-            <div class="inventory-header">
-              <div>
-                <span class="section-kicker">资源清单</span>
+          <div id="capacity-watch-banner" class="capacity-watch-banner" role="status" aria-live="polite" hidden>
+            <strong id="capacity-watch-banner-text">GPU 已就绪</strong>
+            <span class="capacity-watch-banner-actions">
+              <button id="capacity-watch-banner-open" class="inline-action" type="button">查看匹配</button>
+              <button id="capacity-watch-banner-dismiss" class="inline-action" type="button">知道了</button>
+              <button id="capacity-watch-banner-stop" class="inline-action" type="button">停止守望</button>
+            </span>
+          </div>
+          <div id="collector-error" class="alert" hidden></div>
+          <section id="attention-panel" class="attention-panel panel" aria-label="需要关注的服务器" hidden>
+            <div class="attention-heading">
+              <h2>需要关注</h2>
+              <strong id="attention-summary" class="attention-count">需要关注</strong>
+              <div class="attention-filters segmented" role="group" aria-label="问题类型筛选">
+                <button class="attention-filter active" data-attention-filter="all" type="button" aria-pressed="true">全部 <span>0</span></button>
+                <button class="attention-filter" data-attention-filter="connection" type="button" aria-pressed="false">连接 <span>0</span></button>
+                <button class="attention-filter" data-attention-filter="storage" type="button" aria-pressed="false">存储 <span>0</span></button>
+                <button class="attention-filter" data-attention-filter="compute" type="button" aria-pressed="false">算力 <span>0</span></button>
+              </div>
+              <span class="attention-hint"></span>
+              <a class="text-link" href="#/alerts">全部告警</a>
+            </div>
+            <div id="attention-list" class="attention-list"></div>
+          </section>
+
+          <section class="workspace">
+            <aside class="fleet-panel panel">
+              <div class="panel-heading">
+                <h2>服务器</h2>
+                <span id="server-count" class="count-badge">0</span>
+                <div class="fleet-filters segmented" role="group" aria-label="服务器快速筛选">
+                  <button class="fleet-filter active" data-server-filter="all" type="button" aria-pressed="true">全部</button>
+                  <button class="fleet-filter" data-server-filter="issues" type="button" aria-pressed="false">异常</button>
+                  <button class="fleet-filter" data-server-filter="busy" type="button" aria-pressed="false">计算中</button>
+                  <button class="fleet-filter" data-server-filter="available" type="button" aria-pressed="false">有空闲卡</button>
+                  <button class="fleet-filter" data-server-filter="stale" type="button" aria-pressed="false">陈旧</button>
+                </div>
+              </div>
+              <nav id="server-list" class="server-list" aria-label="服务器列表"></nav>
+              <span id="server-order-status" class="sr-only" aria-live="polite"></span>
+            </aside>
+
+            <section class="inventory-panel panel">
+              <div class="inventory-header">
                 <div class="title-row">
                   <h2 id="inventory-title">全局资源</h2>
                   <span id="visible-count" class="count-badge">0</span>
                   <span id="node-freshness" class="freshness-badge" hidden></span>
                 </div>
+                <div class="inventory-tools">
+                  <label class="search-box">
+                    <span class="search-symbol" aria-hidden="true"></span>
+                    <span class="sr-only">搜索服务器、GPU 或程序</span>
+                    <input id="search" type="search" placeholder="搜索主机、用户、程序" maxlength="120" autocomplete="off">
+                    <kbd class="search-shortcut" aria-hidden="true">/</kbd>
+                  </label>
+                  <label class="sort-control">
+                    <span class="sr-only">排序</span>
+                    <select id="gpu-sort" aria-label="GPU 排序方式">
+                      <option value="host">按服务器 / 编号</option>
+                      <option value="utilization">按 GPU 负载</option>
+                      <option value="memory">按显存占用率</option>
+                      <option value="temperature">按温度</option>
+                      <option value="power">按功耗</option>
+                      <option value="processes">按进程数</option>
+                    </select>
+                  </label>
+                  <button id="topology-toggle" class="tool-button topology-trigger" type="button" aria-haspopup="dialog">拓扑</button>
+                  <button id="capacity-toggle" class="tool-button capacity-trigger" type="button">找卡</button>
+                  <button id="owners-toggle" class="tool-button owners-trigger" type="button">用量</button>
+                  <button id="probe-now" class="tool-button probe-trigger" type="button" hidden>立即探测</button>
+                  <button id="export-csv" class="tool-button icon-only" type="button" title="导出当前结果为 CSV" aria-label="导出当前结果"><span class="download-glyph" aria-hidden="true"></span></button>
+                  <button id="toggle-groups" class="group-toggle tool-button" type="button" hidden>全部展开</button>
+                </div>
               </div>
-              <div class="inventory-tools">
-                <label class="sort-control">
-                  <span>排序</span>
-                  <select id="gpu-sort" aria-label="GPU 排序方式">
-                    <option value="host">服务器 / Index</option>
-                    <option value="utilization">GPU 负载</option>
-                    <option value="memory">显存占用率</option>
-                    <option value="temperature">温度</option>
-                    <option value="power">功耗</option>
-                    <option value="processes">进程数</option>
-                  </select>
-                </label>
-                <button id="topology-toggle" class="tool-button topology-trigger" type="button" aria-haspopup="dialog">连接拓扑</button>
-                <button id="capacity-toggle" class="tool-button capacity-trigger" type="button" aria-haspopup="dialog">匹配算力</button>
-                <button id="owners-toggle" class="tool-button owners-trigger" type="button" aria-haspopup="dialog">使用者</button>
-                <button id="probe-now" class="tool-button probe-trigger" type="button" hidden>立即探测</button>
-                <button id="export-csv" class="tool-button" type="button">导出当前结果</button>
-                <button id="toggle-groups" class="group-toggle" type="button" hidden>全部展开</button>
-                <label class="search-box">
-                  <span class="search-symbol" aria-hidden="true"></span>
-                  <span class="sr-only">搜索服务器、GPU 或程序</span>
-                  <input id="search" type="search" placeholder="搜索服务器、GPU 或程序" maxlength="120" autocomplete="off">
-                  <kbd class="search-shortcut" aria-hidden="true">/</kbd>
-                </label>
-              </div>
-            </div>
 
-            <div id="node-notice" class="node-notice" role="status" hidden></div>
-            <section id="program-search-panel" class="program-search-panel" aria-labelledby="program-search-title" hidden>
-              <div class="program-search-heading">
-                <div>
-                  <span class="section-kicker">GPU 进程</span>
+              <div id="node-notice" class="node-notice" role="status" hidden></div>
+              <section id="program-search-panel" class="program-search-panel" aria-labelledby="program-search-title" hidden>
+                <div class="program-search-heading">
                   <h3 id="program-search-title">活跃程序</h3>
+                  <div class="program-search-status">
+                    <span id="program-search-scope">全局</span>
+                    <span id="program-search-count" class="count-badge">0</span>
+                  </div>
                 </div>
-                <div class="program-search-status">
-                  <span id="program-search-scope">全局</span>
-                  <span id="program-search-count" class="count-badge">0</span>
+                <p id="program-search-summary" class="program-search-summary" aria-live="polite"></p>
+                <div id="program-search-results" class="program-search-results" role="list"></div>
+              </section>
+              <section id="gpu-heatmap" class="gpu-heatmap" aria-label="GPU 调度热力图" hidden>
+                <div class="heatmap-heading">
+                  <h3>调度热力图</h3>
+                  <div class="heatmap-modes segmented" role="group" aria-label="热力图指标">
+                    <button class="heatmap-mode active" data-heat-metric="utilization" type="button" aria-pressed="true" title="GPU 负载">计算</button>
+                    <button class="heatmap-mode" data-heat-metric="memory" type="button" aria-pressed="false" title="显存占用率">显存</button>
+                    <button class="heatmap-mode" data-heat-metric="bandwidth" type="button" aria-pressed="false" title="显存带宽利用率（nvidia-smi utilization.memory）">带宽</button>
+                    <button class="heatmap-mode" data-heat-metric="temperature" type="button" aria-pressed="false" title="GPU 温度">温度</button>
+                  </div>
                 </div>
-              </div>
-              <p id="program-search-summary" class="program-search-summary" aria-live="polite"></p>
-              <div id="program-search-results" class="program-search-results" role="list"></div>
-            </section>
-            <section id="gpu-heatmap" class="gpu-heatmap" aria-label="GPU 调度热力图" hidden>
-              <div class="heatmap-heading">
-                <div>
-                  <span class="section-kicker">调度热力图</span>
-                  <h3>GPU 调度热力图</h3>
+                <div class="heatmap-scroll">
+                  <div id="heatmap-grid" class="heatmap-grid"></div>
                 </div>
-                <div class="heatmap-modes" role="group" aria-label="热力图指标">
-                  <button class="heatmap-mode active" data-heat-metric="utilization" type="button" aria-pressed="true">计算</button>
-                  <button class="heatmap-mode" data-heat-metric="memory" type="button" aria-pressed="false">显存</button>
-                  <button class="heatmap-mode" data-heat-metric="temperature" type="button" aria-pressed="false">温度</button>
+              </section>
+              <div id="resource-grid" class="resource-grid" aria-label="系统资源概览"></div>
+              <section id="use-panel" class="use-panel" aria-labelledby="use-title" hidden>
+                <div class="section-heading">
+                  <h3 id="use-title">USE 检查</h3>
+                  <span class="hint" title="每种资源看三件事：使用率、饱和度（排队或等待）、错误。— 表示采集没有提供这一项。" aria-label="说明">i</span>
                 </div>
-              </div>
-              <div class="heatmap-scroll">
-                <div id="heatmap-grid" class="heatmap-grid"></div>
-              </div>
-            </section>
-            <div id="resource-grid" class="resource-grid" aria-label="系统资源概览"></div>
-            <div id="disk-list" class="disk-list" hidden></div>
-            <section id="trend-panel" class="trend-panel" aria-label="服务器短期趋势" hidden>
-              <div class="trend-heading">
-                <div>
-                  <span class="section-kicker">近期趋势</span>
+                <div class="table-scroll">
+                  <table class="use-table">
+                    <thead><tr><th scope="col">资源</th><th scope="col">使用率</th><th scope="col">饱和度</th><th scope="col">错误</th></tr></thead>
+                    <tbody id="use-rows"></tbody>
+                  </table>
+                </div>
+              </section>
+              <div id="disk-list" class="disk-list" hidden></div>
+              <section id="utilization-history" class="trend-panel utilization-history" aria-labelledby="utilization-history-title" hidden>
+                <div class="trend-heading">
+                  <h3 id="utilization-history-title">近 7 天</h3>
+                  <span id="utilization-history-range">等待报表</span>
+                </div>
+                <div id="utilization-history-grid" class="trend-grid"></div>
+              </section>
+              <section id="trend-panel" class="trend-panel" aria-label="服务器短期趋势" hidden>
+                <div class="trend-heading">
                   <h3>实时趋势</h3>
+                  <span id="trend-range">等待样本</span>
                 </div>
-                <span id="trend-range">等待样本</span>
+                <div id="trend-grid" class="trend-grid"></div>
+              </section>
+
+              <div class="filter-row" role="group" aria-label="GPU 状态筛选">
+                <span class="filter-label">GPU</span>
+                <div class="segmented">
+                  <button class="filter active" data-filter="all" type="button" aria-pressed="true">全部</button>
+                  <button class="filter" data-filter="busy" type="button" aria-pressed="false"><i class="dot busy"></i>运行中</button>
+                  <button class="filter" data-filter="idle" type="button" aria-pressed="false"><i class="dot idle"></i>空闲</button>
+                  <button class="filter" data-filter="hot" type="button" aria-pressed="false"><i class="dot hot"></i>高温</button>
+                  <button class="filter" data-filter="processes" type="button" aria-pressed="false">有进程</button>
+                </div>
               </div>
-              <div id="trend-grid" class="trend-grid"></div>
+
+              <div class="table-scroll">
+                <table class="gpu-table gpu-table-head" aria-hidden="true">
+                  <thead>
+                    <tr>
+                      <th>设备</th>
+                      <th>型号 / 驱动</th>
+                      <th>GPU 负载</th>
+                      <th>显存</th>
+                      <th class="gpu-col-temperature">温度</th>
+                      <th class="gpu-col-power">功耗</th>
+                      <th class="gpu-col-process">进程</th>
+                      <th>状态</th>
+                    </tr>
+                  </thead>
+                </table>
+                <div id="gpu-groups" class="gpu-groups"></div>
+                <div id="empty-state" class="empty-state" hidden>
+                  <strong>没有可显示的 GPU</strong>
+                  <span>调整服务器、状态筛选或搜索条件</span>
+                  <button id="clear-inventory-filters" class="secondary-action" type="button" hidden>清除筛选</button>
+                </div>
+              </div>
             </section>
+          </section>
+        </section>
 
-            <div class="filter-row" role="group" aria-label="GPU 状态筛选">
-              <span class="filter-label">GPU 设备</span>
-              <button class="filter active" data-filter="all" type="button" aria-pressed="true">全部</button>
-              <button class="filter" data-filter="busy" type="button" aria-pressed="false"><i class="dot busy"></i>运行中</button>
-              <button class="filter" data-filter="idle" type="button" aria-pressed="false"><i class="dot idle"></i>空闲</button>
-              <button class="filter" data-filter="hot" type="button" aria-pressed="false"><i class="dot hot"></i>高温</button>
-              <button class="filter" data-filter="processes" type="button" aria-pressed="false">有进程</button>
+        <section id="page-find" class="page" data-page="find" aria-labelledby="capacity-title" hidden>
+          <div class="page-heading">
+            <h1 id="capacity-title">找卡</h1>
+            <span class="hint" title="按同一节点、同一型号匹配当前空闲 GPU。计算完全基于浏览器中的最新快照，不会触发额外 SSH 请求。结果不是资源预留，启动任务前请在调度系统中确认。" aria-label="说明">i</span>
+          </div>
+          <section class="panel capacity-panel">
+            <form id="capacity-form" class="capacity-form">
+              <label>
+                <span>GPU 数量</span>
+                <input id="capacity-gpu-count" type="number" min="1" max="256" step="1" value="1" required>
+              </label>
+              <label>
+                <span>每卡最少可用显存</span>
+                <span class="capacity-vram-field"><input id="capacity-vram" type="number" min="0" max="512" step="1" value="24" required><small>GiB</small></span>
+              </label>
+              <label>
+                <span>GPU 型号</span>
+                <select id="capacity-model"><option value="any">不限型号</option></select>
+              </label>
+              <button class="primary-action" type="submit">匹配</button>
+              <button id="capacity-watch-toggle" class="inline-action" type="button">空闲时提醒我</button>
+            </form>
+            <div class="capacity-watch">
+              <span id="capacity-watch-status" class="capacity-watch-status" role="status">保存当前条件后，页面会在出现满足的空闲组合时提醒（可选浏览器通知）</span>
             </div>
+            <div class="capacity-rule"><i></i><span id="capacity-rule">空闲判定将在获得数据后显示</span></div>
+            <div class="capacity-heading">
+              <h2 id="capacity-summary">等待 GPU 快照</h2>
+              <span id="capacity-updated">实时更新</span>
+            </div>
+            <div id="capacity-results" class="capacity-results"></div>
+          </section>
+        </section>
 
-            <div class="table-scroll">
-              <table class="gpu-table gpu-table-head" aria-hidden="true">
-                <thead>
-                  <tr>
-                    <th>设备</th>
-                    <th>型号 / 驱动</th>
-                    <th>GPU 负载</th>
-                    <th>显存</th>
-                    <th class="gpu-col-temperature">温度</th>
-                    <th class="gpu-col-power">功耗</th>
-                    <th class="gpu-col-process">进程</th>
-                    <th>状态</th>
-                  </tr>
-                </thead>
-              </table>
-              <div id="gpu-groups" class="gpu-groups"></div>
-              <div id="empty-state" class="empty-state" hidden>
-                <div class="empty-glyph" aria-hidden="true"><i></i></div>
-                <strong>没有可显示的 GPU</strong>
-                <span>调整服务器、状态筛选或搜索条件</span>
-                <button id="clear-inventory-filters" class="secondary-action" type="button" hidden>清除筛选</button>
+        <section id="page-jobs" class="page" data-page="jobs" aria-labelledby="jobs-title" hidden>
+          <div class="page-heading">
+            <h1 id="jobs-title">任务</h1>
+            <span class="hint" title="同一主机上同一使用者、同一程序、同时启动的进程算一个任务；有调度器作业号时按作业号合并。负载是任务所用 GPU 的平均值，不是单个进程的负载。" aria-label="说明">i</span>
+            <span id="jobs-summary" class="page-summary"></span>
+          </div>
+          <section class="panel">
+            <div class="panel-toolbar">
+              <div class="segmented" role="group" aria-label="任务筛选">
+                <button data-job-filter="all" type="button" aria-pressed="true">全部 <span>0</span></button>
+                <button data-job-filter="mine" type="button" aria-pressed="false">我的 <span>0</span></button>
+                <button data-job-filter="idle" type="button" aria-pressed="false">空转 <span>0</span></button>
               </div>
+              <label class="search-box">
+                <span class="search-symbol" aria-hidden="true"></span>
+                <span class="sr-only">搜索任务</span>
+                <input id="job-search" type="search" placeholder="搜索程序、用户、主机" maxlength="120" autocomplete="off">
+              </label>
             </div>
+            <div class="table-scroll">
+              <table class="data-table jobs-table">
+                <thead>
+                  <tr><th scope="col">使用者</th><th scope="col">程序</th><th scope="col">主机 · GPU</th><th scope="col" class="numeric">负载</th><th scope="col" class="numeric">显存</th><th scope="col">运行</th><th scope="col">状态</th></tr>
+                </thead>
+                <tbody id="jobs-body"></tbody>
+              </table>
+            </div>
+            <div id="jobs-empty" class="empty-state compact" hidden><strong>没有匹配的任务</strong></div>
+          </section>
+        </section>
+
+        <section id="page-alerts" class="page" data-page="alerts" aria-labelledby="alerts-title" hidden>
+          <div class="page-heading">
+            <h1 id="alerts-title">告警</h1>
+            <span id="alerts-summary" class="page-summary"></span>
+          </div>
+          <div class="page-split">
+            <div class="page-main">
+              <section class="panel">
+                <div class="panel-toolbar">
+                  <div class="segmented" role="group" aria-label="告警处理状态">
+                    <button data-alert-tab="open" type="button" aria-pressed="true">未处理 <span>0</span></button>
+                    <button data-alert-tab="acknowledged" type="button" aria-pressed="false">已确认 <span>0</span></button>
+                    <button data-alert-tab="silenced" type="button" aria-pressed="false">已静默 <span>0</span></button>
+                  </div>
+                </div>
+                <div id="alert-list" class="alert-list" role="list"></div>
+              </section>
+              <section id="incident-panel" class="incident-panel panel" aria-label="近期状态变化" hidden>
+                <div class="incident-heading">
+                  <h2 id="incident-summary">近期状态变化</h2>
+                  <button id="toggle-incidents" class="text-link" type="button" hidden>展开全部</button>
+                </div>
+                <div id="incident-list" class="incident-list"></div>
+              </section>
+            </div>
+            <aside class="page-side">
+              <section class="panel side-card" aria-labelledby="noise-title">
+                <div class="side-card-heading">
+                  <h2 id="noise-title">告警噪声</h2>
+                  <span class="hint" title="按告警管理惯例（ANSI/ISA-18.2、EEMUA 191），一个人每小时处理约 6 条以内；反复开关的条件应优先治理。数据来自 /api/brief 的 24 小时窗口。" aria-label="说明">i</span>
+                </div>
+                <div id="noise-body" class="noise-body"><span class="muted-text">等待简报</span></div>
+              </section>
+              <section class="panel side-card" aria-labelledby="maintenance-title">
+                <div class="side-card-heading">
+                  <h2 id="maintenance-title">维护中</h2>
+                  <span class="hint" title="维护期间照常采集，只是不提醒" aria-label="说明">i</span>
+                </div>
+                <div id="maintenance-list" class="side-list"></div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section id="page-usage" class="page" data-page="usage" aria-labelledby="owners-title" hidden>
+          <div class="page-heading">
+            <h1 id="owners-title">用量</h1>
+            <span class="hint" title="归属来自可选的 Slurm / Kubernetes / 进程属主采集。未开启 workloads 采集时无法区分用户，进程归入「未归属」。占用账单按监控观测到的进程时间线统计，覆盖范围受采集与保留窗口限制。" aria-label="说明">i</span>
+            <label class="owners-usage-window">窗口
+              <select id="owners-usage-hours">
+                <option value="24" selected>24 小时</option>
+                <option value="72">3 天</option>
+                <option value="168">7 天</option>
+              </select>
+            </label>
+          </div>
+          <section class="panel">
+            <div class="capacity-heading owners-usage-heading">
+              <h2 id="owners-usage-summary">等待占用账单</h2>
+            </div>
+            <div id="owners-usage-results" class="capacity-results"></div>
+          </section>
+          <section class="panel" aria-labelledby="fleet-utilization-title">
+            <div class="capacity-heading">
+              <h2 id="fleet-utilization-title">忙碌占比</h2>
+              <span id="fleet-utilization-range">等待报表</span>
+            </div>
+            <div id="fleet-utilization" class="fleet-utilization"></div>
+          </section>
+          <section class="panel">
+            <div class="capacity-heading">
+              <h2 id="owners-summary">等待 GPU 快照</h2>
+              <span id="owners-updated">实时更新</span>
+            </div>
+            <div id="owners-results" class="capacity-results"></div>
           </section>
         </section>
       </main>
 
       <footer class="app-footer">
-        <span>Mocop · GPU 集群监控 · OpenSSH 采集</span>
+        <span>Mocop · GPU 集群监控</span>
         <span id="poll-info">等待采集</span>
       </footer>
     </div>
+
     <dialog id="authentication-dialog" class="authentication-dialog" aria-labelledby="authentication-title" aria-describedby="authentication-description">
       <div class="authentication-mark" aria-hidden="true">M</div>
       <div class="authentication-heading">
-        <span class="section-kicker">安全访问</span>
         <h2 id="authentication-title">连接 Mocop</h2>
       </div>
       <p id="authentication-description">输入此 Mocop 实例的访问令牌。令牌来自受保护的安装配置，仅用于此页面向 Mocop API 认证。</p>
@@ -303,220 +450,287 @@
       </form>
       <small class="authentication-privacy">验证成功后仅保存在当前标签页的会话存储中；关闭标签页即失效。</small>
     </dialog>
-    <dialog id="settings-dialog" class="side-dialog settings-dialog" aria-labelledby="settings-title">
-      <div class="dialog-heading">
-        <div>
-          <span class="section-kicker">设置</span>
-          <h2 id="settings-title">监控与外观</h2>
-        </div>
+
+    <dialog id="settings-dialog" class="modal-dialog settings-dialog" aria-labelledby="settings-title">
+      <nav class="settings-nav" aria-label="设置分类">
+        <h2 id="settings-title">设置</h2>
+        <small>个人</small>
+        <button data-settings-tab="appearance" type="button" aria-current="page">外观</button>
+        <button data-settings-tab="display" type="button">显示</button>
+        <small>监控</small>
+        <button data-settings-tab="nodes" type="button">监控节点</button>
+        <button data-settings-tab="collector" type="button">采集策略</button>
+        <small>系统</small>
+        <button data-settings-tab="service" type="button">服务与数据</button>
+        <button data-settings-tab="verify" type="button">自检</button>
+      </nav>
+      <div class="settings-body">
         <button class="dialog-close" data-close-dialog="settings-dialog" type="button" aria-label="关闭设置">×</button>
-      </div>
-      <p class="dialog-intro">设置不会因服务重启自动重置：采集策略与监控节点写入本地配置；外观、密度和视图偏好保存在当前浏览器，换浏览器或清理站点数据后不保留。</p>
-      <div class="settings-sections">
-        <section class="settings-section appearance-settings settings-wide">
-          <h3>界面外观</h3>
-          <div class="appearance-heading">
-            <strong>视觉风格</strong><span>切换布局、明暗、字体、材质与信息密度</span>
+
+        <section class="settings-panel appearance-settings" data-settings-panel="appearance" aria-label="外观">
+          <h3>外观</h3>
+          <div class="settings-group">
+            <h4>界面风格</h4>
+            <div class="style-grid" role="radiogroup" aria-label="视觉风格">
+              <button class="style-choice" data-style-choice="carbon" type="button" role="radio" aria-checked="true">
+                <span class="style-preview carbon" aria-hidden="true"><i></i><i></i></span><strong>炭灰</strong>
+              </button>
+              <button class="style-choice" data-style-choice="paper" type="button" role="radio" aria-checked="false">
+                <span class="style-preview paper" aria-hidden="true"><i></i><i></i></span><strong>纸白</strong>
+              </button>
+              <button class="style-choice" data-style-choice="auto" type="button" role="radio" aria-checked="false">
+                <span class="style-preview auto" aria-hidden="true"><i></i><i></i></span><strong>跟随系统</strong>
+              </button>
+              <button class="style-choice" data-style-choice="precision" type="button" role="radio" aria-checked="false">
+                <span class="style-preview precision" aria-hidden="true"><i></i><i></i></span><strong>精密仪表</strong>
+              </button>
+              <button class="style-choice" data-style-choice="glass" type="button" role="radio" aria-checked="false">
+                <span class="style-preview glass" aria-hidden="true"><i></i><i></i></span><strong>雾光玻璃</strong>
+              </button>
+              <button class="style-choice" data-style-choice="terminal" type="button" role="radio" aria-checked="false">
+                <span class="style-preview terminal" aria-hidden="true"><i></i><i></i></span><strong>终端矩阵</strong>
+              </button>
+              <button class="style-choice" data-style-choice="ledger" type="button" role="radio" aria-checked="false">
+                <span class="style-preview ledger" aria-hidden="true"><i></i><i></i></span><strong>研究台账</strong>
+              </button>
+            </div>
           </div>
-          <div class="style-grid" role="radiogroup" aria-label="视觉风格">
-            <button class="style-choice" data-style-choice="precision" type="button" role="radio" aria-checked="true">
-              <span class="style-preview precision" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span><strong>精密仪表</strong><small>六列总览与克制的控制台层级</small></span>
-            </button>
-            <button class="style-choice" data-style-choice="glass" type="button" role="radio" aria-checked="false">
-              <span class="style-preview glass" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span><strong>雾光玻璃</strong><small>深色景深与三列聚合视图</small></span>
-            </button>
-            <button class="style-choice" data-style-choice="terminal" type="button" role="radio" aria-checked="false">
-              <span class="style-preview terminal" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span><strong>终端矩阵</strong><small>圆角命令台与高密度等宽读数</small></span>
-            </button>
-            <button class="style-choice" data-style-choice="ledger" type="button" role="radio" aria-checked="false">
-              <span class="style-preview ledger" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span><strong>研究台账</strong><small>温暖纸面与研究记录式排版</small></span>
-            </button>
-            <button class="style-choice" data-style-choice="blueprint" type="button" role="radio" aria-checked="false">
-              <span class="style-preview blueprint" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span><strong>工程蓝图</strong><small>圆角技术网格与结构化读数</small></span>
-            </button>
-            <button class="style-choice" data-style-choice="studio" type="button" role="radio" aria-checked="false">
-              <span class="style-preview studio" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span><strong>柔和工作台</strong><small>明亮 Bento 与舒展的信息层级</small></span>
-            </button>
+          <div class="settings-group">
+            <h4>颜色与背景</h4>
+            <div class="settings-rows">
+              <div class="settings-row">
+                <span><strong>强调色</strong></span>
+                <div class="accent-grid" role="radiogroup" aria-label="强调色">
+                  <button class="accent-choice auto" data-accent-choice="auto" type="button" role="radio" aria-checked="true" title="跟随风格"><i aria-hidden="true"></i><span class="sr-only">跟随风格</span></button>
+                  <button class="accent-choice cobalt" data-accent-choice="cobalt" type="button" role="radio" aria-checked="false" title="钴蓝"><i aria-hidden="true"></i><span class="sr-only">钴蓝</span></button>
+                  <button class="accent-choice cyan" data-accent-choice="cyan" type="button" role="radio" aria-checked="false" title="冰青"><i aria-hidden="true"></i><span class="sr-only">冰青</span></button>
+                  <button class="accent-choice violet" data-accent-choice="violet" type="button" role="radio" aria-checked="false" title="星云紫"><i aria-hidden="true"></i><span class="sr-only">星云紫</span></button>
+                  <button class="accent-choice emerald" data-accent-choice="emerald" type="button" role="radio" aria-checked="false" title="翡翠"><i aria-hidden="true"></i><span class="sr-only">翡翠</span></button>
+                  <button class="accent-choice amber" data-accent-choice="amber" type="button" role="radio" aria-checked="false" title="琥珀"><i aria-hidden="true"></i><span class="sr-only">琥珀</span></button>
+                  <button class="accent-choice rose" data-accent-choice="rose" type="button" role="radio" aria-checked="false" title="玫红"><i aria-hidden="true"></i><span class="sr-only">玫红</span></button>
+                </div>
+              </div>
+              <div class="settings-row background-settings">
+                <span>
+                  <strong>背景图片<span class="hint" title="PNG、JPEG、WebP、AVIF；超过 8 MiB 自动压缩，原图最大 32 MiB。只保存在当前浏览器，不会上传到服务器。" aria-label="说明">i</span></strong>
+                  <small id="background-image-status" class="background-status" role="status">未设置</small>
+                </span>
+                <div class="background-actions">
+                  <input id="background-image-input" class="visually-hidden-input" type="file" accept="image/png,image/jpeg,image/webp,image/avif">
+                  <label class="inline-action upload-action" for="background-image-input">选择图片</label>
+                  <button id="remove-background-image" class="inline-action danger-action" type="button" disabled>移除</button>
+                </div>
+              </div>
+              <label class="settings-row background-visibility" for="background-visibility">
+                <span><strong>背景可见度</strong></span>
+                <span class="range-field">
+                  <input id="background-visibility" type="range" min="15" max="70" step="1" value="38">
+                  <output id="background-visibility-value" for="background-visibility">38%</output>
+                </span>
+              </label>
+            </div>
           </div>
-          <div class="appearance-heading accent-heading">
-            <strong>色彩主题</strong><span>同步调整背景、面板、边框与强调色</span>
+          <div class="settings-group">
+            <h4>阅读</h4>
+            <div class="settings-rows">
+              <label class="settings-row">
+                <span><strong>信息密度</strong></span>
+                <select id="interface-density">
+                  <option value="comfortable">舒适</option>
+                  <option value="compact">紧凑</option>
+                </select>
+              </label>
+              <label class="settings-row">
+                <span><strong>字号</strong></span>
+                <select id="interface-text-size">
+                  <option value="standard">标准</option>
+                  <option value="large">大</option>
+                </select>
+              </label>
+              <label class="settings-row">
+                <span><strong>动效</strong></span>
+                <select id="interface-motion">
+                  <option value="normal">正常</option>
+                  <option value="reduce">减少</option>
+                </select>
+              </label>
+            </div>
           </div>
-          <div class="accent-grid" role="radiogroup" aria-label="色彩主题">
-            <button class="accent-choice cobalt" data-accent-choice="cobalt" type="button" role="radio" aria-checked="true"><i aria-hidden="true"></i><span>深海钴蓝</span></button>
-            <button class="accent-choice cyan" data-accent-choice="cyan" type="button" role="radio" aria-checked="false"><i aria-hidden="true"></i><span>极光冰青</span></button>
-            <button class="accent-choice violet" data-accent-choice="violet" type="button" role="radio" aria-checked="false"><i aria-hidden="true"></i><span>星云紫</span></button>
-            <button class="accent-choice emerald" data-accent-choice="emerald" type="button" role="radio" aria-checked="false"><i aria-hidden="true"></i><span>矩阵翡翠</span></button>
-            <button class="accent-choice amber" data-accent-choice="amber" type="button" role="radio" aria-checked="false"><i aria-hidden="true"></i><span>余晖琥珀</span></button>
-            <button class="accent-choice rose" data-accent-choice="rose" type="button" role="radio" aria-checked="false"><i aria-hidden="true"></i><span>霓虹玫红</span></button>
+          <button id="reset-preferences" class="secondary-action" type="button">恢复浏览器显示默认</button>
+        </section>
+
+        <section class="settings-panel" data-settings-panel="display" aria-label="显示" hidden>
+          <h3>显示</h3>
+          <div class="settings-group">
+            <h4>我</h4>
+            <div class="settings-rows">
+              <label class="settings-row">
+                <span><strong>我是谁</strong><small>任务页的「我的」按这里筛选</small></span>
+                <select id="settings-me"><option value="">未设置</option></select>
+              </label>
+            </div>
           </div>
-          <label class="settings-field appearance-density">
-            <span>信息密度</span>
-            <select id="interface-density">
-              <option value="comfortable">舒适</option>
-              <option value="compact">紧凑</option>
-            </select>
-          </label>
-          <div class="background-settings">
-            <div class="background-heading">
-              <span><strong>本地背景</strong><small>仅保存在当前浏览器，不会上传到服务器</small></span>
-              <div class="background-actions">
-                <input id="background-image-input" class="visually-hidden-input" type="file" accept="image/png,image/jpeg,image/webp,image/avif">
-                <label class="inline-action upload-action" for="background-image-input">选择图片</label>
-                <button id="remove-background-image" class="inline-action danger-action" type="button" disabled>移除</button>
+          <div class="settings-group">
+            <h4>服务器列表</h4>
+            <div class="settings-rows">
+              <label class="settings-row">
+                <span><strong>排序方式</strong></span>
+                <select id="server-sort">
+                  <option value="custom">自定义拖动顺序</option>
+                  <option value="group">节点分组</option>
+                  <option value="host">服务器名称</option>
+                  <option value="status">异常优先</option>
+                  <option value="gpu">GPU 利用率</option>
+                  <option value="cpu">CPU 利用率</option>
+                </select>
+              </label>
+              <label class="settings-row">
+                <span><strong>关注视图</strong></span>
+                <select id="default-server-filter">
+                  <option value="all">全部服务器</option>
+                  <option value="issues">异常节点</option>
+                  <option value="busy">计算中节点</option>
+                  <option value="available">有空闲 GPU</option>
+                  <option value="stale">陈旧节点</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div class="settings-group">
+            <h4>GPU 视图</h4>
+            <div class="settings-rows">
+              <label class="settings-row">
+                <span><strong>默认排序</strong></span>
+                <select id="settings-gpu-sort">
+                  <option value="host">服务器 / 编号</option>
+                  <option value="utilization">GPU 负载</option>
+                  <option value="memory">显存占用率</option>
+                  <option value="temperature">温度</option>
+                  <option value="power">功耗</option>
+                  <option value="processes">进程数</option>
+                </select>
+              </label>
+              <label class="settings-row">
+                <span><strong>热力图指标</strong></span>
+                <select id="settings-heat-metric">
+                  <option value="utilization">计算利用率</option>
+                  <option value="memory">显存占用</option>
+                  <option value="bandwidth">显存带宽</option>
+                  <option value="temperature">温度</option>
+                </select>
+              </label>
+              <label class="settings-row settings-switch">
+                <span><strong>显示温度列</strong></span>
+                <input id="show-temperature" type="checkbox" checked>
+              </label>
+              <label class="settings-row settings-switch">
+                <span><strong>显示功耗列</strong></span>
+                <input id="show-power" type="checkbox" checked>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-panel inventory-settings" data-settings-panel="nodes" aria-label="监控节点" hidden>
+          <h3>监控节点</h3>
+          <div class="settings-group">
+            <div class="settings-group-heading">
+              <h4>来自 OpenSSH 配置</h4>
+              <button id="inventory-refresh" class="inline-action" type="button">扫描</button>
+            </div>
+            <p class="inventory-note">扫描不会发起 SSH 连接；拓扑模式会运行有界 <code>ssh -G</code> 解析 ProxyJump/ProxyCommand，识别出的跳板不会被采集。Git 托管与 <code>exclude_hosts</code> 中的别名会被忽略。维护窗口不会停止采集，只会暂时静默该节点的待处理问题。</p>
+            <div id="inventory-status" class="inventory-status" role="status">打开设置后自动扫描</div>
+            <div class="inventory-columns">
+              <div class="inventory-block">
+                <div class="inventory-block-heading"><strong>正在监控</strong><span id="configured-host-count">0</span></div>
+                <div id="configured-host-list" class="inventory-host-list"></div>
+              </div>
+              <div class="inventory-block">
+                <div class="inventory-block-heading"><strong>可添加</strong><span id="available-host-count">0</span></div>
+                <div id="available-host-list" class="inventory-host-list"></div>
               </div>
             </div>
-            <label class="background-visibility" for="background-visibility">
-              <span>背景可见度</span>
-              <input id="background-visibility" type="range" min="15" max="70" step="1" value="38">
-              <output id="background-visibility-value" for="background-visibility">38%</output>
-            </label>
-            <span id="background-image-status" class="background-status" role="status">支持 PNG、JPEG、WebP、AVIF；超过 8 MiB 自动压缩，原图最大 32 MiB</span>
           </div>
-          <span class="settings-help">字体针对中英文正文、指标数字和设备标识分别优化，并只使用本机字体；紧凑模式适合大规模集群。恢复显示默认不会删除单独保存的背景图片。</span>
         </section>
-        <section class="settings-section collector-settings">
-          <div class="settings-section-heading">
-            <div>
-              <h3>采集策略</h3>
-              <span>写入 config.json，并立即热更新</span>
+
+        <section class="settings-panel collector-settings" data-settings-panel="collector" aria-label="采集策略" hidden>
+          <h3>采集策略</h3>
+          <form id="collector-settings-form" class="settings-group">
+            <div class="settings-group-heading">
+              <h4>写入 config.json，立即生效</h4>
+              <span class="persistence-badge">持久化</span>
             </div>
-            <span class="persistence-badge">持久化</span>
-          </div>
-          <form id="collector-settings-form">
-            <label class="settings-field">
-              <span>采集周期</span>
-              <span class="number-field"><input id="settings-poll-interval" type="number" min="2" max="60" step="1" required><small>秒</small></span>
-            </label>
-            <label class="settings-field">
-              <span>单轮探测超时</span>
-              <span class="number-field"><input id="settings-probe-timeout" type="number" min="2" max="300" step="1" required><small>秒</small></span>
-            </label>
-            <label class="settings-field">
-              <span>并发探测数</span>
-              <span class="number-field"><input id="settings-max-workers" type="number" min="1" max="64" step="1" required><small>节点</small></span>
-            </label>
+            <div class="settings-rows">
+              <label class="settings-row">
+                <span><strong>采集周期</strong><small>越短，SSH 与远端查询压力越大</small></span>
+                <span class="number-field"><input id="settings-poll-interval" type="number" min="2" max="60" step="1" required><small>秒</small></span>
+              </label>
+              <label class="settings-row">
+                <span><strong>单轮探测超时</strong><small>必须高于 SSH 连接超时</small></span>
+                <span class="number-field"><input id="settings-probe-timeout" type="number" min="2" max="300" step="1" required><small>秒</small></span>
+              </label>
+              <label class="settings-row">
+                <span><strong>并发探测数</strong></span>
+                <span class="number-field"><input id="settings-max-workers" type="number" min="1" max="64" step="1" required><small>节点</small></span>
+              </label>
+            </div>
             <div class="collector-actions">
               <span id="collector-settings-status" role="status">修改后需要保存</span>
               <button id="save-collector-settings" class="primary-action" type="submit">保存采集策略</button>
             </div>
           </form>
-          <span class="settings-help">较短周期会增加 SSH 与远端查询压力；探测超时必须高于 SSH 连接超时。</span>
         </section>
-        <section class="settings-section">
-          <h3>服务器列表</h3>
-          <label class="settings-field">
-            <span>排序方式</span>
-            <select id="server-sort">
-              <option value="custom">自定义拖动顺序</option>
-              <option value="group">节点分组</option>
-              <option value="host">服务器名称</option>
-              <option value="status">异常优先</option>
-              <option value="gpu">GPU 利用率</option>
-              <option value="cpu">CPU 利用率</option>
-            </select>
-          </label>
-          <label class="settings-field">
-            <span>关注视图</span>
-            <select id="default-server-filter">
-              <option value="all">全部服务器</option>
-              <option value="issues">异常节点</option>
-              <option value="busy">计算中节点</option>
-              <option value="available">有空闲 GPU</option>
-              <option value="stale">陈旧节点</option>
-            </select>
-          </label>
-          <span class="settings-help">节点分组来自本地配置；拖动服务器会自动切换到自定义顺序，关注视图会在下次打开时恢复。</span>
-        </section>
-        <section class="settings-section">
-          <h3>GPU 视图</h3>
-          <label class="settings-field">
-            <span>默认排序</span>
-            <select id="settings-gpu-sort">
-              <option value="host">服务器 / Index</option>
-              <option value="utilization">GPU 负载</option>
-              <option value="memory">显存占用率</option>
-              <option value="temperature">温度</option>
-              <option value="power">功耗</option>
-              <option value="processes">进程数</option>
-            </select>
-          </label>
-          <label class="settings-field">
-            <span>热力图指标</span>
-            <select id="settings-heat-metric">
-              <option value="utilization">计算利用率</option>
-              <option value="memory">显存占用</option>
-              <option value="temperature">温度</option>
-            </select>
-          </label>
-          <label class="settings-switch">
-            <span><strong>显示温度列</strong><small>GPU 当前温度</small></span>
-            <input id="show-temperature" type="checkbox" checked>
-          </label>
-          <label class="settings-switch">
-            <span><strong>显示功耗列</strong><small>实时功率读数</small></span>
-            <input id="show-power" type="checkbox" checked>
-          </label>
-        </section>
-        <section class="settings-section runtime-settings">
-          <h3>监控服务状态</h3>
-          <div class="runtime-status-row">
-            <span><strong>历史数据</strong><small>内存或可选 SQLite</small></span>
-            <em id="persistence-status">等待状态</em>
-          </div>
-          <div class="runtime-status-row">
-            <span><strong>Webhook</strong><small>异步事件投递</small></span>
-            <em id="notification-status">等待状态</em>
-          </div>
-          <div id="notification-endpoints" class="notification-endpoints" hidden></div>
-          <div class="runtime-service-row">
-            <span><strong>监控进程</strong><small id="service-restart-status">正在确认运行方式</small></span>
-            <button id="restart-service" class="inline-action restart-action" type="button" disabled>重启服务</button>
-          </div>
-          <div class="runtime-service-row">
-            <span><strong>通知链路</strong><small id="notification-test-status">配置 Webhook 后可执行受限测试</small></span>
-            <button id="test-notifications" class="inline-action" type="button" disabled>测试通知</button>
-          </div>
-          <div class="runtime-service-row">
-            <span><strong>诊断包</strong><small>脱敏导出当前状态，不含进程、路径和 SSH 错误</small></span>
-            <button id="export-diagnostics" class="inline-action" type="button">导出诊断</button>
-          </div>
-          <span class="settings-help">升级 Mocop 后可在此重启并自动载入新版本；配置、显示偏好和 SQLite 历史不会被重置。</span>
-        </section>
-        <section class="settings-section inventory-settings settings-wide">
-          <div class="settings-section-heading">
-            <div>
-              <h3>监控节点</h3>
-              <span>从 OpenSSH 配置中发现候选节点</span>
-            </div>
-            <button id="inventory-refresh" class="inline-action" type="button">扫描</button>
-          </div>
-          <p class="inventory-note">扫描不会发起 SSH 连接；拓扑模式会运行有界 <code>ssh -G</code> 解析有效的 ProxyJump/ProxyCommand。识别出的跳板基础设施不会被自动采集，并按最近的跳板 alias 生成分组；显式分组仍可覆盖。Git、GitHub、GitLab 与 <code>exclude_hosts</code> 中的别名会被忽略。维护窗口不会停止采集，只会暂时静默该节点的待处理问题。</p>
-          <div id="inventory-status" class="inventory-status" role="status">打开设置后自动扫描</div>
-          <div class="inventory-columns">
-            <div class="inventory-block">
-              <div class="inventory-block-heading"><strong>正在监控</strong><span id="configured-host-count">0</span></div>
-              <div id="configured-host-list" class="inventory-host-list"></div>
-            </div>
-            <div class="inventory-block">
-              <div class="inventory-block-heading"><strong>可添加</strong><span id="available-host-count">0</span></div>
-              <div id="available-host-list" class="inventory-host-list"></div>
+
+        <section class="settings-panel runtime-settings" data-settings-panel="service" aria-label="服务与数据" hidden>
+          <h3>服务与数据</h3>
+          <div class="settings-group">
+            <div class="settings-rows">
+              <div class="settings-row runtime-status-row">
+                <span><strong>历史数据</strong><small>内存或可选 SQLite</small></span>
+                <em id="persistence-status">等待状态</em>
+              </div>
+              <div class="settings-row runtime-status-row">
+                <span><strong>Webhook</strong><small>异步事件投递</small></span>
+                <em id="notification-status">等待状态</em>
+              </div>
+              <div id="notification-endpoints" class="notification-endpoints" hidden></div>
+              <div class="settings-row runtime-service-row">
+                <span><strong>监控进程</strong><small id="service-restart-status">正在确认运行方式</small></span>
+                <button id="restart-service" class="inline-action restart-action" type="button" disabled>重启服务</button>
+              </div>
+              <div class="settings-row runtime-service-row">
+                <span><strong>通知链路</strong><small id="notification-test-status">配置 Webhook 后可执行受限测试</small></span>
+                <button id="test-notifications" class="inline-action" type="button" disabled>测试通知</button>
+              </div>
+              <div class="settings-row runtime-service-row">
+                <span><strong>诊断包</strong><small>脱敏导出当前状态，不含进程、路径和 SSH 错误</small></span>
+                <button id="export-diagnostics" class="inline-action" type="button">导出诊断</button>
+              </div>
             </div>
           </div>
+        </section>
+
+        <section class="settings-panel" data-settings-panel="verify" aria-label="自检" hidden>
+          <div class="settings-panel-heading">
+            <h3>自检</h3>
+            <span class="hint" title="页面上的每个关键数字都由浏览器重新计算，再与服务端独立算出的汇总（快照 stats、GET /api/capacity）逐项对账；文字颜色按 WCAG 2.1 AA 测量对比度。一项检查必须能失败，才算证据。" aria-label="说明">i</span>
+            <button id="run-self-check" class="inline-action" type="button">重新检查</button>
+          </div>
+          <p id="self-check-summary" class="self-check-summary" role="status"></p>
+          <div id="self-check-results" class="settings-rows self-check-results"></div>
         </section>
       </div>
-      <button id="reset-preferences" class="secondary-action" type="button">恢复浏览器显示默认</button>
+    </dialog>
+
+    <dialog id="palette-dialog" class="palette-dialog" aria-label="命令面板">
+      <input id="palette-input" type="search" placeholder="主机、页面、使用者、程序，或「找 2 张 80G」" maxlength="120" autocomplete="off" aria-controls="palette-results" aria-autocomplete="list" role="combobox" aria-expanded="true">
+      <div id="palette-results" class="palette-results" role="listbox" aria-label="结果"></div>
+      <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>↵</kbd> 打开</span><span><kbd>esc</kbd> 关闭</span></div>
     </dialog>
 
     <dialog id="restart-confirm-dialog" class="confirm-dialog" aria-labelledby="restart-confirm-title" aria-describedby="restart-confirm-description">
       <div class="confirm-dialog-mark" aria-hidden="true">↻</div>
       <div>
-        <span class="section-kicker">服务重启</span>
         <h2 id="restart-confirm-title">确认重启监控服务？</h2>
       </div>
       <p id="restart-confirm-description">采集和网页连接会中断数秒。服务恢复后页面将自动刷新，现有配置、浏览器偏好和历史数据保持不变。</p>
@@ -526,15 +740,12 @@
       </div>
     </dialog>
 
-    <dialog id="topology-dialog" class="side-dialog topology-dialog" aria-labelledby="topology-title">
+    <dialog id="topology-dialog" class="modal-dialog single topology-dialog" aria-labelledby="topology-title">
       <div class="dialog-heading">
-        <div>
-          <span class="section-kicker">连接拓扑</span>
-          <h2 id="topology-title">集群连接拓扑</h2>
-        </div>
+        <h2 id="topology-title">连接拓扑</h2>
+        <span class="hint" title="展示监控端经基础设施节点到各服务器的逻辑 SSH 路径。跳板机和 FRP 节点只用于说明连接关系，不会被采集；拓扑不包含 token、密钥、用户名或远端命令，打开视图也不会触发额外 SSH 请求。" aria-label="说明">i</span>
         <button class="dialog-close" data-close-dialog="topology-dialog" type="button" aria-label="关闭连接拓扑">×</button>
       </div>
-      <p class="dialog-intro">展示监控端经基础设施节点到各服务器的逻辑 SSH 路径。跳板机和 FRP 节点只用于说明连接关系，不会被采集；拓扑不包含 token、密钥、用户名或远端命令，打开视图也不会触发额外 SSH 请求。</p>
       <div class="topology-summary" aria-live="polite">
         <span><strong id="topology-node-count">0</strong> 个拓扑节点</span>
         <span><strong id="topology-frp-count">0</strong> 条 FRP 通道</span>
@@ -553,75 +764,10 @@
       </section>
     </dialog>
 
-    <dialog id="capacity-dialog" class="side-dialog capacity-dialog" aria-labelledby="capacity-title">
-      <div class="dialog-heading">
-        <div>
-          <span class="section-kicker">算力匹配</span>
-          <h2 id="capacity-title">匹配可用 GPU</h2>
-        </div>
-        <button class="dialog-close" data-close-dialog="capacity-dialog" type="button" aria-label="关闭算力匹配">×</button>
-      </div>
-      <p class="dialog-intro">按同一节点、同一型号匹配当前空闲 GPU。计算完全基于浏览器中的最新快照，不会触发额外 SSH 请求。</p>
-      <form id="capacity-form" class="capacity-form">
-        <label>
-          <span>GPU 数量</span>
-          <input id="capacity-gpu-count" type="number" min="1" max="256" step="1" value="1" required>
-        </label>
-        <label>
-          <span>每卡最少可用显存</span>
-          <span class="capacity-vram-field"><input id="capacity-vram" type="number" min="0" max="512" step="1" value="24" required><small>GiB</small></span>
-        </label>
-        <label>
-          <span>GPU 型号</span>
-          <select id="capacity-model"><option value="any">不限型号</option></select>
-        </label>
-        <button class="primary-action" type="submit">开始匹配</button>
-      </form>
-      <div class="capacity-watch">
-        <button id="capacity-watch-toggle" class="inline-action" type="button">空闲时提醒我</button>
-        <span id="capacity-watch-status" class="capacity-watch-status" role="status">保存当前条件后，页面会在出现满足的空闲组合时提醒（可选浏览器通知）</span>
-      </div>
-      <div class="capacity-rule"><i></i><span id="capacity-rule">空闲判定将在获得数据后显示</span></div>
-      <div class="capacity-heading">
-        <div><span class="section-kicker">可用节点</span><h3 id="capacity-summary">等待 GPU 快照</h3></div>
-        <span id="capacity-updated">实时更新</span>
-      </div>
-      <div id="capacity-results" class="capacity-results"></div>
-      <p class="capacity-footnote">匹配结果不是资源预留；启动任务前请重新确认节点状态和调度系统中的实际占用。</p>
-    </dialog>
-
-    <dialog id="owners-dialog" class="side-dialog capacity-dialog owners-dialog" aria-labelledby="owners-title">
-      <div class="dialog-heading">
-        <div>
-          <span class="section-kicker">任务归属</span>
-          <h2 id="owners-title">谁在使用集群</h2>
-        </div>
-        <button class="dialog-close" data-close-dialog="owners-dialog" type="button" aria-label="关闭使用者视图">×</button>
-      </div>
-      <p class="dialog-intro">按进程归属聚合当前快照中的 GPU 显存占用。归属来自可选的 Slurm / Kubernetes / 进程属主采集，计算完全在浏览器内进行，不会触发额外请求。</p>
-      <div class="capacity-heading">
-        <div><span class="section-kicker">当前使用者</span><h3 id="owners-summary">等待 GPU 快照</h3></div>
-        <span id="owners-updated">实时更新</span>
-      </div>
-      <div id="owners-results" class="capacity-results"></div>
-      <div class="capacity-heading owners-usage-heading">
-        <div><span class="section-kicker">占用时间</span><h3 id="owners-usage-summary">等待占用账单</h3></div>
-        <label class="owners-usage-window">窗口
-          <select id="owners-usage-hours">
-            <option value="24" selected>24 小时</option>
-            <option value="72">3 天</option>
-            <option value="168">7 天</option>
-          </select>
-        </label>
-      </div>
-      <div id="owners-usage-results" class="capacity-results"></div>
-      <p class="capacity-footnote">未开启 workloads 采集时无法区分用户，进程会归入「未归属」。占用账单按监控观测到的进程时间线统计，覆盖范围受采集与保留窗口限制。</p>
-    </dialog>
-
     <dialog id="gpu-detail-dialog" class="side-dialog gpu-detail-dialog" aria-labelledby="gpu-detail-title">
       <div class="dialog-heading">
         <div>
-          <span id="gpu-detail-host" class="section-kicker">GPU 详情</span>
+          <span id="gpu-detail-host" class="dialog-kicker">GPU 详情</span>
           <h2 id="gpu-detail-title">GPU 详情</h2>
         </div>
         <button id="gpu-detail-ssh" class="inline-action gpu-detail-ssh" type="button">复制 SSH</button>
@@ -635,10 +781,7 @@
         <section class="gpu-task-section">
           <section class="gpu-task-workspace" aria-labelledby="gpu-task-title">
             <div class="gpu-task-heading">
-              <div>
-                <span class="section-kicker">GPU 进程</span>
-                <h3 id="gpu-task-title">活跃计算进程</h3>
-              </div>
+              <h3 id="gpu-task-title">活跃计算进程</h3>
               <div id="gpu-task-heading-tools" class="gpu-task-heading-tools">
                 <label class="gpu-task-search-box">
                   <span class="sr-only">筛选当前 GPU 的程序</span>
@@ -648,7 +791,7 @@
               </div>
             </div>
             <div class="gpu-task-filter-row">
-              <div class="gpu-task-identity-filter" role="group" aria-label="进程归属筛选">
+              <div class="gpu-task-identity-filter segmented" role="group" aria-label="进程归属筛选">
                 <button class="active" data-gpu-task-filter="all" type="button" aria-pressed="true">全部</button>
                 <button data-gpu-task-filter="owned" type="button" aria-pressed="false">已归属</button>
                 <button data-gpu-task-filter="unowned" type="button" aria-pressed="false">未归属</button>
@@ -665,10 +808,7 @@
           </section>
           <section class="gpu-history-section" aria-label="GPU 近期历史">
             <div class="gpu-task-heading">
-              <div>
-                <span class="section-kicker">近期历史</span>
-                <h3>单卡实时趋势</h3>
-              </div>
+              <h3>单卡实时趋势</h3>
               <span id="gpu-history-range" class="count-badge">等待样本</span>
             </div>
             <div id="gpu-history-grid" class="gpu-history-grid"></div>
@@ -682,7 +822,7 @@
     <dialog id="incident-detail-dialog" class="side-dialog incident-detail-dialog" aria-labelledby="incident-detail-title">
       <div class="dialog-heading">
         <div>
-          <span id="incident-detail-host" class="section-kicker">问题诊断</span>
+          <span id="incident-detail-host" class="dialog-kicker">问题诊断</span>
           <h2 id="incident-detail-title">问题诊断</h2>
         </div>
         <button class="dialog-close" data-close-dialog="incident-detail-dialog" type="button" aria-label="关闭问题诊断">×</button>
@@ -699,10 +839,7 @@
           <button id="incident-open-gpu" class="inline-action" type="button" hidden>查看对应 GPU</button>
         </section>
         <section class="incident-actions">
-          <div>
-            <span class="section-kicker">处理方式</span>
-            <h3>处理状态</h3>
-          </div>
+          <h3>处理状态</h3>
           <p>确认后仍保留事件和恢复通知；静默期间不计入待处理问题，也不发送新的 Webhook 告警。</p>
           <label><span>有效时间</span><select id="incident-action-duration"><option value="3600">1 小时</option><option value="14400">4 小时</option><option value="86400" selected>24 小时</option><option value="604800">7 天</option></select></label>
           <label><span>备注（可选）</span><input id="incident-action-reason" type="text" maxlength="120" placeholder="例如：已通知任务负责人"></label>
@@ -735,6 +872,20 @@
     <script src="/attention-groups.js" defer></script>
     <script src="/attention.js" defer></script>
     <script src="/owner-usage.js" defer></script>
+    <script src="/preferences.js" defer></script>
+    <script src="/fleet-state.js" defer></script>
+    <script src="/use-check.js" defer></script>
+    <script src="/gpu-jobs.js" defer></script>
+    <script src="/alert-noise.js" defer></script>
+    <script src="/self-check.js" defer></script>
+    <script src="/command-palette.js" defer></script>
+    <script src="/palette-view.js" defer></script>
+    <script src="/trend-charts.js" defer></script>
+    <script src="/usage-view.js" defer></script>
+    <script src="/jobs-view.js" defer></script>
+    <script src="/alerts-view.js" defer></script>
+    <script src="/topology-view.js" defer></script>
+    <script src="/inventory-forms.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

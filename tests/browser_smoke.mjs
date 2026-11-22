@@ -572,7 +572,8 @@ try {
     return result;
   })()`);
   assert.deepEqual(processState, {
-    state: "有进程", processRows: 1, idleRows: 0, clearVisible: true,
+    // A process holding at least 256 MiB below the busy threshold occupies the card.
+    state: "占用", processRows: 1, idleRows: 0, clearVisible: true,
     clearReset: { filter: "all", query: "", hidden: true },
   });
 
@@ -1271,21 +1272,27 @@ try {
     document.querySelector("#capacity-gpu-count").value = "2";
     document.querySelector("#capacity-vram").value = "60";
     document.querySelector("#capacity-form").requestSubmit();
-    const dialog = document.querySelector("#capacity-dialog");
-    const rect = dialog.getBoundingClientRect();
+    const page = document.querySelector("#page-find");
+    const rect = page.getBoundingClientRect();
     const result = {
-      open: dialog.open,
+      open: !page.hidden && document.querySelector("#page-overview").hidden,
+      hash: window.location.hash,
+      current: document.querySelector('[data-page-link][aria-current="page"]')?.dataset.pageLink,
       initialMatches,
       matches: document.querySelectorAll("#capacity-results .capacity-candidate.match").length,
       firstHost: document.querySelector("#capacity-results .capacity-candidate.match strong")?.textContent,
+      cuda: document.querySelector("#capacity-results .capacity-candidate.match button[title^='CUDA_VISIBLE_DEVICES=']")?.title,
       summary: document.querySelector("#capacity-summary")?.textContent,
       rule: document.querySelector("#capacity-rule")?.textContent,
       centerDelta: Math.abs((rect.left + rect.right) / 2 - document.documentElement.clientWidth / 2),
     };
-    dialog.close();
+    showPage("overview");
     return result;
   })()`);
-  assert.equal(capacity.open, true);
+  assert.equal(capacity.open, true, "find GPUs is a page, not a dialog");
+  assert.equal(capacity.hash, "#/find");
+  assert.equal(capacity.current, "find");
+  assert.match(capacity.cuda, /^CUDA_VISIBLE_DEVICES=\d+,\d+$/, "a match offers its two lowest devices");
   assert.equal(capacity.initialMatches, 2);
   assert.equal(capacity.matches, 1);
   assert.equal(capacity.firstHost, "atlas-02");
@@ -1343,7 +1350,7 @@ try {
       bannerVisible: !banner.hidden,
       stored: localStorage.getItem("mocop.capacityWatch.v1"),
     };
-    document.querySelector("#capacity-dialog").close();
+    showPage("overview");
     return { afterSave, afterDismiss, afterStop };
   })()`);
   // Saving the watch while the fixture already satisfies 2x60 GiB must fire
@@ -1366,7 +1373,7 @@ try {
 
   const owners = await cdp.evaluate(`(() => {
     document.querySelector("#owners-toggle").click();
-    const dialog = document.querySelector("#owners-dialog");
+    const page = document.querySelector("#page-usage");
     const rows = [...document.querySelectorAll("#owners-results .capacity-candidate")];
     const metricNumbers = (row) => [...row.querySelectorAll(".capacity-candidate-metrics span")]
       .map((item) => Number.parseInt(item.textContent, 10));
@@ -1383,9 +1390,9 @@ try {
     const researcherRows = rows.filter(
       (row) => row.querySelector("strong")?.textContent === "researcher",
     );
-    const rect = dialog.getBoundingClientRect();
+    const rect = page.getBoundingClientRect();
     const result = {
-      open: dialog.open,
+      open: !page.hidden,
       rows: rows.length,
       ownerNames: rows.map((row) => row.querySelector("strong")?.textContent),
       researcherRowCount: researcherRows.length,
@@ -1396,7 +1403,7 @@ try {
       offlineNote: document.querySelector("#owners-results .owners-footnote")?.textContent || "",
       centerDelta: Math.abs((rect.left + rect.right) / 2 - document.documentElement.clientWidth / 2),
     };
-    dialog.close();
+    showPage("overview");
     return result;
   })()`);
   assert.equal(owners.open, true);
@@ -1445,7 +1452,7 @@ try {
           .at(-1)?.textContent,
       ),
     };
-    document.querySelector("#owners-dialog").close();
+    showPage("overview");
     return result;
   })()`, true);
   assert.deepEqual(ownersUsage.owners, ["researcher", "未归属"]);
@@ -1457,7 +1464,7 @@ try {
   // dialog and selects the host through the regular selection path.
   const ownersDrilldown = await cdp.evaluate(`(() => {
     document.querySelector("#owners-toggle").click();
-    const dialog = document.querySelector("#owners-dialog");
+    const page = document.querySelector("#page-usage");
     const chip = [...document.querySelectorAll("#owners-results .owner-host-chip")]
       .find((node) => node.textContent === "atlas-01");
     const chipIsButton = chip?.tagName === "BUTTON";
@@ -1465,7 +1472,7 @@ try {
     const result = {
       chipFound: Boolean(chip),
       chipIsButton,
-      dialogOpenAfterClick: dialog.open,
+      dialogOpenAfterClick: !page.hidden,
       selectedHost: view.selectedHost,
       locationHash: window.location.hash,
     };
@@ -1481,7 +1488,7 @@ try {
   assert.equal(
     ownersDrilldown.dialogOpenAfterClick,
     false,
-    "owner host chip closes the owners dialog",
+    "owner host chip leaves the usage page for the overview",
   );
   assert.equal(
     ownersDrilldown.selectedHost,
@@ -1489,6 +1496,118 @@ try {
     "owner host chip selects the corresponding host",
   );
   assert.equal(ownersDrilldown.locationHash, "#atlas-01");
+
+  // Pages answer one question each. The jobs page folds processes into
+  // launches, the alerts page splits conditions by handling and shows alert
+  // noise from /api/brief, and the host view adds a USE table. The fixture
+  // has no history database, so the 7-day report panel stays hidden.
+  const pages = await cdp.evaluate(`(async () => {
+    const until = async (predicate) => {
+      for (let attempt = 0; attempt < 80 && !predicate(); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    window.location.hash = "#/jobs";
+    await until(() => !document.querySelector("#page-jobs").hidden && document.querySelectorAll("#jobs-body tr").length);
+    const jobs = {
+      rows: document.querySelectorAll("#jobs-body tr").length,
+      states: [...document.querySelectorAll("#jobs-body .job-state")].map((node) => node.dataset.state),
+      firstOwner: document.querySelector("#jobs-body .job-owner strong")?.textContent,
+      summary: document.querySelector("#jobs-summary").textContent,
+      mineDisabled: document.querySelector('[data-job-filter="mine"]').disabled,
+    };
+    const search = document.querySelector("#job-search");
+    search.value = "telemetry_probe";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    jobs.searched = document.querySelectorAll("#jobs-body tr").length;
+    jobs.unknownMemory = document.querySelector("#jobs-body tr td:nth-child(5)")?.textContent;
+    search.value = "";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+
+    window.location.hash = "#/alerts";
+    await until(() => document.querySelector("#noise-body .noise-rate"));
+    const alerts = {
+      current: document.querySelector('[data-page-link][aria-current="page"]')?.dataset.pageLink,
+      rows: document.querySelectorAll("#alert-list .alert-row").length,
+      openCount: document.querySelector('[data-alert-tab="open"] span').textContent,
+      badge: document.querySelector("#alerts-badge").textContent,
+      badgeHidden: document.querySelector("#alerts-badge").hidden,
+      noise: document.querySelector("#noise-body .noise-rate")?.textContent || "",
+      changes: document.querySelectorAll("#incident-list .incident-item").length,
+      englishTitles: [...document.querySelectorAll("#alert-list .alert-row-title span")]
+        .filter((node) => /[A-Za-z]{4,} [a-z]+/.test(node.textContent)).length,
+    };
+
+    showPage("overview");
+    selectHost("atlas-01");
+    await until(() => !document.querySelector("#use-panel").hidden);
+    const use = {
+      resources: [...document.querySelectorAll("#use-rows th")].map((cell) => cell.textContent),
+      cells: document.querySelectorAll("#use-rows td").length,
+    };
+    await until(() => utilizationLoader.state.value || utilizationLoader.state.error);
+    use.historyHidden = document.querySelector("#utilization-history").hidden;
+    selectHost("all");
+    return { jobs, alerts, use };
+  })()`, true);
+  assert.equal(pages.jobs.rows, 7);
+  assert.deepEqual([...new Set(pages.jobs.states)].sort(), ["compute", "offline"]);
+  assert.equal(pages.jobs.firstOwner, "researcher", "the widest launch comes first");
+  assert.match(pages.jobs.summary, /7 个任务/);
+  assert.equal(pages.jobs.mineDisabled, true, "my jobs needs a chosen identity");
+  assert.equal(pages.jobs.searched, 1);
+  assert.equal(pages.jobs.unknownMemory, "未知", "a process without a memory reading is unknown, not zero");
+  assert.equal(pages.alerts.current, "alerts");
+  assert.equal(pages.alerts.rows, 3);
+  assert.equal(pages.alerts.openCount, "3");
+  assert.equal(pages.alerts.badge, "3");
+  assert.equal(pages.alerts.badgeHidden, false);
+  assert.match(pages.alerts.noise, /次\/小时/);
+  assert.equal(pages.alerts.changes, 3);
+  assert.equal(pages.alerts.englishTitles, 0, "every condition category has Chinese guidance");
+  assert.deepEqual(pages.use.resources, ["CPU", "内存", "磁盘", "网络", "GPU"]);
+  assert.equal(pages.use.cells, 15);
+  assert.equal(pages.use.historyHidden, true, "no history database, no 7-day panel");
+
+  // The self-check reconciles browser numbers with the server's aggregates
+  // and /api/capacity; on a consistent fixture every row passes.
+  const selfCheck = await cdp.evaluate(`(async () => {
+    document.querySelector("#settings-toggle").click();
+    document.querySelector('[data-settings-tab="verify"]').click();
+    for (let attempt = 0; attempt < 80 && !/项通过/.test(document.querySelector("#self-check-summary").textContent); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const result = {
+      summary: document.querySelector("#self-check-summary").textContent,
+      failed: [...document.querySelectorAll(".check-row.failed")].map((row) => row.textContent),
+      checks: [...document.querySelectorAll(".check-row")].map((row) => row.dataset.check),
+    };
+    document.querySelector('[data-settings-tab="appearance"]').click();
+    document.querySelector("#settings-dialog").close();
+    return result;
+  })()`, true);
+  assert.deepEqual(selfCheck.failed, []);
+  assert.match(selfCheck.summary, /^(\d+) \/ \1 项通过$/);
+  for (const id of ["gpus", "busy-gpus", "online-servers", "incidents", "capacity-gpus", "contrast-muted-2", "overflow"]) {
+    assert(selfCheck.checks.includes(id), `self-check covers ${id}`);
+  }
+
+  // The command palette opens with Ctrl+K, ranks hosts, and runs the choice.
+  await cdp.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "k", code: "KeyK", modifiers: 2, windowsVirtualKeyCode: 75 });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "k", code: "KeyK", modifiers: 2, windowsVirtualKeyCode: 75 });
+  const palette = await cdp.evaluate(`(async () => {
+    const dialog = document.querySelector("#palette-dialog");
+    const input = document.querySelector("#palette-input");
+    const opened = dialog.open && document.activeElement === input;
+    input.value = "atlas-02";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const first = document.querySelector("#palette-results .palette-item strong")?.textContent;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    const result = { opened, first, closed: !dialog.open, selected: view.selectedHost, hash: window.location.hash };
+    selectHost("all");
+    return result;
+  })()`, true);
+  assert.deepEqual(palette, { opened: true, first: "atlas-02", closed: true, selected: "atlas-02", hash: "#atlas-02" });
 
   // Incident detail offers a direct path to the host's maintenance window:
   // the shortcut closes the diagnosis dialog, opens settings and lands on the
@@ -1515,7 +1634,8 @@ try {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       row = [...document.querySelectorAll("#configured-host-list .inventory-host")]
         .find((item) => item.dataset.host === "atlas-03");
-      if (row && row.querySelector(".maintenance-editor")) break;
+      // Focus follows the completed rescan, which may trail a cached row.
+      if (row && row.querySelector(".maintenance-editor") && !view.inventoryLoading) break;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     result.settingsOpen = settingsDialog.open;
@@ -1743,66 +1863,43 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     const settingsDialog = document.querySelector("#settings-dialog");
+    // Settings reopens on the last tab; the appearance controls live on the first.
+    document.querySelector('[data-settings-tab="appearance"]').click();
     const settingsRect = settingsDialog.getBoundingClientRect();
-    const settingsColumns = getComputedStyle(
-      document.querySelector(".settings-sections")
-    ).gridTemplateColumns.split(" ").length;
+    // Settings is a centered dialog: category navigation beside one panel.
+    const settingsColumns = getComputedStyle(settingsDialog).gridTemplateColumns.split(" ").length;
+    // Styles are token sets over one layout: they change color, type, and
+    // corner radius, never the arrangement of panels.
+    const cardStyle = () => getComputedStyle(document.querySelector(".metric-card"));
+    const layout = () => ({
+      columns: getComputedStyle(document.querySelector(".metrics-grid")).gridTemplateColumns.split(" ").length,
+      workspaceColumns: getComputedStyle(document.querySelector(".workspace")).gridTemplateColumns.split(" ").length,
+    });
+    document.querySelector('[data-style-choice="carbon"]').click();
+    const carbonStyle = { radius: cardStyle().borderRadius, scheme: getComputedStyle(document.documentElement).colorScheme, ...layout() };
+    document.querySelector('[data-style-choice="paper"]').click();
+    const paperStyle = { scheme: getComputedStyle(document.documentElement).colorScheme, dataScheme: document.documentElement.dataset.scheme, ...layout() };
     document.querySelector('[data-style-choice="terminal"]').click();
-    const terminalCardStyle = getComputedStyle(document.querySelector(".metric-card"));
     const terminalStyle = {
-      radius: terminalCardStyle.borderRadius,
-      shadow: terminalCardStyle.boxShadow,
+      radius: cardStyle().borderRadius,
       font: getComputedStyle(document.body).fontFamily,
+      ...layout(),
     };
     document.querySelector('[data-style-choice="ledger"]').click();
     const ledgerStyle = {
-      borderLeft: getComputedStyle(document.querySelector(".metric-card")).borderLeftWidth,
-      radius: getComputedStyle(document.querySelector(".metric-card")).borderRadius,
+      radius: cardStyle().borderRadius,
       headingFont: getComputedStyle(document.querySelector("h1")).fontFamily,
-      columns: getComputedStyle(document.querySelector(".metrics-grid"))
-        .gridTemplateColumns.split(" ").length,
       scheme: getComputedStyle(document.documentElement).colorScheme,
-      workspaceColumns: getComputedStyle(document.querySelector(".workspace"))
-        .gridTemplateColumns.split(" ").length,
-    };
-    document.querySelector('[data-style-choice="blueprint"]').click();
-    const blueprintCardStyle = getComputedStyle(document.querySelector(".metric-card"));
-    const blueprintStyle = {
-      radius: blueprintCardStyle.borderRadius,
-      shadow: blueprintCardStyle.boxShadow,
-      headingTransform: getComputedStyle(document.querySelector("h1")).textTransform,
-    };
-    document.querySelector('[data-style-choice="studio"]').click();
-    const studioFleetRect = document.querySelector(".fleet-panel").getBoundingClientRect();
-    const studioInventoryRect = document.querySelector(".inventory-panel").getBoundingClientRect();
-    const studioStyle = {
-      radius: getComputedStyle(document.querySelector(".metric-card")).borderRadius,
-      columns: getComputedStyle(document.querySelector(".metrics-grid"))
-        .gridTemplateColumns.split(" ").length,
-      scheme: getComputedStyle(document.documentElement).colorScheme,
-      fleetOnRight: studioFleetRect.left > studioInventoryRect.left,
+      ...layout(),
     };
     const precisionStyle = document.querySelector('[data-style-choice="precision"]');
     precisionStyle.click();
-    const precisionAppearance = {
-      radius: getComputedStyle(document.querySelector(".metric-card")).borderRadius,
-      columns: getComputedStyle(document.querySelector(".metrics-grid"))
-        .gridTemplateColumns.split(" ").length,
-    };
-    const paletteSnapshot = () => {
-      const rootStyle = getComputedStyle(document.documentElement);
-      const bodyStyle = getComputedStyle(document.body);
-      const cardStyle = getComputedStyle(document.querySelector(".metric-card:not(.primary)"));
-      const panelStyle = getComputedStyle(document.querySelector(".panel"));
-      return [
-        rootStyle.backgroundColor,
-        bodyStyle.backgroundImage,
-        cardStyle.backgroundImage,
-        cardStyle.borderTopColor,
-        panelStyle.backgroundColor,
-        panelStyle.borderTopColor,
-      ];
-    };
+    const precisionAppearance = { radius: cardStyle().borderRadius, ...layout() };
+    // An accent re-tints emphasis (bars, focus, selected styles) in every style.
+    const paletteSnapshot = () => [
+      getComputedStyle(document.querySelector("#cpu-bar")).backgroundColor,
+      getComputedStyle(document.documentElement).getPropertyValue("--blue").trim(),
+    ];
     document.querySelector('[data-accent-choice="cobalt"]').click();
     const cobaltPalette = paletteSnapshot();
     document.querySelector('[data-accent-choice="rose"]').click();
@@ -1810,14 +1907,9 @@ try {
     const themePaletteDelta = cobaltPalette.filter(
       (value, index) => value !== rosePalette[index],
     ).length;
-    const styleNames = ["precision", "glass", "terminal", "ledger", "blueprint", "studio"];
-    const roundedSurfaceSelectors = [
-      ".logo",
-      ".metric-card",
-      ".panel",
-      ".gpu-server-group",
-      ".style-choice",
-    ];
+    const styleNames = ["carbon", "paper", "precision", "glass", "terminal", "ledger"];
+    const lightStyles = new Set(["paper", "ledger"]);
+    const roundedSurfaceSelectors = [".logo", ".metric-card", ".panel", ".segmented", ".style-choice"];
     const styleCornerRadii = Object.fromEntries(styleNames.map((style) => {
       document.documentElement.dataset.style = style;
       return [style, roundedSurfaceSelectors.map((selector) => (
@@ -1826,6 +1918,7 @@ try {
     }));
     const themeDeltas = styleNames.map((style) => {
       document.documentElement.dataset.style = style;
+      document.documentElement.dataset.scheme = lightStyles.has(style) ? "light" : "dark";
       document.documentElement.dataset.accent = "cobalt";
       const cobalt = paletteSnapshot();
       document.documentElement.dataset.accent = "rose";
@@ -1868,17 +1961,19 @@ try {
     for (const style of styleNames) {
       for (const accent of ["cobalt", "cyan", "violet", "emerald", "amber", "rose"]) {
         document.documentElement.dataset.style = style;
+        document.documentElement.dataset.scheme = lightStyles.has(style) ? "light" : "dark";
         document.documentElement.dataset.accent = accent;
         const rootStyle = getComputedStyle(document.documentElement);
         const panelStyle = getComputedStyle(document.querySelector(".panel"));
         const rootBackground = rgba(rootStyle.backgroundColor);
         const panelBackground = composite(rgba(panelStyle.backgroundColor), rootBackground);
-        themeContrastRatios.push(contrast(rgba(rootStyle.color), panelBackground));
+        themeContrastRatios.push(contrast(rgba(getComputedStyle(document.body).color), panelBackground));
       }
     }
     const minimumThemePaletteDelta = Math.min(...themeDeltas);
     const minimumThemeContrast = Math.min(...themeContrastRatios);
     document.documentElement.dataset.style = "precision";
+    document.documentElement.dataset.scheme = "dark";
     document.documentElement.dataset.accent = "rose";
     precisionStyle.focus();
     precisionStyle.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
@@ -2066,12 +2161,12 @@ try {
     const result = {
       utilizationVisible,
       reordered, keyboardOrder, keyboardFocus,
-      savedServerSort: JSON.parse(localStorage.getItem("mocop.preferences.v1")).serverSort,
-      savedVisualStyle: JSON.parse(localStorage.getItem("mocop.preferences.v1")).visualStyle,
-      savedAccent: JSON.parse(localStorage.getItem("mocop.preferences.v1")).accent,
-      savedDensity: JSON.parse(localStorage.getItem("mocop.preferences.v1")).density,
-      savedBackgroundVisibility: JSON.parse(localStorage.getItem("mocop.preferences.v1")).backgroundVisibility,
-      savedServerFilter: JSON.parse(localStorage.getItem("mocop.preferences.v1")).serverFilter,
+      savedServerSort: JSON.parse(localStorage.getItem("mocop.preferences.v2")).serverSort,
+      savedVisualStyle: JSON.parse(localStorage.getItem("mocop.preferences.v2")).visualStyle,
+      savedAccent: JSON.parse(localStorage.getItem("mocop.preferences.v2")).accent,
+      savedDensity: JSON.parse(localStorage.getItem("mocop.preferences.v2")).density,
+      savedBackgroundVisibility: JSON.parse(localStorage.getItem("mocop.preferences.v2")).backgroundVisibility,
+      savedServerFilter: JSON.parse(localStorage.getItem("mocop.preferences.v2")).serverFilter,
       pressedFleetFilters: [...document.querySelectorAll(".fleet-filter[aria-pressed='true']")]
         .map((button) => button.dataset.serverFilter),
       activeVisualStyle: document.documentElement.dataset.style,
@@ -2091,10 +2186,10 @@ try {
       compressedBackgroundDimensions,
       rejectedOversized,
       rejectedDimensions,
+      carbonStyle,
+      paperStyle,
       terminalStyle,
       ledgerStyle,
-      blueprintStyle,
-      studioStyle,
       precisionAppearance,
       glassStyle,
       styleKeyboardFocus,
@@ -2196,13 +2291,13 @@ try {
   assert.equal(personalization.activeAccent, "rose");
   assert.equal(personalization.activeDensity, "compact");
   assert.equal(personalization.backgroundActive, "custom");
-  assert.match(personalization.backgroundStatus, /4 × 3/);
+  assert.equal(personalization.backgroundStatus, "已设置", "only whether a background is set is shown");
   assert.equal(personalization.backgroundRemoveEnabled, true);
   assert.equal(personalization.backgroundOpacity, "0.52");
   assert.match(personalization.rejectedBackground, /PNG/);
   assert.match(personalization.rejectedSpoofed, /文件格式不匹配/);
   assert.match(personalization.rejectedAnimation, /动态图片/);
-  assert.match(personalization.compressedBackgroundStatus, /已压缩/);
+  assert.equal(personalization.compressedBackgroundStatus, "已设置", "compression happens without a size readout");
   assert(personalization.compressedBackgroundSourceSize > 8 * 1024 * 1024);
   assert(personalization.compressedBackgroundSize > 0);
   assert(personalization.compressedBackgroundSize <= 8 * 1024 * 1024);
@@ -2216,40 +2311,36 @@ try {
   );
   assert.match(personalization.rejectedOversized, /32 MiB/);
   assert.match(personalization.rejectedDimensions, /8192/);
-  assert(personalization.themePaletteDelta >= 4);
+  assert.equal(personalization.themePaletteDelta, 2, "the accent changes emphasis color");
   assert(
-    personalization.minimumThemePaletteDelta >= 4,
+    personalization.minimumThemePaletteDelta === 2,
     `all style palettes must change materially: ${personalization.themeDeltas.join(",")}`,
   );
   assert(personalization.minimumThemeContrast >= 4.5);
-  assert.equal(personalization.terminalStyle.radius, "10px");
-  assert.equal(personalization.terminalStyle.shadow, "none");
+  assert.equal(personalization.carbonStyle.radius, "10px");
+  assert.equal(personalization.carbonStyle.scheme, "dark");
+  assert.equal(personalization.paperStyle.scheme, "light");
+  assert.equal(personalization.paperStyle.dataScheme, "light");
+  assert.equal(personalization.terminalStyle.radius, "6px");
   assert.match(personalization.terminalStyle.font, /Mono/);
-  assert.equal(personalization.ledgerStyle.borderLeft, "3px");
-  assert.equal(personalization.ledgerStyle.radius, "12px");
+  assert.equal(personalization.ledgerStyle.radius, "8px");
   assert.match(personalization.ledgerStyle.headingFont, /Serif|Georgia|Songti/);
-  assert.equal(personalization.ledgerStyle.columns, 3);
   assert.equal(personalization.ledgerStyle.scheme, "light");
-  assert.equal(personalization.ledgerStyle.workspaceColumns, 1);
-  assert.equal(personalization.blueprintStyle.radius, "12px");
-  assert.equal(personalization.blueprintStyle.shadow, "none");
-  assert.equal(personalization.blueprintStyle.headingTransform, "uppercase");
-  assert.equal(personalization.studioStyle.radius, "22px");
-  assert.equal(personalization.studioStyle.columns, 3);
-  assert.equal(personalization.studioStyle.scheme, "light");
-  assert.equal(personalization.studioStyle.fleetOnRight, true);
-  assert.equal(personalization.precisionAppearance.radius, "16px");
-  assert.equal(personalization.precisionAppearance.columns, 6);
-  assert.equal(personalization.glassStyle.radius, "22px");
-  assert.match(personalization.glassStyle.blur, /20px/);
+  assert.equal(personalization.precisionAppearance.radius, "12px");
+  for (const style of ["carbonStyle", "paperStyle", "terminalStyle", "ledgerStyle", "precisionAppearance"]) {
+    assert.equal(personalization[style].columns, 6, `${style} keeps the six summary columns`);
+    assert.equal(personalization[style].workspaceColumns, 2, `${style} keeps the fleet rail beside the inventory`);
+  }
+  assert.equal(personalization.glassStyle.radius, "14px");
+  assert.match(personalization.glassStyle.blur, /18px/);
   for (const [style, radii] of Object.entries(personalization.styleCornerRadii)) {
     assert(
-      radii.every((radius) => radius >= 8),
+      radii.every((radius) => radius >= 4),
       `${style} must keep every primary surface visibly rounded: ${radii.join(",")}`,
     );
   }
   assert.equal(personalization.styleKeyboardFocus, "glass");
-  assert.equal(personalization.accentColor, "#f47ca8");
+  assert.equal(personalization.accentColor, "#f06db5");
   assert(personalization.settingsCenterDelta < 2);
   assert.equal(personalization.settingsColumns, 2);
   assert.equal(personalization.configuredHosts, "4");
@@ -2323,8 +2414,8 @@ try {
   assert.equal(personalization.gpuHistoryCards, 4);
   assert.match(personalization.gpuTimelineText, /暂未记录/);
   assert.equal(personalization.heatmapLegend, false);
-  assert.equal(personalization.styleChoiceCount, 6);
-  assert.equal(personalization.accentChoiceCount, 6);
+  assert.equal(personalization.styleChoiceCount, 7, "six styles plus follow-the-system");
+  assert.equal(personalization.accentChoiceCount, 7, "six accents plus follow-the-style");
   assert.equal(personalization.restartDisabled, true);
   assert.match(personalization.restartStatus, /不支持网页重启/);
 
@@ -2451,7 +2542,7 @@ try {
       '.gpu-task-sort [data-task-sort="duration"]',
     ).classList.contains("active");
     const savedTaskSort = JSON.parse(
-      localStorage.getItem("mocop.preferences.v1"),
+      localStorage.getItem("mocop.preferences.v2"),
     ).gpuTaskSort;
     const taskNote = document.querySelector("#gpu-task-note").textContent;
     const server2 = view.snapshot.servers.find((item) => item.host === "atlas-02");
@@ -2724,7 +2815,7 @@ try {
     const server = view.snapshot.servers.find((item) => item.host === "atlas-01");
     openGpuDetail(server, server.gpus.find((item) => item.index === 0));
     const result = {
-      saved: JSON.parse(localStorage.getItem("mocop.preferences.v1")).gpuTaskSort,
+      saved: JSON.parse(localStorage.getItem("mocop.preferences.v2")).gpuTaskSort,
       activeChoice: document.querySelector(".gpu-task-sort .active")?.dataset.taskSort,
       firstRowKey: document.querySelector("#gpu-task-list .gpu-task")?.dataset.processKey,
     };
@@ -2826,31 +2917,30 @@ try {
   });
   await new Promise((resolve) => setTimeout(resolve, 200));
   const midWidth = await cdp.evaluate(`(() => {
+    // The last-collection age rides in the connection chip, which must stay
+    // one line instead of shrinking the age to a single glyph.
     const sync = document.querySelector(".sync-time");
-    const label = sync.querySelector("span");
     const value = sync.querySelector("strong");
-    const previous = { label: label.textContent, value: value.textContent };
+    const previous = value.textContent;
     // Pixel width of CJK tofu depends on whether the host has a CJK font;
     // probe with ASCII so CI and a desktop with Noto CJK see the same box.
-    label.textContent = "Last collected";
     value.textContent = "just now";
     const rect = sync.getBoundingClientRect();
     const measured = {
       width: rect.width,
       height: rect.height,
       flexShrink: getComputedStyle(sync).flexShrink,
-      labelWrap: getComputedStyle(label).whiteSpace,
       valueWrap: getComputedStyle(value).whiteSpace,
+      chipHeight: document.querySelector("#connection").getBoundingClientRect().height,
     };
-    label.textContent = previous.label;
-    value.textContent = previous.value;
+    value.textContent = previous;
     return measured;
   })()`);
   assert.equal(midWidth.flexShrink, "0");
-  assert.equal(midWidth.labelWrap, "nowrap");
   assert.equal(midWidth.valueWrap, "nowrap");
+  assert(midWidth.chipHeight <= 32, `790 px connection chip wrapped (${midWidth.chipHeight}px)`);
   assert(
-    midWidth.width >= 64,
+    midWidth.width >= 48,
     `790 px last-sync collapsed to ${midWidth.width}px`,
   );
   assert(
@@ -2889,13 +2979,12 @@ try {
     document.querySelector("#settings-toggle").click();
     const rect = document.querySelector("#settings-dialog").getBoundingClientRect();
     const header = document.querySelector(".app-header").getBoundingClientRect();
-    const title = document.querySelector("h1").getBoundingClientRect();
-    const kicker = document.querySelector(".product-line").getBoundingClientRect();
+    const nav = document.querySelector(".page-nav");
     const result = {
       overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       headerHeight: header.height,
-      titleHeight: title.height,
-      kickerHeight: kicker.height,
+      navHeight: nav.getBoundingClientRect().height,
+      navScrolls: getComputedStyle(nav).overflowX,
       programSearchColumns,
       programSearchDocumentOverflow,
       tableColumnAlignment,
@@ -2939,7 +3028,7 @@ try {
       > document.documentElement.clientWidth;
     gpuDetailDialog.close();
     result.styleOverflows = {};
-    for (const style of ["precision", "glass", "terminal", "ledger", "blueprint", "studio"]) {
+    for (const style of ["carbon", "paper", "precision", "glass", "terminal", "ledger"]) {
       document.documentElement.dataset.style = style;
       document.body.getBoundingClientRect();
       result.styleOverflows[style] = document.documentElement.scrollWidth
@@ -2950,12 +3039,11 @@ try {
     return result;
   })()`);
   assert.equal(mobile.overflow, false);
-  // A 390 px header is two rows at most: a one-line title and kicker, with
-  // the controls wrapped beneath them. Before this held, the kicker ran to
-  // four lines and the title to three (135 px of header).
+  // A 390 px header is two rows: brand and controls, then the page links on
+  // one scrollable line instead of wrapping into a third row.
   assert(mobile.headerHeight < 110, `mobile header ${mobile.headerHeight}px`);
-  assert(mobile.titleHeight < 30, `mobile title ${mobile.titleHeight}px`);
-  assert(mobile.kickerHeight < 18, `mobile kicker ${mobile.kickerHeight}px`);
+  assert(mobile.navHeight <= 34, `mobile page links wrapped (${mobile.navHeight}px)`);
+  assert.equal(mobile.navScrolls, "auto");
   assert.equal(mobile.programSearchColumns, 1);
   assert.equal(mobile.programSearchDocumentOverflow, false);
   assert.ok(
@@ -2974,12 +3062,12 @@ try {
   assert.equal(mobile.gpuDetailColumns, 1);
   assert.equal(mobile.gpuDetailDocumentOverflow, false);
   assert.deepEqual(mobile.styleOverflows, {
+    carbon: false,
+    paper: false,
     precision: false,
     glass: false,
     terminal: false,
     ledger: false,
-    blueprint: false,
-    studio: false,
   });
   const removedBackground = await cdp.evaluate(`(async () => {
     document.querySelector("#remove-background-image").click();
@@ -2995,7 +3083,7 @@ try {
   assert.deepEqual(removedBackground, {
     background: "",
     removeDisabled: true,
-    status: "背景已从当前浏览器移除",
+    status: "未设置",
   });
   // The public service manifest the dashboard booted from, then the
   // end-to-end viewer marker audit: every dashboard-initiated read of the

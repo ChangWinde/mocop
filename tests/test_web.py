@@ -722,15 +722,16 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="default-server-filter"', body)
         self.assertIn('id="server-sort"', body)
         for style in (
+            "carbon",
+            "paper",
+            "auto",
             "precision",
             "glass",
             "terminal",
             "ledger",
-            "blueprint",
-            "studio",
         ):
             self.assertIn(f'data-style-choice="{style}"', body)
-        for accent in ("cobalt", "cyan", "violet", "emerald", "amber", "rose"):
+        for accent in ("auto", "cobalt", "cyan", "violet", "emerald", "amber", "rose"):
             self.assertIn(f'data-accent-choice="{accent}"', body)
         self.assertIn('id="background-image-input"', body)
         self.assertIn('accept="image/png,image/jpeg,image/webp,image/avif"', body)
@@ -755,7 +756,12 @@ class WebTests(unittest.TestCase):
         self.assertIn('postJson("/api/settings/incident-action"', script)
         self.assertIn('postJson("/api/probe"', script)
         self.assertIn('id="capacity-toggle"', body)
-        self.assertIn('id="capacity-dialog"', body)
+        self.assertIn('id="page-find"', body)
+        for page in ("overview", "find", "jobs", "alerts", "usage"):
+            self.assertIn(f'data-page-link="{page}"', body)
+            self.assertIn(f'data-page="{page}"', body)
+        self.assertIn('id="palette-dialog"', body)
+        self.assertIn('data-settings-panel="verify"', body)
         self.assertIn('id="capacity-form"', body)
         self.assertIn('id="topology-toggle"', body)
         self.assertIn('id="topology-dialog"', body)

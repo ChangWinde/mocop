@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0035](0035-dashboard-pages-and-token-styles.md): styles became token sets over one layout and accents re-tint emphasis only.
 
 ## Context
 
