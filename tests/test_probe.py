@@ -812,7 +812,7 @@ class ProbeTests(unittest.TestCase):
         )
 
         result = OpenSshLinuxResourceProbe().probe(
-            "star-0", replace(config(), hosts=("star-0",), local_host="star-0")
+            "monitor-0", replace(config(), hosts=("monitor-0",), local_host="monitor-0")
         )
 
         self.assertEqual(result.status, "online")
@@ -821,7 +821,7 @@ class ProbeTests(unittest.TestCase):
     @patch("mocop.probe._run_bounded_process", side_effect=OSError)
     def test_local_host_reports_local_probe_start_failure(self, _run) -> None:
         result = OpenSshLinuxResourceProbe().probe(
-            "star-0", replace(config(), hosts=("star-0",), local_host="star-0")
+            "monitor-0", replace(config(), hosts=("monitor-0",), local_host="monitor-0")
         )
 
         self.assertEqual(result.status, "error")
@@ -1554,7 +1554,7 @@ class ProbeTests(unittest.TestCase):
     def test_probe_cancel_terminates_an_active_child_immediately(self) -> None:
         probe = OpenSshLinuxResourceProbe()
         local_config = replace(
-            config(), hosts=("star-0",), local_host="star-0", probe_timeout_seconds=5
+            config(), hosts=("monitor-0",), local_host="monitor-0", probe_timeout_seconds=5
         )
         entered_select = threading.Event()
         results = []
@@ -1569,7 +1569,7 @@ class ProbeTests(unittest.TestCase):
             patch.object(selectors.DefaultSelector, "select", observed_select),
         ):
             worker = threading.Thread(
-                target=lambda: results.append(probe.probe("star-0", local_config))
+                target=lambda: results.append(probe.probe("monitor-0", local_config))
             )
             worker.start()
             self.assertTrue(entered_select.wait(1), "probe never entered process wait")

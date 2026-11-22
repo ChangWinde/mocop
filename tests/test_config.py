@@ -1351,19 +1351,19 @@ else:
     def test_local_host_must_be_an_explicit_non_excluded_target(self) -> None:
         value = valid_config()
         value["auto_discover"] = False
-        value["hosts"] = ["star-0", "gpu-1"]
-        value["local_host"] = "star-0"
+        value["hosts"] = ["monitor-0", "gpu-1"]
+        value["local_host"] = "monitor-0"
         path = self.write(value)
 
-        self.assertEqual(load_config(path).local_host, "star-0")
+        self.assertEqual(load_config(path).local_host, "monitor-0")
 
         value["hosts"] = ["gpu-1"]
         path = self.write(value)
         with self.assertRaisesRegex(ConfigError, "local_host must also appear"):
             load_config(path)
 
-        value["hosts"] = ["star-0", "gpu-1"]
-        value["exclude_hosts"] = ["star-0"]
+        value["hosts"] = ["monitor-0", "gpu-1"]
+        value["exclude_hosts"] = ["monitor-0"]
         path = self.write(value)
         with self.assertRaisesRegex(ConfigError, "local_host cannot be excluded"):
             load_config(path)
