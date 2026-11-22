@@ -6,6 +6,9 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Conditions of the `gpu_processes`, `gpu_memory`, and `pressure` categories
+  now carry Chinese titles and next steps in the dashboard; they showed the
+  server's English diagnosis before.
 - Removing a host, through the dashboard, a configuration reload, or SSH
   discovery, now resolves each of its open conditions with a `resolved`
   transition that is persisted and delivered to webhooks. Before, the

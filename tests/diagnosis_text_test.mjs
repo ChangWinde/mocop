@@ -15,13 +15,13 @@ const { localizedDiagnosis } = globalThis.MocopDiagnosisText.create({ incidentCo
   assert.equal(title, "文件系统空间不足");
   assert.equal(summary, "/scratch 已超过配置的使用率阈值。");
   assert.equal(steps.length, 2);
-  for (const category of ["connectivity", "swap", "memory", "cpu", "gpu_idle_memory", "gpu_temperature", "gpu_count", "gpu_ecc", "gpu_memory_repair", "gpu_slowdown"]) {
+  for (const category of ["connectivity", "swap", "memory", "pressure", "cpu", "gpu_memory", "gpu_idle_memory", "gpu_processes", "gpu_temperature", "gpu_count", "gpu_ecc", "gpu_memory_repair", "gpu_slowdown"]) {
     const [heading, body, next] = localizedDiagnosis({ category, resource: "x" });
     assert.ok(heading && body && next.length >= 1, category);
   }
   assert.deepEqual(
     localizedDiagnosis({
-      category: "pressure",
+      category: "future_category",
       resource: "内存压力",
       value: 42,
       diagnosis: { title: "服务端标题", summary: "服务端摘要", nextSteps: ["第一步"] },
@@ -29,7 +29,7 @@ const { localizedDiagnosis } = globalThis.MocopDiagnosisText.create({ incidentCo
     ["服务端标题", "服务端摘要", ["第一步"]],
   );
   assert.deepEqual(
-    localizedDiagnosis({ category: "pressure", resource: "内存压力", value: 42 }),
+    localizedDiagnosis({ category: "future_category", resource: "内存压力", value: 42 }),
     ["资源状态需要处理", "内存压力 42%", ["确认当前状态是否符合任务预期。"]],
   );
 }

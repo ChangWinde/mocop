@@ -33,7 +33,7 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/static/app.js": 5_762,
     "src/mocop/static/owner-usage.js": 150,
     "src/mocop/static/incident-text.js": 150,
-    "src/mocop/static/diagnosis-text.js": 110,
+    "src/mocop/static/diagnosis-text.js": 85,
     "src/mocop/static/attention.js": 110,
     "src/mocop/static/attention-groups.js": 110,
     "src/mocop/static/background-asset.js": 350,
