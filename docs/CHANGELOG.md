@@ -4,6 +4,65 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+### Added
+
+- The dashboard has five pages, each answering one question: the overview,
+  find GPUs (`#/find`), jobs (`#/jobs`), alerts (`#/alerts`), and usage
+  (`#/usage`). The links sit in a compact header; `#<host>` still opens one
+  host on the overview.
+- The jobs page folds GPU processes into launches: one row per scheduler job,
+  or per owner, program, host, and start time, with the GPUs used, memory held,
+  mean GPU utilization, run time, and whether the job computes, idles on held
+  memory, holds only a few MiB, or sits on an offline host. "Mine" filters by
+  the owner chosen under Settings › Display.
+- The alerts page splits active conditions into open, acknowledged, and
+  silenced, lists recent state changes, and shows alert noise from
+  `GET /api/brief`: openings per hour against the ANSI/ISA-18.2 guideline of
+  about six, and the conditions that open most often, each with a shortcut to
+  its host's maintenance window.
+- The usage page puts the occupancy bill, fleet busy share per hour from
+  `GET /api/reports/utilization`, busy GPU-hours per host, and current owners
+  under one window selector, so every panel covers the same hours. Without
+  history persistence the busy-share panel says so instead of drawing nothing.
+- A host's view adds a USE table (utilization, saturation, and errors for CPU,
+  memory, disk, network, and GPU, with "—" for what the probe does not
+  collect) and, with history persistence, 7-day busy-share and memory charts.
+- Settings › Self-check recomputes GPUs online and computing, online servers,
+  GPU memory, mean CPU, active and critical incidents, and idle capacity in the
+  browser and compares each with the snapshot `stats` or `GET /api/capacity`,
+  then measures every text color against WCAG 2.1 AA.
+- A command palette (Ctrl+K or ⌘K) jumps to pages, hosts, owners, and
+  programs, and turns "找 2 张 80G" or "2x80" into a capacity search.
+- A matching capacity candidate offers "复制 CUDA_VISIBLE_DEVICES" with its
+  lowest-numbered matching devices.
+- Settings adds text size, reduced motion, and "follow the system" between the
+  carbon and paper styles.
+
+### Changed
+
+- The dashboard uses one layout for every visual style. The styles are carbon
+  (the new default), paper, precision, glass, terminal, and ledger; they change
+  color, type, corner radius, and material only. The blueprint and studio
+  styles are removed, and an accent now re-tints emphasis only, following the
+  style unless one is chosen. Every text tier passes WCAG 2.1 AA (4.5:1) on
+  every style's page, card, and dialog surfaces.
+- Display preferences are stored as `mocop.preferences.v2`. The first load
+  migrates a version 1 record, keeping view choices and resetting the visual
+  style and accent.
+- The GPU summary card counts five states: computing (exactly the server's
+  `busyGpus`), occupied (a process holds at least 256 MiB below the busy
+  threshold), free, no reading, and offline. A desktop helper or codec probe
+  holding a few MiB no longer marks a card as occupied in the card, the GPU
+  table, the "idle" filter, or the heatmap, which labels free cards "空闲".
+- The fleet disk tile counts local filesystems once per device and names
+  shared volumes (NFS, Lustre, GPFS, FUSE) separately. Before, a volume mounted
+  on every host was added once per host.
+- The heatmap adds a memory-bandwidth mode (`utilization.memory`).
+- Settings is a centered dialog with categories: appearance, display,
+  monitored nodes, collection, service and data, and self-check.
+- The background image status shows only whether a background is set;
+  rejection reasons still explain a refused file.
+
 ### Fixed
 
 - Conditions of the `gpu_processes`, `gpu_memory`, and `pressure` categories

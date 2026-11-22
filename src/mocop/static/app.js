@@ -24,95 +24,47 @@ const {
   normalizeTopology,
 } = globalThis.MocopApiContracts.create();
 
-const PREFERENCE_STORAGE_KEY = "mocop.preferences.v1";
 const MAX_GPU_DETAIL_PROCESSES = 100;
 const MAX_PROGRAM_SEARCH_RESULTS = 200;
 const MAX_SEARCH_QUERY_LENGTH = 120;
 const MAX_HEATMAP_COLUMNS = 8;
 const GPU_PROCESS_FRESHNESS_WARNING_MS = 90_000;
+// Utilization reports refresh at most this often while a page shows them.
+const REPORT_REFRESH_MS = 60_000;
 const gpuProcessSummaryCache = new WeakMap();
-const DEFAULT_PREFERENCES = Object.freeze({
-  serverSort: "custom",
-  serverOrder: [],
-  gpuSort: "host",
-  gpuTaskSort: "memory",
-  heatMetric: "utilization",
-  visualStyle: "precision",
-  accent: "cobalt",
-  density: "comfortable",
-  backgroundVisibility: 38,
-  serverFilter: "all",
-  showTemperature: true,
-  showPower: true,
-});
-const SERVER_SORT_VALUES = new Set(["custom", "group", "host", "status", "gpu", "cpu"]);
-const GPU_SORT_VALUES = new Set([
-  "host", "utilization", "memory", "temperature", "power", "processes",
-]);
-const GPU_TASK_SORT_VALUES = new Set(["memory", "duration", "name"]);
-const HEAT_METRIC_VALUES = new Set(["utilization", "memory", "temperature"]);
-const VISUAL_STYLE_VALUES = new Set([
-  "precision", "glass", "terminal", "ledger", "blueprint", "studio",
-]);
-const ACCENT_VALUES = new Set(["cobalt", "cyan", "violet", "emerald", "amber", "rose"]);
-const DENSITY_VALUES = new Set(["comfortable", "compact"]);
-const SERVER_FILTER_VALUES = new Set(["all", "issues", "busy", "available", "stale"]);
-const TOPOLOGY_TRANSPORT_LABELS = Object.freeze({
-  ssh: "SSH",
-  "frp-stcp": "FRP · STCP",
-  "frp-xtcp": "FRP · XTCP",
-  vpn: "VPN",
-});
-
+const preferenceStore = globalThis.MocopPreferences.create({ storage: localStorage, safeStoredHosts });
+const DEFAULT_PREFERENCES = preferenceStore.DEFAULTS;
+const {
+  serverFilter: SERVER_FILTER_VALUES, visualStyle: VISUAL_STYLE_VALUES, accent: ACCENT_VALUES,
+  density: DENSITY_VALUES, heatMetric: HEAT_METRIC_VALUES, textSize: TEXT_SIZE_VALUES, motion: MOTION_VALUES,
+} = preferenceStore.VALUES;
+const PAGES = Object.freeze(["overview", "find", "jobs", "alerts", "usage"]);
+const SETTINGS_TABS = Object.freeze(["appearance", "display", "nodes", "collector", "service", "verify"]);
 function safeBackgroundVisibility(value) {
   return Number.isInteger(value) && value >= 15 && value <= 70
     ? value : DEFAULT_PREFERENCES.backgroundVisibility;
 }
 
-
-function loadPreferences() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(PREFERENCE_STORAGE_KEY) || "null");
-    if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
-      return { ...DEFAULT_PREFERENCES };
-    }
-    return {
-      serverSort: SERVER_SORT_VALUES.has(stored.serverSort)
-        ? stored.serverSort : DEFAULT_PREFERENCES.serverSort,
-      serverOrder: safeStoredHosts(stored.serverOrder),
-      gpuSort: GPU_SORT_VALUES.has(stored.gpuSort)
-        ? stored.gpuSort : DEFAULT_PREFERENCES.gpuSort,
-      gpuTaskSort: GPU_TASK_SORT_VALUES.has(stored.gpuTaskSort)
-        ? stored.gpuTaskSort : DEFAULT_PREFERENCES.gpuTaskSort,
-      heatMetric: HEAT_METRIC_VALUES.has(stored.heatMetric)
-        ? stored.heatMetric : DEFAULT_PREFERENCES.heatMetric,
-      visualStyle: VISUAL_STYLE_VALUES.has(stored.visualStyle)
-        ? stored.visualStyle : DEFAULT_PREFERENCES.visualStyle,
-      accent: ACCENT_VALUES.has(stored.accent)
-        ? stored.accent : DEFAULT_PREFERENCES.accent,
-      density: DENSITY_VALUES.has(stored.density)
-        ? stored.density : DEFAULT_PREFERENCES.density,
-      backgroundVisibility: safeBackgroundVisibility(stored.backgroundVisibility),
-      serverFilter: SERVER_FILTER_VALUES.has(stored.serverFilter)
-        ? stored.serverFilter : DEFAULT_PREFERENCES.serverFilter,
-      showTemperature: typeof stored.showTemperature === "boolean"
-        ? stored.showTemperature : DEFAULT_PREFERENCES.showTemperature,
-      showPower: typeof stored.showPower === "boolean"
-        ? stored.showPower : DEFAULT_PREFERENCES.showPower,
-    };
-  } catch (_error) {
-    return { ...DEFAULT_PREFERENCES };
-  }
+const preferences = preferenceStore.load();
+const systemLightScheme = window.matchMedia("(prefers-color-scheme: light)");
+// "auto" resolves to carbon or paper and follows the operating system live.
+function applyDocumentPreferences() {
+  const root = document.documentElement;
+  const style = preferences.visualStyle === "auto"
+    ? (systemLightScheme.matches ? "paper" : "carbon") : preferences.visualStyle;
+  root.dataset.style = style;
+  root.dataset.scheme = style === "paper" || style === "ledger" ? "light" : "dark";
+  if (preferences.accent === "auto") delete root.dataset.accent;
+  else root.dataset.accent = preferences.accent;
+  root.dataset.density = preferences.density;
+  root.dataset.textSize = preferences.textSize;
+  root.dataset.motion = preferences.motion;
+  root.style.setProperty("--custom-background-opacity", String(preferences.backgroundVisibility / 100));
 }
-
-const preferences = loadPreferences();
-document.documentElement.dataset.style = preferences.visualStyle;
-document.documentElement.dataset.accent = preferences.accent;
-document.documentElement.dataset.density = preferences.density;
-document.documentElement.style.setProperty(
-  "--custom-background-opacity",
-  String(preferences.backgroundVisibility / 100),
-);
+applyDocumentPreferences();
+systemLightScheme.addEventListener("change", () => {
+  if (preferences.visualStyle === "auto") applyDocumentPreferences();
+});
 
 // Every dashboard-originated request must carry the viewer marker: the
 // service treats marked reads as "someone is watching" and keeps process
@@ -189,6 +141,15 @@ const ownerUsage = globalThis.MocopOwnerUsage.create({
   format, numeric, memory, age, workloadLabels: WORKLOAD_KIND_LABELS,
 });
 const capacityWatch = globalThis.MocopCapacityWatch.create({ storage: localStorage });
+const fleetState = globalThis.MocopFleetState.create();
+const useCheck = globalThis.MocopUseCheck.create({ format, rate });
+const gpuJobs = globalThis.MocopGpuJobs.create({
+  processName: (process) => gpuTasks.processName(process),
+  holderMinMiB: fleetState.HOLDER_MIN_MIB,
+});
+const alertNoise = globalThis.MocopAlertNoise.create();
+const selfCheck = globalThis.MocopSelfCheck.create({ fleetState });
+const commandPalette = globalThis.MocopCommandPalette.create();
 
 const view = {
   dashboardStarted: false,
@@ -199,11 +160,24 @@ const view = {
   topologyLoading: false,
   topologyError: "",
   topologyRevision: 0,
-  topologyRenderedRevision: -1,
-  topologyNodeRefs: new Map(),
-  topologyMappedHosts: new Set(),
-  topologyUnmappedKey: "",
   selectedHost: "all",
+  page: "overview",
+  settingsTab: "appearance",
+  jobFilter: "all",
+  jobQuery: "",
+  alertTab: "open",
+  alertsRenderKey: "",
+  alertsSideKey: "",
+  jobsRenderKey: "",
+  fleetUtilizationRenderKey: "",
+  brief: null,
+  briefFetchedAt: 0,
+  briefRequest: null,
+  fleetUtilization: null,
+  fleetUtilizationError: "",
+  fleetUtilizationFetchedAt: 0,
+  fleetUtilizationRequest: null,
+  selfCheckRequest: 0,
   serverFilter: preferences.serverFilter,
   attentionFilter: "all",
   filter: "all",
@@ -303,8 +277,9 @@ const view = {
 };
 
 try {
-  const initialHost = decodeURIComponent(window.location.hash.slice(1));
-  if (/^[A-Za-z0-9._-]+$/.test(initialHost)) view.selectedHost = initialHost;
+  const initialHash = decodeURIComponent(window.location.hash.slice(1));
+  if (initialHash.startsWith("/") && PAGES.includes(initialHash.slice(1))) view.page = initialHash.slice(1);
+  else if (/^[A-Za-z0-9._-]+$/.test(initialHash)) view.selectedHost = initialHash;
 } catch (_error) {
   view.selectedHost = "all";
 }
@@ -337,7 +312,6 @@ const elements = {
   topologyUnmapped: $("#topology-unmapped"),
   topologyUnmappedList: $("#topology-unmapped-list"),
   capacityToggle: $("#capacity-toggle"),
-  capacityDialog: $("#capacity-dialog"),
   capacityForm: $("#capacity-form"),
   capacityGpuCount: $("#capacity-gpu-count"),
   capacityVram: $("#capacity-vram"),
@@ -354,7 +328,6 @@ const elements = {
   capacityWatchBannerDismiss: $("#capacity-watch-banner-dismiss"),
   capacityWatchBannerStop: $("#capacity-watch-banner-stop"),
   ownersToggle: $("#owners-toggle"),
-  ownersDialog: $("#owners-dialog"),
   ownersSummary: $("#owners-summary"),
   ownersUpdated: $("#owners-updated"),
   ownersResults: $("#owners-results"),
@@ -364,6 +337,33 @@ const elements = {
   serverSort: $("#server-sort"),
   defaultServerFilter: $("#default-server-filter"),
   interfaceDensity: $("#interface-density"),
+  interfaceTextSize: $("#interface-text-size"),
+  interfaceMotion: $("#interface-motion"),
+  settingsMe: $("#settings-me"),
+  selfCheckSummary: $("#self-check-summary"),
+  selfCheckResults: $("#self-check-results"),
+  runSelfCheck: $("#run-self-check"),
+  alertsBadge: $("#alerts-badge"),
+  paletteToggle: $("#palette-toggle"),
+  paletteDialog: $("#palette-dialog"),
+  paletteInput: $("#palette-input"),
+  paletteResults: $("#palette-results"),
+  jobsBody: $("#jobs-body"),
+  jobsEmpty: $("#jobs-empty"),
+  jobsSummary: $("#jobs-summary"),
+  jobSearch: $("#job-search"),
+  alertList: $("#alert-list"),
+  alertsSummary: $("#alerts-summary"),
+  noiseBody: $("#noise-body"),
+  maintenanceList: $("#maintenance-list"),
+  usePanel: $("#use-panel"),
+  useRows: $("#use-rows"),
+  utilizationHistory: $("#utilization-history"),
+  utilizationHistoryRange: $("#utilization-history-range"),
+  utilizationHistoryGrid: $("#utilization-history-grid"),
+  fleetUtilization: $("#fleet-utilization"),
+  fleetUtilizationRange: $("#fleet-utilization-range"),
+  gpuLegend: $("#gpu-legend"),
   backgroundImageInput: $("#background-image-input"),
   backgroundImageStatus: $("#background-image-status"),
   backgroundVisibility: $("#background-visibility"),
@@ -429,7 +429,7 @@ const elements = {
   attentionPanel: $("#attention-panel"),
   attentionSummary: $("#attention-summary"),
   attentionList: $("#attention-list"),
-  attentionStatus: $("#attention-panel .attention-heading > span"),
+  attentionStatus: $("#attention-panel .attention-hint"),
   incidentPanel: $("#incident-panel"),
   incidentSummary: $("#incident-summary"),
   incidentList: $("#incident-list"),
@@ -497,15 +497,14 @@ const elements = {
   incidentActionFeedback: $("#incident-action-feedback"),
 };
 
-// The six feature dialogs are mutually exclusive modals; the authentication
+// The feature dialogs are mutually exclusive modals; the authentication
 // prompt is deliberately not in this set so nothing can dismiss it.
 const FEATURE_DIALOGS = [
   elements.settingsDialog,
   elements.topologyDialog,
   elements.gpuDetailDialog,
-  elements.capacityDialog,
-  elements.ownersDialog,
   elements.incidentDetailDialog,
+  elements.paletteDialog,
 ];
 
 function openExclusiveDialog(dialog) {
@@ -531,6 +530,21 @@ function create(tag, className, text) {
   return element;
 }
 
+function svgElement(tag, attributes) {
+  const element = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  Object.entries(attributes).forEach(([name, value]) => element.setAttribute(name, value));
+  return element;
+}
+
+const trendCharts = globalThis.MocopTrendCharts.create({ create, svg: svgElement, format });
+const { historyDuration, trendCard, transportRetryCard } = trendCharts;
+const usageView = globalThis.MocopUsageView.create({
+  create, format, memory, numeric, ownerUsage, charts: trendCharts,
+});
+const jobsView = globalThis.MocopJobsView.create({ create, format, memory, durationSince });
+const alertsView = globalThis.MocopAlertsView.create({ create, format, age });
+const inventoryForms = globalThis.MocopInventoryForms.create({ create });
+
 // Binary presentation assets stay out of both synchronous preferences and the
 // service; the leaf owns storage, validation, and re-encoding.
 const backgroundAssets = globalThis.MocopBackgroundAsset.create({
@@ -538,13 +552,6 @@ const backgroundAssets = globalThis.MocopBackgroundAsset.create({
   createImageBitmap: (blob) => createImageBitmap(blob),
   createCanvas: () => document.createElement("canvas"),
 });
-
-function backgroundSize(blob) {
-  if (blob.size < 0.1 * 1024 * 1024) {
-    return `${Math.max(1, Math.ceil(blob.size / 1024))} KiB`;
-  }
-  return `${(blob.size / (1024 * 1024)).toFixed(1)} MiB`;
-}
 
 function setBackgroundStatus(message, kind = "") {
   elements.backgroundImageStatus.textContent = message;
@@ -576,7 +583,7 @@ async function loadStoredBackground() {
     if (!(blob instanceof Blob)) return;
     await backgroundAssets.validate(blob);
     renderBackground(blob);
-    setBackgroundStatus("已恢复当前浏览器保存的背景", "success");
+    setBackgroundStatus("已设置", "success");
   } catch (_error) {
     clearRenderedBackground();
     setBackgroundStatus("浏览器背景存储不可用；内置皮肤仍可正常使用", "error");
@@ -590,9 +597,7 @@ async function selectBackgroundImage() {
   const requestId = ++view.backgroundRequestId;
   elements.backgroundImageInput.disabled = true;
   elements.removeBackgroundImage.disabled = true;
-  setBackgroundStatus(
-    file.size > backgroundAssets.MAX_BYTES ? "正在浏览器本地优化图片…" : "正在安全读取图片…",
-  );
+  setBackgroundStatus("正在处理…");
   try {
     const prepared = await backgroundAssets.prepare(file);
     if (requestId !== view.backgroundRequestId) return;
@@ -600,20 +605,11 @@ async function selectBackgroundImage() {
       await runBackgroundStorage(() => backgroundAssets.writeStored(prepared.blob));
       if (requestId !== view.backgroundRequestId) return;
       renderBackground(prepared.blob);
-      const prefix = prepared.compressed
-        ? `已压缩至 ${backgroundSize(prepared.blob)} 并保存在当前浏览器`
-        : "已保存在当前浏览器";
-      setBackgroundStatus(
-        `${prefix} · ${prepared.dimensions.width} × ${prepared.dimensions.height}`,
-        "success",
-      );
+      setBackgroundStatus("已设置", "success");
     } catch (_error) {
       if (requestId !== view.backgroundRequestId) return;
       renderBackground(prepared.blob);
-      const prefix = prepared.compressed
-        ? `已压缩至 ${backgroundSize(prepared.blob)}；`
-        : "";
-      setBackgroundStatus(`${prefix}浏览器存储空间不足；背景仅在本次会话有效`, "error");
+      setBackgroundStatus("已设置，但浏览器存储空间不足，仅本次会话有效", "error");
     }
   } catch (error) {
     if (requestId === view.backgroundRequestId) {
@@ -636,7 +632,7 @@ async function removeBackgroundImage() {
     await runBackgroundStorage(backgroundAssets.deleteStored);
     if (requestId !== view.backgroundRequestId) return;
     clearRenderedBackground();
-    setBackgroundStatus("背景已从当前浏览器移除", "success");
+    setBackgroundStatus("未设置");
   } catch (_error) {
     if (requestId === view.backgroundRequestId) {
       setBackgroundStatus("无法更新浏览器存储，背景未移除", "error");
@@ -662,31 +658,31 @@ async function runBackgroundStorage(operation) {
 }
 
 function savePreferences() {
-  const value = {
+  preferenceStore.save({
+    ...preferences,
     serverSort: view.serverSort,
     serverOrder: view.serverOrder,
     gpuSort: view.sort,
-    gpuTaskSort: preferences.gpuTaskSort,
     heatMetric: view.heatMetric,
-    visualStyle: preferences.visualStyle,
-    accent: preferences.accent,
-    density: preferences.density,
-    backgroundVisibility: preferences.backgroundVisibility,
     serverFilter: view.serverFilter,
-    showTemperature: preferences.showTemperature,
-    showPower: preferences.showPower,
-  };
-  try {
-    localStorage.setItem(PREFERENCE_STORAGE_KEY, JSON.stringify(value));
-  } catch (_error) {
-    // Rendering must remain available when browser storage is disabled or full.
-  }
+  });
+}
+
+function syncChoiceButtons(buttons, key, value) {
+  buttons.forEach((button) => {
+    const selected = button.dataset[key] === value;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-checked", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
 }
 
 function syncPreferenceControls() {
   elements.serverSort.value = view.serverSort;
   elements.defaultServerFilter.value = view.serverFilter;
   elements.interfaceDensity.value = preferences.density;
+  elements.interfaceTextSize.value = preferences.textSize;
+  elements.interfaceMotion.value = preferences.motion;
   elements.backgroundVisibility.value = String(preferences.backgroundVisibility);
   elements.backgroundVisibilityValue.value = `${preferences.backgroundVisibility}%`;
   elements.gpuSort.value = view.sort;
@@ -694,46 +690,23 @@ function syncPreferenceControls() {
   elements.settingsHeatMetric.value = view.heatMetric;
   elements.showTemperature.checked = preferences.showTemperature;
   elements.showPower.checked = preferences.showPower;
-  document.documentElement.dataset.style = preferences.visualStyle;
-  document.documentElement.dataset.accent = preferences.accent;
-  document.documentElement.dataset.density = preferences.density;
-  document.documentElement.style.setProperty(
-    "--custom-background-opacity",
-    String(preferences.backgroundVisibility / 100),
-  );
+  applyDocumentPreferences();
   document.querySelectorAll(".fleet-filter").forEach((button) => {
-    const selected = button.dataset.serverFilter === view.serverFilter;
-    setPressed(button, selected);
+    setPressed(button, button.dataset.serverFilter === view.serverFilter);
   });
-  styleChoiceButtons.forEach((button) => {
-    const selected = button.dataset.styleChoice === preferences.visualStyle;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-checked", String(selected));
-    button.tabIndex = selected ? 0 : -1;
-  });
-  accentChoiceButtons.forEach((button) => {
-    const selected = button.dataset.accentChoice === preferences.accent;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-checked", String(selected));
-    button.tabIndex = selected ? 0 : -1;
-  });
+  syncChoiceButtons(styleChoiceButtons, "styleChoice", preferences.visualStyle);
+  syncChoiceButtons(accentChoiceButtons, "accentChoice", preferences.accent);
   document.body.classList.toggle("hide-gpu-temperature", !preferences.showTemperature);
   document.body.classList.toggle("hide-gpu-power", !preferences.showPower);
 }
 
 function resetPreferences() {
+  Object.assign(preferences, DEFAULT_PREFERENCES, { serverOrder: [], me: preferences.me });
   view.serverSort = DEFAULT_PREFERENCES.serverSort;
   view.serverOrder = [];
   view.sort = DEFAULT_PREFERENCES.gpuSort;
-  preferences.gpuTaskSort = DEFAULT_PREFERENCES.gpuTaskSort;
   view.heatMetric = DEFAULT_PREFERENCES.heatMetric;
-  preferences.visualStyle = DEFAULT_PREFERENCES.visualStyle;
-  preferences.accent = DEFAULT_PREFERENCES.accent;
-  preferences.density = DEFAULT_PREFERENCES.density;
-  preferences.backgroundVisibility = DEFAULT_PREFERENCES.backgroundVisibility;
   view.serverFilter = DEFAULT_PREFERENCES.serverFilter;
-  preferences.showTemperature = DEFAULT_PREFERENCES.showTemperature;
-  preferences.showPower = DEFAULT_PREFERENCES.showPower;
   view.serverItemCache.clear();
   view.groupCache.clear();
   view.heatmapCache.clear();
@@ -917,182 +890,36 @@ function topologyServer(host) {
   return view.snapshot?.servers.find((server) => server.host === host) || null;
 }
 
-function updateTopologyNode(reference, host, server) {
-  if (!server && reference.signature === "infrastructure") return;
-  const state = !server
-    ? "infrastructure"
-    : server.status === "online" && !server.stale ? "online" : "offline";
-  let metaText;
-  let statusLabel;
-  if (!server) {
-    metaText = "连接路径节点 · 不采集资源";
-    statusLabel = "连接路径节点，不采集资源";
-  } else if (state === "offline") {
-    metaText = server.stale ? "数据陈旧" : "连接不可用";
-    statusLabel = metaText;
-  } else {
-    const cpu = numeric(server.system?.cpu_usage_pct, NaN);
-    metaText = `${server.gpus.length} GPU · CPU ${Number.isFinite(cpu) ? `${format(cpu)}%` : "—"}`;
-    statusLabel = metaText;
-  }
-  const signature = server ? `${displayHost(server)}\u0000${state}\u0000${metaText}` : "infrastructure";
-  if (reference.signature === signature) return;
-  reference.signature = signature;
-  reference.button.className = `topology-node ${state}`;
-  reference.button.disabled = !server;
-  reference.button.querySelector("strong").textContent = displayHost(server || host); reference.meta.textContent = metaText;
-  reference.button.setAttribute("aria-label", `${displayHost(server || host)}，${statusLabel}`);
-}
-
-function topologyNode(host, isRoot, nodeRefs) {
-  const button = create("button", "topology-node infrastructure");
-  button.type = "button";
-  button.dataset.host = host;
-  const heading = create("span", "topology-node-heading");
-  heading.append(
-    create("i", "topology-node-dot"),
-    create("strong", "", displayHost(host)),
-  );
-  if (isRoot) heading.append(create("small", "topology-root-badge", "起点"));
-  const meta = create("span", "topology-node-meta");
-  button.append(heading, meta);
-  button.addEventListener("click", () => {
-    const server = topologyServer(host);
-    if (!server) return;
-    selectHost(host);
+const topologyView = globalThis.MocopTopologyView.create({
+  create,
+  elements: {
+    tree: elements.topologyTree,
+    unmapped: elements.topologyUnmapped,
+    unmappedList: elements.topologyUnmappedList,
+    status: elements.topologyStatus,
+    nodeCount: elements.topologyNodeCount,
+    frpCount: elements.topologyFrpCount,
+    liveSummary: elements.topologyLiveSummary,
+  },
+  displayHost,
+  numeric,
+  format,
+  onHost: (host) => {
+    if (!topologyServer(host)) return;
     elements.topologyDialog.close();
-  });
-  const reference = { button, meta, signature: "" };
-  nodeRefs.set(host, reference);
-  return button;
-}
-
-function topologyBranch(host, linksBySource, nodeRefs, isRoot = false) {
-  const branch = create("li", "topology-branch");
-  branch.append(topologyNode(host, isRoot, nodeRefs));
-  const links = linksBySource.get(host) || [];
-  if (!links.length) return branch;
-  const children = create("ul", "topology-children");
-  links.forEach((link) => {
-    const child = create("li", "topology-child");
-    const connector = create("div", `topology-connector ${link.transport}`);
-    const label = link.label || TOPOLOGY_TRANSPORT_LABELS[link.transport];
-    connector.setAttribute("role", "note");
-    connector.setAttribute(
-      "aria-label",
-      `${host} 通过 ${label} 连接到 ${link.target}`,
-    );
-    const visibleLabel = create(
-      "span",
-      "topology-link-label",
-      label,
-    );
-    visibleLabel.setAttribute("aria-hidden", "true");
-    connector.append(visibleLabel);
-    child.append(connector, topologyBranch(link.target, linksBySource, nodeRefs));
-    children.append(child);
-  });
-  branch.append(children);
-  return branch;
-}
-
-function resetTopologyGraph() {
-  elements.topologyTree.replaceChildren();
-  elements.topologyUnmappedList.replaceChildren();
-  view.topologyRenderedRevision = -1;
-  view.topologyNodeRefs = new Map();
-  view.topologyMappedHosts = new Set();
-  view.topologyUnmappedKey = "";
-  elements.topologyUnmapped.hidden = true;
-}
-
-function buildTopologyGraph(topology) {
-  const linksBySource = new Map();
-  topology.links.forEach((link) => {
-    if (!linksBySource.has(link.source)) linksBySource.set(link.source, []);
-    linksBySource.get(link.source).push(link);
-  });
-  const nodeRefs = new Map();
-  const tree = create("ul", "topology-tree-list");
-  tree.append(topologyBranch(topology.root, linksBySource, nodeRefs, true));
-  elements.topologyTree.replaceChildren(tree);
-  view.topologyNodeRefs = nodeRefs;
-  view.topologyMappedHosts = new Set([
-    topology.root,
-    ...topology.links.map((link) => link.target),
-  ]);
-  view.topologyRenderedRevision = view.topologyRevision;
-}
-
-function syncTopologyUnmapped(servers) {
-  const key = servers.map((server) => `${server.host}\u0000${server.displayName || ""}`).join("\u0000");
-  if (view.topologyUnmappedKey === key) return;
-  view.topologyUnmappedKey = key;
-  const buttons = servers.map((server) => {
-    const button = create("button", "topology-unmapped-node", displayHost(server));
-    button.type = "button";
-    button.addEventListener("click", () => {
-      selectHost(server.host);
-      elements.topologyDialog.close();
-    });
-    return button;
-  });
-  elements.topologyUnmappedList.replaceChildren(...buttons);
-}
+    openHost(host);
+  },
+});
 
 function renderTopology() {
   if (!elements.topologyDialog.open) return;
-  const topology = view.topology;
-  if (view.topologyLoading && !topology) {
-    resetTopologyGraph();
-    elements.topologyStatus.hidden = false;
-    elements.topologyStatus.className = "topology-status";
-    elements.topologyStatus.textContent = "正在读取本地拓扑配置…";
-    return;
-  }
-  if (view.topologyError) {
-    resetTopologyGraph();
-    elements.topologyStatus.hidden = false;
-    elements.topologyStatus.className = "topology-status error";
-    elements.topologyStatus.textContent = view.topologyError;
-    return;
-  }
-  if (!topology?.root) {
-    resetTopologyGraph();
-    elements.topologyStatus.hidden = false;
-    elements.topologyStatus.className = "topology-status";
-    elements.topologyStatus.textContent = "尚未在 config.json 中配置连接拓扑";
-    elements.topologyNodeCount.textContent = "0";
-    elements.topologyFrpCount.textContent = "0";
-    elements.topologyLiveSummary.textContent = "无拓扑配置";
-    return;
-  }
-  if (view.topologyRenderedRevision !== view.topologyRevision) {
-    buildTopologyGraph(topology);
-  }
-  const monitored = view.snapshot?.servers || [];
-  const serverByHost = new Map(monitored.map((server) => [server.host, server]));
-  view.topologyNodeRefs.forEach((reference, host) => {
-    updateTopologyNode(reference, host, serverByHost.get(host) || null);
+  topologyView.render({
+    topology: view.topology,
+    revision: view.topologyRevision,
+    loading: view.topologyLoading,
+    error: view.topologyError,
+    servers: view.snapshot?.servers || [],
   });
-  const mappedServers = monitored.filter(
-    (server) => view.topologyMappedHosts.has(server.host),
-  );
-  const online = mappedServers.filter(
-    (server) => server.status === "online" && !server.stale,
-  ).length;
-  elements.topologyNodeCount.textContent = String(view.topologyMappedHosts.size);
-  elements.topologyFrpCount.textContent = String(
-    topology.links.filter((link) => link.transport.startsWith("frp-")).length,
-  );
-  elements.topologyLiveSummary.textContent = `${online} / ${mappedServers.length} 个监控节点在线`;
-  elements.topologyStatus.hidden = true;
-
-  const unmapped = monitored.filter(
-    (server) => !view.topologyMappedHosts.has(server.host),
-  );
-  elements.topologyUnmapped.hidden = unmapped.length === 0;
-  syncTopologyUnmapped(unmapped);
 }
 
 async function fetchTopology() {
@@ -1307,112 +1134,25 @@ function inventoryHostRow(host, action) {
   }
   row.append(identity, actions);
   if (action === "remove" && view.maintenanceEditingHost === host) {
-    row.append(maintenanceEditor(host, maintenance));
+    row.append(inventoryForms.maintenanceForm({
+      host,
+      maintenance,
+      draft: view.maintenanceDraft?.host === host ? view.maintenanceDraft : null,
+      onDraft: (draft) => { view.maintenanceDraft = draft; },
+      onSave: (seconds, reason) => changeMaintenance(host, seconds, reason),
+      onEnd: () => changeMaintenance(host, 0, ""),
+    }));
   }
   if (action === "remove" && view.groupEditingHost === host) {
-    row.append(hostGroupEditor(host, group));
+    row.append(inventoryForms.groupForm({
+      host,
+      currentGroup: group,
+      knownGroups: [...new Set(Object.values(view.inventory.hostGroups))].sort((a, b) => a.localeCompare(b)),
+      onSave: (name) => changeHostGroup(host, name),
+      onClear: () => changeHostGroup(host, ""),
+    }));
   }
   return row;
-}
-
-function hostGroupEditor(host, currentGroup) {
-  const form = create("form", "host-group-editor");
-  const group = document.createElement("input");
-  group.type = "text";
-  group.maxLength = 48;
-  group.placeholder = "例如：训练集群 / 推理集群";
-  group.value = currentGroup || "";
-  group.setAttribute("aria-label", `${host} 所属分组`);
-  const knownGroups = [...new Set(Object.values(view.inventory.hostGroups))]
-    .sort((first, second) => first.localeCompare(second));
-  if (knownGroups.length) {
-    const suggestions = document.createElement("datalist");
-    suggestions.id = `host-groups-${host}`;
-    knownGroups.forEach((name) => {
-      const option = document.createElement("option");
-      option.value = name;
-      suggestions.append(option);
-    });
-    group.setAttribute("list", suggestions.id);
-    form.append(group, suggestions);
-  } else {
-    form.append(group);
-  }
-  const save = create("button", "primary-action", currentGroup ? "保存分组" : "加入分组");
-  save.type = "submit";
-  form.append(save);
-  if (currentGroup) {
-    const clear = create("button", "inline-action danger-action", "移出分组");
-    clear.type = "button";
-    clear.addEventListener("click", () => changeHostGroup(host, ""));
-    form.append(clear);
-  }
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    if (!form.reportValidity() || !group.value.trim()) return;
-    changeHostGroup(host, group.value);
-  });
-  return form;
-}
-
-function maintenanceEditor(host, maintenance) {
-  // A pending or failed save re-renders the list; the draft keeps the
-  // operator's unsaved input and focus target across those rebuilds.
-  const draft = view.maintenanceDraft?.host === host ? view.maintenanceDraft : null;
-  const form = create("form", "maintenance-editor");
-  const reason = document.createElement("input");
-  reason.type = "text";
-  reason.required = true;
-  reason.maxLength = 120;
-  reason.placeholder = "维护原因，例如：驱动升级";
-  reason.value = draft ? draft.reason : (maintenance?.reason || "");
-  reason.setAttribute("aria-label", `${host} 维护原因`);
-  const duration = document.createElement("select");
-  duration.setAttribute("aria-label", `${host} 维护时长`);
-  const selectedDuration = draft?.duration || "14400";
-  [[3600, "1 小时"], [14400, "4 小时"], [86400, "24 小时"], [604800, "7 天"]]
-    .forEach(([value, label]) => {
-      const option = document.createElement("option");
-      option.value = String(value);
-      option.textContent = label;
-      if (String(value) === selectedDuration) option.selected = true;
-      duration.append(option);
-    });
-  const updateDraft = (focusField) => {
-    view.maintenanceDraft = {
-      host,
-      reason: reason.value,
-      duration: duration.value,
-      focusField: focusField || view.maintenanceDraft?.focusField || null,
-    };
-  };
-  reason.addEventListener("input", () => updateDraft("reason"));
-  reason.addEventListener("focus", () => updateDraft("reason"));
-  duration.addEventListener("change", () => updateDraft("duration"));
-  duration.addEventListener("focus", () => updateDraft("duration"));
-  const save = create("button", "primary-action", maintenance ? "延长维护" : "开始维护");
-  save.type = "submit";
-  form.append(reason, duration, save);
-  if (maintenance) {
-    const clear = create("button", "inline-action danger-action", "立即结束");
-    clear.type = "button";
-    clear.addEventListener("click", () => changeMaintenance(host, 0, ""));
-    form.append(clear);
-  }
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const trimmedReason = reason.value.trim();
-    if (!trimmedReason) {
-      reason.setCustomValidity("请输入有效的维护原因");
-      form.reportValidity();
-      reason.setCustomValidity("");
-      return;
-    }
-    if (!form.reportValidity()) return;
-    updateDraft();
-    changeMaintenance(host, Number(duration.value), trimmedReason);
-  });
-  return form;
 }
 
 function renderInventory() {
@@ -1693,8 +1433,197 @@ function selectHost(host) {
   window.history.replaceState(null, "", fragment);
   historyLoader.reset({ loading: host !== "all" });
   view.trendRenderKey = "";
+  utilizationLoader.reset({ loading: host !== "all" });
   render();
+  renderUtilizationHistory();
   syncHistory();
+}
+
+// Pages answer one question each; the hash keeps a page or host addressable.
+function showPage(page, { hash = true } = {}) {
+  const target = PAGES.includes(page) ? page : "overview";
+  const changed = view.page !== target;
+  view.page = target;
+  document.querySelectorAll("section[data-page]").forEach((section) => {
+    section.hidden = section.dataset.page !== target;
+  });
+  document.querySelectorAll("[data-page-link]").forEach((link) => {
+    if (link.dataset.pageLink === target) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+  if (hash) {
+    const fragment = target === "overview" && view.selectedHost !== "all"
+      ? `#${encodeURIComponent(view.selectedHost)}` : `#/${target}`;
+    window.history.replaceState(null, "", fragment);
+  }
+  if (changed) window.scrollTo({ top: 0 });
+  if (target === "find" && view.snapshot) {
+    elements.capacityGpuCount.value = String(view.capacityRequest.gpuCount);
+    elements.capacityVram.value = String(view.capacityRequest.minVramGiB);
+    syncCapacityModels();
+    elements.capacityModel.value = view.capacityRequest.model;
+    renderCapacityWatchControls();
+  }
+  if (target === "usage") {
+    fetchOwnersUsage();
+    fetchFleetUtilization();
+  }
+  if (target === "alerts") fetchBrief();
+  view.alertsRenderKey = "";
+  view.alertsSideKey = "";
+  view.jobsRenderKey = "";
+  view.fleetUtilizationRenderKey = "";
+  view.ownersResultsKey = "";
+  view.capacityResultsKey = "";
+  render();
+}
+
+function openHost(host) {
+  showPage("overview", { hash: false });
+  if (view.selectedHost === host) window.history.replaceState(null, "", `#${encodeURIComponent(host)}`);
+  else selectHost(host);
+}
+
+function renderNav() {
+  const open = numeric(view.snapshot.stats.actionableIncidents);
+  elements.alertsBadge.hidden = open === 0;
+  elements.alertsBadge.textContent = format(open);
+}
+
+function describeCondition(condition) {
+  return { title: localizedDiagnosis(condition)[0], detail: incidentConditionMessage(condition) };
+}
+
+function renderAlertsPage() {
+  if (view.page !== "alerts") return;
+  const active = view.incidents?.active || [];
+  const counts = alertsView.tabCounts(active);
+  document.querySelectorAll("[data-alert-tab]").forEach((button) => {
+    setPressed(button, button.dataset.alertTab === view.alertTab);
+    button.querySelector("span").textContent = format(counts[button.dataset.alertTab]);
+  });
+  elements.alertsSummary.textContent = view.incidents
+    ? `${active.length} 个活动 · ${counts.open} 个待处理` : "告警同步中";
+  const key = `${view.incidentVersion}:${view.alertTab}`;
+  if (key !== view.alertsRenderKey) {
+    view.alertsRenderKey = key;
+    elements.alertList.replaceChildren(...alertsView.alertRows(active, {
+      tab: view.alertTab, hostLabel: displayHost, describe: describeCondition, onOpen: openIncidentDetail,
+    }));
+  }
+  // The side cards change with maintenance windows and each brief fetch only.
+  const sideKey = JSON.stringify([
+    view.snapshot.servers.filter((server) => server.maintenance)
+      .map((server) => [server.host, displayHost(server), server.maintenance.until, server.maintenance.reason]),
+    view.briefFetchedAt,
+    Boolean(view.briefRequest),
+  ]);
+  if (sideKey === view.alertsSideKey) return;
+  view.alertsSideKey = sideKey;
+  elements.maintenanceList.replaceChildren(...alertsView.maintenance(view.snapshot.servers, {
+    hostLabel: displayHost, onHost: openHost,
+  }));
+  if (view.brief || !view.briefRequest) {
+    elements.noiseBody.replaceChildren(...alertsView.noise(view.brief && alertNoise.summarize(view.brief), {
+      hostLabel: displayHost, onRecurring: (item) => openMaintenanceEditor(item.host),
+    }));
+  }
+}
+
+// One shared fetch for report-backed panels: in flight at most once and
+// refreshed at most every REPORT_REFRESH_MS while its page is shown.
+async function fetchReport(name, url, { onUnavailable } = {}) {
+  if (view[`${name}Request`] || Date.now() - view[`${name}FetchedAt`] < REPORT_REFRESH_MS) return;
+  view[`${name}Request`] = (async () => {
+    try {
+      const response = await fetch(url);
+      const body = await response.json();
+      if (response.status === 503 && body.code === "HISTORY_UNAVAILABLE" && onUnavailable) {
+        view[name] = null;
+        onUnavailable();
+      } else if (!response.ok) {
+        throw new Error(body.error || `HTTP ${response.status}`);
+      } else {
+        view[name] = body;
+      }
+    } catch (_error) {
+      view[name] = null;
+    } finally {
+      view[`${name}FetchedAt`] = Date.now();
+      view[`${name}Request`] = null;
+      render();
+    }
+  })();
+}
+
+function fetchBrief() {
+  fetchReport("brief", "/api/brief?hours=24");
+}
+
+function fetchFleetUtilization() {
+  fetchReport("fleetUtilization", `/api/reports/utilization?hours=${encodeURIComponent(view.ownersUsageHours)}`, {
+    onUnavailable: () => { view.fleetUtilizationError = "需要开启历史持久化（history.enabled）才能统计利用率"; },
+  });
+}
+
+function renderFleetUtilization() {
+  if (view.page !== "usage") return;
+  const key = `${view.fleetUtilizationFetchedAt}:${Boolean(view.fleetUtilizationRequest)}`;
+  if (key === view.fleetUtilizationRenderKey) return;
+  view.fleetUtilizationRenderKey = key;
+  if (!view.fleetUtilization) {
+    elements.fleetUtilizationRange.textContent = "";
+    elements.fleetUtilization.replaceChildren(create(
+      "div", "utilization-empty",
+      view.fleetUtilizationRequest ? "正在读取利用率报表…" : view.fleetUtilizationError || "利用率报表暂不可用",
+    ));
+    return;
+  }
+  const { range, nodes } = usageView.utilization(view.fleetUtilization, { hostLabel: displayHost, onHost: openHost });
+  elements.fleetUtilizationRange.textContent = range;
+  elements.fleetUtilization.replaceChildren(...nodes);
+}
+
+function renderJobs() {
+  if (view.page !== "jobs") return;
+  const all = gpuJobs.list(view.snapshot.servers, limits().gpu_busy_pct);
+  const { me } = preferences;
+  const counts = {
+    all: all.length,
+    mine: me ? all.filter((job) => job.owner === me).length : 0,
+    idle: all.filter((job) => job.state === "idle").length,
+  };
+  document.querySelectorAll("[data-job-filter]").forEach((button) => {
+    const filter = button.dataset.jobFilter;
+    setPressed(button, filter === view.jobFilter);
+    button.querySelector("span").textContent = format(counts[filter]);
+    if (filter === "mine") {
+      button.disabled = !me;
+      button.title = me ? "" : "在设置 › 显示 › 我是谁 中选择你的用户名";
+    }
+  });
+  if (view.jobFilter === "mine" && !me) view.jobFilter = "all";
+  const visible = gpuJobs.sort(gpuJobs.filter(all, {
+    query: view.jobQuery,
+    state: view.jobFilter === "idle" ? "idle" : "all",
+    owner: view.jobFilter === "mine" ? me : "",
+  }));
+  elements.jobsSummary.textContent = `${all.length} 个任务 · ${counts.idle} 个空转`;
+  const key = JSON.stringify([view.jobFilter, view.jobQuery, me, visible.map((job) => [
+    job.key, job.utilization, job.memoryMiB, job.state, job.gpus, displayHost(job.host),
+  ])]);
+  if (key === view.jobsRenderKey) return;
+  view.jobsRenderKey = key;
+  elements.jobsBody.replaceChildren(...visible.map((job) => jobsView.row(job, {
+    me, hostLabel: displayHost, onOpen: openJob,
+  })));
+  elements.jobsEmpty.hidden = visible.length > 0;
+}
+
+function openJob(job) {
+  const server = view.snapshot.servers.find((item) => item.host === job.host);
+  const gpu = server?.gpus.find((item) => item.index === job.gpus[0]);
+  if (server && gpu) openGpuDetail(server, gpu);
 }
 
 // Validate the incidents envelope once and index active conditions by host,
@@ -1815,30 +1744,41 @@ function capacityCandidateCard(candidate) {
   const actions = create("div", "capacity-candidate-actions");
   const locate = create("button", "inline-action", "查看节点");
   locate.type = "button";
-  locate.addEventListener("click", () => {
-    elements.capacityDialog.close();
-    selectHost(candidate.host);
-  });
+  locate.addEventListener("click", () => openHost(candidate.host));
   actions.append(locate, sshCopyButton(candidate.host));
+  if (candidate.satisfies) {
+    // The lowest-numbered matching devices, ready to paste before a launch.
+    const devices = candidate.available.map((gpu) => gpu.index).sort((a, b) => a - b)
+      .slice(0, view.capacityRequest.gpuCount);
+    const cuda = create("button", "inline-action", "复制 CUDA_VISIBLE_DEVICES");
+    cuda.type = "button";
+    cuda.title = `CUDA_VISIBLE_DEVICES=${devices.join(",")}`;
+    cuda.addEventListener("click", () => copyText(cuda, cuda.title, "复制 CUDA_VISIBLE_DEVICES"));
+    actions.append(cuda);
+  }
   card.append(heading, metrics, devices, actions);
   return card;
 }
 
 // The copied command uses the configured OpenSSH alias, which is exactly what
 // the operator's own ssh client resolves; display names stay presentation-only.
-async function copySshCommand(button, host) {
+async function copyText(button, text, label) {
   if (button.dataset.resetTimer) clearTimeout(Number(button.dataset.resetTimer));
   try {
     if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
-    await navigator.clipboard.writeText(`ssh ${host}`);
+    await navigator.clipboard.writeText(text);
     button.textContent = "已复制";
   } catch (_error) {
     button.textContent = "复制失败";
   }
   button.dataset.resetTimer = String(setTimeout(() => {
-    button.textContent = "复制 SSH";
+    button.textContent = label;
     delete button.dataset.resetTimer;
   }, 2000));
+}
+
+function copySshCommand(button, host) {
+  return copyText(button, `ssh ${host}`, "复制 SSH");
 }
 
 function sshCopyButton(host) {
@@ -1850,7 +1790,7 @@ function sshCopyButton(host) {
 }
 
 function renderOwners() {
-  if (!elements.ownersDialog.open) return;
+  if (view.page !== "usage") return;
   if (!view.snapshot) {
     elements.ownersSummary.textContent = "等待 GPU 快照";
     return;
@@ -1858,16 +1798,7 @@ function renderOwners() {
   elements.ownersUpdated.textContent = age(view.snapshot.lastPollCompletedAt);
   const { ranked, excludedOfflineHosts, oldestObservedAt, hostLabels } =
     ownerUsage.currentOwners(view.snapshot);
-  const offlineNote = excludedOfflineHosts
-    ? create(
-      "div",
-      "owners-footnote",
-      `${excludedOfflineHosts} 台离线节点未计入`,
-    )
-    : null;
-  if (offlineNote) {
-    offlineNote.title = "离线节点仅保留最后一次成功采集的进程，不代表当前占用";
-  }
+  const offlineNote = usageView.offlineNote(excludedOfflineHosts);
   if (!ranked.length) {
     elements.ownersSummary.textContent = "当前快照没有 GPU 进程";
     elements.ownersResults.replaceChildren(...(offlineNote ? [offlineNote] : []));
@@ -1879,7 +1810,7 @@ function renderOwners() {
     ranked, visibleCount: visible.length, oldestObservedAt,
   });
   // The summary above is cheap text; the cards are rebuilt only when what
-  // they show changes, so an open dialog does not churn on every snapshot.
+  // they show changes, so an open page does not churn on every snapshot.
   const key = JSON.stringify([excludedOfflineHosts, visible.map((entry) => [
     entry.label, entry.attributed, entry.vramMiB, entry.unknownVramKeys.size,
     entry.gpus.size, entry.hosts.size, entry.processKeys.size, [...entry.kinds].sort(),
@@ -1887,58 +1818,10 @@ function renderOwners() {
   ])]);
   if (key === view.ownersResultsKey) return;
   view.ownersResultsKey = key;
-  elements.ownersResults.replaceChildren();
-  for (const entry of visible) {
-    const card = create(
-      "article",
-      `capacity-candidate ${entry.attributed ? "match" : "near"}`,
-    );
-    const heading = create("div", "capacity-candidate-heading");
-    const identity = create("span", "capacity-candidate-identity");
-    const ownerName = create("strong", "", entry.label);
-    ownerName.title = entry.label;
-    const kindText = entry.kinds.size ? [...entry.kinds].sort().join(" · ") : "进程";
-    const kindLabel = create("small", "", kindText);
-    kindLabel.title = kindText;
-    if (!entry.attributed) {
-      card.title = "启用 workloads.mode=identity 可显示属主与完整命令行";
-    }
-    identity.append(ownerName, kindLabel);
-    const vramLabel = create(
-      "em",
-      "",
-      `${entry.unknownVramKeys.size ? "至少 " : ""}${memory(entry.vramMiB)}`,
-    );
-    if (entry.unknownVramKeys.size) {
-      vramLabel.title = `${entry.unknownVramKeys.size} 个进程未返回显存占用`;
-    }
-    heading.append(identity, vramLabel);
-    const metrics = create("div", "capacity-candidate-metrics");
-    metrics.append(
-      create("span", "", `${entry.gpus.size} 张 GPU`),
-      create("span", "", `${entry.hosts.size} 个节点`),
-      create("span", "", `${entry.processKeys.size} 个进程`),
-    );
-    const devices = create("div", "capacity-devices");
-    [...entry.hosts].sort().slice(0, 8).forEach((host) => {
-      // Drill-down: the chip jumps to the host in the fleet view, reusing the
-      // regular selection path (URL hash included) via selectHost().
-      const chip = create("button", "owner-host-chip", hostLabels.get(host) || host);
-      chip.type = "button";
-      chip.title = `${host} · 点击查看该节点`;
-      chip.addEventListener("click", () => {
-        elements.ownersDialog.close();
-        selectHost(host);
-      });
-      devices.append(chip);
-    });
-    if (entry.hosts.size > 8) {
-      devices.append(create("span", "", `+${entry.hosts.size - 8}`));
-    }
-    card.append(heading, metrics, devices);
-    elements.ownersResults.append(card);
-  }
-  if (offlineNote) elements.ownersResults.append(offlineNote);
+  elements.ownersResults.replaceChildren(
+    ...usageView.ownerCards(visible, { hostLabels, onHost: openHost }),
+    ...(offlineNote ? [offlineNote] : []),
+  );
 }
 
 async function fetchOwnersUsage() {
@@ -1963,7 +1846,7 @@ async function fetchOwnersUsage() {
   } catch (_error) {
     if (request !== view.ownersUsageRequest) return;
     view.ownersUsage = null;
-    view.ownersUsageError = "占用账单加载失败，可重新打开本面板重试";
+    view.ownersUsageError = "占用账单加载失败，切换窗口可重试";
   } finally {
     if (request === view.ownersUsageRequest) {
       view.ownersUsageLoading = false;
@@ -1973,7 +1856,7 @@ async function fetchOwnersUsage() {
 }
 
 function renderOwnersUsage() {
-  if (!elements.ownersDialog.open) return;
+  if (view.page !== "usage") return;
   elements.ownersUsageResults.replaceChildren();
   if (view.ownersUsageLoading) {
     elements.ownersUsageSummary.textContent = "正在统计占用账单…";
@@ -1988,56 +1871,16 @@ function renderOwnersUsage() {
     elements.ownersUsageSummary.textContent = "等待占用账单";
     return;
   }
-  const owners = Array.isArray(usage.owners) ? usage.owners : [];
-  if (!owners.length) {
+  if (!Array.isArray(usage.owners) || !usage.owners.length) {
     elements.ownersUsageSummary.textContent = "窗口内没有观测到 GPU 进程";
     return;
   }
   elements.ownersUsageSummary.textContent = ownerUsage.usageSummary(usage);
-  const days = ownerUsage.usageDays(usage);
-  if (days.length) {
-    const strip = create("div", "owners-usage-days");
-    strip.setAttribute("aria-label", "按天占用");
-    strip.append(...days.map(({ day, label }) => create("span", "owner-day-chip", `${day} · ${label}`)));
-    elements.ownersUsageResults.append(strip);
-  }
-  for (const entry of owners.slice(0, 50)) {
-    const card = create(
-      "article",
-      `capacity-candidate ${entry.owner ? "match" : "near"}`,
-    );
-    const heading = create("div", "capacity-candidate-heading");
-    const identity = create("span", "capacity-candidate-identity");
-    const ownerName = create("strong", "", entry.owner || "未归属");
-    ownerName.title = entry.owner || "启用 workloads.mode=identity 可区分用户";
-    const kinds = ownerUsage.usageKinds(entry);
-    identity.append(ownerName, create("small", "", kinds.length ? kinds.join(" · ") : "进程"));
-    heading.append(identity, create("em", "", ownerUsage.gpuHoursLabel(entry.gpuSeconds)));
-    const metrics = create("div", "capacity-candidate-metrics");
-    const idleShare = ownerUsage.idleShare(entry);
-    metrics.append(
-      create("span", "", `${numeric(entry.gpus)} 张 GPU`),
-      create(
-        "span",
-        "",
-        Array.isArray(entry.hosts) ? `${entry.hosts.length} 个节点` : "节点未知",
-      ),
-      create("span", "", `${numeric(entry.processes)} 段占用`),
-      create(
-        "span",
-        Number.isFinite(idleShare) && idleShare >= 0.5 ? "owner-idle-high" : "",
-        Number.isFinite(idleShare)
-          ? `闲置占比 ${format(idleShare * 100)}%`
-          : "闲置占比未知",
-      ),
-    );
-    card.append(heading, metrics);
-    elements.ownersUsageResults.append(card);
-  }
+  elements.ownersUsageResults.replaceChildren(...usageView.billCards(usage));
 }
 
 function renderCapacityMatcher() {
-  if (!elements.capacityDialog.open || !view.snapshot) return;
+  if (view.page !== "find" || !view.snapshot) return;
   syncCapacityModels();
   const request = view.capacityRequest;
   elements.capacityUpdated.textContent = age(view.snapshot.lastPollCompletedAt);
@@ -2424,24 +2267,20 @@ function renderIncidents() {
     elements.incidentPanel.hidden = true;
     return;
   }
-  const events = view.incidents.events.filter(
-    (event) => view.selectedHost === "all" || event.host === view.selectedHost,
-  );
+  const { events } = view.incidents;
   if (!events.length) {
-    view.incidentRenderKey = `${view.incidentVersion}:${view.selectedHost}:empty`;
+    view.incidentRenderKey = `${view.incidentVersion}:empty`;
     elements.incidentPanel.hidden = true;
     return;
   }
-  const renderKey = `${view.incidentVersion}:${view.selectedHost}:${view.incidentExpanded}`;
+  const renderKey = `${view.incidentVersion}:${view.incidentExpanded}`;
   if (renderKey === view.incidentRenderKey) {
     elements.incidentPanel.hidden = false;
     return;
   }
   view.incidentRenderKey = renderKey;
   const visible = view.incidentExpanded ? events : events.slice(0, 6);
-  elements.incidentSummary.textContent = view.selectedHost === "all"
-    ? `${events.length} 条近期状态变化`
-    : `${displayHost(view.selectedHost)} · ${events.length} 条近期变化`;
+  elements.incidentSummary.textContent = `${events.length} 条近期状态变化`;
   elements.incidentToggle.hidden = events.length <= 6;
   elements.incidentToggle.textContent = view.incidentExpanded ? "收起" : "展开全部";
   const fragment = document.createDocumentFragment();
@@ -2689,7 +2528,6 @@ function renderSummary() {
   );
   const threshold = limits();
   const onlineRatio = ratio(snapshot.stats.onlineServers, snapshot.stats.servers);
-  const gpuBusyRatio = ratio(snapshot.stats.busyGpus, snapshot.stats.gpus);
   const gpuMemoryPct = ratio(
     snapshot.stats.memoryUsedMiB,
     snapshot.stats.memoryTotalMiB,
@@ -2774,7 +2612,17 @@ function renderSummary() {
   elements.memoryCard.classList.toggle("is-critical", memoryCritical);
   elements.gpuCard.classList.toggle("is-warning", hottestGpu >= threshold.gpu_temperature_warning_c && !gpuCritical);
   elements.gpuCard.classList.toggle("is-critical", gpuCritical);
-  elements.gpuBar.style.width = `${clamp(gpuBusyRatio)}%`;
+  const activity = fleetState.breakdown(snapshot.servers, threshold.gpu_busy_pct);
+  const listed = fleetState.ACTIVITY_KEYS.reduce((sum, key) => sum + activity[key], 0);
+  elements.gpuBar.querySelectorAll("[data-activity]").forEach((segment) => {
+    segment.style.width = `${listed ? (activity[segment.dataset.activity] / listed) * 100 : 0}%`;
+  });
+  elements.gpuLegend.querySelectorAll("[data-activity]").forEach((item) => {
+    const count = activity[item.dataset.activity];
+    item.hidden = count === 0 && ["unknown", "offline"].includes(item.dataset.activity);
+    item.querySelector("b").textContent = format(count);
+  });
+  elements.gpuBar.setAttribute("aria-label", `计算 ${activity.compute} · 占用 ${activity.occupied} · 空闲 ${activity.free}`);
   elements.gpuCard.title = Number.isFinite(hottestGpu)
     ? `最高温度 ${format(hottestGpu, 1)}°C`
     : "等待 GPU 温度样本";
@@ -3288,6 +3136,7 @@ function renderResources() {
         resourceTile(label, "—", "暂无有效样本")),
     );
     elements.diskList.hidden = true;
+    renderUse(null);
     return;
   }
 
@@ -3302,8 +3151,12 @@ function renderResources() {
   const memoryUsed = systems.reduce((sum, system) => sum + numeric(system.memory_used_mib), 0);
   const swapTotal = systems.reduce((sum, system) => sum + numeric(system.swap_total_mib), 0);
   const swapUsed = systems.reduce((sum, system) => sum + numeric(system.swap_used_mib), 0);
-  const diskTotal = systems.reduce((sum, system) => sum + numeric(system.disk_total_mib), 0);
-  const diskUsed = systems.reduce((sum, system) => sum + numeric(system.disk_used_mib), 0);
+  // One host reports its own deduplicated disks; across hosts a Lustre/NFS
+  // volume would be counted once per mount, so the fleet view totals local
+  // disks and names the shared volumes separately.
+  const storageTotals = systems.length > 1 ? fleetState.storageTotals(selectedServers) : null;
+  const diskTotal = storageTotals ? storageTotals.local.totalMiB : numeric(systems[0].disk_total_mib);
+  const diskUsed = storageTotals ? storageTotals.local.usedMiB : numeric(systems[0].disk_used_mib);
   const rx = systems.reduce((sum, system) => sum + numeric(system.network_rx_bps), 0);
   const tx = systems.reduce((sum, system) => sum + numeric(system.network_tx_bps), 0);
   const diskRead = systems.reduce((sum, system) => sum + numeric(system.disk_read_bps), 0);
@@ -3354,9 +3207,9 @@ function renderResources() {
       threshold.swap_warning_pct,
     ),
     resourceTile(
-      "磁盘",
+      storageTotals ? "本地磁盘" : "磁盘",
       `${format(diskPct, 1)}%`,
-      `${storage(diskUsed)} / ${storage(diskTotal)}`,
+      `${storage(diskUsed)} / ${storage(diskTotal)}${storageTotals?.shared.volumes ? ` · 共享 ${storageTotals.shared.volumes} 卷另计` : ""}`,
       diskPct,
       threshold.disk_warning_pct,
     ),
@@ -3390,6 +3243,18 @@ function renderResources() {
     ),
   );
   renderDisks(selectedSystem);
+  renderUse(selectedServers.length === 1 && view.selectedHost !== "all" ? selectedServers[0] : null);
+}
+
+function renderUse(server) {
+  const rows = server ? useCheck.rows(server, limits()) : [];
+  elements.usePanel.hidden = !rows.length;
+  elements.useRows.replaceChildren(...rows.map((row) => {
+    const line = create("tr");
+    line.append(create("th", "", row.resource), ...row.cells.map((cell) => create("td", cell.state, cell.text)));
+    line.firstChild.setAttribute("scope", "row");
+    return line;
+  }));
 }
 
 function heatmapMetric(gpu) {
@@ -3397,6 +3262,10 @@ function heatmapMetric(gpu) {
     const value = numeric(gpu.memory_total_mib) > 0
       ? ratio(gpu.memory_used_mib, gpu.memory_total_mib)
       : NaN;
+    return { value, level: value, label: Number.isFinite(value) ? `${format(value)}%` : "—" };
+  }
+  if (view.heatMetric === "bandwidth") {
+    const value = gpu.utilization_memory_pct == null ? NaN : numeric(gpu.utilization_memory_pct, NaN);
     return { value, level: value, label: Number.isFinite(value) ? `${format(value)}%` : "—" };
   }
   if (view.heatMetric === "temperature") {
@@ -3432,9 +3301,13 @@ function heatmapTile(server, gpu) {
     ? metric.value >= threshold + 5 ? " critical" : metric.value >= threshold ? " warning" : ""
     : "";
   const unavailable = Number.isFinite(metric.value) ? "" : " unavailable";
+  // In compute mode a schedulable card says so instead of showing "0%".
+  const free = view.heatMetric === "utilization"
+    && fleetState.activity(gpu, { online: true, busyPct: limits().gpu_busy_pct }) === "free";
+  const strength = free ? "" : clamp(metric.level) >= 55 ? " high" : "";
   const tile = create(
     "button",
-    `heatmap-cell ${view.heatMetric}${temperatureClass}${unavailable}`,
+    `heatmap-cell ${view.heatMetric}${temperatureClass}${unavailable}${free ? " free" : ""}${strength}`,
   );
   tile.type = "button";
   tile.style.setProperty("--heat-level", String(0.07 + (clamp(metric.level) / 100) * 0.63));
@@ -3442,7 +3315,7 @@ function heatmapTile(server, gpu) {
   tile.setAttribute("aria-label", tile.title);
   tile.append(
     create("small", "", `#${gpu.index}`),
-    create("strong", "", metric.label),
+    create("strong", "", free ? "空闲" : metric.label),
   );
   tile.addEventListener("click", () => openGpuDetail(server, gpu));
   return tile;
@@ -3477,9 +3350,12 @@ function cachedHeatmapRow(server, columns) {
       index: gpu.index,
       name: gpu.name,
       utilization: gpu.utilization_gpu_pct,
+      bandwidth: gpu.utilization_memory_pct,
       memoryUsed: gpu.memory_used_mib,
       memoryTotal: gpu.memory_total_mib,
       temperature: gpu.temperature_c,
+      holders: fleetState.holders(gpu).length,
+      processesAvailable: gpu.processes_available,
     })),
   });
   const cached = view.heatmapCache.get(server.host);
@@ -3591,142 +3467,6 @@ function renderNodeNotice() {
   }
 }
 
-function historyDuration(points) {
-  if (points.length < 2) return `${points.length} 个样本`;
-  const elapsed = Math.max(0, Date.parse(points.at(-1).observedAt) - Date.parse(points[0].observedAt));
-  const minutes = Math.max(1, Math.round(elapsed / 60000));
-  return `${points.length} 个样本 · 最近 ${minutes} 分钟`;
-}
-
-// X positions follow observedAt so uneven sampling keeps its real spacing;
-// gapBefore marks pauses clearly longer than the observed cadence, which
-// split the drawn path instead of bridging the outage.
-function chartPositions(points) {
-  const fallback = {
-    xs: points.map((_, index) =>
-      points.length > 1 ? (index / (points.length - 1)) * 220 : 220),
-    gapBefore: points.map(() => false),
-  };
-  if (points.length < 2) return fallback;
-  const times = points.map((point) => Date.parse(point.observedAt));
-  if (!times.every(Number.isFinite)) return fallback;
-  const span = times.at(-1) - times[0];
-  if (!(span > 0)) return fallback;
-  const deltas = times.slice(1).map((time, index) => time - times[index]);
-  const positive = deltas.filter((delta) => delta > 0).sort((a, b) => a - b);
-  const median = positive.length ? positive[Math.floor(positive.length / 2)] : 0;
-  const gapThreshold = median > 0 ? median * 3 : Infinity;
-  return {
-    xs: times.map((time) => ((time - times[0]) / span) * 220),
-    gapBefore: times.map((_, index) => index > 0 && deltas[index - 1] > gapThreshold),
-  };
-}
-
-const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
-
-function svgElement(tag, attributes) {
-  const element = document.createElementNS(SVG_NAMESPACE, tag);
-  Object.entries(attributes).forEach(([name, value]) => element.setAttribute(name, value));
-  return element;
-}
-
-// Every trend chart shares one 220x54 canvas with a baseline at y=50.
-function chartCanvas() {
-  const svg = svgElement("svg", {
-    viewBox: "0 0 220 54", preserveAspectRatio: "none", "aria-hidden": "true",
-  });
-  svg.append(svgElement("line", {
-    x1: "0", x2: "220", y1: "50", y2: "50", class: "chart-baseline",
-  }));
-  return svg;
-}
-
-function sparkline(points, accessor, color, maximum = null) {
-  const svg = chartCanvas();
-  const values = points.map(accessor);
-  const finite = values.filter((value) => Number.isFinite(value));
-  const ceiling = maximum ?? Math.max(1, ...finite);
-  const { xs, gapBefore } = chartPositions(points);
-  const segments = [];
-  let current = [];
-  values.forEach((value, index) => {
-    if (!Number.isFinite(value)) {
-      if (current.length) segments.push(current);
-      current = [];
-      return;
-    }
-    if (gapBefore[index] && current.length) {
-      segments.push(current);
-      current = [];
-    }
-    const y = 50 - Math.min(1, Math.max(0, value / ceiling)) * 44;
-    current.push([xs[index], y]);
-  });
-  if (current.length) segments.push(current);
-  segments.forEach((segment) => {
-    if (segment.length === 1) {
-      svg.append(svgElement("circle", {
-        cx: segment[0][0].toFixed(1), cy: segment[0][1].toFixed(1), r: "1.6", fill: color,
-      }));
-      return;
-    }
-    svg.append(svgElement("polyline", {
-      points: segment.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "),
-      fill: "none",
-      stroke: color,
-      "stroke-width": "2",
-      "vector-effect": "non-scaling-stroke",
-    }));
-  });
-  return svg;
-}
-
-function trendCard(label, points, accessor, formatter, color, maximum = null) {
-  const card = create("article", "trend-card");
-  const values = points.map(accessor).filter((value) => Number.isFinite(value));
-  // The current reading comes from the latest sample only; a missing latest
-  // metric shows a gap instead of silently holding the previous value.
-  const latest = points.length ? accessor(points.at(-1)) : NaN;
-  const top = create("div", "trend-card-top");
-  top.append(
-    create("span", "", label),
-    create("strong", "", Number.isFinite(latest) ? formatter(latest) : "—"),
-  );
-  card.append(top, sparkline(points, accessor, color, maximum));
-  const peak = values.length ? Math.max(...values) : null;
-  card.append(create("span", "trend-card-foot", peak == null ? "等待有效速率" : `峰值 ${formatter(peak)}`));
-  return card;
-}
-
-function transportRetryCard(points) {
-  const { xs } = chartPositions(points);
-  const retriedXs = xs.filter((_, index) => Boolean(points[index].transportRetried));
-  const card = create("article", "trend-card");
-  const top = create("div", "trend-card-top");
-  top.append(
-    create("span", "", "链路重试"),
-    create("strong", "", `${format(retriedXs.length)} 次`),
-  );
-  const svg = chartCanvas();
-  retriedXs.forEach((x) => {
-    svg.append(svgElement("line", {
-      x1: x.toFixed(1),
-      x2: x.toFixed(1),
-      y1: "18",
-      y2: "50",
-      stroke: "#f5b95f",
-      "stroke-width": "2",
-      "vector-effect": "non-scaling-stroke",
-    }));
-  });
-  card.append(
-    top,
-    svg,
-    create("span", "trend-card-foot", "样本期间 SSH 传输层重连标记"),
-  );
-  return card;
-}
-
 function renderTrends() {
   if (view.selectedHost === "all") {
     elements.trendPanel.hidden = true;
@@ -3786,6 +3526,44 @@ function syncHistory() {
   const server = view.snapshot.servers.find((item) => item.host === view.selectedHost);
   if (!server) return;
   historyLoader.request(`${server.host}:${server.lastSuccessAt || "pending"}`);
+  utilizationLoader.request(`${server.host}\u0000${Math.floor(Date.now() / 3_600_000)}`);
+}
+
+// Without history persistence the report is unavailable and the panel stays
+// hidden rather than drawing an empty week.
+const utilizationLoader = globalThis.MocopKeyedLoader.create({
+  load: async (key) => {
+    const host = key.split("\u0000")[0];
+    const response = await fetch(`/api/reports/utilization?hours=168&host=${encodeURIComponent(host)}`);
+    const report = await response.json();
+    if (response.status === 503 && report.code === "HISTORY_UNAVAILABLE") return { host, report: null };
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return view.selectedHost === host ? { host, report } : undefined;
+  },
+  retry: () => syncHistory(),
+  onSettled: () => renderUtilizationHistory(),
+});
+
+function renderUtilizationHistory() {
+  const { value, error } = utilizationLoader.state;
+  const current = value?.host === view.selectedHost ? value : null;
+  elements.utilizationHistory.hidden = view.selectedHost === "all" || (current && !current.report);
+  if (elements.utilizationHistory.hidden) return;
+  if (!current) {
+    elements.utilizationHistoryRange.textContent = error ? "读取失败，稍后重试" : "正在读取";
+    elements.utilizationHistoryGrid.replaceChildren();
+    return;
+  }
+  const { report } = current;
+  const window = (accessor) => trendCharts.hourlyValues(report.fleet, report.sinceAt, report.generatedAt, accessor);
+  const busy = window(trendCharts.busySharePct);
+  const sampled = busy.values.filter((value) => value != null).length;
+  elements.utilizationHistoryRange.textContent = `${sampled} / ${busy.values.length} 小时有样本`;
+  const percent = (value) => `${format(value, 1)}%`;
+  elements.utilizationHistoryGrid.replaceChildren(
+    trendCard("GPU 忙碌占比", trendCharts.hourlyPoints(busy), (point) => point.value ?? NaN, percent, "var(--blue)", 100),
+    trendCard("显存占用", trendCharts.hourlyPoints(window(trendCharts.memorySharePct)), (point) => point.value ?? NaN, percent, "var(--mem)", 100),
+  );
 }
 
 function renderDisks(system) {
@@ -3852,7 +3630,7 @@ function gpuState(gpu, server) {
   const threshold = limits();
   if (temperature >= threshold.gpu_temperature_warning_c) return ["高温", "hot"];
   if (utilization >= threshold.gpu_busy_pct) return ["运行中", "busy"];
-  if (gpuProcessSummary(gpu).count) return ["有进程", "process"];
+  if (fleetState.holders(gpu).length) return ["占用", "process"];
   return ["空闲", "idle"];
 }
 
@@ -4724,7 +4502,7 @@ function filteredRecords() {
     const temperature = numeric(gpu.temperature_c);
     const threshold = limits();
     if (view.filter === "busy" && utilization < threshold.gpu_busy_pct) return false;
-    if (view.filter === "idle" && (utilization >= threshold.gpu_busy_pct || gpuProcessSummary(gpu).count)) return false;
+    if (view.filter === "idle" && fleetState.activity(gpu, { online: true, busyPct: threshold.gpu_busy_pct }) !== "free") return false;
     if (view.filter === "hot" && temperature < threshold.gpu_temperature_warning_c) return false;
     if (view.filter === "processes" && !gpuProcessSummary(gpu).count) return false;
     return gpuRecordMatchesSearch(server, gpu, terms);
@@ -5024,8 +4802,12 @@ function render() {
   }
   if (!view.snapshot) return;
   renderSummary();
+  renderNav();
   renderAttention();
   renderIncidents();
+  renderAlertsPage();
+  renderJobs();
+  renderFleetUtilization();
   renderServers();
   const panelKey = selectedHostPanelKey();
   if (panelKey !== view.selectedPanelKey) {
@@ -5330,11 +5112,180 @@ elements.gpuSort.addEventListener("change", () => {
   render();
 });
 
+function showSettingsTab(tab) {
+  view.settingsTab = SETTINGS_TABS.includes(tab) ? tab : "appearance";
+  document.querySelectorAll("[data-settings-tab]").forEach((button) => {
+    if (button.dataset.settingsTab === view.settingsTab) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  document.querySelectorAll("[data-settings-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.settingsPanel !== view.settingsTab;
+  });
+  if (view.settingsTab === "verify") runSelfCheck();
+}
+
+// "Who am I" offers the owners the collector attributes, plus the saved one.
+function syncOwnerChoices() {
+  const owners = new Set(preferences.me ? [preferences.me] : []);
+  view.snapshot?.servers.forEach((server) => server.gpus.forEach((gpu) => (gpu.processes || []).forEach((process) => {
+    if (process.workload?.owner) owners.add(process.workload.owner);
+  })));
+  const options = [create("option", "", "未设置")];
+  options[0].value = "";
+  [...owners].sort().forEach((owner) => {
+    const option = create("option", "", owner);
+    option.value = owner;
+    options.push(option);
+  });
+  elements.settingsMe.replaceChildren(...options);
+  elements.settingsMe.value = preferences.me;
+}
+
 elements.settingsToggle.addEventListener("click", () => {
   syncPreferenceControls();
+  syncOwnerChoices();
+  showSettingsTab(view.maintenanceFocusHost ? "nodes" : view.settingsTab);
   openExclusiveDialog(elements.settingsDialog);
   refreshInventory();
   fetchServiceCapability();
+});
+document.querySelectorAll("[data-settings-tab]").forEach((button) => {
+  button.addEventListener("click", () => showSettingsTab(button.dataset.settingsTab));
+});
+elements.runSelfCheck.addEventListener("click", runSelfCheck);
+
+// Text colors measured where they are read: on a card over the page.
+function contrastSamples() {
+  const { parseColor, contrastRatio } = globalThis.MocopSelfCheck;
+  const card = $(".metric-card") || document.body;
+  const page = parseColor(getComputedStyle(document.documentElement).backgroundColor);
+  const surface = parseColor(getComputedStyle(card).backgroundColor);
+  const probe = create("span");
+  return [["text", "正文"], ["text-2", "次要文字"], ["muted", "说明文字"], ["muted-2", "最淡文字"]].map(([token, label]) => {
+    probe.style.color = `var(--${token})`;
+    card.append(probe);
+    const text = parseColor(getComputedStyle(probe).color);
+    probe.remove();
+    return { id: `contrast-${token}`, label: `对比度 · ${label}`, ratio: text && page && surface ? contrastRatio(text, surface, page) : Number.NaN };
+  });
+}
+
+async function runSelfCheck() {
+  if (!view.snapshot) {
+    elements.selfCheckSummary.textContent = "等待首个快照";
+    return;
+  }
+  const request = ++view.selfCheckRequest;
+  elements.selfCheckSummary.className = "self-check-summary";
+  elements.selfCheckSummary.textContent = "正在对账…";
+  // The server answers from its newest snapshot, so the capacity comparison
+  // holds only if no snapshot arrived during the request; one that did
+  // restarts the comparison, at most three times. Without a referee the rows
+  // are omitted, never passed.
+  let snapshot, activeIncidents, browserCapacity, serverCapacity;
+  for (let attempt = 0; attempt < 3 && snapshot !== view.snapshot; attempt += 1) {
+    snapshot = view.snapshot;
+    activeIncidents = incidentsSyncedWithSnapshot() ? view.incidents.active : null;
+    browserCapacity = activeIncidents ? capacityMatches({ gpuCount: 1, minVramGiB: 0, model: "any" }) : null;
+    serverCapacity = await fetch("/api/capacity?gpus=1&min_vram_gib=0")
+      .then((response) => (response.ok ? response.json() : null))
+      .catch(() => null);
+    if (request !== view.selfCheckRequest) return;
+  }
+  const stable = snapshot === view.snapshot;
+  const rows = [
+    ...selfCheck.reconcile({
+      snapshot,
+      activeIncidents,
+      browserCapacity: stable ? browserCapacity : null,
+      serverCapacity: stable ? serverCapacity : null,
+    }),
+    ...selfCheck.contrastRows(contrastSamples()),
+    selfCheck.layoutRow({
+      viewportWidth: document.documentElement.clientWidth, documentWidth: document.documentElement.scrollWidth,
+    }),
+  ];
+  const shown = (value) => (typeof value === "number" ? format(value, Number.isInteger(value) ? 0 : 2) : value ?? "—");
+  const passed = rows.filter((row) => row.ok).length;
+  elements.selfCheckSummary.className = `self-check-summary ${passed === rows.length ? "success" : "error"}`;
+  elements.selfCheckSummary.textContent = `${passed} / ${rows.length} 项通过`;
+  elements.selfCheckResults.replaceChildren(...rows.map((row) => {
+    const line = create("div", `settings-row check-row ${row.ok ? "ok" : "failed"}`);
+    line.dataset.check = row.id;
+    const label = create("span");
+    label.append(create("strong", "", row.label), create("small", "", row.source));
+    const values = create("span", "check-values");
+    values.append(create("span", "", `期望 ${shown(row.expected)}`), create("span", "", `实际 ${shown(row.actual)}`));
+    line.append(create("span", "check-mark", row.ok ? "✓" : "✕"), label, values);
+    return line;
+  }));
+}
+
+// Command palette: pages, hosts, owners, programs, and GPU demands.
+function paletteEntries() {
+  const servers = view.snapshot?.servers || [];
+  const owners = new Set();
+  const programs = new Set();
+  servers.forEach((server) => server.gpus.forEach((gpu) => (gpu.processes || []).forEach((process) => {
+    if (process.workload?.owner) owners.add(process.workload.owner);
+    programs.add(gpuTasks.processName(process));
+  })));
+  return commandPalette.entries({
+    pages: [
+      ["overview", "总览"], ["find", "找卡"], ["jobs", "任务"], ["alerts", "告警", "incident alert"],
+      ["usage", "用量", "usage owners"], ["settings", "设置", "settings"], ["verify", "自检", "self check"],
+    ].map(([id, label, keywords = ""]) => ({ id, label, keywords })),
+    hosts: servers.map((server) => ({ host: server.host, label: displayHost(server), detail: hostGroupName(server) || "" })),
+    owners: [...owners].sort(),
+    programs: [...programs].sort().slice(0, 200),
+  });
+}
+
+const paletteView = globalThis.MocopPaletteView.create({
+  create,
+  palette: commandPalette,
+  input: elements.paletteInput,
+  results: elements.paletteResults,
+  run: (entry) => runPaletteEntry(entry),
+});
+
+function openPalette() {
+  paletteView.open(paletteEntries());
+  openExclusiveDialog(elements.paletteDialog);
+  elements.paletteInput.focus();
+}
+
+function runPaletteEntry(entry) {
+  elements.paletteDialog.close();
+  if (entry.kind === "demand") {
+    view.capacityRequest = { gpuCount: entry.demand.gpuCount, minVramGiB: entry.demand.minVramGiB, model: "any" };
+    showPage("find");
+  } else if (entry.kind === "host") {
+    openHost(entry.id);
+  } else if (entry.kind === "owner") {
+    view.jobFilter = "all";
+    view.jobQuery = entry.id;
+    elements.jobSearch.value = entry.id;
+    showPage("jobs");
+  } else if (entry.kind === "program") {
+    view.query = entry.id;
+    elements.search.value = entry.id;
+    showPage("overview");
+  } else if (entry.id === "settings" || entry.id === "verify") {
+    if (entry.id === "verify") view.settingsTab = "verify";
+    elements.settingsToggle.click();
+  } else {
+    showPage(entry.id);
+  }
+}
+
+elements.paletteToggle.addEventListener("click", openPalette);
+document.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    if (elements.paletteDialog.open) elements.paletteDialog.close();
+    else openPalette();
+  }
 });
 
 elements.topologyToggle.addEventListener("click", () => {
@@ -5343,28 +5294,40 @@ elements.topologyToggle.addEventListener("click", () => {
   if (!view.topology && !view.topologyLoading) fetchTopology();
 });
 
-elements.capacityToggle.addEventListener("click", () => {
-  if (!view.snapshot) return;
-  elements.capacityGpuCount.value = String(view.capacityRequest.gpuCount);
-  elements.capacityVram.value = String(view.capacityRequest.minVramGiB);
-  syncCapacityModels();
-  elements.capacityModel.value = view.capacityRequest.model;
-  openExclusiveDialog(elements.capacityDialog);
-  renderCapacityMatcher();
-  renderCapacityWatchControls();
+elements.capacityToggle.addEventListener("click", () => showPage("find"));
+elements.ownersToggle.addEventListener("click", () => showPage("usage"));
+window.addEventListener("hashchange", () => {
+  const hash = decodeURIComponent(window.location.hash.slice(1));
+  if (hash.startsWith("/")) showPage(hash.slice(1), { hash: false });
+  else if (/^[A-Za-z0-9._-]+$/.test(hash)) openHost(hash);
 });
 
-elements.ownersToggle.addEventListener("click", () => {
-  if (!view.snapshot) return;
-  openExclusiveDialog(elements.ownersDialog);
-  renderOwners();
-  fetchOwnersUsage();
-});
-
+// The window governs every usage panel, so they always cover the same hours.
 elements.ownersUsageHours.addEventListener("change", () => {
   const hours = Number.parseInt(elements.ownersUsageHours.value, 10);
   view.ownersUsageHours = Number.isFinite(hours) && hours >= 1 ? hours : 24;
-  if (elements.ownersDialog.open) fetchOwnersUsage();
+  view.fleetUtilizationFetchedAt = 0;
+  if (view.page === "usage") {
+    fetchOwnersUsage();
+    fetchFleetUtilization();
+  }
+});
+
+document.querySelectorAll("[data-job-filter]").forEach((button) => {
+  button.addEventListener("click", () => {
+    view.jobFilter = button.dataset.jobFilter;
+    renderJobs();
+  });
+});
+elements.jobSearch.addEventListener("input", () => {
+  view.jobQuery = elements.jobSearch.value.slice(0, MAX_SEARCH_QUERY_LENGTH);
+  renderJobs();
+});
+document.querySelectorAll("[data-alert-tab]").forEach((button) => {
+  button.addEventListener("click", () => {
+    view.alertTab = button.dataset.alertTab;
+    renderAlertsPage();
+  });
 });
 
 elements.capacityForm.addEventListener("submit", (event) => {
@@ -5417,9 +5380,7 @@ elements.capacityWatchToggle.addEventListener("click", () => {
   renderCapacityWatchBanner();
 });
 
-elements.capacityWatchBannerOpen.addEventListener("click", () => {
-  if (!elements.capacityDialog.open) elements.capacityToggle.click();
-});
+elements.capacityWatchBannerOpen.addEventListener("click", () => showPage("find"));
 
 elements.capacityWatchBannerDismiss.addEventListener("click", () => {
   view.capacityWatchBannerDismissed = true;
@@ -5558,6 +5519,27 @@ elements.interfaceDensity.addEventListener("change", () => {
   savePreferences();
 });
 
+elements.interfaceTextSize.addEventListener("change", () => {
+  if (!TEXT_SIZE_VALUES.has(elements.interfaceTextSize.value)) return;
+  preferences.textSize = elements.interfaceTextSize.value;
+  syncPreferenceControls();
+  savePreferences();
+});
+
+elements.interfaceMotion.addEventListener("change", () => {
+  if (!MOTION_VALUES.has(elements.interfaceMotion.value)) return;
+  preferences.motion = elements.interfaceMotion.value;
+  syncPreferenceControls();
+  savePreferences();
+});
+
+elements.settingsMe.addEventListener("change", () => {
+  preferences.me = elements.settingsMe.value;
+  savePreferences();
+  view.jobsRenderKey = "";
+  renderJobs();
+});
+
 elements.backgroundVisibility.addEventListener("input", () => {
   preferences.backgroundVisibility = safeBackgroundVisibility(
     Number(elements.backgroundVisibility.value),
@@ -5657,17 +5639,17 @@ elements.incidentOpenGpu.addEventListener("click", () => {
   const gpu = server?.gpus.find((item) => item.index === index);
   if (server && gpu) openGpuDetail(server, gpu);
 });
-elements.incidentOpenMaintenance.addEventListener("click", () => {
-  const host = view.selectedIncident?.host;
+// Pre-expand the maintenance editor for a host, then reuse the regular
+// settings entry point (it closes other dialogs and rescans nodes).
+function openMaintenanceEditor(host) {
   if (!host) return;
-  // Pre-expand the maintenance editor for this host, then reuse the regular
-  // settings entry point (it closes the incident dialog and rescans nodes).
   view.maintenanceEditingHost = host;
   view.maintenanceDraft = null;
   view.groupEditingHost = null;
   view.maintenanceFocusHost = host;
   elements.settingsToggle.click();
-});
+}
+elements.incidentOpenMaintenance.addEventListener("click", () => openMaintenanceEditor(view.selectedIncident?.host));
 elements.inventoryRefresh.addEventListener("click", refreshInventory);
 elements.collectorSettingsForm.addEventListener("submit", saveCollectorSettings);
 [
@@ -5741,6 +5723,7 @@ const requestDashboardAuthentication = dashboardAuthentication.bindPrompt({
 
 syncPreferenceControls();
 renderInventory();
+showPage(view.page, { hash: false });
 
 async function startDashboard() {
   loadStoredBackground();

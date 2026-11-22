@@ -30,7 +30,7 @@ TRACKED_ROOT_ENTRIES = {
 # These ceilings are a ratchet over the reviewed tree, not a general style
 # rule. Extract a coherent leaf and lower the budget instead of raising it.
 CORE_MODULE_LINE_BUDGETS = {
-    "src/mocop/static/app.js": 5_762,
+    "src/mocop/static/app.js": 5_745,
     "src/mocop/static/owner-usage.js": 150,
     "src/mocop/static/incident-text.js": 150,
     "src/mocop/static/diagnosis-text.js": 85,
@@ -49,6 +49,20 @@ CORE_MODULE_LINE_BUDGETS = {
     "src/mocop/static/process-search.js": 205,
     "src/mocop/static/process-inventory.js": 125,
     "src/mocop/static/update-pill.js": 175,
+    "src/mocop/static/preferences.js": 135,
+    "src/mocop/static/fleet-state.js": 110,
+    "src/mocop/static/use-check.js": 145,
+    "src/mocop/static/gpu-jobs.js": 120,
+    "src/mocop/static/alert-noise.js": 50,
+    "src/mocop/static/self-check.js": 135,
+    "src/mocop/static/command-palette.js": 90,
+    "src/mocop/static/palette-view.js": 65,
+    "src/mocop/static/trend-charts.js": 215,
+    "src/mocop/static/usage-view.js": 155,
+    "src/mocop/static/jobs-view.js": 75,
+    "src/mocop/static/alerts-view.js": 120,
+    "src/mocop/static/topology-view.js": 165,
+    "src/mocop/static/inventory-forms.js": 120,
     "src/mocop/service.py": 1_571,
     "src/mocop/service_scheduler.py": 655,
     "src/mocop/process_transitions.py": 150,
@@ -216,18 +230,19 @@ class RepositoryGovernanceTests(unittest.TestCase):
         for step in ("2xs", "xs", "sm", "md", "lg", "xl", "2xl", "pill"):
             self.assertIn(f"--radius-{step}:", stylesheet)
 
-    def test_muted_text_passes_contrast_on_every_style_surface(self) -> None:
-        # WCAG AA for body-size text is 4.5:1. The two secondary text tiers are
-        # checked against each visual style's static surfaces (bg, surface,
-        # panel-solid), resolving the `color-mix(in srgb, var(--x) N%, #hex)`
-        # form the tokens use; the default --muted-2 sat at 2.6:1 before.
+    def test_every_text_tier_passes_contrast_on_every_style_surface(self) -> None:
+        # WCAG AA for body-size text is 4.5:1. Every text tier, down to the
+        # faintest (--muted-2), is checked against each visual style's static
+        # surfaces (page, card, dialog), resolving the
+        # `color-mix(in srgb, var(--x) N%, #hex)` form tokens may use; the
+        # faintest tier sat near 2.7:1 before the carbon tokens.
         stylesheet = (ROOT / "src" / "mocop" / "static" / "styles.css").read_text(
             encoding="utf-8"
         )
         root_block = re.search(r":root \{(.*?)\n\}", stylesheet, re.S)
         assert root_block is not None
         root = self._tokens(root_block.group(1))
-        styles = {"precision": root}
+        styles = {"carbon": root}
         for match in re.finditer(
             r'html\[data-style="(\w+)"\] \{(.*?)\n\}', stylesheet, re.S
         ):
@@ -238,7 +253,7 @@ class RepositoryGovernanceTests(unittest.TestCase):
                 self._rgb(tokens[surface], tokens)
                 for surface in ("bg", "surface", "panel-solid")
             ]
-            for tier in ("muted", "muted-2"):
+            for tier in ("text", "text-2", "muted", "muted-2"):
                 text = self._rgb(tokens[tier], tokens)
                 for surface, rgb in zip(
                     ("bg", "surface", "panel-solid"), surfaces, strict=False

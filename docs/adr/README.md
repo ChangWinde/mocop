@@ -16,7 +16,7 @@ for status and superseding rules.
 | [0006](0006-browser-local-visual-assets.md) | Accepted | Browser-local visual assets |
 | [0007](0007-time-bounded-maintenance-overlay.md) | Accepted | Time-bounded maintenance as an incident overlay |
 | [0008](0008-configured-ssh-connection-topology.md) | Accepted | Configured SSH connection topology |
-| [0009](0009-orthogonal-visual-style-and-accent.md) | Accepted | Orthogonal visual style and accent |
+| [0009](0009-orthogonal-visual-style-and-accent.md) | Superseded by 0035 | Orthogonal visual style and accent |
 | [0010](0010-independent-host-scheduling.md) | Accepted | Independent host scheduling |
 | [0011](0011-bounded-operations-extensions.md) | Accepted | Bounded operational extensions |
 | [0012](0012-supervised-dashboard-restart.md) | Accepted | Supervised dashboard restart |
@@ -42,3 +42,4 @@ for status and superseding rules.
 | [0032](0032-incident-criteria-and-expiry-order.md) | Accepted | Criterion-only incident updates and atomic expiry ordering |
 | [0033](0033-optional-persistence-indexes.md) | Accepted | Optional indexes and retention with existing metadata |
 | [0034](0034-event-ids-unique-across-restarts.md) | Accepted | Transition ids do not repeat across restarts |
+| [0035](0035-dashboard-pages-and-token-styles.md) | Accepted | Dashboard pages by question and token-only visual styles |

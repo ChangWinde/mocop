@@ -61,7 +61,7 @@ English README, API, operations, and engineering references remain maintained.
 - Config-backed host inventory, expected GPU counts, local-host collection, and host groups
 - Per-GPU trends and process timelines, optional bounded SQLite retention, read-only Slurm/Kubernetes/Docker/Podman context
 - Per-owner GPU occupancy and idle-share rollups, and a situation brief
-- Six visual styles, six accents, compact mode, saved ordering, local backgrounds
+- Five task pages, command palette, self-check, six styles, local backgrounds
 - Opt-in release checks and verified one-click self-update
 - OpenMetrics 1.0 endpoint for Prometheus and Grafana
 
