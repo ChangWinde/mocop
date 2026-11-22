@@ -83,7 +83,7 @@ class DiscoveryTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         ssh_config = Path(directory.name) / "config"
         ssh_config.write_text(
-            "Host gpu-01 github github.com corp-gitlab gitlab-work git.bfs gpu-02\n",
+            "Host gpu-01 github github.com corp-gitlab gitlab-work git.internal gpu-02\n",
             encoding="utf-8",
         )
         config = MonitorConfig(
@@ -104,7 +104,7 @@ class DiscoveryTests(unittest.TestCase):
             source.aliases(config),
             (
                 "corp-gitlab",
-                "git.bfs",
+                "git.internal",
                 "github",
                 "github.com",
                 "gitlab-work",

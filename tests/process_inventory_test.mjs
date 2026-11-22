@@ -56,7 +56,7 @@ assert.deepEqual(inventory.panelCopy("全局", false, {
   summary: "全局没有匹配的活跃程序",
   empty: "换一个名称、PID、用户或 workload 关键词重试",
 });
-assert.equal(inventory.panelCopy("pai-2", true, {
+assert.equal(inventory.panelCopy("atlas-02", true, {
   matches: [{}, {}], total: 3, unavailableGpuCount: 0, staleCount: 0,
 }).summary, "共 3 条活跃进程，显示显存占用最高的 2 条");
 assert.equal(inventory.panelCopy("全局", false, {

@@ -1632,7 +1632,7 @@ class SqliteTelemetryPersistenceTests(unittest.TestCase):
         )
 
     def test_seed_and_close_pair_stays_closed_across_a_restart(self) -> None:
-        # The live kyzs-1 case end to end: one answered sample seeds the
+        # A retired host's case end to end: one answered sample seeds the
         # inventory, the host goes stale, the seed is closed at its own
         # second. After a restart with the host still down, the pair must
         # come back closed: no dropped record, no occupancy, and nothing for
